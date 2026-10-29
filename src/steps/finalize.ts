@@ -1,4 +1,4 @@
-import { baseRef, changedFiles, diffStat, gitOk, revParse } from "../git.js";
+import { baseRef, changedFiles, diffStat, isAncestor, mergeRef, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
@@ -7,6 +7,7 @@ import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { type MergePolicy, mergePolicy, riskClass, type RiskAssessment } from "../pipeline/risk.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { type GateReport, runGates } from "./gates.js";
+import { gitAuthor } from "./implement.js";
 
 export interface FinalizeInput {
   result: "done" | "needs_human";
@@ -28,19 +29,30 @@ export interface FinalizeOutput {
   pr: string | null;
 }
 
-/** Base moved since intake → rebase + re-run gates; conflict or red → needs_human. */
-async function syncBase(ctx: RunContext): Promise<{ ok: boolean; reason: string; gates?: GateReport }> {
+/**
+ * Base moved since intake → merge the base into the branch (as git.author; never a rebase, so the
+ * branch never needs a force-push) and re-run the full gates. Conflict (merge aborted) or red gates
+ * → needs_human.
+ */
+export async function syncBase(ctx: RunContext, step = "finalize"): Promise<{ ok: boolean; reason: string; gates?: GateReport }> {
   const ref = await baseRef(ctx.repoDir, ctx.repo.base_branch);
   const current = await revParse(ctx.repoDir, ref);
-  if (current === ctx.baseSha) return { ok: true, reason: "" };
-  ctx.events.emit({ step: "finalize", event: "progress", data: { base_moved: { from: ctx.baseSha, to: current } } });
-  if (!(await gitOk(ctx.worktree, ["-c", "user.name=factory", "-c", "user.email=factory@localhost", "rebase", "-q", current]))) {
-    await gitOk(ctx.worktree, ["rebase", "--abort"]);
-    return { ok: false, reason: "base moved: rebase conflict" };
+  if (current === ctx.baseSha || (await isAncestor(ctx.worktree, current))) {
+    ctx.baseSha = current;
+    return { ok: true, reason: "" };
+  }
+  ctx.events.emit({ step, event: "progress", data: { base_moved: { from: ctx.baseSha, to: current } } });
+  const merged = await mergeRef(ctx.worktree, current, `chore: merge ${ctx.repo.base_branch} into ${ctx.branch}`, gitAuthor(ctx));
+  if (!merged.ok) {
+    ctx.events.emit({ step, event: "progress", data: { merge_conflict: merged.conflicts } });
+    const where = merged.conflicts.length ? `merge conflict in ${merged.conflicts.join(", ")}` : `merge failed: ${merged.error.slice(0, 200)}`;
+    return { ok: false, reason: `base ${ctx.repo.base_branch} moved (${current.slice(0, 8)}): ${where}` };
   }
   ctx.baseSha = current;
   const gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
-  return gates.green ? { ok: true, reason: "", gates } : { ok: false, reason: "base moved: gates red after rebase", gates };
+  return gates.green
+    ? { ok: true, reason: "", gates }
+    : { ok: false, reason: `base ${ctx.repo.base_branch} moved: gates red after merging it`, gates };
 }
 
 function cell(s: string): string {

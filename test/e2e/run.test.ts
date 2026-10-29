@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
-import { addOrigin } from "../helpers/repo.js";
+import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -278,6 +278,51 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.result).toMatchObject({ result: "done", pr: null });
     expect(r.github.pushes).toEqual([]);
     expect(r.file("pr.md")).toContain("## Summary");
+  });
+});
+
+describe("base moved before finalize", () => {
+  /** Commits on main of the fixture repo once, when the first reviewer starts (after implement). */
+  const moveBaseOnReview = (path: string, content: string) => {
+    let moved = false;
+    return (req: { role: string }, repo: string) => {
+      if (moved || !req.role.startsWith("review_")) return;
+      moved = true;
+      commitFile(repo, path, content, "main moved");
+    };
+  };
+
+  it("clean merge: base merged into the branch as git.author (no rebase), full gates re-run, done", async () => {
+    const r = await runScenario({ script: "clean.json", onCall: moveBaseOnReview("src/other.js", "export const other = 1;\n") });
+    expect(r.result).toMatchObject({ result: "done" });
+    const head = r.github.prs[0]!.head;
+    const [subject, parents, author] = git(r.repo, "log", "-1", "--format=%s|%P|%an", head).trim().split("|");
+    expect(subject).toBe(`chore: merge main into ${head}`);
+    expect(parents!.split(" ")).toHaveLength(2);
+    expect(author).toBe("factory-bot");
+    // the implement commit is still there unchanged (no rewrite → plain push is enough)
+    expect(git(r.repo, "log", "--format=%s", head)).toContain("feat(P1): multiply");
+    expect(git(r.repo, "merge-base", "--is-ancestor", "main", head)).toBe("");
+    const baseMoved = r.events.filter((e) => e.event === "progress" && e.data.base_moved).length;
+    expect(baseMoved).toBe(1);
+    expect(() => r.file("gates-3.json")).not.toThrow(); // implement, finalize, after merge
+    expect(r.github.prs[0]!.draft).toBe(false);
+  });
+
+  it("conflict: merge aborted, needs_human naming the files, draft PR, worktree clean", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      onCall: moveBaseOnReview("src/math.js", "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function divide(a, b) {\n  return a / b;\n}\n"),
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
+    expect(r.result.reason).toMatch(/^base main moved \([0-9a-f]{8}\): merge conflict in src\/math\.js$/);
+    expect(r.github.prs[0]!.draft).toBe(true);
+    expect(r.github.prs[0]!.body).toContain("merge conflict in src/math.js");
+    const wt = join(r.runDir, "worktree");
+    expect(git(wt, "status", "--porcelain")).toBe("");
+    expect(() => git(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD")).toThrow();
+    expect(git(wt, "log", "-1", "--format=%s")).toBe("feat(P1): multiply\n");
+    expect(r.events.find((e) => e.data.merge_conflict)?.data.merge_conflict).toEqual(["src/math.js"]);
   });
 });
 

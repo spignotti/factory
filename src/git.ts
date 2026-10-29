@@ -104,6 +104,27 @@ export async function commitAll(cwd: string, message: string, author: { name: st
   return true;
 }
 
+export type MergeOutcome = { ok: true } | { ok: false; conflicts: string[]; error: string };
+
+/**
+ * Merges `ref` into HEAD as `author` (fast-forward allowed, hooks skipped). On failure the merge is
+ * aborted, so the worktree is left as before, and the conflicting files are reported.
+ */
+export async function mergeRef(cwd: string, ref: string, message: string, author: { name: string; email: string }): Promise<MergeOutcome> {
+  try {
+    await git(cwd, ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "merge", "-q", "--no-edit", "--no-verify", "-m", message, ref]);
+    return { ok: true };
+  } catch (e) {
+    const conflicts = lines(await git(cwd, ["diff", "--name-only", "--diff-filter=U"]).catch(() => ""));
+    await gitOk(cwd, ["merge", "--abort"]);
+    return { ok: false, conflicts, error: (e as Error).message };
+  }
+}
+
+export async function isAncestor(cwd: string, ancestor: string, of = "HEAD"): Promise<boolean> {
+  return gitOk(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
+}
+
 /** Discards all uncommitted changes in a factory-owned worktree. */
 export async function discardChanges(cwd: string): Promise<void> {
   await git(cwd, ["reset", "-q", "--hard", "HEAD"]);

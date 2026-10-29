@@ -21,7 +21,8 @@ Implemented (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 - **Review** (`src/steps/review.ts`): `plan` and `simplicity` reviewers, read-only tools, structured findings,
   continued sessions with the incremental diff in round ≥ 2.
 - **Merge/exit** (`src/pipeline/merge.ts`, `loop.ts`): ids, dedupe, nit cap, stalemate, exit rules, fix rounds.
-- **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates, base-moved rebase, risk class,
+- **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (not a
+  rebase, so no force-push is ever needed) plus full gates again, conflict → `needs_human`; risk class,
   merge policy (Amendment a: `merge.auto_merge_max_risk: none|low|medium`, default `none`), PR body from
   `standards/pr-template.md`, push/PR through the `GitHub` interface (`src/gh.ts`).
 - **Agents** (`src/agents/`): one `AgentRunner` interface; `fake-runner` (scripted fixtures) and `pi-runner`
