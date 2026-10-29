@@ -41,7 +41,7 @@ export async function planReviewers(ctx: RunContext, round: number): Promise<Rev
 }
 
 const REVIEW_SHAPE = `Reply with a single \`\`\`json block:
-{"reviewer":"<name>","prior":[{"finding_id":"R1-plan-1","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
+{"reviewer":"<name>","prior":[{"finding_id":"<id of a prior finding you were given>","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
  "findings":[{"severity":"bug|suggestion|nit","file":"","line":0,"claim":"","evidence":"","fix":"","checkable":"lint|test|script|no","check_sketch":""}]}`;
 
 /** Rules from the base commit: the implementer must not be able to rewrite its reviewers' rules. */
@@ -86,11 +86,13 @@ function sessionsFor(ctx: RunContext, reviewers: Reviewer[]): ReviewSession[] {
 }
 
 const LEAN_SHAPE = `Reply with a single \`\`\`json block {"reviews":[<plan review>,<simplicity review>]}, each review shaped like:
-{"reviewer":"plan|simplicity","prior":[{"finding_id":"R1-plan-1","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
+{"reviewer":"plan|simplicity","prior":[{"finding_id":"<id of a prior finding you were given>","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
  "findings":[{"severity":"bug|suggestion|nit","file":"","line":0,"claim":"","evidence":"","fix":"","checkable":"lint|test|script|no","check_sketch":""}]}
-Give the verdict on a prior finding in the review of the reviewer that raised it.`;
+Give the verdict on a prior finding in the review of the reviewer that raised it.
+Without prior findings, "prior" is [].`;
 
-const shapeOf = (s: ReviewSession): string => (s.reviewers.length > 1 ? LEAN_SHAPE : REVIEW_SHAPE.replace("<name>", s.reviewers[0]!));
+const shapeOf = (s: ReviewSession): string =>
+  s.reviewers.length > 1 ? LEAN_SHAPE : `${REVIEW_SHAPE.replace("<name>", s.reviewers[0]!)}\nWithout prior findings, "prior" is [].`;
 
 interface Diffs {
   /** Since base: round 1 and reviewers joining later. */

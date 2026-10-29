@@ -3,3 +3,4 @@ nothing extra (see scope report); deviations justified; callers and dependents s
 exact text, values and paths the original task spells out are used as given.
 protected_changes: each one is required by the original task, not just convenient; the diff of each protected file
 matches its declared change and weakens no check, CI job, policy or protection. Otherwise report a bug.
+A declared protected change needs no approval inside the run: the human approves it at merge (the factory forces human review). Never report a missing approval.

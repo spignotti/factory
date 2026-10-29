@@ -17,6 +17,18 @@ const HANDOFF_SHAPE = `When done, reply with handoff.json as a single \`\`\`json
  "responses":[{"finding_id":"R1-plan-1","status":"fixed|wontfix","response":"reason"}]}`;
 
 /**
+ * The handoff shape plus the check names a `kind:check` ref may use: the gates resolve refs against
+ * the base config, so a check the run itself adds (or a shell command) is not a valid ref.
+ */
+export function handoffShape(ctx: Pick<RunContext, "repo">, id: string): string {
+  const names = ctx.repo.checks.map((c) => c.name);
+  const refs = names.length
+    ? `A kind:check ref is exactly one of these check names: ${names.join(", ")} (not a command, not a check this run adds).`
+    : "This repo has no checks: use kind:test evidence only.";
+  return `${HANDOFF_SHAPE.replace("<id>", id)}\n${refs}`;
+}
+
+/**
  * Removes a root \`handoff.json\` an agent wrote as a file instead of replying with it, so it never
  * lands in a factory commit. Kept when the base has it or a package names it.
  */
@@ -68,7 +80,7 @@ export async function implementerTurn(ctx: RunContext, step: string, turn: Sessi
     errors = parsed.ok ? (turn.validate?.(parsed.handoff) ?? []) : parsed.errors;
     if (parsed.ok && errors.length === 0) return { handoff: parsed.handoff, errors };
     ctx.events.emit({ step, event: "progress", role: "implement", data: { invalid_handoff: errors } });
-    prompt = `Your handoff was invalid:\n- ${errors.join("\n- ")}\n\n${HANDOFF_SHAPE.replace("<id>", turn.packageId)}`;
+    prompt = `Your handoff was invalid:\n- ${errors.join("\n- ")}\n\n${handoffShape(ctx, turn.packageId)}`;
   }
   return { errors };
 }
@@ -89,7 +101,7 @@ async function packagePrompt(ctx: RunContext, pkg: Package): Promise<string> {
     ctx.handoffs.length ? asData("previous_handoffs", JSON.stringify(ctx.handoffs, null, 2)) : "",
     diff ? asData("diff_since_base", diff) : "",
     ctx.briefing ? `Recurring findings in this repo (avoid them):\n${asData("findings_briefing", ctx.briefing)}` : "",
-    HANDOFF_SHAPE.replace("<id>", pkg.id),
+    handoffShape(ctx, pkg.id),
   ].filter(Boolean).join("\n\n");
 }
 
@@ -152,7 +164,7 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
         return true;
       }
       reason = `fast gates red after ${attempt} attempt(s)`;
-      prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${failureSummary(report)}\n\n${HANDOFF_SHAPE.replace("<id>", pkg.id)}`;
+      prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${failureSummary(report)}\n\n${handoffShape(ctx, pkg.id)}`;
     }
     failures[pkg.id] = reason;
     const firstOfBug = ctx.plan.type === "bug" && done.length === 0;
