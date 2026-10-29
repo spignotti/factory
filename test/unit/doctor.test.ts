@@ -270,3 +270,41 @@ describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", 
     expect(check(JSON.parse(c3.text()) as DoctorReport, "github settings")).toMatchObject({ status: "info" });
   });
 });
+
+describe("factory doctor: services and ui (§15)", () => {
+  const SERVE = `node -e "require('http').createServer((q,r)=>r.end('ok')).listen(Number(process.argv[1]),'0.0.0.0')"`;
+  const services = (c: Record<string, unknown>) => {
+    c.services = [
+      { name: "web", start: `${SERVE} {port:web}` },
+      { name: "db", start: "exit 3", host: true },
+      { name: "spare", start: "sleep 60" },
+    ];
+    c.ui = { start: `${SERVE} {port:ui}`, url: "http://127.0.0.1:{port:ui}/", services: ["web"] };
+    c.checks = [...((c.checks as unknown[]) ?? []), { name: "uses-db", run: "true", tier: "manual", services: ["db"] }];
+  };
+
+  it("static: host services warn, unused ones are noted; nothing starts without --services", async () => {
+    const c = capture();
+    await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo: createFixtureRepo(services), json: true, probe, view, github: new FakeGitHub() }, c.io);
+    const r = JSON.parse(c.text()) as DoctorReport;
+    expect(r.checks.filter((x) => x.name.startsWith("service "))).toEqual([
+      { name: "service db", status: "warn", detail: expect.stringMatching(/outside the sandbox/) },
+      { name: "service spare", status: "info", detail: expect.stringMatching(/never starts/) },
+    ]);
+    expect(check(r, "services")).toMatchObject({ status: "info", detail: expect.stringMatching(/--services/) });
+  });
+
+  it.runIf(process.platform === "linux")("--services: each service and the ui start and stop once in a clean base worktree (sandboxed)", async () => {
+    const repo = createFixtureRepo(services);
+    writeFileSync(join(repo, "UNCOMMITTED.txt"), "local only");
+    const c = capture();
+    const fh = mkdtempSync(join(tmpdir(), "fh-"));
+    expect(await doctorCommand({ factoryHome: fh, repo, services: true, json: true, probe, view, github: new FakeGitHub() }, c.io)).toBe(1);
+    const r = JSON.parse(c.text()) as DoctorReport;
+    expect(check(r, "service web")).toMatchObject({ status: "ok", detail: expect.stringMatching(/started in .*s and stopped/) });
+    expect(r.checks.find((x) => x.name === "service db" && x.status === "fail")?.detail).toMatch(/env_missing: service db/);
+    expect(check(r, "ui")).toMatchObject({ status: "ok", detail: expect.stringMatching(/reachable at http:\/\/127\.0\.0\.1:\d+\//) });
+    expect(execFileSync("git", ["worktree", "list"], { cwd: repo, encoding: "utf8" }).trim().split("\n")).toHaveLength(1);
+    expect(execFileSync("ls", [join(fh, "ports")], { encoding: "utf8" }).trim()).toBe(""); // slot released
+  }, 60_000);
+});
