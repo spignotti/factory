@@ -24,6 +24,8 @@ export const EVENT_TYPES = [
   "sandbox",
   // Services: data.action = ports | starting | ready | failed | stopped.
   "service",
+  // One `docs_lookup` tool call (Context7): library, topic, estimated tokens, status.
+  "docs_lookup",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

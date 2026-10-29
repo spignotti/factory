@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import { RoleOverridesSchema } from "./profile.js";
+import { DocsLookupSchema, RoleOverridesSchema } from "./profile.js";
 
 export const TierSchema = z.enum(["fast", "full", "manual"]);
 export type Tier = z.infer<typeof TierSchema>;
@@ -137,6 +137,8 @@ export const RepoConfigSchema = z
       .default({ author: "factory" }),
     // Names of extra environment variables passed to agent tool processes and checks.
     agent_env: z.array(z.string()).default([]),
+    // Agent steps with the `docs_lookup` tool for this repo; replaces the profile's list.
+    docs_lookup: DocsLookupSchema.optional(),
     // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
   })

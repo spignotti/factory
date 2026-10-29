@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EvalBrowser, findHeadlessShell, knownDevice } from "../../src/evaluate/browser.js";
 import { videoToGif } from "../../src/evaluate/gif.js";
 import { BrowserSession, screenshotFile } from "../../src/evaluate/tools.js";
-import { browserToolDefinitions } from "../../src/agents/pi-runner.js";
+import { factoryToolDefinitions } from "../../src/agents/pi-runner.js";
 import { FakeRunner } from "../../src/agents/fake-runner.js";
 import { createSandbox, hostProbe, type Jail } from "../../src/sandbox/sandbox.js";
 
@@ -117,7 +117,7 @@ describe.skipIf(!shell)("evaluator browser (real Chromium headless shell)", () =
       expect(JSON.parse((await tools.call("console", {})).text)).toEqual([expect.objectContaining({ text: "boom" })]);
       expect(JSON.parse((await tools.call("network", {})).text)).toEqual([expect.objectContaining({ status: 404 })]);
 
-      const defs = browserToolDefinitions(tools);
+      const defs = factoryToolDefinitions(tools);
       expect(defs.map((d) => d.name)).toEqual(["goto", "click", "tap", "fill", "text", "screenshot", "console", "network"]);
       const r = await defs.find((d) => d.name === "screenshot")!.execute("id", { name: "A2" }, undefined, undefined, undefined as never);
       expect(r.content.map((c) => c.type)).toEqual(["text", "image"]);
@@ -125,7 +125,7 @@ describe.skipIf(!shell)("evaluator browser (real Chromium headless shell)", () =
       const fake = new FakeRunner([{ role: "evaluate", tool_calls: [{ tool: "text", args: { selector: "h1" } }], output: { ok: true } }]);
       await fake.run({ role: "evaluate", model: "m/x", cwd: evidenceDir, system: "", prompt: "", tools: "read_only", env: {}, browser: tools });
       expect(fake.calls[0]!.toolResults).toEqual([{ tool: "text", text: "Clicked" }]);
-      await expect(new FakeRunner([{ role: "evaluate", tool_calls: [{ tool: "text", args: {} }] }]).run({ role: "evaluate", model: "m/x", cwd: evidenceDir, system: "", prompt: "", tools: "read_only", env: {} })).rejects.toThrow(/no browser tools/);
+      await expect(new FakeRunner([{ role: "evaluate", tool_calls: [{ tool: "text", args: {} }] }]).run({ role: "evaluate", model: "m/x", cwd: evidenceDir, system: "", prompt: "", tools: "read_only", env: {} })).rejects.toThrow(/has no tool text/);
     } finally {
       await b.close();
     }

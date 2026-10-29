@@ -20,6 +20,9 @@ roles:
 billing:
   opencode-go: subscription
   openai: subscription
+# Agent steps with the docs_lookup tool (Context7, run by the factory; CONTEXT7_API_KEY optional).
+docs_lookup:
+  roles: [plan, implement, fix]
 retry:
   base_ms: 2000
   max_ms: 60000

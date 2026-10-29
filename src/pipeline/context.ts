@@ -3,12 +3,13 @@ import { join } from "node:path";
 import { buildAgentEnv } from "../agents/env.js";
 import type { Sleep } from "../agents/fake-runner.js";
 import { callModel, type ModelRequest, type ModelResponse } from "../agents/models.js";
+import { type Context7Client, docsTools } from "../docs/context7.js";
 import type { AgentRunner } from "../agents/runner.js";
 import type { Clock, EventLog } from "../events.js";
 import type { GitHub } from "../gh.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { Plan } from "../schemas/plan.js";
-import { type Profile, profileRoleOf } from "../schemas/profile.js";
+import { type DocsStep, type Profile, profileRoleOf } from "../schemas/profile.js";
 import type { RepoConfig } from "../schemas/repo.js";
 import { supervise, WatchdogAbort } from "./watchdog.js";
 import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
@@ -33,6 +34,8 @@ export interface RunDeps {
   sandbox?: Sandbox;
   /** Role prompt replacements by name (`roles/<name>.md`), from an eval profile. */
   prompts?: Partial<Record<string, string>>;
+  /** Context7 client behind the `docs_lookup` tool; absent = no docs tool (tests). */
+  docs?: Context7Client;
 }
 
 export interface Task {
@@ -115,7 +118,13 @@ export function jailFor(ctx: Pick<RunContext, "deps" | "agentHome">, cwd: string
   return { sandbox, rw: [cwd, ctx.agentHome], ro: common ? [common] : [], hide: [ctx.deps.factoryHome] };
 }
 
-export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "agentDir" | "jail">;
+export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "agentDir" | "jail" | "docs">;
+
+/** Whether an agent step gets `docs_lookup`: repo.yaml `docs_lookup.roles`, else the profile's. */
+export function docsEnabled(ctx: Pick<RunContext, "deps" | "repo">, step: string): boolean {
+  const roles: string[] = ctx.repo.docs_lookup?.roles ?? ctx.deps.profile.docs_lookup.roles;
+  return ctx.deps.docs !== undefined && roles.includes(step as DocsStep);
+}
 
 /** One supervised agent call: model chain with backoff/fallback, heartbeat events, watchdog. */
 export async function callAgent(
@@ -124,6 +133,9 @@ export async function callAgent(
   req: AgentCall,
 ): Promise<ModelResponse> {
   const { deps, events } = ctx;
+  const docs = deps.docs && docsEnabled(ctx, step)
+    ? docsTools(deps.docs, (call) => void events.emit({ step, event: "docs_lookup", role: req.role, data: { ...call } }))
+    : undefined;
   try {
     return await supervise(
       events,
@@ -140,6 +152,7 @@ export async function callAgent(
           env: agentEnv(ctx, req.role),
           jail: jailFor(ctx, req.cwd),
           agentDir: join(deps.factoryHome, "pi"),
+          ...(docs ? { docs } : {}),
           signal,
           onActivity: (a) => void events.emit({ step, event: a.kind, role: req.role, data: a.detail ? { detail: a.detail } : {} }),
         }),

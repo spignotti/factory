@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { renderCiStub } from "./ci.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { Context7Client } from "./docs/context7.js";
 import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { gcCommand } from "./commands/gc.js";
@@ -121,6 +122,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         signal: controller.signal,
         // One runner per run; evalOne closes it.
         runner: () => new PiRunner(join(factoryHome, "pi")),
+        docs: Context7Client.fromEnv(process.env),
       };
       try {
         if (command === "eval") {
@@ -228,7 +230,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         },
       });
       return await doctorCommand(
-        { factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, services: values.services, json: values.json },
+        { factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, services: values.services, json: values.json, context7: Context7Client.fromEnv(process.env) },
         io,
       );
     }
@@ -289,7 +291,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             noPr: values["no-pr"],
             wait: values.wait,
           },
-          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);
@@ -321,7 +323,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         const result = await resumeFactory(
           positionals[0]!,
           { wait: values.wait, noPr: values["no-pr"] },
-          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);

@@ -148,6 +148,16 @@ export function profileIssues(
 
 export const SandboxModeSchema = z.enum(["required", "preferred", "off"]);
 
+/**
+ * Agent steps that get the `docs_lookup` tool (Context7): `plan` (plan_high/plan_medium), `implement`,
+ * `fix` (the implementer in review and gate fix rounds), `review`, `evaluate`.
+ */
+export const DOCS_STEPS = ["plan", "implement", "fix", "review", "evaluate"] as const;
+export type DocsStep = (typeof DOCS_STEPS)[number];
+export const DEFAULT_DOCS_STEPS: DocsStep[] = ["plan", "implement", "fix"];
+export const DocsLookupSchema = z.object({ roles: z.array(z.enum(DOCS_STEPS)) }).strict();
+export type DocsLookup = z.infer<typeof DocsLookupSchema>;
+
 export const ProfileSchema = z
   .object({
     roles: RolesSchema,
@@ -160,6 +170,8 @@ export const ProfileSchema = z
     retry: RetrySchema.default({ base_ms: 2000, max_ms: 60_000, attempts: 4 }),
     /** Extra env var names per role for agent tool processes. */
     env: z.record(z.string(), z.array(z.string())).default({}),
+    /** Which agent steps get the `docs_lookup` tool; `roles: []` turns it off. */
+    docs_lookup: DocsLookupSchema.default({ roles: [...DEFAULT_DOCS_STEPS] }),
   })
   .superRefine((p, ctx) => {
     for (const issue of profileIssues(p.roles, p.providers)) ctx.addIssue({ code: "custom", ...issue });
@@ -201,6 +213,7 @@ export const ProfileLayerSchema = z
     providers: ProvidersSchema.partial().optional(),
     billing: BillingSchema.optional(),
     sandbox: SandboxModeSchema.optional(),
+    docs_lookup: DocsLookupSchema.optional(),
   })
   .strict();
 export type ProfileLayer = z.infer<typeof ProfileLayerSchema>;

@@ -1,29 +1,16 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type TSchema, Type } from "typebox";
+import { Type } from "typebox";
+import type { FactoryTools, ToolResult, ToolSpec } from "../agents/runner.js";
 import type { EvalBrowser } from "./browser.js";
 
 /**
  * Browser tools of the evaluator. They run in the factory process against the jailed
  * browser; Pi gets them as custom tools, the fake runner calls them from scripted `tool_calls`.
  */
-export interface BrowserToolResult {
-  text: string;
-  /** PNG screenshot, base64 (shown to the model). */
-  image?: string;
-  isError?: boolean;
-}
-
-export interface BrowserTools {
-  readonly specs: BrowserToolSpec[];
-  call(name: string, args: Record<string, unknown>): Promise<BrowserToolResult>;
-}
-
-export interface BrowserToolSpec {
-  name: string;
-  description: string;
-  parameters: TSchema;
-}
+export type BrowserToolResult = ToolResult;
+export type BrowserTools = FactoryTools;
+export type BrowserToolSpec = ToolSpec;
 
 const SELECTOR = Type.String({ description: 'Playwright selector: CSS, text=…, role=button[name="…"], or [data-testid=…]' });
 

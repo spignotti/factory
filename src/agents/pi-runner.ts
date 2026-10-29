@@ -18,12 +18,11 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { BrowserTools } from "../evaluate/tools.js";
 import { isolatedContextFiles } from "./context-files.js";
 import { endpointViolation } from "./provider-guard.js";
 import { PathGuard } from "../sandbox/guard.js";
 import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
-import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage } from "./runner.js";
+import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage, type FactoryTools } from "./runner.js";
 
 const TOOLS: Record<AgentRequest["tools"], string[]> = {
   coding: ["read", "bash", "edit", "write", "grep", "find", "ls"],
@@ -104,8 +103,9 @@ export class PiRunner implements AgentRunner {
       extendResources: () => {},
       reload: async () => {},
     };
-    const tools = [...TOOLS[req.tools], ...(req.browser?.specs.map((s) => s.name) ?? [])];
-    const customTools = [...toolDefinitions(req, tools), ...(req.browser ? browserToolDefinitions(req.browser) : [])];
+    const factoryTools = [req.browser, req.docs].filter((t): t is FactoryTools => t !== undefined);
+    const tools = [...TOOLS[req.tools], ...factoryTools.flatMap((t) => t.specs.map((s) => s.name))];
+    const customTools = [...toolDefinitions(req, tools), ...factoryTools.flatMap(factoryToolDefinitions)];
     const { session } = await createAgentSession({
       cwd: req.cwd,
       agentDir,
@@ -201,8 +201,11 @@ export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail">,
   return defs as ToolDefinition[];
 }
 
-/** The evaluator's browser tools as Pi custom tools (typebox schemas, verified against Pi 1.4.0). */
-export function browserToolDefinitions(browser: BrowserTools): ToolDefinition[] {
+/**
+ * Factory-process tools (evaluator browser, `docs_lookup`) as Pi custom tools (typebox schemas,
+ * verified against Pi 1.4.0).
+ */
+export function factoryToolDefinitions(browser: FactoryTools): ToolDefinition[] {
   return browser.specs.map((spec) =>
     defineTool({
       name: spec.name,

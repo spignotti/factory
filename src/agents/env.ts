@@ -24,6 +24,8 @@ export const NEVER_PASSED = new Set([
   "OPENCODE_API_KEY",
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
+  // Context7 key: docs_lookup runs in the factory process.
+  "CONTEXT7_API_KEY",
   "PI_CODING_AGENT_DIR",
   "FACTORY_HOME",
   "GH_TOKEN",

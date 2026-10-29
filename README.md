@@ -145,6 +145,7 @@ verify:
 harden: { max_proposals: 5 }
 git: { author: factory, email: "…" }
 agent_env: []                        # extra env var names for agent tools and checks
+docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
 models: {}                           # per-repo role chains, see Model configuration
 ```
 
@@ -185,6 +186,23 @@ shows the effective model per role and the layer it came from.
 `billing` names each provider's billing kind: `subscription` usage is reported in tokens (PR body, `stats`),
 `metered` usage in USD. Unlisted providers are metered; the built-in default lists
 `opencode-go` and `openai` as subscriptions.
+
+## Docs lookup (Context7)
+
+Planner, implementer and fix rounds get a `docs_lookup` tool (`library`, `topic`, optional `version`):
+it resolves the library on [Context7](https://context7.com) (`GET /api/v2/libs/search`) and returns
+current docs for the topic (`GET /api/v2/context`, at most ~3k tokens per call, cached per run). The tool
+runs in the factory process, not in the sandbox, and only talks to `https://context7.com` (redirects are
+not followed). Every call is a `docs_lookup` event (library, resolved id, topic, estimated tokens, status);
+errors and rate limits come back to the model as a tool error, never fail the run.
+
+The API key is optional: without one Context7 serves an anonymous, lower rate limit; set
+`CONTEXT7_API_KEY` in the factory's environment for your plan's limit. The key is sent only as the bearer
+header to Context7, never to agent processes (`NEVER_PASSED`), and redacted from logs. Choose the steps
+with `docs_lookup: { roles: [...] }` (`plan`, `implement`, `fix`, `review`, `evaluate`) in a profile
+layer or in repo.yaml; `roles: []` turns it off. `factory doctor` checks that Context7 is reachable and
+that a configured key is accepted. Evals use the profile's setting, so `factory experiment` can compare
+with and without it.
 
 ## Sandbox (Linux)
 

@@ -23,7 +23,7 @@ export const FakeStepSchema = z.object({
   usage: UsageSchema.optional(),
   /** Slow-but-active session: emits heartbeats while sleeping between them. */
   heartbeats: z.object({ count: z.number().int().min(1), interval_ms: z.number().min(0) }).optional(),
-  /** Browser tool calls (evaluator) run in order before the output; results are recorded in the call. */
+  /** Factory tool calls (browser, docs_lookup) run in order before the output; results are recorded in the call. */
   tool_calls: z.array(z.object({ tool: z.string(), args: z.record(z.string(), z.unknown()).default({}) })).optional(),
   /** Hangs (no events) for this long. */
   silent_ms: z.number().optional(),
@@ -41,7 +41,9 @@ export interface FakeCall {
   env: Record<string, string>;
   prompt: string;
   sessionKey?: string;
-  /** Results of scripted browser tool calls. */
+  /** Names of the factory-process tools (browser, docs_lookup) the call had. */
+  factoryTools: string[];
+  /** Results of scripted tool calls. */
   toolResults?: { tool: string; text: string; isError?: boolean }[];
 }
 
@@ -101,6 +103,7 @@ export class FakeRunner implements AgentRunner {
       env: { ...req.env },
       prompt: req.prompt,
       sessionKey: req.sessionKey,
+      factoryTools: [req.browser, req.docs].flatMap((t) => t?.specs.map((s) => s.name) ?? []),
     });
     const step = this.queues.get(req.role)?.shift();
     if (!step) throw new Error(`fake-runner: no scripted step left for role ${req.role}`);
@@ -117,10 +120,11 @@ export class FakeRunner implements AgentRunner {
     const usage = step.usage ? UsageSchema.parse(step.usage) : ZERO_USAGE;
     if (step.error) throw new AgentError(step.error.message, usage, step.error.status, step.error.retry_after_ms);
     if (step.tool_calls) {
-      if (!req.browser) throw new Error(`fake-runner: role ${req.role} has no browser tools for tool_calls`);
       const results: NonNullable<FakeCall["toolResults"]> = [];
       for (const c of step.tool_calls) {
-        const r = await req.browser.call(c.tool, c.args);
+        const tools = [req.browser, req.docs].find((t) => t?.specs.some((s) => s.name === c.tool));
+        if (!tools) throw new Error(`fake-runner: role ${req.role} has no tool ${c.tool} for tool_calls`);
+        const r = await tools.call(c.tool, c.args);
         results.push({ tool: c.tool, text: r.text, ...(r.isError ? { isError: true } : {}) });
       }
       this.calls[this.calls.length - 1]!.toolResults = results;

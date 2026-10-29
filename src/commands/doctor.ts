@@ -18,6 +18,7 @@ import { Services } from "../services.js";
 import { browsersPath, findHeadlessShell, INSTALL_HINT, knownDevice } from "../evaluate/browser.js";
 import type { z } from "zod";
 import type { DoctorReportSchema } from "../schemas/reports.js";
+import { type Context7Client, context7Probe } from "../docs/context7.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -45,6 +46,8 @@ export interface DoctorOptions {
   pingTimeoutMs?: number;
   /** `--services`: start and stop every service and the ui once in a clean base worktree. */
   services?: boolean;
+  /** Context7 client of `docs_lookup` (the CLI passes one; absent = not checked). */
+  context7?: Context7Client;
 }
 
 /** Resolves the layered model config (with the repo layer if `--repo`), reporting errors as a failed check. */
@@ -304,6 +307,13 @@ export function contextFileChecks(factoryHome: string, repoDir?: string): Doctor
   return checks;
 }
 
+/** Context7 behind `docs_lookup`: reachable, and the key accepted when `CONTEXT7_API_KEY` is set. */
+export async function docsLookupCheck(client: Context7Client, roles: readonly string[]): Promise<DoctorCheck> {
+  if (!roles.length) return { name: "docs_lookup", status: "info", detail: "off (profile docs_lookup.roles is empty)" };
+  const probe = await context7Probe(client);
+  return { name: "docs_lookup", status: probe.status, detail: `Context7 for ${roles.join(", ")}: ${probe.detail}` };
+}
+
 /** `factory doctor`: setup checks, the Zen guard and the effective model per role with its layer. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
@@ -331,6 +341,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
     }
   }
   checks.push(...contextFileChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined));
+  if (opts.context7 && profile) checks.push(await docsLookupCheck(opts.context7, profile.docs_lookup.roles));
   if (opts.repo) {
     try {
       const repoDir = resolve(opts.repo);

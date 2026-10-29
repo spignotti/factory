@@ -31,7 +31,8 @@
         "model_retry",
         "queued",
         "sandbox",
-        "service"
+        "service",
+        "docs_lookup"
       ]
     },
     "role": {
