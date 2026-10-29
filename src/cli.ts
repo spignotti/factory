@@ -51,15 +51,15 @@ const USAGE = `usage:
   factory experiment --base <profile> --variant <profile> [--tasks <glob>] [--repeat N≥2] [--out <dir>]
               (eval of both, decision rule, JSON verdict; schemas/verdict.schema.json)
               eval/experiment also take [--work-dir <dir>] [--keep]
-  factory adopt --repo <path> --ref <tag> [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
+  factory adopt --repo <path> [--ref <tag>] [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
               (drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md (template if missing); removes the legacy
                coding setup (--keep spares paths); baseline plan as proposal; one PR; settings only as hints)
   factory harden --repo <path> [--no-compact] [--max <1-10>] [--profile <file>] [--json]
               (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
                $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
-  factory ci-stub --ref <tag>
-              (prints .github/workflows/factory.yml for a pinned factory ref; doctor checks its hash)
+  factory ci-stub [--ref <tag>]
+              (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; doctor checks its hash)
 `;
 
 function exitCode(result: string, signal: AbortSignal): number {
@@ -78,8 +78,17 @@ function sandboxFor(profile: Profile, io: Io): Sandbox {
 const defaultIo: Io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) };
 
 /** Package version, plus the commit when run from a git checkout (npm link / checkout installs). */
+function packageVersion(): string {
+  return (JSON.parse(asset("package.json")) as { version: string }).version;
+}
+
+/** Default CI-stub pin: the release tag of this factory version (`v<package.json version>`). */
+export function defaultRef(): string {
+  return `v${packageVersion()}`;
+}
+
 function versionString(): string {
-  const { version } = JSON.parse(asset("package.json")) as { version: string };
+  const version = packageVersion();
   try {
     const root = fileURLToPath(new URL("..", import.meta.url));
     if (!existsSync(join(root, ".git"))) return version;
@@ -173,7 +182,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           json: { type: "boolean", default: false },
         },
       });
-      if (!values.repo || !values.ref) {
+      if (!values.repo) {
         io.err(USAGE);
         return 2;
       }
@@ -186,7 +195,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         return await adoptCommand(
           {
             repo: values.repo,
-            ref: values.ref,
+            ref: values.ref ?? defaultRef(),
             base: values.base,
             keep: values.keep ?? [],
             measure: !values["no-measure"],
@@ -231,11 +240,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     }
     if (command === "ci-stub") {
       const { values } = parseArgs({ args: rest, options: { ref: { type: "string" } } });
-      if (!values.ref) {
-        io.err(USAGE);
-        return 2;
-      }
-      io.out(renderCiStub(values.ref));
+      io.out(renderCiStub(values.ref ?? defaultRef()));
       return 0;
     }
     if (command === "doctor") {
