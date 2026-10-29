@@ -7,6 +7,7 @@ import { PiRunner } from "../../src/agents/pi-runner.js";
 import { isZenEndpoint, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
 import { doctorCommand, type DoctorReport } from "../../src/commands/doctor.js";
 import { FakeGitHub } from "../../src/gh.js";
+import { createSandbox, hostProbe } from "../../src/sandbox/sandbox.js";
 import { createFixtureRepo } from "../helpers/repo.js";
 
 const probe = { platform: "linux" as const, bwrap: () => true, pasta: () => true };
@@ -294,7 +295,15 @@ describe("factory doctor: services and ui (§15)", () => {
     expect(check(r, "services")).toMatchObject({ status: "info", detail: expect.stringMatching(/--services/) });
   });
 
-  it.runIf(process.platform === "linux")("--services: each service and the ui start and stop once in a clean base worktree (sandboxed)", async () => {
+  // Needs a working bwrap + pasta (GitHub runners restrict user namespaces; the sandbox tests skip there too).
+  const realSandbox = (() => {
+    try {
+      return process.platform === "linux" && Boolean(createSandbox("required", hostProbe));
+    } catch {
+      return false;
+    }
+  })();
+  it.runIf(realSandbox)("--services: each service and the ui start and stop once in a clean base worktree (sandboxed)", async () => {
     const repo = createFixtureRepo(services);
     writeFileSync(join(repo, "UNCOMMITTED.txt"), "local only");
     const c = capture();
