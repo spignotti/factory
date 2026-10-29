@@ -7,7 +7,7 @@ import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
  * Process sandbox for agent bash and repo commands (setup, checks, tests): bubblewrap for the
  * filesystem, pasta for the network (SPEC Amendment j). Linux only.
  *
- * - Filesystem: system dirs read-only; read-write only the run's worktree and agent HOME (bound at the
+ * - Filesystem: system dirs and PATH toolchain prefixes read-only (never a home dir or `/opt` whole); read-write only the run's worktree and agent HOME (bound at the
  *   same paths, so in-process tools and bash agree on paths); the worktree's `.git` file and the main
  *   repo's git dir read-only (git is read-only for agents; a writable gitdir could set hooks or
  *   `core.fsmonitor` that would run on the host); a private /tmp. Never bound: /run (docker socket),
@@ -138,7 +138,9 @@ export function pathBinds(path: string, never: string[], home = homedir()): stri
     if (!existsSync(dir) || inside("/usr", dir)) continue;
     const parent = dirname(dir);
     const target = basename(dir) === "bin" && parent !== "/" && !inside(home, parent) && !inside(parent, home) ? parent : dir;
-    if (target === "/" || never.some((n) => inside(target, n) || inside(n, target))) continue;
+    // Never a home directory or one of its ancestors (`/home`): other dotfiles (gh, ssh, cloud
+    // credentials) would become readable. Never a `never` path or anything overlapping it.
+    if (target === "/" || inside(target, home) || never.some((n) => inside(target, n) || inside(n, target))) continue;
     out.add(target);
   }
   return [...out];
@@ -159,7 +161,8 @@ export function bwrapArgs(jail: Jail, cwd: string, env: { PATH?: string } = proc
     else if (st.isDirectory()) a.push("--ro-bind", d, d);
   }
   for (const f of ETC) a.push("--ro-bind-try", `/etc/${f}`, `/etc/${f}`);
-  a.push("--ro-bind-try", "/opt", "/opt");
+  // `/opt` is not bound whole (it can hold keys of unrelated software); toolchains under it come in
+  // through their PATH entries below.
   const never = [...jail.rw, ...jail.ro, ...(jail.hide ?? []), "/run", "/var/run", "/proc", "/sys", "/dev", "/tmp", "/etc"].map(realOr);
   for (const d of pathBinds(env.PATH ?? "", never)) a.push("--ro-bind-try", d, d);
   a.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");

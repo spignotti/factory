@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { createServer } from "node:http";
 import { networkInterfaces, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { bashSpawnHook } from "../../src/agents/pi-runner.js";
 import { sh } from "../../src/exec.js";
@@ -74,6 +74,15 @@ describe("jail command line", () => {
     mkdirSync(join(dir, "fh", "bin"), { recursive: true });
     const path = ["/usr/bin", join(h, ".local", "bin"), join(dir, "opt", "tool", "bin"), join(dir, "fh", "bin"), "relative/bin"].join(":");
     expect(pathBinds(path, [join(dir, "fh")], h)).toEqual([join(h, ".local", "bin"), join(dir, "opt", "tool")]);
+  });
+
+  it("PATH binds never expose a home dir or its ancestors, and /opt is not bound whole", () => {
+    const h = join(dir, "h2", "me");
+    mkdirSync(join(h, "bin"), { recursive: true });
+    const path = [h, dirname(h), join(h, "bin")].join(":");
+    expect(pathBinds(path, [], h)).toEqual([join(h, "bin")]);
+    const args = jailedArgv(jail({}), "sh", "x", wt);
+    expect(args.join(" ")).not.toMatch(/--ro-bind(-try)? \/opt \/opt/);
   });
 });
 
