@@ -28,6 +28,7 @@ repo_config:
   tests:
     globs:
     - tests/**
+    run: set -- {files}; l=; for f do f=${f#tests/}; f=${f%.py}; l="$l $(printf %s "$f" | tr / .)"; done; .venv/bin/python tests/runtests.py --parallel 1 $l
   human_only_paths:
   - .factory/repo.yaml
   limits:

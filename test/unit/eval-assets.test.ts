@@ -11,7 +11,8 @@ describe("shipped eval assets", () => {
     for (const t of tasks) {
       expect(t.repo).toMatch(/^https:\/\/github\.com\//);
       expect(t.license).toMatch(/^(MIT|BSD-3-Clause|Apache-2\.0)$/);
-      expect(t.repo_config).toBeDefined();
+      // bug plans need tests.run (red-green proof)
+      expect((t.repo_config!.tests as { run?: string }).run).toContain("{files}");
     }
     expect(tasks.filter((t) => t.id.startsWith("unjs__")).length).toBeGreaterThanOrEqual(3);
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));

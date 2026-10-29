@@ -421,6 +421,8 @@ export async function validateTask(task: EvalTask, deps: Pick<EvalDeps, "factory
   const d = deps as EvalDeps;
   try {
     const repo = await prepareTaskRepo(task, repoDir);
+    // Bug plans need `tests.run` for the red-green proof; without it every bug run ends needs_human.
+    if (!repo.tests.run) return { task: task.id, ok: false, base_red: false, fix_green: false, detail: "repo.yaml tests.run is missing: bug plans would stop with needs_human" };
     const at = async (sha: string, label: string) =>
       withBaseWorktree(repoDir, sha, join(root, label), async (wt) => {
         await copyHidden(task, repoDir, wt);
