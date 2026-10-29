@@ -217,7 +217,7 @@ secrets: { provider: env_file, path: ~/.factory/secrets/shop.env, names: [DATABA
 # or a generic wrapper that runs a command with the secrets in its env (a secrets manager CLI)
 secrets:
   provider: command
-  command: "infisical run --env=dev --"      # the factory runs `<command> env -0` and keeps `names`
+  command: "vault-cli run --"               # the factory runs `<command> env -0` and keeps `names`
   credentials: ~/.factory/secrets/shop.env  # the wrapper's own auth vars (optional), only for the wrapper
   names: [DATABASE_URL, STRIPE_KEY]
 ```
@@ -237,35 +237,43 @@ secrets:
 - `factory gates` resolves them too, unless the caller's env already sets every name (CI).
 - `factory doctor --repo` checks the file (outside the repo, `0600`) and that every name resolves, by
   count, never printing a value. `factory adopt` drafts the block from `.env.example` names (never
-  values): the `command` provider with `infisical run --env=dev --` when the repo has `.infisical.json`,
-  else `env_file`.
+  values): the `command` provider with the Infisical login-then-run command below (project id from
+  `.infisical.json` `workspaceId`) when the repo has `.infisical.json`, else `env_file`.
 
 Example: Infisical with a per-repo, read-only machine identity (nothing in the factory is
 Infisical-specific; any CLI that runs a command with secrets in its env works the same way):
 
 1. In the Infisical project, create a project role (e.g. `factory-read-dev`) that may only **read**
-   secrets, restricted to the `dev` environment.
+   secrets, restricted to the `dev` environment. Custom roles need a paid plan; on the free plan give
+   the factory its own small project (only the dev secrets it needs) and add the identity as *Viewer*.
 2. Create a machine identity per repo (e.g. `factory-shop`, organization role *No Access*) with
    Universal Auth, add it to the project with that role, and create a client secret.
 3. Write its credentials (and `INFISICAL_DOMAIN` for EU Cloud or self-hosting) to the credentials file:
 
    ```sh
    install -m 600 /dev/null ~/.factory/secrets/shop.env
-   printf 'INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=%s\nINFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=%s\n' "$ID" "$SECRET" >> ~/.factory/secrets/shop.env
+   printf 'INFISICAL_CLIENT_ID=%s\nINFISICAL_CLIENT_SECRET=%s\nINFISICAL_DOMAIN=https://eu.infisical.com\n' "$ID" "$SECRET" >> ~/.factory/secrets/shop.env
    ```
 
-4. Let the wrapper log in with them for each resolution (the access token never leaves the wrapper):
+4. Let the wrapper log in with them for each resolution, then run with that token. Without a login
+   session a bare `infisical run` falls into the interactive login flow and fails. The token stays in
+   an unexported shell variable, so it never reaches the resolved env:
 
    ```yaml
    secrets:
      provider: command
-     command: 'env INFISICAL_TOKEN="$(infisical login --method=universal-auth --silent --plain)" infisical run --env=dev --projectId=<project-id> --'
+     command: >-
+       t="$(infisical login --method=universal-auth --client-id="$INFISICAL_CLIENT_ID"
+       --client-secret="$INFISICAL_CLIENT_SECRET" --domain="${INFISICAL_DOMAIN:-https://app.infisical.com}"
+       --silent --plain)" && infisical run --token="$t" --projectId=<project-id> --env=dev
+       --domain="${INFISICAL_DOMAIN:-https://app.infisical.com}" --
      credentials: ~/.factory/secrets/shop.env
      names: [DATABASE_URL, STRIPE_KEY]
    ```
 
-   With an `INFISICAL_TOKEN` in the credentials file, or your own `infisical login`, the plain
-   `infisical run --env=dev --` is enough. Then run `factory doctor --repo <path>`.
+   `<project-id>` is the `workspaceId` in `.infisical.json`; a failed login stops the wrapper before
+   `run`. Only when you are logged in yourself (`infisical login`) is the plain
+   `infisical run --env=dev --` enough. Then run `factory doctor --repo <path>`.
 
 Residual risks: checks run code the agents wrote, so a test can read a value from its env and encode it
 somewhere exact-match redaction does not catch (e.g. base64 into a file in the worktree), or send it

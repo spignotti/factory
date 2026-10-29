@@ -71,7 +71,7 @@ export interface Detection {
   workflows: Workflow[];
   special_jobs: SpecialJob[];
   /** Secret names from an env template (never values) and whether a secrets-manager config is present. */
-  secrets: { names: string[]; sources: string[]; infisical: boolean };
+  secrets: { names: string[]; sources: string[]; infisical: boolean; infisicalProjectId?: string };
 }
 
 export const ENV_TEMPLATES = [".env.example", ".env.sample", ".env.template", ".env.dist"];
@@ -392,6 +392,18 @@ export function detect(dir: string, files: string[]): Detection {
     cloud: { present: cloudReasons.length > 0, reasons: cloudReasons },
     workflows,
     special_jobs: specialJobs(workflows),
-    secrets: { ...envTemplateNames(dir), infisical: existsSync(join(dir, ".infisical.json")) },
+    secrets: { ...envTemplateNames(dir), ...infisicalConfig(dir) },
   };
+}
+
+/** `.infisical.json` presence and its `workspaceId` (the project id), only when it is a plain id (it ends up in a shell command). */
+function infisicalConfig(dir: string): { infisical: boolean; infisicalProjectId?: string } {
+  const file = join(dir, ".infisical.json");
+  if (!existsSync(file)) return { infisical: false };
+  try {
+    const id = (JSON.parse(readFileSync(file, "utf8")) as { workspaceId?: unknown }).workspaceId;
+    return typeof id === "string" && /^[A-Za-z0-9-]+$/.test(id) ? { infisical: true, infisicalProjectId: id } : { infisical: true };
+  } catch {
+    return { infisical: true };
+  }
 }
