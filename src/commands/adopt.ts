@@ -225,15 +225,11 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
           id: nextProposalId(proposalsDir(deps.factoryHome, repoId), date, "adopt"),
           repo: repoId,
           created_at: now.toISOString(),
-          status: "open",
-          rationale: "Establish factory baseline (SPEC §12 step 3).",
-          plan: res.plan,
-          references: { findings: [], checklist: [] },
+          proposals: [{ status: "open", rationale: "Establish factory baseline (SPEC §12 step 3).", plan: res.plan, references: { findings: [], checklist: [] }, resolution: null }],
           signals: { detection: report.detection, legacy: { removed: legacy.removed.length, proposed: legacy.proposed.length, kept: legacy.kept.length } },
           metrics: null,
-          resolution: null,
         });
-        report.proposal = { id: p.id, path: p.plan_path.replace(/\.plan\.json$/, ".json"), plan_path: p.plan_path };
+        report.proposal = { id: p.proposals[0]!.id, path: join(proposalsDir(deps.factoryHome, repoId), `${p.id}.json`), plan_path: p.proposals[0]!.plan_path };
       } else report.plan_error = res.error;
     }
     const author = { name: config.git.author, email: config.git.email ?? `${config.git.author}@users.noreply.github.com` };

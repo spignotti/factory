@@ -151,7 +151,7 @@ base branch; the user's checkout is not touched):
   workflows and AGENTS.md sections about old tools are only listed as proposed removals. Deploy, release and
   scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths, e.g.
   `--keep CLAUDE.md --keep .claude`. The PR description lists every removed, proposed and kept item.
-- **Baseline plan** (`plan_medium`): saved as proposal `<date>-adopt` (see Harden); run it after the merge
+- **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
 - **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
@@ -162,9 +162,9 @@ base branch; the user's checkout is not touched):
 `factory harden --repo <path>` (weekly or by hand) turns recurring problems into deterministic checks, one
 proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>/`:
 
-1. **Lifecycle**: an open proposal whose factory run (matched by plan goal or `resolves_findings`) merged is
-   `resolved` (its findings too); all its PRs closed, or no merged/open PR after 28 days, is `dropped` and its
-   findings are reopened.
+1. **Lifecycle** (per proposal): an open proposal whose factory run (matched by its plan file, plan goal or
+   `resolves_findings`) merged is `resolved` (its findings too); all its PRs closed, or no merged/open PR after
+   28 days, is `dropped` and its findings are reopened.
 2. **Compaction** (`plan_medium`, no tools): near-duplicate open findings are merged; counts, runs and dates
    are merged in code (`--no-compact` skips).
 3. **Signals** (code): findings seen twice or checkable, flaky checks, unchecked checklist items, a 30-day
@@ -173,9 +173,11 @@ proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>
    reverted factory PRs. Evaluator signals are empty until M4.
 4. **Metrics**: one line per call in `metrics.jsonl` (determinism ratio, open findings, CI minutes, flaky,
    done and revert rate, median rounds).
-5. **Proposal** (`harden` role, read-only tools): exactly one, validated as a plan (one retry), written to
-   `proposals/<date>.json` (+ `.plan.json`); its findings become `proposed`. No signals, no LLM call. Run it
-   with `factory run --plan <dir>/<date>.plan.json`.
+5. **Ticket** (`harden` role, read-only tools): ONE file `proposals/<date>.json` with up to 5 ranked proposals
+   (`repo.yaml` `harden.max_proposals`, `--max`), each validated as a plan (one retry; overlapping or invalid
+   ones are dropped and listed), with its own `<date>.<rank>.plan.json`; their findings become `proposed`.
+   No signals, no LLM call. Each proposal is its own run and PR:
+   `factory run --plan <dir>/<date>.<rank>.plan.json`.
 
 ## Evals and experiments
 

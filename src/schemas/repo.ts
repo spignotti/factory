@@ -48,6 +48,10 @@ const VerifyAreaSchema = z.object({
   flows: z.array(z.string()).default([]),
 });
 
+/** Default and upper bound of proposals per harden ticket (Amendment w). */
+export const DEFAULT_MAX_PROPOSALS = 5;
+export const MAX_PROPOSALS_LIMIT = 10;
+
 export const RepoConfigSchema = z
   .object({
     base_branch: z.string().default("main"),
@@ -111,6 +115,10 @@ export const RepoConfigSchema = z
       .loose()
       .optional(),
     verify: z.object({ areas: z.array(VerifyAreaSchema).default([]) }).default({ areas: [] }),
+    // Amendment w: ranked proposals per harden ticket (`--max` overrides).
+    harden: z
+      .object({ max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS) })
+      .default({ max_proposals: DEFAULT_MAX_PROPOSALS }),
     git: z
       .object({ author: z.string().default("factory"), email: z.string().optional() })
       .default({ author: "factory" }),
