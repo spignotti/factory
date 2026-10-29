@@ -60,6 +60,16 @@ export interface DraftInput {
 
 
 /**
+ * Infisical wrapper: a universal-auth login with the credentials file's machine identity, then `infisical run`
+ * with that token. A plain `infisical run` without a login session falls into the interactive login flow.
+ * The token stays in a shell variable (not exported), so it never reaches the resolved env.
+ */
+export function infisicalCommand(projectId: string, env = "dev"): string {
+  const domain = '--domain="${INFISICAL_DOMAIN:-https://app.infisical.com}"';
+  return `t="$(infisical login --method=universal-auth --client-id="$INFISICAL_CLIENT_ID" --client-secret="$INFISICAL_CLIENT_SECRET" ${domain} --silent --plain)" && infisical run --token="$t" --projectId=${projectId} --env=${env} ${domain} --`;
+}
+
+/**
  * `secrets:` draft from the env template (names only): `.infisical.json` → the `command` provider with
  * a per-repo credentials file for the wrapper; otherwise `env_file`. Undefined without names.
  */
@@ -68,9 +78,10 @@ export function draftSecrets(d: Detection, repoName = "<repo>"): { block: Record
   if (!names.length) return undefined;
   const file = `~/.factory/secrets/${repoName}.env`;
   if (d.secrets.infisical) {
+    const project = d.secrets.infisicalProjectId;
     return {
-      block: { provider: "command", command: "infisical run --env=dev --", credentials: file, names },
-      comment: `# secrets: names from ${d.secrets.sources.join(", ")}; .infisical.json found, so the wrapper resolves them. ${file} (mode 0600) holds the wrapper's machine-identity credentials. Checks, services and the ui get the values, agents never.`,
+      block: { provider: "command", command: infisicalCommand(project ?? "<project-id>"), credentials: file, names },
+      comment: `# secrets: names from ${d.secrets.sources.join(", ")}; .infisical.json found, so the wrapper resolves them${project ? "" : " (TODO: set the project id, .infisical.json has no workspaceId)"}. ${file} (mode 0600) holds the machine identity's INFISICAL_CLIENT_ID, INFISICAL_CLIENT_SECRET and, for EU Cloud or self-hosting, INFISICAL_DOMAIN. Checks, services and the ui get the values, agents never.`,
     };
   }
   return {

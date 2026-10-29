@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { detect } from "../../src/adopt/detect.js";
-import { draftRepoYaml } from "../../src/adopt/draft.js";
+import { draftRepoYaml, infisicalCommand } from "../../src/adopt/draft.js";
 import { secretsChecks } from "../../src/commands/doctor.js";
 import { EventLog } from "../../src/events.js";
 import { agentEnv, commandEnv } from "../../src/pipeline/context.js";
@@ -206,15 +206,62 @@ describe("adopt drafts a secrets block (names only)", () => {
   const files = (dir: string) => gitIn(dir, "ls-files").split("\n").filter(Boolean);
   const env = "# copy to .env\nDATABASE_URL=postgres://user:pass@localhost/db\nexport STRIPE_KEY=sk_test_placeholder\nPATH=/nope\n";
 
-  it(".infisical.json → command provider with a per-repo credentials file", () => {
-    const dir = makeRepo({ ".env.example": env, ".infisical.json": '{"workspaceId":"x"}', "package.json": "{}" });
+  it(".infisical.json → command provider that logs in with the machine identity, project id from workspaceId", () => {
+    const id = "ea0bcc30-2303-4ec2-87f7-cdabc870ff29";
+    const dir = makeRepo({ ".env.example": env, ".infisical.json": `{"workspaceId":"${id}","defaultEnvironment":"dev"}`, "package.json": "{}" });
     const d = detect(dir, files(dir));
-    expect(d.secrets).toEqual({ names: ["DATABASE_URL", "STRIPE_KEY", "PATH"], sources: [".env.example"], infisical: true });
+    expect(d.secrets).toEqual({ names: ["DATABASE_URL", "STRIPE_KEY", "PATH"], sources: [".env.example"], infisical: true, infisicalProjectId: id });
     const { text, config } = draftRepoYaml({ detection: d, checks: [], baseBranch: "main", date: "2026-10-29", repoName: "shop" });
-    expect(config.secrets).toEqual({ provider: "command", command: "infisical run --env=dev --", credentials: "~/.factory/secrets/shop.env", names: ["DATABASE_URL", "STRIPE_KEY"] });
+    expect(config.secrets).toEqual({ provider: "command", command: infisicalCommand(id), credentials: "~/.factory/secrets/shop.env", names: ["DATABASE_URL", "STRIPE_KEY"] });
+    expect(infisicalCommand(id)).toMatch(/infisical login --method=universal-auth .* && infisical run --token="\$t" --projectId=ea0bcc30-2303-4ec2-87f7-cdabc870ff29 --env=dev .* --$/);
     expect(text).toContain("# secrets: names from .env.example; .infisical.json found");
+    expect(text).not.toContain("TODO: set the project id");
     expect(text).not.toContain("sk_test_placeholder");
     expect(text).not.toContain("user:pass");
+  });
+
+  it(".infisical.json without a plain workspaceId → placeholder project id and a TODO", () => {
+    for (const json of ["{}", "not json", '{"workspaceId":"x; rm -rf ~"}']) {
+      const dir = makeRepo({ ".env.example": env, ".infisical.json": json, "package.json": "{}" });
+      const d = detect(dir, files(dir));
+      expect(d.secrets).toMatchObject({ infisical: true });
+      expect(d.secrets.infisicalProjectId).toBeUndefined();
+      const { text, config } = draftRepoYaml({ detection: d, checks: [], baseBranch: "main", date: "2026-10-29", repoName: "shop" });
+      expect(config.secrets).toMatchObject({ command: infisicalCommand("<project-id>") });
+      expect(text).toContain("TODO: set the project id");
+    }
+  });
+
+  it("the drafted Infisical command resolves non-interactively with a fake CLI; the token stays in the wrapper", async () => {
+    const dir = tmp();
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const cli = join(bin, "infisical");
+    writeFileSync(
+      cli,
+      [
+        "#!/bin/sh",
+        // login: only with the identity's credentials and the configured domain; prints the token
+        'if [ "$1" = login ]; then',
+        `  case "$*" in *"--client-id=cid-1234567 --client-secret=${CRED} --domain=https://eu.infisical.com --silent --plain"*) echo access-token-77aa21; exit 0;; esac`,
+        '  echo "would prompt" >&2; exit 9',
+        "fi",
+        // run: refuses without --token (the real CLI starts the interactive login), then runs the command
+        '[ "$1" = run ] || exit 8; shift',
+        'tok=""; while [ "$1" != "--" ]; do case "$1" in --token=*) tok="${1#--token=}";; esac; shift; done; shift',
+        '[ "$tok" = access-token-77aa21 ] || { echo "No valid login session found, triggering login flow" >&2; exit 1; }',
+        `DB_PASSWORD=${DB} exec "$@"`,
+      ].join("\n"),
+    );
+    chmodSync(cli, 0o755);
+    const creds = secretFile(join(dir, "secrets"), "shop.env", `INFISICAL_CLIENT_ID=cid-1234567\nINFISICAL_CLIENT_SECRET=${CRED}\nINFISICAL_DOMAIN=https://eu.infisical.com\n`);
+    const cfg = { provider: "command" as const, command: infisicalCommand("p-1"), credentials: creds, names: ["DB_PASSWORD"] };
+    const r = await resolveSecrets(cfg, { repoDir: tmp(), factoryHome: dir, parentEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir } });
+    expect(r.env).toEqual({ DB_PASSWORD: DB });
+    expect(r.missing).toEqual([]);
+    expect(JSON.stringify(r.env)).not.toContain("access-token-77aa21");
+    const wrong = secretFile(join(dir, "secrets2"), "shop.env", "INFISICAL_CLIENT_ID=cid-1234567\nINFISICAL_CLIENT_SECRET=wrong-secret-000000\n");
+    await expect(resolveSecrets({ ...cfg, credentials: wrong }, { repoDir: tmp(), factoryHome: dir, parentEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir } })).rejects.toThrow(/exited 9/);
   });
 
   it("env template only → env_file provider; none → no block", () => {
