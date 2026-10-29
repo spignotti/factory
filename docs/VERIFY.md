@@ -73,3 +73,13 @@ the gate commands it started itself. Killing bash children that Pi spawned relie
 - None of these run in tests; they are exercised only against a real repository.
 - `harden` CI audit: `GhCli.ciRuns` uses `gh run list --created >=<date> --limit 200 --json databaseId,headSha,workflowName,event,conclusion,createdAt` and one `gh run view <id> --json jobs` per run (job durations from `startedAt`/`completedAt`); `GhCli.latestTag` uses `gh api repos/spignotti/factory/tags`. Field names follow the gh docs; not yet run against a real repository.
 - `adopt` push/PR use the same `push`/`createPr` as runs; branch protection and auto-merge are only printed as hints.
+
+## Evaluate (M4, Amendment x)
+
+- The browser tools as Pi custom tools (`PiRunner` `customTools`) are covered by the fake runner only; a real
+  `evaluate` session with `openai/gpt-6-luna` driving them is unverified.
+- Evidence links (`https://github.com/<owner>/<repo>/blob/<sha>/<path>?raw=true`) and the inline GIF are
+  verified as text against a local bare remote; how GitHub renders them (private repos: viewers need
+  access) is unverified. The push retry on a non-fast-forward is not exercised by a test.
+- Mobile web builds (Expo / React Native Web) are covered through Playwright device emulation only; no
+  real Expo app has been evaluated yet.
