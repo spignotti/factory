@@ -4,9 +4,9 @@ A deterministic pipeline that turns a task (issue, plan file or plain text) into
 request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. `SPEC.md` is the
 source of truth.
 
-## Status: M1 — core loop
+## Status: M2a — operations and safety
 
-Implemented (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
+M1 core loop (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 
 - **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks used as is;
   `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check (one retry,
@@ -31,8 +31,11 @@ Implemented (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
   (Amendment c); heartbeat/progress events and the watchdog (Amendment d).
 - **Events** (`src/events.ts`): `events.jsonl` and one-line `result.json`.
 
-Not in M1: CI stub, services, security/checklist reviewers, findings memory, fast lane, `status`/
-`stats`/`gc`/`doctor`, eval, evaluator, `adopt`, `harden`.
+M2a (Amendments e–p): layered model config and provider allowlist, Linux sandbox (bubblewrap + pasta),
+findings memory, `security` and `checklist` reviewers, fast lane, `status`/`stats`/`gc --json`, `doctor` with
+the Zen guard, JSON Schemas; see the sections below.
+
+Not yet: CI stub, services (M2b), eval, evaluator, `adopt`, `harden`.
 
 ## Resume
 
