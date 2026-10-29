@@ -50,7 +50,11 @@ describe("error classification", () => {
     [new AgentError("invalid api key"), "auth"],
     [new InvalidOutputError("handoff invalid"), "invalid_output"],
     [new AgentError("500 internal error", undefined, 500), "other"],
-    [new Error("socket hang up"), "other"],
+    [new Error("socket hang up"), "network"],
+    [new Error("terminated"), "network"],
+    [new Error("read ECONNRESET"), "network"],
+    [new AgentError("fetch failed", undefined, 502), "other"],
+    [new AgentError("tool terminated the process"), "other"],
   ])("%s -> %s", (err, cls) => {
     expect(classifyError(err)).toBe(cls);
   });
@@ -78,6 +82,18 @@ describe("fallback", () => {
     // openai (ChatGPT login) is a subscription: tokens are kept, the catalog price is not
     expect(ev[0]).toMatchObject({ tokens_in: 10, cost_usd: 0, data: { class: "capacity", billing: "subscription" } });
     expect(ev[5]).toMatchObject({ data: { from: "openai/sol", to: "opencode-go/grok-4.7", class: "capacity" } });
+  });
+
+  it("retries the same model on a dropped stream, never falling back to capacity_only", async () => {
+    const { deps, slept, runner, read } = setup([
+      { role: "plan_high", model: "openai/sol", error: { message: "terminated" } },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    const res = await callModel(deps, "plan", req("plan_high"));
+    expect(res).toMatchObject({ text: "ok", model: "openai/sol" });
+    expect(slept).toEqual([100]);
+    expect(runner.calls.map((c) => c.model)).toEqual(["openai/sol", "openai/sol"]);
+    expect(read()[0]).toMatchObject({ event: "agent_error", data: { class: "network" } });
   });
 
   it("falls back immediately on limit without backoff", async () => {

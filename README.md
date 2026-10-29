@@ -53,7 +53,7 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
   rebase, so never a force-push) plus full gates again, conflict → `needs_human`; risk class and merge
   policy; PR body from `standards/pr-template.md`; push/PR through `src/gh.ts`.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
-  env allowlist and isolated `HOME`; capacity/limit/auth/invalid_output classification with same-model
+  env allowlist and isolated `HOME`; capacity/network/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
@@ -193,7 +193,7 @@ Layers, most specific wins, each replacing whole role chains:
 providers: { allow: [opencode-go, openai], deny: [opencode] }   # only here or built-in
 billing: { opencode-go: subscription, openai: subscription }    # only here or built-in
 sandbox: preferred                                              # only here or built-in
-retry: { base_ms: 2000, max_ms: 60000, attempts: 4 }            # same-model backoff on capacity errors
+retry: { base_ms: 2000, max_ms: 60000, attempts: 4 }            # same-model backoff on capacity and dropped-connection errors
 env: { implement: [MY_TOOL_TOKEN] }                             # extra env var names per role
 roles:
   pr_writer: [{ model: opencode-go/mimo-v2.6-flash }]
