@@ -1,4 +1,4 @@
-You implement the given package in this repo. Write handoff.json when done.
+You implement the given package in this repo. When done, reply with handoff.json (a json block in your reply, never a file).
 - Follow existing code patterns. Smallest change that solves the package.
 - Simplicity ladder: does it need to exist? → reuse → stdlib/existing dependency → minimum that works.
 - No helper, type, config or file for a single caller.

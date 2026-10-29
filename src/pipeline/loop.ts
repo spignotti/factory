@@ -1,9 +1,9 @@
 import { commitAll, diffText, headSha, stageAll } from "../git.js";
-import { asData } from "../prompts.js";
+import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { ReviewOutput } from "../schemas/review.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
-import { gitAuthor, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
+import { dropStrayHandoff, gitAuthor, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
 import { evaluateRound } from "../steps/evaluate.js";
 import { reviewRound } from "../steps/review.js";
 import { checkDeadline, type RunContext, writeJson } from "./context.js";
@@ -50,11 +50,12 @@ export async function fixStep(
     "Fix round. Fix the class, not the instance: search for the same pattern and fix all occurrences.",
     findings.length ? "Answer every finding id with fixed or wontfix + reason in `responses`." : "",
     asData("plan", JSON.stringify(ctx.plan, null, 2)),
+    taskBlock(ctx),
     asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
     asData("diff", diff),
     findings.length ? asData("open_findings", JSON.stringify(findings, null, 2)) : "",
     input.gates && !input.gates.green ? asData("gate_failures", failureSummary(input.gates)) : "",
-    'Reply with handoff.json as a ```json block with "package":"fix".',
+    'Reply with handoff.json as a ```json block with "package":"fix" (in your reply; never write it to a file).',
   ].filter(Boolean).join("\n\n");
   const sessionKey = `${ctx.runId}-fix-${label}`;
   for (;;) {
@@ -76,6 +77,7 @@ export async function fixStep(
     }
     const gates = await runGates(ctx, input.tier ?? "fast", ctx.plan.packages.map((p) => p.id));
     if (gates.green) {
+      await dropStrayHandoff(ctx, "fix");
       await commitAll(ctx.worktree, `fix: ${label === "finalize" ? "finalize gates" : `address review round ${label}`}`, gitAuthor(ctx));
       return { ok: true, gates };
     }

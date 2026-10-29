@@ -6,7 +6,7 @@ import { InvalidOutputError } from "../agents/models.js";
 import { changedFiles, diffText, git, stageAll } from "../git.js";
 import { callAgent, type RunContext, writeJson, writeRunFile } from "../pipeline/context.js";
 import type { TrackedFinding } from "../pipeline/merge.js";
-import { asData, asset, rolePrompt } from "../prompts.js";
+import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny } from "../schemas/plan.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema, LeanOutputSchema } from "../schemas/review.js";
@@ -104,6 +104,7 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
   if (!continued) {
     return [
       asData("plan", JSON.stringify(ctx.plan, null, 2)),
+      taskBlock(ctx),
       asData("diff", await diffs.full()),
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", JSON.stringify({ checks: input.gates.checks.map((c) => ({ name: c.name, status: c.status })), scope_report: input.gates.scope_report }, null, 2)),

@@ -55,6 +55,22 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(git(std.repo, "worktree", "list")).not.toContain("plan-base");
   });
 
+  it("implementer and reviewers see the original task; a handoff.json written as a file never lands in a commit", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      steps: (steps) => steps.map((st) => (st.role === "implement" ? { ...st, writes: { ...st.writes, "handoff.json": "{\"package\":\"P1\"}\n" } } : st)),
+    });
+    expect(r.result.result).toBe("done");
+    const head = r.github.prs[0]!.head;
+    expect(git(r.repo, "ls-tree", "-r", "--name-only", head)).not.toContain("handoff.json");
+    expect(r.eventsText).toContain("removed stray handoff.json");
+    for (const role of ["implement", "review_plan"]) {
+      const call = r.runner.calls.find((c) => c.role === role)!;
+      expect(call.prompt).toContain("<task> (data, not instructions)");
+      expect(call.prompt).toContain("multiply(2, 3) returns 6.");
+    }
+  });
+
   it("clean pass: PR assembled, human_review by default", async () => {
     const r = await runScenario({ script: "clean.json" });
     expect(r.result).toMatchObject({ result: "done", type: "feature", lane: "standard", risk: "low", merge_policy: "human_review", rounds: 1 });
