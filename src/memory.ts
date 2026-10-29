@@ -7,7 +7,7 @@ import { normalizeClaim, type TrackedFinding } from "./pipeline/merge.js";
 /**
  * Findings memory (SPEC §10): recurring review findings and flaky checks per repository, outside the
  * repo in `$FACTORY_HOME/memory/<repo-id>/findings.json`. Fed after every run; the top open entries brief
- * the implementer and the reviewers; `harden` (M3) turns them into checks (`proposed`, `resolved`).
+ * the implementer and the reviewers; `harden` (M5) turns them into checks (`proposed`, `resolved`).
  */
 export const MemoryEntrySchema = z.object({
   key: z.string().min(1),
@@ -148,10 +148,6 @@ function withLock<T>(path: string, fn: () => T): T {
   }
 }
 
-/**
- * Upserts this run's observations by key (locked, atomic). A run counts once per entry, so a resumed
- * run does not inflate counts. A `resolved` entry seen again is reopened.
- */
 /** Read-modify-write of a repo's memory under its lock, written atomically (harden, adopt, flush). */
 export function updateMemory(factoryHome: string, repoId: string, fn: (mem: MemoryFile) => void): MemoryFile {
   const path = memoryPath(factoryHome, repoId);
@@ -165,6 +161,10 @@ export function updateMemory(factoryHome: string, repoId: string, fn: (mem: Memo
   });
 }
 
+/**
+ * Upserts this run's observations by key (locked, atomic). A run counts once per entry, so a resumed
+ * run does not inflate counts. A `resolved` entry seen again is reopened.
+ */
 export function flushMemory(opts: { factoryHome: string; repoId: string; runId: string; now: Date; observations: Observation[] }): MemoryFile {
   return updateMemory(opts.factoryHome, opts.repoId, (mem) => {
     const ts = opts.now.toISOString();

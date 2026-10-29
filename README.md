@@ -154,6 +154,26 @@ base branch; the user's checkout is not touched):
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
 
+## Harden
+
+`factory harden --repo <path>` (weekly or by hand) turns recurring problems into deterministic checks, one
+proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>/`:
+
+1. **Lifecycle**: an open proposal whose factory run (matched by plan goal or `resolves_findings`) merged is
+   `resolved` (its findings too); all its PRs closed, or no merged/open PR after 28 days, is `dropped` and its
+   findings are reopened.
+2. **Compaction** (`plan_medium`, no tools): near-duplicate open findings are merged; counts, runs and dates
+   are merged in code (`--no-compact` skips).
+3. **Signals** (code): findings seen twice or checkable, flaky checks, unchecked checklist items, a 30-day
+   CI audit via `gh` (failure/flaky rates, median/p90 durations, minutes per week, checks that never fail,
+   slow checks without `paths`, CI stub behind the latest factory tag), run stats, stale verify guides,
+   reverted factory PRs. Evaluator signals are empty until M4.
+4. **Metrics**: one line per call in `metrics.jsonl` (determinism ratio, open findings, CI minutes, flaky,
+   done and revert rate, median rounds).
+5. **Proposal** (`harden` role, read-only tools): exactly one, validated as a plan (one retry), written to
+   `proposals/<date>.json` (+ `.plan.json`); its findings become `proposed`. No signals, no LLM call. Run it
+   with `factory run --plan <dir>/<date>.plan.json`.
+
 ## Evals and experiments
 
 ```

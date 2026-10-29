@@ -12,6 +12,7 @@ import { gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
+import { hardenCommand } from "./commands/harden.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { resumeFactory, runFactory } from "./pipeline/run.js";
@@ -48,6 +49,9 @@ const USAGE = `usage:
   factory adopt --repo <path> --ref <tag> [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
               (§12: drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md test strategy; removes the legacy
                coding setup (--keep spares paths); baseline plan as proposal; one PR; settings only as hints)
+  factory harden --repo <path> [--no-compact] [--profile <file>] [--json]
+              (§11: resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), at most one
+               proposal in $FACTORY_HOME/memory/<repo>/proposals/<date>.json; exit 1 when selection failed)
   factory ci-stub --ref <tag>
               (prints .github/workflows/factory.yml for a pinned factory ref; doctor checks its hash)
 `;
@@ -167,6 +171,31 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             force: values.force,
             json: values.json,
           },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
+          io,
+        );
+      } finally {
+        uninstall();
+        await runner.close();
+      }
+    }
+    if (command === "harden") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { repo: { type: "string" }, "no-compact": { type: "boolean", default: false }, profile: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      if (!values.repo) {
+        io.err(USAGE);
+        return 2;
+      }
+      const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
+      const runner = new PiRunner(join(factoryHome, "pi"));
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      try {
+        return await hardenCommand(
+          { repo: values.repo, compact: !values["no-compact"], json: values.json },
           { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
           io,
         );

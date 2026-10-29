@@ -40,3 +40,41 @@ export type Proposal = z.infer<typeof ProposalSchema>;
 
 /** A proposal without a merged or closed PR after this many days is dropped (entries reopen). */
 export const STALE_DAYS = 28;
+
+/** One line of `$FACTORY_HOME/memory/<repo>/metrics.jsonl` (SPEC §11 step 2), one per `harden`. */
+export const MetricsSchema = z
+  .object({
+    ts: z.string(),
+    repo: z.string(),
+    /** Deterministic checks / (checks + unmarked checklist items + open checkable findings); null with nothing to count. */
+    determinism_ratio: z.number().min(0).max(1).nullable(),
+    deterministic_checks: z.number().int(),
+    llm_verified_items: z.number().int(),
+    open_findings: z.number().int(),
+    ci_minutes_per_week: z.number().nullable(),
+    flaky_rate: z.number().nullable(),
+    done_rate: z.number().nullable(),
+    median_rounds: z.number().nullable(),
+    /** Reverted factory PRs / factory PRs of the window; null without factory PRs. */
+    revert_rate: z.number().nullable(),
+  })
+  .strict();
+export type Metrics = z.infer<typeof MetricsSchema>;
+
+/** `factory harden --json` (stdout). */
+export const HardenReportSchema = z
+  .object({
+    generated_at: z.string(),
+    repo: z.string(),
+    /** Earlier proposals resolved or dropped by this run. */
+    lifecycle: z.array(z.object({ id: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), pr: z.string().nullable() }).strict()),
+    compaction: z.object({ merged: z.number().int(), error: z.string().nullable() }).strict(),
+    signals: z.record(z.string(), z.unknown()),
+    metrics: MetricsSchema,
+    /** null: no signals, or selection failed (`error`). */
+    proposal: ProposalSchema.nullable(),
+    path: z.string().nullable(),
+    error: z.string().nullable(),
+  })
+  .strict();
+export type HardenReport = z.infer<typeof HardenReportSchema>;
