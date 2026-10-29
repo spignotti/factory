@@ -2,8 +2,32 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
 
+/**
+ * Providers the factory may call. Both are subscription-backed for us: `opencode-go` (OpenCode Go)
+ * and `openai` (ChatGPT OAuth). Everything else is rejected at profile load, most importantly
+ * `opencode/*` — that is OpenCode Zen, billed pay-per-use, and one typo away from `opencode-go/*`.
+ */
+export const ALLOWED_PROVIDERS = ["opencode-go", "openai"] as const;
+
+export function providerOf(model: string): string {
+  return model.slice(0, model.indexOf("/"));
+}
+
 export const ModelEntrySchema = z.object({
-  model: z.string().regex(/^[^/\s]+\/\S+$/, "model must be <provider>/<model>"),
+  model: z
+    .string()
+    .regex(/^[^/\s]+\/\S+$/, "model must be <provider>/<model>")
+    .superRefine((m, ctx) => {
+      const provider = providerOf(m);
+      if ((ALLOWED_PROVIDERS as readonly string[]).includes(provider)) return;
+      ctx.addIssue({
+        code: "custom",
+        message:
+          provider === "opencode"
+            ? `provider "opencode" is OpenCode Zen (pay-per-use) and not allowed; use opencode-go/* (${m})`
+            : `provider "${provider}" is not allowed; allowed: ${ALLOWED_PROVIDERS.join(", ")} (${m})`,
+      });
+    }),
   thinking: z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]).optional(),
   /** Model family; derived from the model id when absent (e.g. `deepseek`, `grok`). */
   family: z.string().optional(),

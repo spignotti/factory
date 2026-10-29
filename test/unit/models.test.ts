@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -104,12 +104,12 @@ describe("implement model family", () => {
     expect(() =>
       parseProfile(`
 roles:
-  plan_high: [{ model: a/x }]
-  plan_medium: [{ model: a/x }]
-  plan_normalize: [{ model: a/x }]
+  plan_high: [{ model: openai/x }]
+  plan_medium: [{ model: openai/x }]
+  plan_normalize: [{ model: openai/x }]
   implement: [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/grok-4.7 }]
-  review: [{ model: a/x }]
-  pr_writer: [{ model: a/x }]
+  review: [{ model: openai/x }]
+  pr_writer: [{ model: openai/x }]
 `),
     ).toThrow(/one model family/);
   });
@@ -130,5 +130,39 @@ roles:
 
   it("ships a valid default profile", () => {
     expect(loadProfile("default").roles.implement.length).toBeGreaterThan(0);
+  });
+});
+
+describe("provider allowlist", () => {
+  const withImplement = (model: string) => `
+roles:
+  plan_high: [{ model: openai/x }]
+  plan_medium: [{ model: openai/x }]
+  plan_normalize: [{ model: openai/x }]
+  implement: [{ model: ${model} }]
+  review: [{ model: openai/x }]
+  pr_writer: [{ model: openai/x }]
+`;
+
+  it("accepts opencode-go and openai", () => {
+    expect(() => parseProfile(withImplement("opencode-go/deepseek-v4-pro"))).not.toThrow();
+    expect(() => parseProfile(withImplement("openai/mid-codex"))).not.toThrow();
+  });
+
+  it("rejects the pay-per-use opencode (Zen) provider with a pointed message", () => {
+    expect(() => parseProfile(withImplement("opencode/deepseek-v4-pro"))).toThrow(/OpenCode Zen \(pay-per-use\)/);
+  });
+
+  it.each(["anthropic/claude-x", "openai-codex/gpt-5", "openrouter/x", "OpenAI/x"])("rejects %s", (model) => {
+    expect(() => parseProfile(withImplement(model))).toThrow(/is not allowed/);
+  });
+
+  it("checks every role, including optional ones", () => {
+    expect(() => parseProfile(withImplement("openai/x") + "  evaluate: [{ model: opencode/x }]\n")).toThrow(/Zen/);
+  });
+
+  it("every shipped profile passes the allowlist", () => {
+    const dir = join(import.meta.dirname, "..", "..", "profiles");
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".yaml"))) expect(() => loadProfile(join(dir, f))).not.toThrow();
   });
 });
