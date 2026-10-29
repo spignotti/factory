@@ -47,6 +47,15 @@ budget; a resume at `finalize` only re-runs the gates (no new review of the huma
 
 ## Usage
 
+Without a checkout (builds on install through `prepare`):
+
+```
+npx github:spignotti/factory#<tag> doctor
+npx github:spignotti/factory#<tag> run --repo <path> --issue 12
+```
+
+From a checkout:
+
 ```
 pnpm install
 pnpm build

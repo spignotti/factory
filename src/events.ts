@@ -49,10 +49,22 @@ export interface EventInput {
 
 export type Clock = () => number;
 
+/** Agent usage per role and model (PR stats, `stats`). Calls count successes and errors. */
+export interface RoleUsage {
+  role: string;
+  model: string;
+  calls: number;
+  errors: number;
+  tokens_in: number;
+  tokens_out: number;
+  cost_usd: number;
+}
+
 export class EventLog {
   readonly path: string;
   private readonly listeners: ((e: FactoryEvent) => void)[] = [];
   readonly totals = { tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+  private readonly byRole = new Map<string, RoleUsage>();
 
   constructor(
     runDir: string,
@@ -68,15 +80,33 @@ export class EventLog {
       for (const line of readFileSync(this.path, "utf8").split("\n")) {
         if (!line.trim()) continue;
         try {
-          const e = JSON.parse(line) as Partial<FactoryEvent>;
-          this.totals.tokens_in += e.tokens_in ?? 0;
-          this.totals.tokens_out += e.tokens_out ?? 0;
-          this.totals.cost_usd += e.cost_usd ?? 0;
+          this.count(JSON.parse(line) as Partial<FactoryEvent>);
         } catch {
           // torn last line after a crash
         }
       }
     }
+  }
+
+  private count(e: Partial<FactoryEvent>): void {
+    this.totals.tokens_in += e.tokens_in ?? 0;
+    this.totals.tokens_out += e.tokens_out ?? 0;
+    this.totals.cost_usd += e.cost_usd ?? 0;
+    if ((e.event === "agent_finished" || e.event === "agent_error") && e.role && e.model) {
+      const key = `${e.role}\0${e.model}`;
+      const u = this.byRole.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+      u.calls += 1;
+      if (e.event === "agent_error") u.errors += 1;
+      u.tokens_in += e.tokens_in ?? 0;
+      u.tokens_out += e.tokens_out ?? 0;
+      u.cost_usd += e.cost_usd ?? 0;
+      this.byRole.set(key, u);
+    }
+  }
+
+  /** Usage per role and model, in first-use order (resumed runs include the earlier attempts). */
+  usage(): RoleUsage[] {
+    return [...this.byRole.values()].map((u) => ({ ...u }));
   }
 
   /** Redacts this run's secret values from any text that leaves the process (files, PR body). */
@@ -105,9 +135,7 @@ export class EventLog {
       cost_usd: input.cost_usd ?? 0,
       data: input.data ?? {},
     };
-    this.totals.tokens_in += event.tokens_in;
-    this.totals.tokens_out += event.tokens_out;
-    this.totals.cost_usd += event.cost_usd;
+    this.count(event);
     appendFileSync(this.path, redact(JSON.stringify(event), this.secrets) + "\n");
     for (const l of this.listeners) l(event);
     return event;

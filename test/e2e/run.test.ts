@@ -28,6 +28,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(pr.body).toContain("| [x] | A1 | multiply(2, 3) returns 6 | test | test: `test/multiply.test.js::multiply` |");
     expect(pr.body).toContain("merge policy: **human_review**");
     expect(pr.body).toMatch(/✅ unit/);
+    expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, \$\d+\.\d{4}/);
+    expect(pr.body).toMatch(/- review_plan: `openai\/[\w.-]+` ×1/);
     expect(r.file("pr.md")).toBe(pr.body);
 
     // factory commits on the branch, as git.author

@@ -11,8 +11,17 @@
   "bin": {
     "factory": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "profiles",
+    "roles",
+    "standards",
+    "README.md",
+    "SPEC.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."

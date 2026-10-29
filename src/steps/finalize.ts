@@ -104,6 +104,10 @@ export function renderPrBody(ctx: RunContext, v: {
       `- duration: ${((Date.now() - input.startedAt) / 60_000).toFixed(1)} min`,
       `- tokens: ${ctx.events.totals.tokens_in} in / ${ctx.events.totals.tokens_out} out`,
       `- cost: $${ctx.events.totals.cost_usd.toFixed(4)}`,
+      "- models (role: model, calls, tokens in/out, cost):",
+      ...ctx.events.usage().map(
+        (u) => `  - ${u.role}: \`${u.model}\` ×${u.calls}${u.errors ? ` (${u.errors} failed)` : ""}, ${u.tokens_in}/${u.tokens_out}, $${u.cost_usd.toFixed(4)}`,
+      ),
     ].join("\n"),
     blockers: out.result === "needs_human"
       ? `\n## Blockers (needs_human)\n\n${out.reason}\n${list(openFindings(input.findings).filter((f) => f.severity === "bug").map((f) => `${f.id}: ${f.claim} (${f.file}:${f.line})`))}\n`
