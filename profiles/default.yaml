@@ -1,14 +1,20 @@
-# Role -> model fallback chains. Exact ids are resolved by `doctor` against `pi --list-models`.
-# The chains are placeholders (TBD by Silas, Amendment c). `implement` must stay in one model family.
+# Built-in role -> model chains (Silas's defaults, Amendment c as amended 2026-10-29).
+# Override per user in ~/.factory/profile.yaml and per repo in .factory/repo.yaml `models:`.
 roles:
-  plan_high:      [{ model: openai/sol, thinking: high },   { model: opencode-go/grok-4.7, thinking: high }]
-  plan_medium:    [{ model: openai/sol, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
-  plan_normalize: [{ model: opencode-go/deepseek-v4.1-flash }]
-  implement:      [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
-  review:         [{ model: openai/mid-codex, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
-  evaluate:       [{ model: opencode-go/claude-haiku-5.5 }]
-  pr_writer:      [{ model: opencode-go/deepseek-v4.1-flash }]
-  harden:         [{ model: openai/sol, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
+  plan_high:         [{ model: openai/gpt-6.1-sol, thinking: high }]
+  plan_medium:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  plan_normalize:    [{ model: opencode-go/deepseek-v4.1-flash }]
+  # One explicit cross-family backup, used only after capacity retries on the primary are exhausted.
+  implement:
+    - { model: opencode-go/deepseek-v4.1-flash, thinking: high }
+    - { model: opencode-go/mimo-v2.6-flash, capacity_only: true }
+  review_plan:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_checklist:  [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_security:   [{ model: openai/gpt-6.1-sol, thinking: high }]
+  review_simplicity: [{ model: openai/gpt-6-luna, thinking: medium }]
+  evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
+  pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
+  harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
 retry:
   base_ms: 2000
   max_ms: 60000

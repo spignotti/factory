@@ -1,26 +1,10 @@
+import { DEPENDENCY_GLOBS, MIGRATION_GLOBS } from "../paths.js";
 import { matchesAny } from "../schemas/plan.js";
 import type { RepoConfig, Risk } from "../schemas/repo.js";
 import type { RunResultKind } from "../events.js";
 
 export type MergePolicy = "auto" | "bot_review" | "human_review";
 
-const DEPENDENCY_FILES = [
-  "**/package.json",
-  "**/pnpm-lock.yaml",
-  "**/package-lock.json",
-  "**/yarn.lock",
-  "**/pyproject.toml",
-  "**/uv.lock",
-  "**/poetry.lock",
-  "**/requirements*.txt",
-  "**/Cargo.toml",
-  "**/Cargo.lock",
-  "**/go.mod",
-  "**/go.sum",
-  "**/Gemfile",
-  "**/Gemfile.lock",
-];
-const MIGRATIONS = ["**/migrations/**"];
 
 export interface RiskAssessment {
   risk: Risk;
@@ -36,9 +20,9 @@ export function riskClass(input: { changed: string[]; diffLines: number; repo: R
   const reasons: string[] = [];
   const sensitive = hits(repo.sensitive_paths);
   if (sensitive.length) reasons.push(`sensitive_paths: ${sensitive.join(", ")}`);
-  const deps = hits(DEPENDENCY_FILES);
+  const deps = hits(DEPENDENCY_GLOBS);
   if (deps.length) reasons.push(`dependencies: ${deps.join(", ")}`);
-  const migrations = hits(MIGRATIONS);
+  const migrations = hits(MIGRATION_GLOBS);
   if (migrations.length) reasons.push(`migrations: ${migrations.join(", ")}`);
   if (diffLines > repo.merge.low_max_diff_lines) reasons.push(`diff ${diffLines} lines > ${repo.merge.low_max_diff_lines}`);
   if (input.laneEscalated) reasons.push("fast-lane escalation");

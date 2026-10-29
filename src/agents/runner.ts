@@ -1,3 +1,4 @@
+import type { Jail } from "../sandbox/sandbox.js";
 /** One interface for every LLM role: plan, implement, reviewers, summarize. */
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -32,6 +33,8 @@ export interface AgentRequest {
   env: Record<string, string>;
   /** Factory-owned Pi config dir (`PI_CODING_AGENT_DIR`, SPEC §8.3). */
   agentDir?: string;
+  /** Sandbox for bash and the path guard for in-process tools (Amendment j); absent = unconfined. */
+  jail?: Jail;
   /** Continue an earlier session with the same key (reviewers in round >= 2). */
   sessionKey?: string;
   signal?: AbortSignal;

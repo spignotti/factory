@@ -13,7 +13,8 @@ import {
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { topoOrder } from "../pipeline/dag.js";
-import { agentEnv, type RunContext, writeJson } from "../pipeline/context.js";
+import { agentEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
+import type { Jail } from "../sandbox/sandbox.js";
 import type { Check, Tier } from "../schemas/repo.js";
 
 export interface CheckResult {
@@ -42,16 +43,16 @@ export function withEnvCommand(run: string, envCommand: string): string {
 /** Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green. */
 export async function runChecks(
   checks: Check[],
-  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: number },
+  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: number; jail?: Jail },
 ): Promise<CheckResult[]> {
   const timeout = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline - Date.now()));
   const results: CheckResult[] = [];
   for (const check of checks) {
     const cmd = withEnvCommand(check.run, opts.envCommand);
-    let r = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout() });
+    let r = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout(), jail: opts.jail });
     let status: CheckResult["status"] = r.code === 0 ? "pass" : "fail";
     if (status === "fail") {
-      const again = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout() });
+      const again = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout(), jail: opts.jail });
       if (again.code === 0) status = "flaky";
       else r = again;
     }
@@ -79,6 +80,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     env,
     envCommand: repo.env_command,
     deadline: ctx.deadline,
+    jail: jailFor(ctx, worktree),
   });
 
   const builtins: BuiltinResult[] = [
@@ -99,6 +101,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       setup: repo.setup,
       env,
       deadline: ctx.deadline,
+      jail: (cwd) => jailFor(ctx, cwd),
     });
     reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
     builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail });

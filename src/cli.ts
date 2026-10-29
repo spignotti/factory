@@ -2,21 +2,36 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
+import { doctorCommand } from "./commands/doctor.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
+import { gcCommand } from "./commands/gc.js";
+import { statsCommand } from "./commands/stats.js";
+import { statusCommand } from "./commands/status.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { resumeFactory, runFactory } from "./pipeline/run.js";
-import { loadProfile } from "./schemas/profile.js";
+import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
+import type { Profile } from "./schemas/profile.js";
+import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 
 const USAGE = `usage:
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
-              [--plan-effort none|medium|high] [--no-pr] [--profile <name>] [--wait]
+              [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
-  factory resume <run-id> [--wait] [--no-pr] [--profile <name>]
+  factory resume <run-id> [--wait] [--no-pr] [--profile <file>]
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
+  factory doctor [--repo <path>] [--profile <file>] [--ping] [--json]
+              (setup checks, Zen guard, ChatGPT login; effective model per role and its layer;
+               --ping sends one tiny request per configured model)
+  models: built-in < $FACTORY_HOME/profile.yaml < --profile <file> < repo.yaml models: (see README)
+  factory status [--json]
+              (running, waiting for a human, interrupted runs; open factory PRs)
+  factory stats [--since 7d] [--repo <path>] [--json]
+              (results, rounds, gates, providers, cost; this period vs the previous one)
+  factory gc [--dry-run] [--force] [--json]
+              (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
 `;
 
@@ -24,6 +39,13 @@ function exitCode(result: string, signal: AbortSignal): number {
   const reason: unknown = signal.reason;
   if (reason instanceof Interrupted) return reason.signalName === "SIGINT" ? 130 : 143;
   return result === "failed" ? 1 : 0;
+}
+
+/** Decides the sandbox from the profile (throws when `required` is unmet); warnings go to stderr. */
+function sandboxFor(profile: Profile, io: Io): Sandbox {
+  const sandbox = createSandbox(profile.sandbox);
+  for (const w of sandbox.warnings) io.err(`factory: ${w}\n`);
+  return sandbox;
 }
 
 const defaultIo: Io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) };
@@ -45,6 +67,31 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       });
       return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, json: values.json }, io);
     }
+    if (command === "doctor") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { repo: { type: "string" }, profile: { type: "string" }, ping: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+      });
+      return await doctorCommand({ factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, json: values.json }, io);
+    }
+    if (command === "status") {
+      const { values } = parseArgs({ args: rest, options: { json: { type: "boolean", default: false } } });
+      return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), json: values.json }, io);
+    }
+    if (command === "stats") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { since: { type: "string", default: "7d" }, repo: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      return statsCommand({ factoryHome: factoryHomeOf(), since: values.since, repo: values.repo, json: values.json }, io);
+    }
+    if (command === "gc") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { "dry-run": { type: "boolean", default: false }, force: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+      });
+      return await gcCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), dryRun: values["dry-run"], force: values.force, json: values.json }, io);
+    }
     if (command === "run") {
       const { values } = parseArgs({
         args: rest,
@@ -57,7 +104,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           "plan-effort": { type: "string" },
           "no-pr": { type: "boolean", default: false },
           wait: { type: "boolean", default: false },
-          profile: { type: "string", default: "default" },
+          profile: { type: "string" },
         },
       });
       if (!values.repo || [values.issue, values.plan, values.text].filter(Boolean).length !== 1) {
@@ -67,7 +114,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const effort = values["plan-effort"];
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
       if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
-      const factoryHome = process.env.FACTORY_HOME ?? join(homedir(), ".factory");
+      const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });
@@ -83,7 +131,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             noPr: values["no-pr"],
             wait: values.wait,
           },
-          { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome, signal: controller.signal },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);
@@ -99,14 +147,15 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         options: {
           wait: { type: "boolean", default: false },
           "no-pr": { type: "boolean" },
-          profile: { type: "string", default: "default" },
+          profile: { type: "string" },
         },
       });
       if (positionals.length !== 1) {
         io.err(USAGE);
         return 2;
       }
-      const factoryHome = process.env.FACTORY_HOME ?? join(homedir(), ".factory");
+      const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });
@@ -114,7 +163,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         const result = await resumeFactory(
           positionals[0]!,
           { wait: values.wait, noPr: values["no-pr"] },
-          { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome, signal: controller.signal },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { type Jail, jailedArgv } from "./sandbox/sandbox.js";
 
 export interface ShResult {
   code: number;
@@ -30,13 +31,14 @@ export function resetKilledCommands(): void {
 /** Runs a shell command, capturing stdout and stderr interleaved. Never throws on non-zero exit. */
 export function sh(
   command: string,
-  opts: { cwd: string; env: Record<string, string>; timeoutMs?: number },
+  opts: { cwd: string; env: Record<string, string>; timeoutMs?: number; jail?: Jail },
 ): Promise<ShResult> {
   const started = Date.now();
   if (killedBy) return Promise.resolve({ code: 130, output: `[factory] not started: ${killedBy}\n`, durationMs: 0 });
   return new Promise((resolve) => {
     // Own process group, so a timeout kills everything the command started.
-    const child = spawn("sh", ["-c", command], { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const [file, ...args] = jailedArgv(opts.jail, "sh", command, opts.cwd, opts.env);
+    const child = spawn(file!, args, { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     if (child.pid !== undefined) running.add(child.pid);
     let output = "";
     const onData = (d: Buffer) => {

@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { realSleep } from "../agents/fake-runner.js";
 
@@ -109,4 +109,16 @@ export async function waitForRepoLock(
     if (release) return release;
     await realSleep(opts.pollMs, opts.signal);
   }
+}
+
+/** Live lock holders (running runs and resumes), one per locked repository. */
+export function activeHolders(factoryHome: string): LockHolder[] {
+  const dir = join(factoryHome, "locks");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((n) => n.endsWith(".lock"))
+    .map((n) => join(dir, n))
+    .filter(holderAlive)
+    .map((p) => readHolder(p)!)
+    .filter(Boolean);
 }

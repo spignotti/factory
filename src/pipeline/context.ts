@@ -11,6 +11,7 @@ import type { Plan } from "../schemas/plan.js";
 import { type Profile, profileRoleOf } from "../schemas/profile.js";
 import type { RepoConfig } from "../schemas/repo.js";
 import { supervise, WatchdogAbort } from "./watchdog.js";
+import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
 
 export interface RunDeps {
   runner: AgentRunner;
@@ -27,6 +28,8 @@ export interface RunDeps {
   lockPollMs?: number;
   /** Aborted on SIGINT/SIGTERM (reason: Interrupted). */
   signal?: AbortSignal;
+  /** Process sandbox for agents and repo commands (Amendment j); absent = none (tests). */
+  sandbox?: Sandbox;
 }
 
 export interface Task {
@@ -55,7 +58,15 @@ export interface RunContext {
   gateCount: number;
   /** `max_wall_minutes` outer limit (epoch ms), enforced between steps and inside agent calls. */
   deadline: number;
+  /** Findings memory briefing (§10): top open recurring findings, or "". */
+  briefing: string;
+  /** Effective lane (§6.11): `fast` until escalated. */
+  lane: Lane;
+  /** Why a fast-lane run moved to the standard lane (empty = not escalated). */
+  laneEscalation: string[];
 }
+
+export type Lane = "standard" | "fast";
 
 export class WallTimeExceeded extends Error {
   constructor(minutes: number) {
@@ -88,7 +99,18 @@ export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome">, r
   return buildAgentEnv(ctx.deps.parentEnv ?? process.env, { home: ctx.agentHome, extra: [...ctx.repo.agent_env, ...roleEnv] });
 }
 
-export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "agentDir">;
+/**
+ * Jail for agent bash and repo commands with `cwd` writable (worktree or a temp base worktree), the
+ * agent HOME writable and the main repo git dir read-only. Undefined when the sandbox is off.
+ */
+export function jailFor(ctx: Pick<RunContext, "deps" | "agentHome">, cwd: string): Jail | undefined {
+  const sandbox = ctx.deps.sandbox;
+  if (!sandbox || sandbox.mode === "off") return undefined;
+  const common = gitCommonDir(cwd);
+  return { sandbox, rw: [cwd, ctx.agentHome], ro: common ? [common] : [], hide: [ctx.deps.factoryHome] };
+}
+
+export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "agentDir" | "jail">;
 
 /** One supervised agent call: model chain with backoff/fallback, heartbeat events, watchdog. */
 export async function callAgent(
@@ -111,6 +133,7 @@ export async function callAgent(
         callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep }, step, {
           ...req,
           env: agentEnv(ctx, req.role),
+          jail: jailFor(ctx, req.cwd),
           agentDir: join(deps.factoryHome, "pi"),
           signal,
           onActivity: (a) => void events.emit({ step, event: a.kind, role: req.role, data: a.detail ? { detail: a.detail } : {} }),

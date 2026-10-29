@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+import { RoleOverridesSchema } from "./profile.js";
 
 export const TierSchema = z.enum(["fast", "full", "manual"]);
 export type Tier = z.infer<typeof TierSchema>;
@@ -54,6 +55,7 @@ export const RepoConfigSchema = z
         per_package: z.boolean().default(false),
       })
       .default({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5, per_package: false }),
+    fast_lane: z.object({ max_diff_lines: z.number().int().min(1).default(150) }).default({ max_diff_lines: 150 }),
     merge: z
       .object({
         auto_merge_max_risk: z.enum(["none", "low", "medium"]).default("none"),
@@ -86,6 +88,8 @@ export const RepoConfigSchema = z
       .default({ author: "factory" }),
     // Names of extra environment variables passed to agent tool processes and checks (Amendment b).
     agent_env: z.array(z.string()).default([]),
+    // Per-repo model overrides, role → chain (Amendment i); validated again after the merge.
+    models: RoleOverridesSchema.optional(),
   })
   .loose()
   .superRefine((cfg, ctx) => {

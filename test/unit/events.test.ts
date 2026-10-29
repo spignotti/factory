@@ -5,6 +5,22 @@ import { describe, expect, it } from "vitest";
 import { EventLog, ResultSchema, writeResult } from "../../src/events.js";
 
 describe("events", () => {
+  it("tracks usage per role and model, also across a resumed log", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ev-"));
+    const log = new EventLog(dir, "run-1");
+    log.emit({ step: "implement", event: "agent_error", role: "implement", model: "a", tokens_in: 5, cost_usd: 0.1 });
+    log.emit({ step: "implement", event: "agent_finished", role: "implement", model: "b", tokens_in: 10, tokens_out: 2 });
+    log.emit({ step: "implement", event: "agent_finished", role: "implement", model: "b", tokens_in: 10, tokens_out: 2 });
+    log.emit({ step: "implement", event: "heartbeat", role: "implement", model: "b" });
+    const again = new EventLog(dir, "run-1");
+    again.emit({ step: "review", event: "agent_finished", role: "review_plan", model: "c", tokens_in: 1 });
+    expect(again.usage()).toEqual([
+      { role: "implement", model: "a", calls: 1, errors: 1, tokens_in: 5, tokens_out: 0, cost_usd: 0.1 },
+      { role: "implement", model: "b", calls: 2, errors: 0, tokens_in: 20, tokens_out: 4, cost_usd: 0 },
+      { role: "review_plan", model: "c", calls: 1, errors: 0, tokens_in: 1, tokens_out: 0, cost_usd: 0 },
+    ]);
+  });
+
   it("appends typed events with all SPEC fields and sums usage", () => {
     const dir = mkdtempSync(join(tmpdir(), "ev-"));
     const log = new EventLog(dir, "run-1", () => Date.UTC(2026, 9, 29));

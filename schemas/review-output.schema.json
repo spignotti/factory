@@ -1,0 +1,104 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/review-output.schema.json",
+  "title": "reviewer output (one reviewer)",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "reviewer": {
+      "type": "string",
+      "enum": [
+        "plan",
+        "simplicity",
+        "security",
+        "checklist",
+        "evaluator"
+      ]
+    },
+    "prior": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "accept_wontfix",
+              "still_open",
+              "reject_wontfix"
+            ]
+          }
+        },
+        "required": [
+          "finding_id",
+          "verdict"
+        ]
+      }
+    },
+    "findings": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "bug",
+              "suggestion",
+              "nit"
+            ]
+          },
+          "file": {
+            "default": "",
+            "type": "string"
+          },
+          "line": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "claim": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "default": "",
+            "type": "string"
+          },
+          "fix": {
+            "default": "",
+            "type": "string"
+          },
+          "checkable": {
+            "default": "no",
+            "type": "string",
+            "enum": [
+              "lint",
+              "test",
+              "script",
+              "no"
+            ]
+          },
+          "check_sketch": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "claim"
+        ]
+      }
+    }
+  },
+  "required": [
+    "reviewer"
+  ]
+}

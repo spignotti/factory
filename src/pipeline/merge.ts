@@ -101,13 +101,14 @@ export interface ExitDecision {
 }
 
 /** SPEC §6.7 exit rules, in order. */
-export function decideExit(input: { round: number; maxRounds: number; stalemate: boolean; open: TrackedFinding[] }): ExitDecision {
+export function decideExit(input: { round: number; maxRounds: number; stalemate: boolean; open: TrackedFinding[]; extraRound?: boolean }): ExitDecision {
   const { round, maxRounds, stalemate, open } = input;
   const openBugs = open.filter((f) => f.severity === "bug").length;
   if (stalemate) return { action: "needs_human", rule: 1, reason: "stalemate: reviewer rejected a wontfix" };
   if (open.length === 0) return { action: "done", rule: 2, reason: "no open findings" };
   if (round >= maxRounds && openBugs === 0) return { action: "done", rule: 3, reason: "max rounds reached, no open bug" };
-  if (round === maxRounds) return { action: "fix", rule: 4, reason: "max rounds reached with open bug: one extra round" };
+  if (round === maxRounds && input.extraRound !== false) return { action: "fix", rule: 4, reason: "max rounds reached with open bug: one extra round" };
+  if (round === maxRounds) return { action: "needs_human", rule: 5, reason: `open bug after ${round} rounds (fast lane: no extra round)` };
   if (round > maxRounds) return { action: "needs_human", rule: 5, reason: `open bug after ${round} rounds` };
   return { action: "fix", rule: 6, reason: `${open.length} open finding(s)` };
 }

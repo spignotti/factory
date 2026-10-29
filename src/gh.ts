@@ -33,6 +33,25 @@ export interface GitHub {
   updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void>;
   /** Resume: a draft PR whose run is now done becomes ready for review. */
   markReady(repoDir: string, pr: string): Promise<void>;
+  /** `status` / `gc`: current state of a factory PR. */
+  prStatus(repoDir: string, pr: string): Promise<PrStatus>;
+  /** `doctor`: is `gh` logged in (no token is read or printed)? */
+  authenticated(repoDir: string): Promise<boolean>;
+  /** `doctor` hints; readable without admin rights. Unknown values are null. */
+  repoSettings(repoDir: string, branch: string): Promise<RepoSettings>;
+}
+
+export interface RepoSettings {
+  private: boolean | null;
+  auto_merge_allowed: boolean | null;
+  branch_protected: boolean | null;
+  required_checks: string[] | null;
+  error?: string;
+}
+
+export interface PrStatus {
+  state: "open" | "merged" | "closed";
+  draft: boolean;
 }
 
 async function gh(cwd: string, args: string[]): Promise<string> {
@@ -42,6 +61,32 @@ async function gh(cwd: string, args: string[]): Promise<string> {
 
 /** `gh` CLI implementation. Not exercised in tests (see docs/VERIFY.md). */
 export class GhCli implements GitHub {
+  async authenticated(repoDir: string): Promise<boolean> {
+    try {
+      await gh(repoDir, ["auth", "status", "--hostname", "github.com"]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async repoSettings(repoDir: string, branch: string): Promise<RepoSettings> {
+    const out: RepoSettings = { private: null, auto_merge_allowed: null, branch_protected: null, required_checks: null };
+    try {
+      const repo = JSON.parse(await gh(repoDir, ["api", "repos/{owner}/{repo}", "--jq", "{private, allow_auto_merge}"])) as { private?: boolean; allow_auto_merge?: boolean | null };
+      out.private = repo.private ?? null;
+      out.auto_merge_allowed = repo.allow_auto_merge ?? null;
+      const b = JSON.parse(
+        await gh(repoDir, ["api", `repos/{owner}/{repo}/branches/${encodeURIComponent(branch)}`, "--jq", "{protected, contexts: .protection.required_status_checks.contexts}"]),
+      ) as { protected?: boolean; contexts?: string[] | null };
+      out.branch_protected = b.protected ?? null;
+      out.required_checks = b.contexts ?? null;
+    } catch (e) {
+      out.error = (e as Error).message.split("\n")[0]!.slice(0, 200);
+    }
+    return out;
+  }
+
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
     // UNVERIFIED: check-runs response shape on the user's repos.
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {status, conclusion}]"]);
@@ -78,6 +123,12 @@ export class GhCli implements GitHub {
 
   async markReady(repoDir: string, pr: string): Promise<void> {
     await gh(repoDir, ["pr", "ready", pr]);
+  }
+
+  async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft"])) as { state: string; isDraft: boolean };
+    const state = j.state.toLowerCase();
+    return { state: state === "merged" || state === "closed" ? state : "open", draft: j.isDraft };
   }
 }
 
@@ -122,5 +173,27 @@ export class FakeGitHub implements GitHub {
 
   async markReady(_repoDir: string, pr: string): Promise<void> {
     this.readied.push(pr);
+  }
+
+  /** PR states by URL; created PRs are open. */
+  readonly prStates = new Map<string, PrStatus>();
+
+  authOk = true;
+  settings: RepoSettings = { private: true, auto_merge_allowed: false, branch_protected: false, required_checks: [] };
+
+  async authenticated(): Promise<boolean> {
+    return this.authOk;
+  }
+
+  async repoSettings(): Promise<RepoSettings> {
+    return this.settings;
+  }
+
+  async prStatus(_repoDir: string, pr: string): Promise<PrStatus> {
+    const s = this.prStates.get(pr);
+    if (s) return s;
+    const created = this.prs.find((p) => p.url === pr);
+    if (!created) throw new Error(`PR ${pr} not found`);
+    return { state: "open", draft: created.draft };
   }
 }

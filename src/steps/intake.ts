@@ -83,6 +83,20 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
   return { kind: "invalid", errors };
 }
 
+/**
+ * Fast lane intake (§6.11): plan block, else `plan_normalize` only. `escalate` = no usable plan
+ * without the plan step; the caller moves the run to the standard lane.
+ */
+export async function obtainFastPlan(ctx: IntakeContext): Promise<PlanOutcome | { kind: "escalate"; reason: string }> {
+  const block = extractPlanBlock(ctx.task.text);
+  if (block !== undefined) {
+    const v = validatePlan(block, { repo: ctx.repo });
+    if (v.ok) return { kind: "plan", plan: v.plan, source: "block" };
+  }
+  const n = await normalize(ctx);
+  return n.kind === "invalid" ? { kind: "escalate", reason: `plan_normalize output invalid: ${n.errors.join("; ")}` } : n;
+}
+
 /** Intake steps 3–5: plan block, normalize (effort none), else plan step. */
 export async function obtainPlan(ctx: IntakeContext, effort: PlanEffort): Promise<PlanOutcome> {
   const block = extractPlanBlock(ctx.task.text);

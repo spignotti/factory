@@ -11,11 +11,22 @@
   "bin": {
     "factory": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "schemas",
+    "profiles",
+    "roles",
+    "standards",
+    "README.md",
+    "SPEC.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "schemas": "tsc -p tsconfig.build.json && node scripts/gen-schemas.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",

@@ -531,29 +531,34 @@ Return plan.json with resolves_findings and a short rationale referencing the si
 ```
 
 ### 8.2 `profiles/default.yaml`
-Exact ids resolved by `doctor` against `pi --list-models`.
+Built-in role → model chains (Silas's defaults; see Amendment c and i for overrides). Exact ids are checked by `doctor` against Pi's model registry.
 
 ```yaml
 roles:
-  plan_high:      [{ model: openai/<sol>, thinking: high },   { model: opencode-go/grok-4.7, thinking: high }]
-  plan_medium:    [{ model: openai/<sol>, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
-  plan_normalize: [{ model: opencode-go/deepseek-v4.1-flash }]
-  implement:      [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
-  review:         [{ model: openai/<mid-codex>, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
-  evaluate:       [{ model: opencode-go/claude-haiku-5.5 }]
-  pr_writer:      [{ model: opencode-go/deepseek-v4.1-flash }]
-  harden:         [{ model: openai/<sol>, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
+  plan_high:         [{ model: openai/gpt-6.1-sol, thinking: high }]
+  plan_medium:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  plan_normalize:    [{ model: opencode-go/deepseek-v4.1-flash }]
+  implement:         [{ model: opencode-go/deepseek-v4.1-flash, thinking: high },
+                      { model: opencode-go/mimo-v2.6-flash, capacity_only: true }]
+  review_plan:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_checklist:  [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_security:   [{ model: openai/gpt-6.1-sol, thinking: high }]
+  review_simplicity: [{ model: openai/gpt-6-luna, thinking: medium }]
+  evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
+  pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
+  harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
 ```
 
-- OpenAI via Pi's subscription login; Grok via OpenCode Go.
-- Reviewers ≠ implement model family (`doctor`).
-- **Fallback:** next entry on rate limit, quota, auth error, 5xx or timeout — never on bad output. Logged as an event.
+- OpenAI only via Pi's stored ChatGPT login ("Sign in with ChatGPT"), never an API key; DeepSeek and MiMo via OpenCode Go.
+- Every reviewer has its own role. Reviewer families ≠ every implement family, including the backup's (validated at load).
+- **Fallback:** next entry on rate limit, quota, auth error, 5xx or timeout — never on bad output. A `capacity_only` entry is only used after a capacity error once the same-model retries are exhausted. Logged as an event.
 
 ### 8.3 Pi isolation and security
 - `PI_CODING_AGENT_DIR` → factory-owned dir with provider auth only; no user extensions, skills or memory; repo `AGENTS.md` allowed.
 - Tokens removed from the agent tool environment; only the factory uses `gh` and `git push`.
 - Task and PR text passed as delimited data.
 - Reviewers and the evaluator have no write or bash tools.
+- Agent bash, repo setup and checks run in a bwrap + pasta sandbox; file tools are path-guarded (Amendment j).
 
 ## 9. Run directory, events, status
 
@@ -567,7 +572,7 @@ roles:
 
 `events.jsonl` line:
 ```json
-{"ts":"…","run_id":"…","step":"review","event":"finished","role":"review","model":"…","tokens_in":0,"tokens_out":0,"cost_usd":0,"data":{}}
+{"ts":"…","run_id":"…","step":"review","event":"finished","role":"review_plan","model":"…","tokens_in":0,"tokens_out":0,"cost_usd":0,"data":{}}
 ```
 
 - **Events:** `step_started`, `step_finished`, `gate_result`, `model_fallback`, `round_finished`, `lane_escalated`, `watchdog_abort`, `run_finished`, plus `heartbeat`, `progress`, `agent_finished`, `agent_error`, `model_retry`, `queued`.
@@ -792,7 +797,7 @@ Also includes the comparison to the previous period of the same length.
 
 ## 18. To verify during the build
 - Pi SDK API (sessions, tool selection, thinking levels, usage/cost, persistence).
-- Provider names and exact model ids (OpenAI subscription; OpenCode Go: DeepSeek V4.1 Flash, Grok 4.7, Claude Haiku 5.5).
+- Provider names and exact model ids (OpenAI subscription: GPT-6.1 Sol, GPT-6 Luna; OpenCode Go: DeepSeek V4.1 Flash, MiMo V2.6 Flash).
 - Pi custom tool API for browser tools.
 - `npx github:…` install time in CI (prebuilt bundle if slow).
 - Supabase CLI per-run instances with port offsets in parallel.
@@ -829,16 +834,71 @@ a) **Auto-merge is implemented but configured off.** The per-risk merge policy d
    `merge: { auto_merge_max_risk: none }` (values `none | low | medium`; `high` can never auto-merge).
    Default is `none`, so every PR is `human_review` until the value is raised later. The `bot_review` / `human_review` logic stays as specified; `auto` is only reachable for risk classes at or below `auto_merge_max_risk`.
 
-b) **Env allowlist, not denylist.** Agent tool processes (Pi sessions and any tool they spawn) get an explicit environment ALLOWLIST and an isolated `HOME` without gh or git credentials. Only the factory process itself pushes and uses `gh`. Reason: the old runner leaked the full environment into logs.
+b) **Env allowlist, not denylist.** Agent tool processes (Pi sessions and any tool they spawn) get an explicit environment ALLOWLIST and an isolated `HOME` without gh or git credentials. The factory's own provider credentials (`OPENCODE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), `PI_CODING_AGENT_DIR`, `FACTORY_HOME` and gh/git tokens are never passed, even when `agent_env` names them. Only the factory process itself pushes and uses `gh`. Reason: the old runner leaked the full environment into logs.
 
-c) **Provider capacity errors are their own class.** Errors such as "at capacity", `ttft_admission_refused`, or 429/503 "retry shortly" are classified separately from other failures: retry the SAME model with exponential backoff first, then fall back. The `implement` role must NOT fall back to a different model family (no DeepSeek -> Grok). Exact model fallback chains are TBD and decided by Silas later. Token usage must be recorded from error events too.
+c) **Provider capacity errors are their own class.** Errors such as "at capacity", `ttft_admission_refused`, or 429/503 "retry shortly" are classified separately from other failures: retry the SAME model with exponential backoff first, then fall back. Token usage must be recorded from error events too.
+   *Amended 2026-10-29 (Silas):* `implement` may have exactly the fallbacks configured in its chain. Entries of the primary's model family are normal fallbacks. An entry of another family is allowed only when it is marked `capacity_only: true`, and it is used only after a capacity error once the capacity retries are exhausted (never on limit, auth, other or invalid output). Default: DeepSeek V4.1 Flash (thinking high) with MiMo V2.6 Flash as the capacity-only backup. The rule is validated at profile load and after the layered merge (Amendment i), and re-applied at runtime. Role defaults: `plan_high` and `review_security` GPT-6.1 Sol high; `plan_medium`, `harden`, `review_plan` and `review_checklist` Sol medium; `review_simplicity` and `evaluate` GPT-6 Luna medium; `plan_normalize` and `pr_writer` DeepSeek V4.1 Flash. Claude Haiku is removed.
 
 d) **Heartbeats.** Pi sessions emit heartbeat/progress events into `events.jsonl`, so the watchdog does not kill long but active sessions, and `status` shows live progress.
 
 e) **Zen guard.** `doctor` hard-fails if any configured model resolves to the pay-per-use OpenCode Zen endpoint. Only `opencode-go` and the OpenAI subscription are allowed providers.
+   *Amended 2026-10-29 (Silas, see i):* the provider policy is configurable (`providers: { allow, deny }`). The public default is `allow: ["*"]`, `deny: [opencode]` (Zen is denied unless a user profile removes it explicitly); Silas's user profile pins `allow: [opencode-go, openai]`. The Zen endpoint check in `doctor` stays.
 
 f) **Weekdays only.** Scheduled routines (`harden`, retro, `eval`) run Monday to Friday only.
 
 g) **GitHub Pro is available.** Branch protection and required checks on private repos are OK.
+   *Amended 2026-10-29 (Silas, M2a):* the factory must not depend on GitHub Pro or an admin token. `doctor` reads branch protection and the auto-merge setting with ordinary read rights and reports them as hints (`info`) only; without protection the merge policy is still enforced in code and PRs wait for a manual merge.
 
 h) **One run per repo, merge not rebase, resume (built in M1).** §4, §6, §6.1, §6.9, §6.10 and §9 describe the per-repo lock with `--wait` queue, merging a moved base before finalize, and `resume` as implemented. Parallel runs per repo and automatic conflict resolution are future work.
+
+i) **Layered model configuration (Silas 2026-10-29).** Most specific wins, whole chains replaced per role:
+   1. built-in `profiles/default.yaml` (Silas's defaults, §8.2);
+   2. user profile `$FACTORY_HOME/profile.yaml` (default `~/.factory/profile.yaml`): `roles` (partial), `retry` (partial), `env`, `providers`;
+   3. `--profile <name|file>` on `run`/`resume`/`doctor`: an extra layer for experiments (`roles`/`retry`/`env` only). It sits below the repo layer, so a repo's choice is never overridden by accident;
+   4. repo `.factory/repo.yaml` `models:` (role → chain, partial), e.g. cheaper models for a less important repo.
+   `providers` (`allow`, `deny`; `*` = any except `opencode`, which must be named explicitly; deny wins) can only be set by the built-in and user layers, so a repo cannot widen it. A repo layer cannot set an entry's `family` either (it would disguise a model's family). All safety rules (provider policy, reviewer family ≠ every implement family, `capacity_only` rule for cross-family implement entries) are validated on the merged result; errors name the role and the layer it came from. `doctor` prints the effective chain per role and its layer. Unknown roles or keys in any layer are errors.
+
+j) **Sandbox (Silas 2026-10-29), Linux only.** Agent bash (Pi `spawnHook`) and every repo command the factory runs for a run (`setup`, gate checks, `tests.run` for the red-green proof) run in a bubblewrap jail inside a pasta network namespace:
+   - filesystem: `/usr` (and `/bin`, `/lib*` links), selected `/etc` files and PATH toolchain dirs read-only (a prefix outside home whole, inside home only the bin dir; never a home dir or its ancestors, never `/opt` whole); read-write only the run's worktree (or the temporary base worktree) and the agent HOME, at their real paths; the worktree's `.git` link file and the main repo's git dir read-only (agents cannot commit, set hooks, `core.fsmonitor` or rewrite `gitdir`); private `/tmp`, `/proc`, `/dev`; own user, pid, ipc, uts and cgroup namespaces. Never visible: `/run` (docker socket), other homes, `$FACTORY_HOME` except the run's own dirs.
+   - network: `pasta --no-map-gw -T none -U none` (no host loopback, no port forwards) plus, inside the namespace before bwrap, blackhole routes for 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0/8 and the gateway, no on-link subnet, IPv6 off. Internet works; host services, the Docker bridge, cloud metadata and the LAN do not. The resolver from `/etc/resolv.conf` stays reachable (residual risk).
+   - in-process Pi tools (read, write, edit, grep, find, ls) go through a path guard confined to the session cwd with symlinks resolved; writes into any `.git` are denied. Residual risk: a symlink swapped in between check and use by a concurrent bash process (TOCTOU).
+   - `sandbox: required | preferred | off` in the built-in or user profile only (not repo.yaml, not `--profile`); default `preferred`. `required` fails the run when bwrap or pasta (with iproute2) is missing; `preferred` degrades with a warning (no pasta → host network; no bwrap or not Linux → unjailed); `off` runs everything on the host. The decision is logged as a `sandbox` event and shown by `doctor`. `factory gates` (local/CI use) is not sandboxed.
+
+k) **Findings memory details (§10, M2a).**
+   - `repo-id`: canonical origin as `host/owner/repo` (ssh, scp-like and https forms agree; credentials, `.git`, trailing slash and host case dropped), `local<abs path>` without an origin. Directory: sanitized id plus an 8-hex hash (`$FACTORY_HOME/memory/<dir>/findings.json`). File: `{version: 1, repo, entries[]}`.
+   - `key`: hash of reviewer, file and normalized claim (line numbers are not part of it). Flaky checks use `flaky:<check name>`, reviewer `gates`.
+   - Flushed: findings still `open` at exit, nits excluded (noise); `accepted_wontfix` and `resolved` are not recurring problems. A run counts once per entry (`runs` keeps the last 20 run ids), so resume does not inflate `count`; a `resolved` entry seen again is reopened.
+   - Written under a lock file with an atomic rename; an unreadable file is moved to `findings.json.broken-<ts>` and memory starts fresh. Memory errors never change a run's result (logged as `progress` events).
+   - Briefing: top 10 `open` by count, then `last_seen`, as data in the implement package prompt and the round-1 review prompt; not in the planner, `pr_writer` or the PR.
+
+l) **Security and checklist reviewers (§6.6, M2a).**
+   - Activation is decided in code before every round on all files changed since base (committed, staged, untracked; renames count with both names):
+     - `security`: a file matches `sensitive_paths` or is a dependency manifest or lockfile in any directory (`DEPENDENCY_FILES` in `src/paths.ts`, also used by the risk class and fast-lane escalation: npm/pnpm/yarn/bun, Python, Cargo, Go, Ruby, PHP, JVM, .NET, Elixir, Swift, Dart, Deno, Nix). The matching files are passed as `security_trigger_files`; `skip_paths` still keeps lockfile bodies out of the diff (the reviewer can read them).
+     - `checklist`: `review.checklist: true` and `.factory/checklist.md` at the **base commit** has unmarked items (read from base like `review-rules.md`, so the implementer cannot edit it away). Items go in as data with ids `C1…` and their line.
+     - A reviewer that ran once in a run stays active for later rounds (its open findings need its verdicts). A reviewer joining after round 1 gets the full round-1 input.
+   - **Checklist marker syntax:** every Markdown list item (`-`, `*`, `+`, `1.`, optional `[ ]`/`[x]`, any indentation) is one item; indented non-bullet lines continue it. An item already enforced by a deterministic check carries `<!-- check: <check name> -->` anywhere in it and is skipped by the checklist reviewer (and counted as done by `harden`). Other HTML comments are ignored. The task box state (`[x]`) has no meaning.
+   - The planner gets the unmarked items too (§6.2 "relevant checklist items"; all of them, the planner picks), from the repo checkout it plans in.
+
+m) **Fast lane (§6.11, M2a).**
+   - Intake: a valid plan block, else `plan_normalize` only. Invalid normalize output (after its retry) or more than one package moves the run to the standard lane at intake (invalid output → `plan_medium` plans it; several packages → the normalized plan is kept).
+   - Escalation after implement (once, on the whole change since base): diff lines (added + removed) > `fast_lane.max_diff_lines` (default 150), any dependency manifest or lockfile (`src/paths.ts`), `sensitive_paths`, `human_only_paths` or `**/migrations/**`. A fix round that later touches such a file is not re-checked; the risk class at finalize still sees it.
+   - Every escalation is a `lane_escalated` event `{from, to, reasons}`, is kept in `state.json` (resume keeps the lane), sets `result.lane` to `standard`, adds the risk reason "fast-lane escalation" (so never `low`) and is named in the PR stats (`lane: fast → standard (…)`).
+   - `lean` review: `plan` and `simplicity` share one session on the `review_plan` model chain and answer `{"reviews":[…]}` with one review each; `security`/`checklist` still run as their own sessions when active (security cannot be active without escalation; checklist can).
+   - At most one fix round: `max_rounds` is capped at 2 and an open `bug` after round 2 is `needs_human` (no extra round).
+
+n) **`status`, `stats`, `gc` (§9, §14, M2a).** All three read `$FACTORY_HOME/runs/*` (`src/runs.ts`); the start time of a run comes from its id (UTC). Schemas in `schemas/`.
+   - `status [--json]`: `running` = runs whose id holds a live repo lock (pid alive); `waiting` = latest result `needs_human`/`needs_input`, unless the PR is merged/closed or the run was collected by `gc`; `interrupted` = no result and no live lock holder (killed process: `resume` or start again); `prs` = open PRs of not yet collected runs with `merge_policy`, `risk`, draft flag (one `gh pr view` per PR; a `gh` error gives `state: "unknown"` with the error instead of failing).
+   - `stats [--since 7d] [--repo <path>] [--json]`: `--since` takes `h`/`d`/`w`; `current` = [now − since, now), `previous` = the period before, plus `delta`. `done_rate` counts finished runs only (no `locked`, no running/interrupted runs). Quantiles are nearest-rank. Gate failures/flaky counts come from `gate_result` events (base checks excluded); fallbacks, capacity and limit errors per provider from `model_fallback`/`agent_error`; tokens/cost per role and provider from `agent_finished`/`agent_error`. "Auto-merged PRs later reverted" is `reverted: null` for now (needs the GitHub history; M3 `harden`). `--repo` compares resolved paths.
+   - `gc [--dry-run] [--force] [--json]`: for runs with a PR and a branch not yet collected: takes the repo lock (busy → skipped), skips open PRs and PRs whose state `gh` cannot tell, skips a dirty worktree unless `--force`; then `git worktree remove`, `git branch -D` only for `factory/*` branches, and the remote branch only while `origin` still points at the local branch head (plain `git push origin --delete`; a branch someone pushed to later is kept). Sets `state.gc_at`; collected runs drop out of `status`. Runs without a PR (`--no-pr`, failures) are not collected in M2a.
+
+o) **`doctor` and the Zen guard (§15, Amendment e, M2a).**
+   - Every model of every effective chain (all layers merged) is resolved through Pi with the factory's own `$FACTORY_HOME/pi/models.json` and `auth.json`, the same files `PiRunner` uses.
+   - `zen guard` fails when a model of another provider resolves to an OpenCode endpoint outside `/go` (a `models.json` `baseUrl` override or a catalog change), when an `opencode-go` model is not on a `/go/` path, when Pi does not know a model, or when any `baseUrl` anywhere in `models.json` points at Zen. `opencode/*` (Zen) passes only when `providers.allow` names `opencode` explicitly (not via `*`) and is then a warning; otherwise it fails.
+   - `openai login` fails unless OpenAI runs on Pi's stored ChatGPT login (OAuth subscription); a stored or environment API key fails. Other providers in use need a credential. Only credential sources are printed, never values.
+   - `extra usage` is always a warning while `opencode-go` or `openai` are in use: the overage setting cannot be read through an API.
+   - `--ping` sends one tiny request per configured model (timeout 60 s each, in parallel); failures are warnings. No request goes out while the guard fails. Tests use a fake view; no test calls a provider.
+   - The runtime applies the same two rules before every session (`PiRunner`): a Zen endpoint for a non-`opencode` model or OpenAI without the ChatGPT login is refused (`auth` class, so the chain may fall back).
+   - With `--repo`: a remote URL with embedded credentials fails (the main repo's git dir is readable in the sandbox; only remote names are printed); `gh` must be logged in (fail otherwise); auto-merge (when `auto_merge_max_risk` is not `none`) and branch protection with `factory / done` are `info` hints (Amendment g as amended). Only `fail` makes `doctor` exit 1.
+   - Not in M2a: CI stub hash and services checks (they come with the CI stub and services, M2b).
+
+p) **JSON contracts (M2a).** `result.json`, `events.jsonl` lines, `status`/`stats`/`gc`/`doctor --json`, the findings memory file and the reviewer outputs (single and lean) are zod schemas in code (`src/events.ts`, `src/memory.ts`, `src/schemas/reports.ts`, `src/schemas/review.ts`); the report schemas are strict (no unknown keys). `pnpm schemas` writes JSON Schema (draft 2020-12) copies to `schemas/` (shipped in the package); a test fails when a copy is out of date and validates real outputs of a fake run against the zod schemas. Reviewer outputs are published in their input form (fields with defaults optional).

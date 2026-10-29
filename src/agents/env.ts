@@ -15,8 +15,17 @@ export const BASE_ENV_ALLOWLIST = [
   "NODE_EXTRA_CA_CERTS",
 ] as const;
 
-/** Never passed, even when configured: only the factory process pushes and calls `gh`. */
-const NEVER_PASSED = new Set([
+/**
+ * Never passed, even when configured (repo.yaml `agent_env`, profile `env`): only the factory process
+ * pushes, calls `gh` and talks to model providers (SPEC §8.3).
+ */
+export const NEVER_PASSED = new Set([
+  // Model provider credentials of the factory itself (Pi reads them from the factory's env/auth.json).
+  "OPENCODE_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "PI_CODING_AGENT_DIR",
+  "FACTORY_HOME",
   "GH_TOKEN",
   "GITHUB_TOKEN",
   "GH_ENTERPRISE_TOKEN",

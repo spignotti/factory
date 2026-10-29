@@ -4,11 +4,28 @@ import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
+import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
+import type { AgentRequest } from "../../src/agents/runner.js";
+import type { FakeStep } from "../../src/agents/fake-runner.js";
+import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
 import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 const eventsOf = (r: ScenarioRun, type: string) => r.events.filter((e) => e.event === type);
+
+/** Standard script → fast lane: `plan_normalize` instead of the planner, plan + simplicity in one lean review. */
+function toFastLane(steps: FakeStep[]): FakeStep[] {
+  const out: FakeStep[] = [];
+  for (const step of steps) {
+    if (step.role === "plan_high") out.push({ ...step, role: "plan_normalize" });
+    else if (step.role === "review_simplicity") {
+      const plan = out.findLast((s) => s.role === "review_plan")!;
+      plan.output = { reviews: [plan.output, step.output] };
+    } else out.push({ ...step });
+  }
+  return out;
+}
 
 describe("E2E with fake-runner on a fixture repo", () => {
   it("clean pass: PR assembled, human_review by default", async () => {
@@ -28,6 +45,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(pr.body).toContain("| [x] | A1 | multiply(2, 3) returns 6 | test | test: `test/multiply.test.js::multiply` |");
     expect(pr.body).toContain("merge policy: **human_review**");
     expect(pr.body).toMatch(/✅ unit/);
+    expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, \$\d+\.\d{4}/);
+    expect(pr.body).toMatch(/- review_plan: `openai\/[\w.-]+` ×1/);
     expect(r.file("pr.md")).toBe(pr.body);
 
     // factory commits on the branch, as git.author
@@ -65,6 +84,18 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.eventsText).not.toContain(SECRET);
     expect(JSON.stringify(r.resultFile)).not.toContain(SECRET);
     expect(r.file("pr.md")).not.toContain(SECRET);
+  });
+
+  it("repo.yaml models: override a role for this repo; a merged config that breaks a safety rule fails at intake", async () => {
+    const r = await runScenario({ script: "clean.json", patch: (c) => void (c.models = { pr_writer: [{ model: "opencode-go/grok-4.7" }] }) });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.calls.find((c) => c.role === "pr_writer")?.model).toBe("opencode-go/grok-4.7");
+    expect(r.runner.calls.find((c) => c.role === "implement")?.model).toBe("opencode-go/deepseek-v4.1-flash");
+
+    const bad = await runScenario({ script: "clean.json", patch: (c) => void (c.models = { review_plan: [{ model: "opencode-go/deepseek-v4-pro" }] }) });
+    expect(bad.result.result).toBe("failed");
+    expect(bad.result.reason).toMatch(/review_plan from repo layer/);
+    expect(bad.runner.calls).toEqual([]);
   });
 
   it("secret values that reach agent output are redacted from artifacts, PR body and result", async () => {
@@ -139,6 +170,127 @@ describe("E2E with fake-runner on a fixture repo", () => {
     const decisions = eventsOf(r, "round_finished").map((e) => (e.data.decision as { rule: number }).rule);
     expect(decisions).toEqual([6, 4, 5]);
     expect(r.runner.remaining()).toEqual({});
+  });
+
+  it("findings memory: open findings at exit are remembered; the next run briefs implement and review", async () => {
+    const first = await runScenario({ script: "bug-max-rounds.json" });
+    const mem = loadMemory(first.factoryHome, canonicalRepoId("", first.repo));
+    expect(mem.entries.length).toBeGreaterThan(0);
+    expect(mem.entries.every((e) => e.status === "open" && e.count === 1 && e.runs[0] === first.runId)).toBe(true);
+    expect(eventsOf(first, "progress").some((e) => (e.data.memory as { observations: number } | undefined)?.observations === mem.entries.length)).toBe(true);
+    expect(first.github.prs[0]?.body).not.toContain("Recurring");
+
+    const text = mem.entries[0]!.text;
+    const second = await runScenario({
+      script: "clean.json",
+      before: (repo, factoryHome) =>
+        void flushMemory({ factoryHome, repoId: canonicalRepoId("", repo), runId: "old", now: new Date(), observations: mem.entries.map((e) => ({ ...e })) }),
+    });
+    expect(second.result.result).toBe("done");
+    expect(second.runner.calls.find((c) => c.role === "implement")?.prompt).toContain(text);
+    expect(second.runner.calls.filter((c) => c.role.startsWith("review_")).every((c) => c.prompt.includes(text))).toBe(true);
+    expect(second.runner.calls.find((c) => c.role === "pr_writer")?.prompt ?? "").not.toContain(text);
+    expect(second.github.prs[0]?.body).not.toContain(text);
+  });
+
+  it("security and checklist reviewers join when the diff touches sensitive paths and unmarked checklist items exist", async () => {
+    const checklist = "- Every exported function has a test\n- No TODO comments <!-- check: lint -->\n";
+    const r = await runScenario({
+      script: "clean.json",
+      setup: (repo) => commitFile(repo, ".factory/checklist.md", checklist),
+      steps: (steps) => {
+        // Not in the plan (a sensitive plan file needs a risk criterion): the diff decides, not the plan.
+        steps[1]!.writes = { ...steps[1]!.writes, "src/auth/session.js": "export const ttl = 60;\n" };
+        return [
+          ...steps,
+          { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } },
+          { role: "review_checklist", output: { reviewer: "checklist", prior: [], findings: [] } },
+        ];
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.remaining()).toEqual({});
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "security", "checklist"]);
+    const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
+    expect(prompt("review_security")).toMatch(/security_trigger_files[\s\S]*src\/auth\/session\.js/);
+    expect(prompt("review_checklist")).toContain("C1 (checklist.md:1): Every exported function has a test");
+    expect(prompt("review_checklist")).not.toContain("No TODO comments");
+    expect(prompt("review_plan")).not.toContain("checklist_items");
+    expect(prompt("plan_high")).toMatch(/checklist_items[\s\S]*Every exported function has a test/);
+    expect(prompt("plan_high")).not.toContain("No TODO comments");
+  });
+
+  it("no security reviewer for ordinary files; no checklist reviewer when review.checklist is off or all items are marked", async () => {
+    const off = await runScenario({
+      script: "clean.json",
+      patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
+      setup: (repo) => commitFile(repo, ".factory/checklist.md", "- Every exported function has a test\n"),
+    });
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/checklist.md", "- Tests pass <!-- check: unit -->\n") });
+    for (const r of [off, marked]) {
+      expect(r.result.result).toBe("done");
+      expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
+    }
+  });
+
+  it("a dependency file anywhere activates security", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      steps: (steps) => {
+        (steps[0]!.output as { packages: { files: string[] }[] }).packages[0]!.files.push("tools/package.json");
+        steps[1]!.writes = { ...steps[1]!.writes, "tools/package.json": "{\"name\":\"tools\"}\n" };
+        return [...steps, { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } }];
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.calls.find((c) => c.role === "review_security")?.prompt).toContain("tools/package.json");
+  });
+
+  it("fast lane: plan_normalize, one lean review session, PR says fast", async () => {
+    const r = await runScenario({ script: "clean.json", options: { lane: "fast" }, steps: toFastLane });
+    expect(r.result).toMatchObject({ result: "done", lane: "fast", rounds: 1 });
+    expect(r.runner.remaining()).toEqual({});
+    expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_normalize", "implement", "review_plan", "pr_writer"]);
+    const review = r.runner.calls.find((c) => c.role === "review_plan")!;
+    expect(review.prompt).toContain('{"reviews":[<plan review>,<simplicity review>]}');
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data).toMatchObject({ mode: "lean", reviewers: ["plan", "simplicity"] });
+    expect(r.file("review-1-plan.json")).toContain('"reviewer": "plan"');
+    expect(r.file("review-1-simplicity.json")).toContain('"reviewer": "simplicity"');
+    expect(r.github.prs[0]?.body).toContain("- lane: fast (lean review, at most one fix round)");
+    expect(eventsOf(r, "lane_escalated")).toEqual([]);
+  });
+
+  it("fast lane: an open bug after the one fix round -> needs_human, no extra round", async () => {
+    const r = await runScenario({ script: "bug-max-rounds.json", options: { lane: "fast" }, steps: (s) => {
+      // Two review rounds and one fix: the script's third round must never be asked for.
+      const seen: Record<string, number> = {};
+      return toFastLane(s).filter((x) => !["review_plan", "implement"].includes(x.role) || (seen[x.role] = (seen[x.role] ?? 0) + 1) <= 2);
+    } });
+    expect(r.result).toMatchObject({ result: "needs_human", lane: "fast", rounds: 2 });
+    expect(r.result.reason).toMatch(/no extra round/);
+    expect(r.runner.remaining()).toEqual({});
+  });
+
+  it("fast lane escalates after implement when the diff is too big: full review, medium risk, PR names the reasons", async () => {
+    const r = await runScenario({ script: "clean.json", options: { lane: "fast" }, patch: (c) => void (c.fast_lane = { max_diff_lines: 3 }), steps: (s) => s.map((x) => (x.role === "plan_high" ? { ...x, role: "plan_normalize" } : x)) });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "medium" });
+    expect(r.runner.remaining()).toEqual({});
+    const esc = eventsOf(r, "lane_escalated");
+    expect(esc).toHaveLength(1);
+    expect(esc[0]).toMatchObject({ step: "implement", data: { from: "fast", to: "standard" } });
+    expect((esc[0]!.data.reasons as string[])[0]).toMatch(/^diff \d+ lines > fast_lane.max_diff_lines 3$/);
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data).toMatchObject({ mode: "full" });
+    expect(r.github.prs[0]?.body).toMatch(/- lane: fast → standard \(diff \d+ lines/);
+    expect(r.github.prs[0]?.body).toContain("fast-lane escalation");
+    expect(JSON.parse(r.file("state.json"))).toMatchObject({ lane: "standard" });
+  });
+
+  it("fast lane: invalid plan_normalize output escalates at intake to the plan step", async () => {
+    const r = await runScenario({ script: "invented-normalize.json", options: { lane: "fast" } });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard" });
+    expect(r.runner.remaining()).toEqual({});
+    expect(eventsOf(r, "lane_escalated")[0]).toMatchObject({ step: "intake" });
+    expect((eventsOf(r, "lane_escalated")[0]!.data.reasons as string[])[0]).toMatch(/^plan_normalize output invalid/);
   });
 
   it("fallback: capacity error -> backoff retry on the same model -> fallback", async () => {
@@ -396,4 +548,32 @@ describe("run guards", () => {
     expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "failed" } });
     expect(r.github.prs).toEqual([]);
   });
+
+  const realSandbox = ((): Sandbox | undefined => {
+    try {
+      return createSandbox("required", hostProbe);
+    } catch {
+      return undefined;
+    }
+  })();
+
+  it.skipIf(!realSandbox)("sandbox: setup and checks run jailed; agents get the jail; the run still passes", async () => {
+    const reqs: AgentRequest[] = [];
+    const r = await runScenario({
+      script: "clean.json",
+      deps: { sandbox: realSandbox },
+      onCall: (req) => void reqs.push(req),
+      patch: (c) => {
+        // Inside the jail: own pid namespace (a handful of processes) and no host factory home.
+        c.setup = 'test "$(ls /proc | grep -c "^[0-9]")" -lt 10';
+        (c.checks as unknown[]).push({ name: "jailed", run: 'test ! -e "$HOME/../../../pi" && test ! -e /run/docker.sock', tier: "fast" });
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.events.find((e) => e.event === "sandbox")?.data).toMatchObject({ mode: "required", fs: "bwrap", net: "isolated" });
+    const impl = reqs.find((q) => q.role === "implement")!;
+    expect(impl.jail?.rw).toEqual([join(r.runDir, "worktree"), join(r.runDir, "home")]);
+    expect(impl.jail?.ro).toEqual([join(r.repo, ".git")]);
+    expect(impl.jail?.hide).toEqual([r.factoryHome]);
+  }, 60_000);
 });

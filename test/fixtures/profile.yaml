@@ -1,9 +1,14 @@
 roles:
-  plan_high:      [{ model: openai/sol, thinking: high }, { model: opencode-go/grok-4.7, thinking: high }]
-  plan_medium:    [{ model: openai/sol, thinking: medium }]
-  plan_normalize: [{ model: opencode-go/deepseek-v4.1-flash }]
-  implement:      [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
-  review:         [{ model: openai/mid-codex, thinking: medium }]
-  pr_writer:      [{ model: opencode-go/deepseek-v4.1-flash }]
+  plan_high:         [{ model: openai/sol, thinking: high }, { model: opencode-go/grok-4.7, thinking: high }]
+  plan_medium:       [{ model: openai/sol, thinking: medium }]
+  plan_normalize:    [{ model: opencode-go/deepseek-v4.1-flash }]
+  implement:         [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
+  review_plan:       [{ model: openai/mid-codex, thinking: medium }]
+  review_simplicity: [{ model: openai/mid-codex, thinking: medium }]
+  review_security:   [{ model: openai/mid-codex, thinking: high }]
+  review_checklist:  [{ model: openai/mid-codex, thinking: medium }]
+  evaluate:          [{ model: openai/luna }]
+  pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
+  harden:            [{ model: openai/sol }]
 retry: { base_ms: 1000, max_ms: 8000, attempts: 3 }
 env: {}

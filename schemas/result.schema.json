@@ -1,0 +1,142 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/result.schema.json",
+  "title": "factory result.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "task": {
+      "type": "string"
+    },
+    "type": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "feature",
+            "bug",
+            "chore"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lane": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "fast"
+      ]
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "done",
+        "needs_human",
+        "needs_input",
+        "failed",
+        "base_red",
+        "locked"
+      ]
+    },
+    "risk": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "merge_policy": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "auto",
+            "bot_review",
+            "human_review"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pr": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "cost_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string"
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "branch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "worktree": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_dir": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "repo",
+    "task",
+    "type",
+    "lane",
+    "result",
+    "risk",
+    "merge_policy",
+    "pr",
+    "rounds",
+    "minutes",
+    "cost_usd",
+    "reason",
+    "branch",
+    "worktree",
+    "run_dir"
+  ],
+  "additionalProperties": false
+}

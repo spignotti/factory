@@ -1,0 +1,78 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/event.schema.json",
+  "title": "factory events.jsonl line",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "ts": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "step": {
+      "type": "string"
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "step_started",
+        "step_finished",
+        "gate_result",
+        "model_fallback",
+        "round_finished",
+        "lane_escalated",
+        "watchdog_abort",
+        "run_finished",
+        "heartbeat",
+        "progress",
+        "agent_finished",
+        "agent_error",
+        "model_retry",
+        "queued",
+        "sandbox"
+      ]
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tokens_in": {
+      "type": "number"
+    },
+    "tokens_out": {
+      "type": "number"
+    },
+    "cost_usd": {
+      "type": "number"
+    },
+    "data": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "required": [
+    "ts",
+    "run_id",
+    "step",
+    "event",
+    "role",
+    "model",
+    "tokens_in",
+    "tokens_out",
+    "cost_usd",
+    "data"
+  ],
+  "additionalProperties": false
+}

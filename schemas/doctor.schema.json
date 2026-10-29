@@ -1,0 +1,101 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/doctor.schema.json",
+  "title": "factory doctor --json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warn",
+              "fail",
+              "info"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "status",
+          "detail"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "layer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "models",
+          "layer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "providers": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "allow",
+        "deny"
+      ],
+      "additionalProperties": false
+    },
+    "providers_in_use": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "ok",
+    "checks",
+    "models",
+    "providers_in_use"
+  ],
+  "additionalProperties": false
+}
