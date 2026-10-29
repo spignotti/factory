@@ -138,6 +138,9 @@ describe("factory adopt", () => {
     const repo = makeRepo({ "package.json": JSON.stringify(pkg), "package-lock.json": JSON.stringify({ name: "a", lockfileVersion: 3, requires: true, packages: { "": { name: "a" } } }) });
     const { report } = await runAdopt(repo, [], { plan: false, pr: false, measure: true });
     expect(report.setup_seconds).not.toBeNull();
+    // no AGENTS.md before: adopt writes the factory template
+    expect(report.written).toContain("AGENTS.md");
+    expect([...show(repo, "factory/adopt", "AGENTS.md").matchAll(/^## (.+)$/gm)].map((m) => m[1])).toEqual(["Purpose", "Stack & commands", "Test strategy", "Architecture", "Conventions", "Domain knowledge", "Data & secrets", "Do not", "Verify"]);
     const byName = Object.fromEntries(report.checks.map((c) => [c.name, c]));
     expect(byName.lint!.tier).toBe("fast");
     expect(byName.test!.tier).toBe("manual");

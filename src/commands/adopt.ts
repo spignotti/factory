@@ -5,7 +5,7 @@ import { extractJson } from "../agents/runner.js";
 import { staleClaudeMd, trimAgentsMd } from "../adopt/agents-md.js";
 import { classifyLegacy, isReviewFile, type LegacyReport, withMigratedReviewRules } from "../adopt/legacy.js";
 import { type Detection, detect } from "../adopt/detect.js";
-import { type DraftCheck, draftChecks, draftRepoYaml, dropMutating, testStrategySection, withTestStrategy } from "../adopt/draft.js";
+import { agentsTemplate, type DraftCheck, draftChecks, draftRepoYaml, dropMutating, projectPurpose, testStrategySection, withTestStrategy } from "../adopt/draft.js";
 import { type MeasureResult, measureChecks } from "../adopt/measure.js";
 import { CI_STUB_PATH, renderCiStub } from "../ci.js";
 import type { Io } from "./gates.js";
@@ -213,7 +213,8 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     const legacy = classifyLegacy({ files, workflows: detection.workflows, checks, setup: detection.setup, agentsMd, keep: opts.keep, read });
     const trim = agentsMd !== undefined && !legacy.kept.some((k) => k.path === "AGENTS.md") ? trimAgentsMd(agentsMd) : undefined;
     const warnings = [...(trim?.warnings ?? [])];
-    for (const claude of legacy.removed.filter((i) => /(^|\/)CLAUDE\.md$/.test(i.path))) {
+    // Without AGENTS.md the root CLAUDE.md is carried into the new AGENTS.md, so it cannot go stale.
+    for (const claude of legacy.removed.filter((i) => /(^|\/)CLAUDE\.md$/.test(i.path) && (agentsMd !== undefined || i.path !== "CLAUDE.md"))) {
       const w = staleClaudeMd(read(claude.path) ?? "", agentsMd);
       if (w) warnings.push(claude.path === "CLAUDE.md" ? w : w.replace("CLAUDE.md", claude.path));
     }
@@ -228,8 +229,15 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     write(REPO_CONFIG_PATH, repoYaml);
     write(REVIEW_RULES_PATH, withMigratedReviewRules(asset("standards/review-rules.md"), reviewSources));
     write(CI_STUB_PATH, ciStub);
-    const agentsBase = trim?.text ?? agentsMd;
-    const agentsNext = withTestStrategy(agentsBase, testStrategySection(detection, checks)) ?? (agentsBase !== agentsMd ? agentsBase : undefined);
+    let agentsNext: string | undefined;
+    if (agentsMd === undefined) {
+      const claude = legacy.removed.some((i) => i.path === "CLAUDE.md") ? read("CLAUDE.md") : undefined;
+      const topDirs = [...new Set(files.filter((f) => f.includes("/") && !f.startsWith(".")).map((f) => f.split("/")[0]!))].sort().slice(0, 15);
+      agentsNext = agentsTemplate({ detection, checks, purpose: projectPurpose(wt), topDirs, extra: claude ? { from: "CLAUDE.md", text: claude } : undefined });
+    } else {
+      const agentsBase = trim?.text ?? agentsMd;
+      agentsNext = withTestStrategy(agentsBase, testStrategySection(detection, checks)) ?? (agentsBase !== agentsMd ? agentsBase : undefined);
+    }
     if (agentsNext !== undefined) write("AGENTS.md", agentsNext);
     for (const item of legacy.removed) await git(wt, ["rm", "-q", "-r", "--", item.path]);
 
