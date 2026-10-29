@@ -147,13 +147,26 @@ function parseSession(s: ReviewSession, text: string): { ok: true; reviews: Revi
   return { ok: true, reviews: s.reviewers.map((r) => parsed.data.reviews.find((x) => x.reviewer === r)!) };
 }
 
+/**
+ * Verdicts must name findings this session was shown. A verdict on an unknown id means the reviewer
+ * answered another round's question (or invented ids); taking it as valid would silently drop its
+ * real findings, so it is invalid output and gets the corrective retry.
+ */
+function checkPriorIds(out: ReturnType<typeof parseSession>, input: ReviewInput, s: ReviewSession): ReturnType<typeof parseSession> {
+  if (!out.ok) return out;
+  const known = new Set(input.findings.filter((f) => s.reviewers.includes(f.reviewer)).map((f) => f.id));
+  const unknown = out.reviews.flatMap((r) => r.prior.map((p) => p.finding_id)).filter((id) => !known.has(id));
+  if (!unknown.length) return out;
+  return { ok: false, errors: [`prior verdicts name unknown finding ids: ${unknown.join(", ")} (judge only the prior findings you were given${known.size ? "" : "; there are none, so prior must be []"})`] };
+}
+
 async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<ReviewOutput[]> {
   const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`, ctx.deps.prompts)), rolePrompt("review-common", ctx.deps.prompts)].join("\n\n");
   let prompt = await reviewPrompt(ctx, s, input, diffs, rules, plan);
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await callAgent(ctx, "review", { role: s.role, cwd: ctx.worktree, tools: "read_only", system, prompt, sessionKey: `${ctx.runId}-review-${s.key}` });
-    const out = parseSession(s, res.text);
+    const out = checkPriorIds(parseSession(s, res.text), input, s);
     if (out.ok) {
       for (const r of out.reviews) writeJson(ctx, `review-${input.round}-${r.reviewer}.json`, r);
       return out.reviews;

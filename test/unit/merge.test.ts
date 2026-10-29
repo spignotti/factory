@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { capNits, decideExit, findingKey, isStalemate, mergeRound, openFindings, type TrackedFinding } from "../../src/pipeline/merge.js";
-import { type Finding, FindingSchema, type ReviewOutput } from "../../src/schemas/review.js";
+import { type Finding, FindingSchema, normalizeCheckable, type ReviewOutput } from "../../src/schemas/review.js";
 
 const f = (o: Partial<Finding> & { claim: string }): Finding => FindingSchema.parse({ severity: "suggestion", file: "src/a.js", line: 1, ...o });
 const review = (reviewer: ReviewOutput["reviewer"], findings: Finding[], prior: ReviewOutput["prior"] = []): ReviewOutput => ({ reviewer, findings, prior });
@@ -112,5 +112,18 @@ describe("exit rules", () => {
   it("6: otherwise fix", () => {
     expect(exit(1, [open("nit")])).toMatchObject({ action: "fix", rule: 6 });
     expect(exit(1, [open("bug")])).toMatchObject({ action: "fix", rule: 6 });
+  });
+});
+
+describe("normalizeCheckable", () => {
+  it("maps loose model answers onto the enum", () => {
+    const cases: [unknown, string][] = [
+      ["test", "test"], ["LINT", "lint"], ["yes", "script"], [true, "script"], ["Yes", "script"],
+      ["unit test", "test"], ["a lint rule", "lint"], ["custom check script", "script"],
+      ["no", "no"], ["not checkable", "no"], ["no test possible", "no"], [false, "no"], [null, "no"], [3, "no"], ["maybe", "no"],
+    ];
+    for (const [v, want] of cases) expect([v, normalizeCheckable(v)]).toEqual([v, want]);
+    expect(FindingSchema.parse({ severity: "bug", claim: "x" }).checkable).toBe("no");
+    expect(FindingSchema.parse({ severity: "bug", claim: "x", checkable: "yes" }).checkable).toBe("script");
   });
 });
