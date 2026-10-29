@@ -2,16 +2,11 @@ import type { GitHub, PrStatus } from "../gh.js";
 import { activeHolders } from "../pipeline/lock.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
+import type { z } from "zod";
+import type { StatusReportSchema } from "../schemas/reports.js";
 
 /** `factory status --json` (SPEC §9; schema `schemas/status.schema.json`). */
-export interface StatusReport {
-  generated_at: string;
-  running: { run_id: string; repo: string; task: string; step: string; lane: string; pid: number; minutes: number; branch: string | null; pr: string | null }[];
-  waiting: { run_id: string; repo: string; task: string; result: "needs_human" | "needs_input"; reason: string; questions: string[]; pr: string | null; branch: string | null; worktree: string | null }[];
-  /** Stopped without a result (killed process): resume or start again. */
-  interrupted: { run_id: string; repo: string; task: string; step: string }[];
-  prs: { run_id: string; repo: string; task: string; pr: string; state: "open" | "unknown"; draft: boolean | null; merge_policy: string | null; risk: string | null; result: string | null; error?: string }[];
-}
+export type StatusReport = z.infer<typeof StatusReportSchema>;
 
 const repoOf = (r: RunRecord) => r.state?.repo ?? r.result?.repo ?? "";
 const taskOf = (r: RunRecord) => r.state?.task.ref ?? r.result?.task ?? "";

@@ -5,13 +5,11 @@ import { git, gitOk, repoLockId } from "../git.js";
 import { acquireRepoLock } from "../pipeline/lock.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
+import type { z } from "zod";
+import type { GcReportSchema } from "../schemas/reports.js";
 
 /** `factory gc` result (schema `schemas/gc.schema.json`). */
-export interface GcReport {
-  dry_run: boolean;
-  cleaned: { run_id: string; repo: string; pr: string; pr_state: "merged" | "closed"; worktree_removed: boolean; branch_deleted: boolean; remote_branch_deleted: boolean; notes: string[] }[];
-  skipped: { run_id: string; repo: string; pr: string | null; reason: string }[];
-}
+export type GcReport = z.infer<typeof GcReportSchema>;
 
 /** Only branches the factory created are ever deleted. */
 const FACTORY_BRANCH = /^factory\/[A-Za-z0-9._/-]+$/;

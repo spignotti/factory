@@ -1,0 +1,675 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/stats.schema.json",
+  "title": "factory stats --json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "generated_at": {
+      "type": "string"
+    },
+    "since": {
+      "type": "string"
+    },
+    "repo": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "current": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "by_result": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "by_lane": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "by_type": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "by_repo": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "done_rate": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rounds": {
+          "type": "object",
+          "properties": {
+            "median": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "p90": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "median",
+            "p90"
+          ],
+          "additionalProperties": false
+        },
+        "minutes": {
+          "type": "object",
+          "properties": {
+            "median": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "p90": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "median",
+            "p90"
+          ],
+          "additionalProperties": false
+        },
+        "gate_failures": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "flaky_checks": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "result",
+              "reason",
+              "count"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "providers": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "calls": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "tokens_in": {
+                "type": "number"
+              },
+              "tokens_out": {
+                "type": "number"
+              },
+              "cost_usd": {
+                "type": "number"
+              },
+              "errors": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "fallbacks": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "capacity_errors": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "limit_errors": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "calls",
+              "tokens_in",
+              "tokens_out",
+              "cost_usd",
+              "errors",
+              "fallbacks",
+              "capacity_errors",
+              "limit_errors"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "roles": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "calls": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "tokens_in": {
+                "type": "number"
+              },
+              "tokens_out": {
+                "type": "number"
+              },
+              "cost_usd": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "calls",
+              "tokens_in",
+              "tokens_out",
+              "cost_usd"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "cost_usd": {
+          "type": "number"
+        },
+        "lane_escalations": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "watchdog_aborts": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "merge_policy": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "auto_merged": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "reverted": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "runs",
+        "by_result",
+        "by_lane",
+        "by_type",
+        "by_repo",
+        "done_rate",
+        "rounds",
+        "minutes",
+        "gate_failures",
+        "flaky_checks",
+        "reasons",
+        "providers",
+        "roles",
+        "cost_usd",
+        "lane_escalations",
+        "watchdog_aborts",
+        "merge_policy",
+        "auto_merged",
+        "reverted"
+      ],
+      "additionalProperties": false
+    },
+    "previous": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        },
+        "runs": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "by_result": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "by_lane": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "by_type": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "by_repo": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "done_rate": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rounds": {
+          "type": "object",
+          "properties": {
+            "median": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "p90": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "median",
+            "p90"
+          ],
+          "additionalProperties": false
+        },
+        "minutes": {
+          "type": "object",
+          "properties": {
+            "median": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "p90": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "median",
+            "p90"
+          ],
+          "additionalProperties": false
+        },
+        "gate_failures": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "flaky_checks": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "result",
+              "reason",
+              "count"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "providers": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "calls": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "tokens_in": {
+                "type": "number"
+              },
+              "tokens_out": {
+                "type": "number"
+              },
+              "cost_usd": {
+                "type": "number"
+              },
+              "errors": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "fallbacks": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "capacity_errors": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "limit_errors": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "calls",
+              "tokens_in",
+              "tokens_out",
+              "cost_usd",
+              "errors",
+              "fallbacks",
+              "capacity_errors",
+              "limit_errors"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "roles": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "calls": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "tokens_in": {
+                "type": "number"
+              },
+              "tokens_out": {
+                "type": "number"
+              },
+              "cost_usd": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "calls",
+              "tokens_in",
+              "tokens_out",
+              "cost_usd"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "cost_usd": {
+          "type": "number"
+        },
+        "lane_escalations": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "watchdog_aborts": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "merge_policy": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "auto_merged": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "reverted": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "runs",
+        "by_result",
+        "by_lane",
+        "by_type",
+        "by_repo",
+        "done_rate",
+        "rounds",
+        "minutes",
+        "gate_failures",
+        "flaky_checks",
+        "reasons",
+        "providers",
+        "roles",
+        "cost_usd",
+        "lane_escalations",
+        "watchdog_aborts",
+        "merge_policy",
+        "auto_merged",
+        "reverted"
+      ],
+      "additionalProperties": false
+    },
+    "delta": {
+      "type": "object",
+      "properties": {
+        "runs": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "done_rate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cost_usd": {
+          "type": "number"
+        },
+        "median_rounds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "runs",
+        "done_rate",
+        "cost_usd",
+        "median_rounds"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "generated_at",
+    "since",
+    "repo",
+    "current",
+    "previous",
+    "delta"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,97 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/gc.schema.json",
+  "title": "factory gc --json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "cleaned": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "string"
+          },
+          "pr_state": {
+            "type": "string",
+            "enum": [
+              "merged",
+              "closed"
+            ]
+          },
+          "worktree_removed": {
+            "type": "boolean"
+          },
+          "branch_deleted": {
+            "type": "boolean"
+          },
+          "remote_branch_deleted": {
+            "type": "boolean"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "pr",
+          "pr_state",
+          "worktree_removed",
+          "branch_deleted",
+          "remote_branch_deleted",
+          "notes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "pr",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "dry_run",
+    "cleaned",
+    "skipped"
+  ],
+  "additionalProperties": false
+}

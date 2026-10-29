@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { z } from "zod";
 import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import { type ChecklistItem, parseChecklist, unmarkedItems } from "../checklist.js";
@@ -10,7 +9,7 @@ import type { TrackedFinding } from "../pipeline/merge.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny } from "../schemas/plan.js";
-import { type Reviewer, type ReviewOutput, ReviewOutputSchema } from "../schemas/review.js";
+import { type Reviewer, type ReviewOutput, ReviewOutputSchema, LeanOutputSchema } from "../schemas/review.js";
 import type { GateReport } from "./gates.js";
 
 
@@ -147,8 +146,6 @@ function parseSession(s: ReviewSession, text: string): { ok: true; reviews: Revi
   }
   return { ok: true, reviews: s.reviewers.map((r) => parsed.data.reviews.find((x) => x.reviewer === r)!) };
 }
-
-const LeanOutputSchema = z.object({ reviews: z.array(ReviewOutputSchema) });
 
 async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<ReviewOutput[]> {
   const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`)), rolePrompt("review-common")].join("\n\n");

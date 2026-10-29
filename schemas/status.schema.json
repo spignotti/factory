@@ -1,0 +1,234 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/status.schema.json",
+  "title": "factory status --json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "generated_at": {
+      "type": "string"
+    },
+    "running": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          },
+          "lane": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "fast"
+            ]
+          },
+          "pid": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "minutes": {
+            "type": "number"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "step",
+          "lane",
+          "pid",
+          "minutes",
+          "branch",
+          "pr"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "waiting": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "needs_human",
+              "needs_input"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "worktree": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "result",
+          "reason",
+          "questions",
+          "pr",
+          "branch",
+          "worktree"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "interrupted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "step"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "prs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "unknown"
+            ]
+          },
+          "draft": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "merge_policy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "risk": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "pr",
+          "state",
+          "draft",
+          "merge_policy",
+          "risk",
+          "result"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "generated_at",
+    "running",
+    "waiting",
+    "interrupted",
+    "prs"
+  ],
+  "additionalProperties": false
+}

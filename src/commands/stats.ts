@@ -3,42 +3,13 @@ import { resolve } from "node:path";
 import type { FactoryEvent } from "../events.js";
 import { listRuns, readEvents, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
+import type { z } from "zod";
+import type { StatsPeriodSchema, StatsReportSchema } from "../schemas/reports.js";
 
 /** One period of `factory stats` (SPEC §14; schema `schemas/stats.schema.json`). */
-export interface StatsPeriod {
-  from: string;
-  to: string;
-  runs: number;
-  by_result: Record<string, number>;
-  by_lane: Record<string, number>;
-  by_type: Record<string, number>;
-  by_repo: Record<string, number>;
-  /** done / runs with a final result other than `locked`; null without such runs. */
-  done_rate: number | null;
-  rounds: { median: number | null; p90: number | null };
-  minutes: { median: number | null; p90: number | null };
-  gate_failures: Record<string, number>;
-  flaky_checks: Record<string, number>;
-  reasons: { result: string; reason: string; count: number }[];
-  providers: Record<string, { calls: number; errors: number; fallbacks: number; capacity_errors: number; limit_errors: number; tokens_in: number; tokens_out: number; cost_usd: number }>;
-  roles: Record<string, { calls: number; tokens_in: number; tokens_out: number; cost_usd: number }>;
-  cost_usd: number;
-  lane_escalations: number;
-  watchdog_aborts: number;
-  merge_policy: Record<string, number>;
-  auto_merged: number;
-  /** Auto-merged factory PRs reverted later: not tracked yet (needs the GitHub history, M3 harden). */
-  reverted: null;
-}
+export type StatsPeriod = z.infer<typeof StatsPeriodSchema>;
 
-export interface StatsReport {
-  generated_at: string;
-  since: string;
-  repo: string | null;
-  current: StatsPeriod;
-  previous: StatsPeriod;
-  delta: { runs: number; done_rate: number | null; cost_usd: number; median_rounds: number | null };
-}
+export type StatsReport = z.infer<typeof StatsReportSchema>;
 
 /** `7d`, `24h`, `2w` → milliseconds. */
 export function parseSince(s: string): number {

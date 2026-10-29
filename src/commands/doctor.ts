@@ -6,6 +6,8 @@ import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
 import { createSandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
+import type { z } from "zod";
+import type { DoctorReportSchema } from "../schemas/reports.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -16,14 +18,7 @@ export interface DoctorCheck {
   detail: string;
 }
 
-export interface DoctorReport {
-  ok: boolean;
-  checks: DoctorCheck[];
-  models: ReturnType<typeof describeProfile>;
-  providers?: Profile["providers"];
-  /** Providers of all configured models (every chain entry). */
-  providers_in_use: string[];
-}
+export type DoctorReport = z.infer<typeof DoctorReportSchema>;
 
 export interface DoctorOptions {
   factoryHome: string;

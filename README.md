@@ -146,6 +146,12 @@ factory gc [--dry-run] [--force]            # remove worktree and branches of me
 
 `gc` deletes only `factory/*` branches, and the remote branch only if nobody pushed to it after the factory; a worktree with uncommitted changes needs `--force`.
 
+## JSON contracts
+
+Machine-readable outputs have JSON Schemas in [`schemas/`](schemas/): `result.json`, `events.jsonl` lines,
+`status`, `stats`, `gc` and `doctor` with `--json`, the findings memory and the reviewer outputs. They are
+generated from the zod schemas in code (`pnpm schemas`); a test keeps them in sync.
+
 ## Development
 
 ```
