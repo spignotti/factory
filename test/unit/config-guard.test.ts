@@ -58,6 +58,10 @@ describe("config guard: what counts", () => {
       "+// @ts-expect-error untyped lib",
       "+// biome-ignore lint: x",
       " const ok = 1; // @ts-ignore (context line)",
+      '+const msg = "never use eslint-disable here";',
+      "--- a/README.md",
+      "+++ b/README.md",
+      "+Do not add `# noqa` or `// @ts-ignore`.",
     ].join("\n");
     expect(addedSuppressions(diff).map((s) => [s.file, s.marker])).toEqual([
       ["src/a.py", "noqa"],

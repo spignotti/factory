@@ -53,14 +53,17 @@ export const SUPPRESSIONS: Suppression[] = [
   { marker: "type: ignore", pattern: /#\s*type:\s*ignore\b/ },
   { marker: "pyright: ignore", pattern: /#\s*pyright:\s*(ignore|basic)\b/ },
   { marker: "pylint: disable", pattern: /#\s*pylint:\s*disable\b/ },
-  { marker: "eslint-disable", pattern: /eslint-disable(-next-line|-line)?\b/ },
-  { marker: "@ts-ignore", pattern: /@ts-ignore\b/ },
-  { marker: "@ts-expect-error", pattern: /@ts-expect-error\b/ },
-  { marker: "@ts-nocheck", pattern: /@ts-nocheck\b/ },
-  { marker: "biome-ignore", pattern: /biome-ignore\b/ },
+  { marker: "eslint-disable", pattern: /(?:\/\/|\/\*|\*)\s*eslint-disable(-next-line|-line)?\b/ },
+  { marker: "@ts-ignore", pattern: /(?:\/\/|\/\*|\*)\s*@ts-ignore\b/ },
+  { marker: "@ts-expect-error", pattern: /(?:\/\/|\/\*|\*)\s*@ts-expect-error\b/ },
+  { marker: "@ts-nocheck", pattern: /(?:\/\/|\/\*|\*)\s*@ts-nocheck\b/ },
+  { marker: "biome-ignore", pattern: /(?:\/\/|\/\*|\*)\s*biome-ignore\b/ },
   { marker: "nolint", pattern: /\/\/\s*nolint\b/ },
   { marker: "allow(clippy", pattern: /#!?\[allow\(clippy::/ },
 ];
+
+/** Prose files may mention markers without suppressing anything. */
+const PROSE = /\.(md|mdx|markdown|txt|rst)$/i;
 
 const sorted = (xs: string[]) => xs.map((x) => x.replace(/\s+/g, " ").trim()).sort().join("\n");
 
@@ -109,7 +112,7 @@ export function addedSuppressions(diff: string): { file: string; marker: string;
       file = m[1]!;
       continue;
     }
-    if (!line.startsWith("+") || line.startsWith("+++")) continue;
+    if (!line.startsWith("+") || line.startsWith("+++") || PROSE.test(file)) continue;
     for (const s of SUPPRESSIONS) if (s.pattern.test(line)) out.push({ file, marker: s.marker, line: line.slice(1).trim() });
   }
   return out;
