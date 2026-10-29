@@ -11,6 +11,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
   createExtensionRuntime,
+  defineTool,
   loadProjectContextFiles,
   ModelRuntime,
   type ResourceLoader,
@@ -18,6 +19,7 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { BrowserTools } from "../evaluate/tools.js";
 import { endpointViolation } from "./provider-guard.js";
 import { PathGuard } from "../sandbox/guard.js";
 import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
@@ -99,8 +101,8 @@ export class PiRunner implements AgentRunner {
       extendResources: () => {},
       reload: async () => {},
     };
-    const tools = TOOLS[req.tools];
-    const customTools = toolDefinitions(req, tools);
+    const tools = [...TOOLS[req.tools], ...(req.browser?.specs.map((s) => s.name) ?? [])];
+    const customTools = [...toolDefinitions(req, tools), ...(req.browser ? browserToolDefinitions(req.browser) : [])];
     const { session } = await createAgentSession({
       cwd: req.cwd,
       agentDir,
@@ -194,6 +196,25 @@ export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail">,
   }
   // Variance of the render callbacks only; the SDK registers its tools the same way internally.
   return defs as ToolDefinition[];
+}
+
+/** The evaluator's browser tools as Pi custom tools (typebox schemas, verified against Pi 1.4.0). */
+export function browserToolDefinitions(browser: BrowserTools): ToolDefinition[] {
+  return browser.specs.map((spec) =>
+    defineTool({
+      name: spec.name,
+      label: spec.name,
+      description: spec.description,
+      parameters: spec.parameters,
+      executionMode: "sequential",
+      async execute(_id, params) {
+        const r = await browser.call(spec.name, params as Record<string, unknown>);
+        const content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [{ type: "text", text: r.text }];
+        if (r.image) content.push({ type: "image", data: r.image, mimeType: "image/png" });
+        return { content, details: undefined, isError: r.isError };
+      },
+    }),
+  );
 }
 
 /** Pi bash spawn hook: fixed env, and the command wrapped into the jail. */
