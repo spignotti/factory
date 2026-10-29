@@ -3,7 +3,10 @@ import { billingOf, familyOf, type ModelEntry, type Profile, profileRoleOf } fro
 import { realSleep, type Sleep } from "./fake-runner.js";
 import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage } from "./runner.js";
 
-export type ErrorClass = "capacity" | "limit" | "auth" | "invalid_output" | "other";
+export type ErrorClass = "capacity" | "network" | "limit" | "auth" | "invalid_output" | "other";
+
+/** A dropped or failed connection (undici reports a cut stream as `terminated`): worth retrying the same model. */
+const NETWORK = /^terminated$|\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|socket hang up|fetch failed|other side closed|premature close/i;
 
 /** Bad agent output; never a reason to fall back to another model. */
 export class InvalidOutputError extends Error {
@@ -23,6 +26,7 @@ export function classifyError(err: unknown): ErrorClass {
   if ((status === 429 || status === 503) && (/retry shortly|try again shortly/i.test(message) || retryAfter !== undefined)) {
     return "capacity";
   }
+  if (status === undefined && NETWORK.test(message.trim())) return "network";
   if (status === 401 || status === 403 || /unauthori[sz]ed|invalid api key|authenticat|forbidden|not logged in/i.test(message)) {
     return "auth";
   }
@@ -71,8 +75,8 @@ function nextEntry(chain: ModelEntry[], i: number, cls: ErrorClass): number {
 }
 
 /**
- * Runs one agent call with the role's model chain: capacity errors retry the same model with
- * exponential backoff, then fall back; limit/auth/other fall back directly, skipping
+ * Runs one agent call with the role's model chain: capacity and network errors retry the same model with
+ * exponential backoff, then fall back (network like other: never to `capacity_only`); limit/auth/other fall back directly, skipping
  * `capacity_only` entries; invalid output never falls back. Usage is recorded from successful and failed calls.
  */
 /**
@@ -112,7 +116,7 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
         });
         if (req.signal?.aborted) throw err;
         if (cls === "invalid_output") throw err;
-        if (cls === "capacity" && attempt + 1 < profile.retry.attempts) {
+        if ((cls === "capacity" || cls === "network") && attempt + 1 < profile.retry.attempts) {
           const delay = backoffMs(attempt, profile.retry);
           events.emit({ step, event: "model_retry", role: req.role, model: entry.model, data: { attempt: attempt + 1, delay_ms: delay } });
           await sleep(delay, req.signal);
