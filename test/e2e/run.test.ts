@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
+import type { AgentRequest } from "../../src/agents/runner.js";
+import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
 import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
@@ -410,4 +412,32 @@ describe("run guards", () => {
     expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "failed" } });
     expect(r.github.prs).toEqual([]);
   });
+
+  const realSandbox = ((): Sandbox | undefined => {
+    try {
+      return createSandbox("required", hostProbe);
+    } catch {
+      return undefined;
+    }
+  })();
+
+  it.skipIf(!realSandbox)("sandbox: setup and checks run jailed; agents get the jail; the run still passes", async () => {
+    const reqs: AgentRequest[] = [];
+    const r = await runScenario({
+      script: "clean.json",
+      deps: { sandbox: realSandbox },
+      onCall: (req) => void reqs.push(req),
+      patch: (c) => {
+        // Inside the jail: own pid namespace (a handful of processes) and no host factory home.
+        c.setup = 'test "$(ls /proc | grep -c "^[0-9]")" -lt 10';
+        (c.checks as unknown[]).push({ name: "jailed", run: 'test ! -e "$HOME/../../../pi" && test ! -e /run/docker.sock', tier: "fast" });
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.events.find((e) => e.event === "sandbox")?.data).toMatchObject({ mode: "required", fs: "bwrap", net: "isolated" });
+    const impl = reqs.find((q) => q.role === "implement")!;
+    expect(impl.jail?.rw).toEqual([join(r.runDir, "worktree"), join(r.runDir, "home")]);
+    expect(impl.jail?.ro).toEqual([join(r.repo, ".git")]);
+    expect(impl.jail?.hide).toEqual([r.factoryHome]);
+  }, 60_000);
 });

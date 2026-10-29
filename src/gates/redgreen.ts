@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh, tail } from "../exec.js";
 import { git } from "../git.js";
+import type { Jail } from "../sandbox/sandbox.js";
 
 export interface RedGreenResult {
   ok: boolean;
@@ -31,6 +32,8 @@ export async function redGreenProof(opts: {
   env: Record<string, string>;
   /** `max_wall_minutes` deadline (epoch ms); commands are killed when it passes. */
   deadline?: number;
+  /** Sandbox per working dir (base worktree or the run worktree). */
+  jail?: (cwd: string) => Jail | undefined;
 }): Promise<RedGreenResult> {
   const { worktree, baseSha, files, testCommand, env } = opts;
   const inconclusive = (detail: string): RedGreenResult => ({ ok: false, redOnBase: false, greenOnHead: false, inconclusive: true, detail });
@@ -49,11 +52,11 @@ export async function redGreenProof(opts: {
       copyFileSync(join(worktree, f), join(baseDir, f));
     }
     if (opts.setup) {
-      const setup = await sh(opts.setup, { cwd: baseDir, env, timeoutMs: timeoutMs() });
+      const setup = await sh(opts.setup, { cwd: baseDir, env, timeoutMs: timeoutMs(), jail: opts.jail?.(baseDir) });
       if (setup.code !== 0) return inconclusive(`setup failed in the base worktree:\n${tail(setup.output, 20)}`);
     }
-    const base = await sh(cmd, { cwd: baseDir, env, timeoutMs: timeoutMs() });
-    const head = await sh(cmd, { cwd: worktree, env, timeoutMs: timeoutMs() });
+    const base = await sh(cmd, { cwd: baseDir, env, timeoutMs: timeoutMs(), jail: opts.jail?.(baseDir) });
+    const head = await sh(cmd, { cwd: worktree, env, timeoutMs: timeoutMs(), jail: opts.jail?.(worktree) });
     const redOnBase = base.code !== 0;
     const greenOnHead = head.code === 0;
     const detail = [

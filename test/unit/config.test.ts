@@ -46,8 +46,12 @@ describe("layered model config (Amendment i)", () => {
     expect(() => parseRepoConfig(`models:\n  providers: { allow: ["*"] }\n`)).toThrow();
   });
 
-  it("only built-in and user layers may set providers", () => {
+  it("only built-in and user layers may set providers and the sandbox", () => {
     expect(() => parseLayer("cli", "x.yaml", `providers: { deny: [] }`)).toThrow(ConfigError);
+    expect(() => parseLayer("cli", "x.yaml", `sandbox: off`)).toThrow(/sandbox can only be set/);
+    expect(() => parseRepoConfig(`models:\n  sandbox: off\n`)).toThrow();
+    expect(resolveProfile(loadLayers({ factoryHome: home("sandbox: required\n") })).sandbox).toBe("required");
+    expect(resolveProfile(loadLayers({ factoryHome: home() })).sandbox).toBe("preferred");
     expect(() => parseLayer("user", "p.yaml", `providers: { deny: [] }`)).not.toThrow();
   });
 

@@ -54,8 +54,10 @@ function formatZod(e: z.ZodError): string {
 export function parseLayer(name: LayerName, source: string, text: string): Layer {
   const parsed = ProfileLayerSchema.safeParse(parse(text) ?? {});
   if (!parsed.success) throw new ConfigError(`${name} profile ${source} is invalid: ${formatZod(parsed.error)}`);
-  if (parsed.data.providers && name !== "built-in" && name !== "user") {
-    throw new ConfigError(`${name} profile ${source}: providers can only be set in the built-in or user profile (${userProfilePathHint})`);
+  for (const key of ["providers", "sandbox"] as const) {
+    if (parsed.data[key] !== undefined && name !== "built-in" && name !== "user") {
+      throw new ConfigError(`${name} profile ${source}: ${key} can only be set in the built-in or user profile (${userProfilePathHint})`);
+    }
   }
   return { name, source, data: parsed.data };
 }
@@ -94,6 +96,7 @@ export function resolveProfile(layers: Layer[]): Profile {
   let retry: Record<string, unknown> = {};
   const env: Record<string, string[]> = {};
   const providers: Record<string, unknown> = { ...DEFAULT_PROVIDERS };
+  let sandbox: string | undefined;
   for (const layer of layers) {
     for (const [role, chain] of Object.entries(layer.data.roles ?? {})) {
       if (!chain) continue;
@@ -102,9 +105,12 @@ export function resolveProfile(layers: Layer[]): Profile {
     }
     retry = { ...retry, ...layer.data.retry };
     Object.assign(env, layer.data.env ?? {});
-    if (layer.name === "built-in" || layer.name === "user") Object.assign(providers, layer.data.providers ?? {});
+    if (layer.name === "built-in" || layer.name === "user") {
+      Object.assign(providers, layer.data.providers ?? {});
+      sandbox = layer.data.sandbox ?? sandbox;
+    }
   }
-  const parsed = ProfileSchema.safeParse({ roles, retry, env, providers });
+  const parsed = ProfileSchema.safeParse({ roles, retry, env, providers, sandbox });
   if (!parsed.success) {
     const where = (path: PropertyKey[]) => {
       const role = path[0] === "roles" ? (path[1] as ProfileRole | undefined) : undefined;
@@ -123,7 +129,7 @@ export function withRepoModels(profile: Profile, models: RoleOverrides | undefin
   const base: Layer = {
     name: "built-in",
     source: "(resolved)",
-    data: { roles: profile.roles, retry: profile.retry, env: profile.env, providers: profile.providers },
+    data: { roles: profile.roles, retry: profile.retry, env: profile.env, providers: profile.providers, sandbox: profile.sandbox },
     roleSources: profile.sources,
   };
   return resolveProfile([base, layer]);

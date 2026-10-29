@@ -4,6 +4,12 @@ import {
   type AgentSessionEvent,
   createAgentSession,
   createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   createExtensionRuntime,
   loadProjectContextFiles,
   ModelRuntime,
@@ -12,6 +18,8 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { PathGuard } from "../sandbox/guard.js";
+import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
 import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage } from "./runner.js";
 
 const TOOLS: Record<AgentRequest["tools"], string[]> = {
@@ -83,14 +91,8 @@ export class PiRunner implements AgentRunner {
       extendResources: () => {},
       reload: async () => {},
     };
-    const env = req.env;
-    // A custom tool replaces the built-in tool of the same name (AgentSession._refreshToolRegistry),
-    // so every bash process gets exactly the allowlisted env (Amendment b).
-    const bash = createBashToolDefinition(req.cwd, {
-      exposeSessionEnvironment: false,
-      spawnHook: (ctx) => ({ ...ctx, env: { ...env } }),
-    });
     const tools = TOOLS[req.tools];
+    const customTools = toolDefinitions(req, tools);
     const { session } = await createAgentSession({
       cwd: req.cwd,
       agentDir,
@@ -99,8 +101,7 @@ export class PiRunner implements AgentRunner {
       thinkingLevel: req.thinking ?? "off",
       resourceLoader,
       tools,
-      // Variance of the render callbacks only; the SDK registers bash the same way internally.
-      customTools: tools.includes("bash") ? [bash as unknown as ToolDefinition] : [],
+      customTools,
       sessionManager: SessionManager.inMemory(req.cwd),
       // Pi's own retries are off: the factory decides on backoff and fallback (Amendment c).
       settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true } }),
@@ -160,6 +161,40 @@ export class PiRunner implements AgentRunner {
     for (const { session } of this.sessions.values()) session.dispose();
     this.sessions.clear();
   }
+}
+
+/**
+ * Custom tools replace the built-ins of the same name (AgentSession._refreshToolRegistry).
+ * bash: exactly the allowlisted env (Amendment b), jailed by bwrap/pasta when a jail is given; the
+ * in-process file tools go through a PathGuard confined to the session cwd (Amendment j).
+ */
+export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail">, tools: string[]): ToolDefinition[] {
+  const { cwd, env, jail } = req;
+  const defs: unknown[] = [];
+  if (tools.includes("bash")) defs.push(createBashToolDefinition(cwd, { exposeSessionEnvironment: false, spawnHook: bashSpawnHook(env, jail) }));
+  if (jail) {
+    const guard = new PathGuard([cwd]);
+    const make: Record<string, () => unknown> = {
+      read: () => createReadToolDefinition(cwd, { operations: guard.readOps() }),
+      write: () => createWriteToolDefinition(cwd, { operations: guard.writeOps() }),
+      edit: () => createEditToolDefinition(cwd, { operations: guard.editOps() }),
+      grep: () => createGrepToolDefinition(cwd, { operations: guard.grepOps() }),
+      find: () => createFindToolDefinition(cwd, { operations: guard.findOps() }),
+      ls: () => createLsToolDefinition(cwd, { operations: guard.lsOps() }),
+    };
+    for (const t of tools) if (make[t]) defs.push(make[t]());
+  }
+  // Variance of the render callbacks only; the SDK registers its tools the same way internally.
+  return defs as ToolDefinition[];
+}
+
+/** Pi bash spawn hook: fixed env, and the command wrapped into the jail. */
+export function bashSpawnHook(env: Record<string, string>, jail: Jail | undefined) {
+  return (ctx: { command: string; cwd: string; env: NodeJS.ProcessEnv }) => ({
+    ...ctx,
+    command: jailedCommand(jail, ctx.command, ctx.cwd, env),
+    env: { ...env },
+  });
 }
 
 // UNVERIFIED: Pi reports provider errors as text in AssistantMessage.errorMessage; the HTTP status is

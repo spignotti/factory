@@ -3,6 +3,7 @@ import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../
 import { loadRepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
+import { createSandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -21,6 +22,8 @@ export interface DoctorReport {
 
 export interface DoctorOptions {
   factoryHome: string;
+  /** Sandbox probe (tests inject one). */
+  probe?: SandboxProbe;
   repo?: string;
   profile?: string;
   json: boolean;
@@ -50,10 +53,23 @@ export function renderDoctor(r: DoctorReport): string {
   return lines.join("\n") + "\n";
 }
 
+export function sandboxCheck(mode: SandboxMode, probe?: SandboxProbe): DoctorCheck {
+  try {
+    const sb = createSandbox(mode, probe);
+    if (sb.mode === "off") return { name: "sandbox", status: "warn", detail: "off: agent commands run on the host" };
+    const what = `${mode}: filesystem ${sb.fs}, network ${sb.net}`;
+    return { name: "sandbox", status: sb.warnings.length ? "warn" : "ok", detail: [what, ...sb.warnings].join("; ") };
+  } catch (e) {
+    if (e instanceof SandboxUnavailable) return { name: "sandbox", status: "fail", detail: e.message };
+    throw e;
+  }
+}
+
 /** `factory doctor`: setup checks and the effective model per role with the layer it came from. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
   const checks = [check];
+  if (profile) checks.push(sandboxCheck(profile.sandbox, opts.probe));
   const report: DoctorReport = {
     ok: checks.every((c) => c.status !== "fail"),
     checks,

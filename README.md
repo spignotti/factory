@@ -95,6 +95,15 @@ rules (provider policy, reviewers in another model family than every `implement`
 `implement` backup must be `capacity_only`) are checked after the merge. `factory doctor [--repo <path>]`
 shows the effective model per role and the layer it came from.
 
+## Sandbox (Linux)
+
+Agent bash, repo `setup`, gate checks and red-green test runs are jailed with bubblewrap inside a pasta
+network namespace (SPEC Amendment j): only the run's worktree and agent HOME are writable, git metadata is
+read-only, host loopback, Docker bridge, metadata service and LAN are unreachable, the internet works. File
+tools are confined to the worktree. Set `sandbox: required | preferred | off` in
+`~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
+(bubblewrap), `pasta` (passt) and `ip` (iproute2); `factory doctor` shows what is in effect.
+
 ## Development
 
 ```

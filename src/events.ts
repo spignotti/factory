@@ -20,6 +20,8 @@ export const EVENT_TYPES = [
   "model_retry",
   // Waiting for the per-repo lock (`--wait`).
   "queued",
+  // Sandbox in effect for this run, with degradation warnings (Amendment j).
+  "sandbox",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

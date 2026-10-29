@@ -126,10 +126,14 @@ export function profileIssues(
   return [...issues, ...chainIssues(roles)];
 }
 
+export const SandboxModeSchema = z.enum(["required", "preferred", "off"]);
+
 export const ProfileSchema = z
   .object({
     roles: RolesSchema,
     providers: ProvidersSchema.default(DEFAULT_PROVIDERS),
+    /** Process sandbox for agents and repo commands (Amendment j). */
+    sandbox: SandboxModeSchema.default("preferred"),
     /** Same-model exponential backoff on capacity errors before falling back. */
     retry: RetrySchema.default({ base_ms: 2000, max_ms: 60_000, attempts: 4 }),
     /** Extra env var names per role for agent tool processes (Amendment b). */
@@ -173,6 +177,7 @@ export const ProfileLayerSchema = z
     retry: RetrySchema.partial().optional(),
     env: z.record(z.string(), z.array(z.string())).optional(),
     providers: ProvidersSchema.partial().optional(),
+    sandbox: SandboxModeSchema.optional(),
   })
   .strict();
 export type ProfileLayer = z.infer<typeof ProfileLayerSchema>;

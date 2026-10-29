@@ -14,7 +14,7 @@ import { finalize, syncBase } from "../steps/finalize.js";
 import { type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
 import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
-import { agentEnv, checkDeadline, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { agentEnv, checkDeadline, jailFor, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
@@ -163,6 +163,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   const runDir = join(deps.factoryHome, "runs", runId);
   mkdirSync(runDir, { recursive: true });
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
+  if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });
   const repoDir = resolve(opts.repo);
   const lane = opts.lane ?? "standard";
   const ref = opts.issue !== undefined ? `#${opts.issue}` : (opts.planFile ?? opts.textFile ?? "");
@@ -217,13 +218,13 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const env = agentEnv(ctx);
 
     if (repo.setup) {
-      const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline - Date.now()) });
+      const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline - Date.now()), jail: jailFor(ctx, worktree) });
       checkDeadline(ctx);
       if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` });
     }
     if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
-      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline });
+      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree) });
       throwIfInterrupted(deps);
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
@@ -319,6 +320,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   const now = deps.now ?? Date.now;
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
+  if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });
   const f = new RunFrame(runId, runDir, st.repo, "standard", events, startedAt, now, st.task.ref);
   f.set({ branch: st.branch, worktree: st.worktree, pr: st.pr, rounds: st.rounds });
 

@@ -9,6 +9,8 @@ import { gatesCommand, type Io } from "./commands/gates.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { resumeFactory, runFactory } from "./pipeline/run.js";
+import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
+import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 
 const USAGE = `usage:
@@ -27,6 +29,13 @@ function exitCode(result: string, signal: AbortSignal): number {
   const reason: unknown = signal.reason;
   if (reason instanceof Interrupted) return reason.signalName === "SIGINT" ? 130 : 143;
   return result === "failed" ? 1 : 0;
+}
+
+/** Decides the sandbox from the profile (throws when `required` is unmet); warnings go to stderr. */
+function sandboxFor(profile: Profile, io: Io): Sandbox {
+  const sandbox = createSandbox(profile.sandbox);
+  for (const w of sandbox.warnings) io.err(`factory: ${w}\n`);
+  return sandbox;
 }
 
 const defaultIo: Io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) };
@@ -78,6 +87,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
       if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });
@@ -93,7 +103,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             noPr: values["no-pr"],
             wait: values.wait,
           },
-          { runner, github: new GhCli(), profile: resolveProfile(loadLayers({ factoryHome, profile: values.profile })), factoryHome, signal: controller.signal },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);
@@ -117,6 +127,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         return 2;
       }
       const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });
@@ -124,7 +135,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         const result = await resumeFactory(
           positionals[0]!,
           { wait: values.wait, noPr: values["no-pr"] },
-          { runner, github: new GhCli(), profile: resolveProfile(loadLayers({ factoryHome, profile: values.profile })), factoryHome, signal: controller.signal },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);

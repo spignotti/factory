@@ -558,6 +558,7 @@ roles:
 - Tokens removed from the agent tool environment; only the factory uses `gh` and `git push`.
 - Task and PR text passed as delimited data.
 - Reviewers and the evaluator have no write or bash tools.
+- Agent bash, repo setup and checks run in a bwrap + pasta sandbox; file tools are path-guarded (Amendment j).
 
 ## 9. Run directory, events, status
 
@@ -855,3 +856,9 @@ i) **Layered model configuration (Silas 2026-10-29).** Most specific wins, whole
    3. `--profile <name|file>` on `run`/`resume`/`doctor`: an extra layer for experiments (`roles`/`retry`/`env` only). It sits below the repo layer, so a repo's choice is never overridden by accident;
    4. repo `.factory/repo.yaml` `models:` (role → chain, partial), e.g. cheaper models for a less important repo.
    `providers` (`allow`, `deny`; `*` = any; deny wins) can only be set by the built-in and user layers, so a repo cannot widen it. All safety rules (provider policy, reviewer family ≠ every implement family, `capacity_only` rule for cross-family implement entries) are validated on the merged result; errors name the role and the layer it came from. `doctor` prints the effective chain per role and its layer. Unknown roles or keys in any layer are errors.
+
+j) **Sandbox (Silas 2026-10-29), Linux only.** Agent bash (Pi `spawnHook`) and every repo command the factory runs for a run (`setup`, gate checks, `tests.run` for the red-green proof) run in a bubblewrap jail inside a pasta network namespace:
+   - filesystem: `/usr` (and `/bin`, `/lib*` links), selected `/etc` files, `/opt` and PATH toolchain dirs read-only; read-write only the run's worktree (or the temporary base worktree) and the agent HOME, at their real paths; the worktree's `.git` link file and the main repo's git dir read-only (agents cannot commit, set hooks, `core.fsmonitor` or rewrite `gitdir`); private `/tmp`, `/proc`, `/dev`; own user, pid, ipc, uts and cgroup namespaces. Never visible: `/run` (docker socket), other homes, `$FACTORY_HOME` except the run's own dirs.
+   - network: `pasta --no-map-gw -T none -U none` (no host loopback, no port forwards) plus, inside the namespace before bwrap, blackhole routes for 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0/8 and the gateway, no on-link subnet, IPv6 off. Internet works; host services, the Docker bridge, cloud metadata and the LAN do not. The resolver from `/etc/resolv.conf` stays reachable (residual risk).
+   - in-process Pi tools (read, write, edit, grep, find, ls) go through a path guard confined to the session cwd with symlinks resolved; writes into any `.git` are denied. Residual risk: a symlink swapped in between check and use by a concurrent bash process (TOCTOU).
+   - `sandbox: required | preferred | off` in the built-in or user profile only (not repo.yaml, not `--profile`); default `preferred`. `required` fails the run when bwrap or pasta (with iproute2) is missing; `preferred` degrades with a warning (no pasta → host network; no bwrap or not Linux → unjailed); `off` runs everything on the host. The decision is logged as a `sandbox` event and shown by `doctor`. `factory gates` (local/CI use) is not sandboxed.
