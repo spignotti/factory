@@ -17,6 +17,10 @@
     "profiles",
     "roles",
     "standards",
+    "templates",
+    "evals/tasks",
+    "evals/profiles",
+    "evals/README.md",
     "README.md",
     "SPEC.md"
   ],

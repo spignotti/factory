@@ -23,6 +23,20 @@ export function killRunningCommands(reason: string): void {
   }
 }
 
+/**
+ * Registers a long-lived process group (a service) so killRunningCommands reaches it too.
+ * Returns the unregister function.
+ */
+export function trackProcessGroup(pid: number): () => void {
+  running.add(pid);
+  return () => void running.delete(pid);
+}
+
+/** Why commands are refused (killRunningCommands was called), or undefined. */
+export function commandsKilled(): string | undefined {
+  return killedBy;
+}
+
 /** Test hook: allow commands again after killRunningCommands. */
 export function resetKilledCommands(): void {
   killedBy = undefined;

@@ -1,0 +1,36 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: unjs__ufo-335
+repo: https://github.com/unjs/ufo.git
+base: a7b94e69ff6159de8ddfd4940c90db4708c0d67e
+task: |
+  withoutBase can produce a protocol-relative URL (open redirect)
+
+  Stripping a base can leave a path that starts with `//`, e.g. `withoutBase("/base//evil.com", "/base")`
+  returns `"//evil.com"`, which browsers treat as a protocol-relative URL to another host. The result of
+  `withoutBase` must never start with more than one slash: collapse leading slashes to a single `/`.
+plan_effort: medium
+hidden:
+  from_commit: 5cd9e676711af3f4e4b5398ddf6ca8d52c1c7e1f
+  paths:
+  - test/base.test.ts
+  check: pnpm exec vitest run test/base.test.ts
+timeout_min: 30
+repo_config:
+  base_branch: main
+  setup: pnpm install --frozen-lockfile
+  checks:
+  - name: test
+    run: pnpm exec vitest run
+    tier: fast
+  tests:
+    globs:
+    - test/**
+    run: pnpm exec vitest run {files}
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: MIT
+source: https://github.com/unjs/ufo/pull/335
+notes: 'TypeScript task (unjs/ufo). The hidden test file is taken whole from the fix commit. Validated 2026-10-29 with `factory eval --validate` (sandboxed): hidden check red on base, green on the fix commit.'

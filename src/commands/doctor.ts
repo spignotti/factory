@@ -1,13 +1,19 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
+import { ciStubCheck, otherPrWorkflows } from "../ci.js";
 import { GhCli, type GitHub } from "../gh.js";
-import { remotesWithCredentials } from "../git.js";
+import { baseRef, remotesWithCredentials, revParse, withBaseWorktree } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
 import { loadRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
-import { createSandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
+import { createSandbox, gitCommonDir, type Sandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
+import { sh, tail } from "../exec.js";
+import { Services } from "../services.js";
 import type { z } from "zod";
 import type { DoctorReportSchema } from "../schemas/reports.js";
 
@@ -35,6 +41,8 @@ export interface DoctorOptions {
   view?: ProviderView;
   github?: GitHub;
   pingTimeoutMs?: number;
+  /** `--services`: start and stop every service and the ui once in a clean base worktree. */
+  services?: boolean;
 }
 
 /** Resolves the layered model config (with the repo layer if `--repo`), reporting errors as a failed check. */
@@ -187,6 +195,78 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   return checks;
 }
 
+/** CI stub hash (§5.3, §15) and other workflows gating pull requests (hint). */
+export function ciChecks(repoDir: string, repo: RepoConfig): DoctorCheck[] {
+  const stub = ciStubCheck(repoDir);
+  const checks: DoctorCheck[] = [{ name: "ci stub", ...stub }];
+  if (repo.base_branch !== "main") {
+    checks.push({ name: "ci stub", status: "warn", detail: `base_branch is ${repo.base_branch}; the stub's push trigger and default base are main` });
+  }
+  const others = otherPrWorkflows(repoDir);
+  if (others.length) {
+    checks.push({ name: "other workflows", status: "info", detail: `${others.join(", ")} also run on pull requests; checks there are unknown to repo.yaml (move them into repo.yaml checks, or keep them out of required statuses)` });
+  }
+  return checks;
+}
+
+/** Static service/ui checks: what runs unsandboxed, what nothing uses. */
+export function serviceConfigChecks(repo: RepoConfig): DoctorCheck[] {
+  const checks: DoctorCheck[] = [];
+  const used = new Set([...repo.checks.flatMap((c) => c.services ?? []), ...(repo.ui?.services ?? [])]);
+  for (const svc of repo.services) {
+    if (svc.host) checks.push({ name: `service ${svc.name}`, status: "warn", detail: "host: true: starts outside the sandbox, in the run worktree the agents write (residual risk)" });
+    if (!used.has(svc.name)) checks.push({ name: `service ${svc.name}`, status: "info", detail: "no check or ui needs it; it never starts" });
+  }
+  return checks;
+}
+
+/**
+ * Live service/ui check (`--services`, §15 "services start/stop; ui reachable"): setup, then every
+ * service and the ui started (ready probe) and stopped once, in a clean detached worktree of the base,
+ * with the same sandbox and env allowlist as a run. Never touches the user's checkout.
+ */
+export async function liveServiceChecks(repoDir: string, repo: RepoConfig, factoryHome: string, sandbox: Sandbox): Promise<DoctorCheck[]> {
+  const names = [...repo.services.map((s) => s.name), ...(repo.ui ? ["ui"] : [])];
+  if (!names.length) return [];
+  const tmp = mkdtempSync(join(tmpdir(), "factory-doctor-"));
+  const runId = `doctor-${process.pid}-${Date.now()}`;
+  const checks: DoctorCheck[] = [];
+  try {
+    const sha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
+    await withBaseWorktree(repoDir, sha, join(tmp, "wt"), async (wt) => {
+      const home = prepareAgentHome(tmp);
+      const env = buildAgentEnv(process.env, { home, extra: repo.agent_env });
+      const common = gitCommonDir(wt);
+      const jail = sandbox.mode === "off" ? undefined : { sandbox, rw: [wt, home], ro: common ? [common] : [], hide: [factoryHome] };
+      if (repo.setup) {
+        const setup = await sh(repo.setup, { cwd: wt, env, jail, timeoutMs: 15 * 60_000 });
+        if (setup.code !== 0) {
+          checks.push({ name: "services", status: "fail", detail: `setup failed in a clean base worktree: ${tail(setup.output, 5)}` });
+          return;
+        }
+      }
+      for (const name of names) {
+        const services = new Services(repo, { runId, logDir: join(tmp, "services"), cwd: wt, env, factoryHome, jail });
+        const t0 = Date.now();
+        try {
+          await services.ensure(name === "ui" ? [...(repo.ui?.services ?? []), "ui"] : [name]);
+          const what = name === "ui" ? `reachable at ${await services.expand(repo.ui!.url)}` : "started";
+          checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "ok", detail: `${what} in ${Math.round((Date.now() - t0) / 100) / 10}s and stopped` });
+        } catch (e) {
+          checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "fail", detail: (e as Error).message.slice(0, 600) });
+        } finally {
+          await services.stopAll();
+        }
+      }
+    });
+  } catch (e) {
+    checks.push({ name: "services", status: "fail", detail: (e as Error).message.slice(0, 300) });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  return checks;
+}
+
 /** `factory doctor`: setup checks, the Zen guard and the effective model per role with its layer. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
@@ -222,7 +302,19 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
           ? { name: "git remotes", status: "fail", detail: `credentials embedded in the URL of remote ${leaky.join(", ")}; agents can read .git/config inside the sandbox. Use gh's credential helper (gh auth setup-git) and a plain URL` }
           : { name: "git remotes", status: "ok", detail: "no credentials in remote URLs" },
       );
-      checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, loadRepoConfig(repoDir))));
+      const repo = loadRepoConfig(repoDir);
+      checks.push(...ciChecks(repoDir, repo));
+      checks.push(...serviceConfigChecks(repo));
+      if (opts.services && profile) {
+        try {
+          checks.push(...(await liveServiceChecks(repoDir, repo, opts.factoryHome, createSandbox(profile.sandbox, opts.probe))));
+        } catch (e) {
+          checks.push({ name: "services", status: "fail", detail: `not started: ${(e as Error).message}` });
+        }
+      } else if (repo.services.length || repo.ui) {
+        checks.push({ name: "services", status: "info", detail: "not started; doctor --repo <path> --services starts and stops each service and the ui once" });
+      }
+      checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, repo)));
     } catch (e) {
       const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
       checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand until \`factory adopt\`, SPEC §5.2)` : (e as Error).message.slice(0, 300) });

@@ -1,0 +1,40 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: django__django-16485
+repo: https://github.com/django/django.git
+base: 39f83765e12b0e5d260b7939fc3fe281d879b279
+task: |
+  floatformat() crashes on "0.00".
+  Description
+
+  from decimal import Decimal
+  from django.template.defaultfilters import floatformat
+  floatformat('0.00', 0)
+  floatformat(Decimal('0.00'), 0)
+  Both throw ValueError: valid range for prec is [1, MAX_PREC]
+plan_effort: medium
+hidden:
+  from_commit: 4b066bde692078b194709d517b27e55defae787c
+  paths:
+  - tests/template_tests/filter_tests/test_floatformat.py
+  check: .venv/bin/python tests/runtests.py --parallel 1 template_tests.filter_tests.test_floatformat
+timeout_min: 45
+repo_config:
+  base_branch: main
+  setup: uv venv -q -p 3.11 .venv && uv pip install -q -p .venv -e .
+  checks:
+  - name: tests
+    run: .venv/bin/python tests/runtests.py --parallel 1 template_tests.filter_tests
+    tier: fast
+  tests:
+    globs:
+    - tests/**
+    run: set -- {files}; l=; for f do f=${f#tests/}; f=${f%.py}; l="$l $(printf %s "$f" | tr / .)"; done; .venv/bin/python tests/runtests.py --parallel 1 $l
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: BSD-3-Clause
+source: 'SWE-bench Verified django__django-16485 (hidden tests: the upstream test file at the merge commit, equal to base + test_patch)'
+notes: 'FAIL_TO_PASS: test_zero_values (template_tests.filter_tests.test_floatformat.FunctionTests.test_zero_values). Upstream merge 2023-01-19T09:47:44Z. Validated 2026-10-29 with `factory eval --validate`
+  (sandboxed): hidden check red on base, green on the merge commit.'

@@ -12,6 +12,7 @@ import { type Profile, profileRoleOf } from "../schemas/profile.js";
 import type { RepoConfig } from "../schemas/repo.js";
 import { supervise, WatchdogAbort } from "./watchdog.js";
 import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
+import { Services } from "../services.js";
 
 export interface RunDeps {
   runner: AgentRunner;
@@ -30,6 +31,8 @@ export interface RunDeps {
   signal?: AbortSignal;
   /** Process sandbox for agents and repo commands (Amendment j); absent = none (tests). */
   sandbox?: Sandbox;
+  /** Role prompt replacements by name (`roles/<name>.md`), from an eval profile (§13). */
+  prompts?: Partial<Record<string, string>>;
 }
 
 export interface Task {
@@ -64,6 +67,8 @@ export interface RunContext {
   lane: Lane;
   /** Why a fast-lane run moved to the standard lane (empty = not escalated). */
   laneEscalation: string[];
+  /** Services of this run (§6.12), stopped at run end. */
+  services?: Services;
 }
 
 export type Lane = "standard" | "fast";
@@ -147,4 +152,17 @@ export async function callAgent(
     }
     throw e;
   }
+}
+
+/** Services of a run in its worktree, with the run's env and jail; events as `service`. */
+export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "runId" | "runDir" | "events" | "worktree">): Services {
+  return new Services(ctx.repo, {
+    runId: ctx.runId,
+    logDir: join(ctx.runDir, "services"),
+    cwd: ctx.worktree,
+    env: agentEnv(ctx),
+    factoryHome: ctx.deps.factoryHome,
+    jail: jailFor(ctx, ctx.worktree),
+    onEvent: (action, data) => void ctx.events.emit({ step: "gates", event: "service", data: { action, ...data } }),
+  });
 }

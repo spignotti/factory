@@ -1,0 +1,10 @@
+# Example variant for `factory experiment --base baseline --variant evals/profiles/example-variant.yaml`.
+# Only what differs from the base: one role chain, one prompt, one flag. The variant is layered on the
+# base (models: built-in < user < base < variant; prompts and flags merged key by key).
+description: luna for the plan reviewer, a terser implement prompt, high plan effort
+roles:
+  review_plan: [{ model: openai/gpt-6-luna, thinking: medium }]
+prompts:
+  implement: example-implement.md
+flags:
+  plan_effort: high

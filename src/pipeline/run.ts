@@ -5,7 +5,7 @@ import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
-import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
+import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema } from "../schemas/plan.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
@@ -17,7 +17,8 @@ import { gitAuthor, implementPackages } from "../steps/implement.js";
 import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
 import { planStep } from "../steps/plan.js";
 import { fastLaneEscalation } from "./lane.js";
-import { agentEnv, checkDeadline, jailFor, type Lane, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { EnvMissing } from "../services.js";
+import { agentEnv, checkDeadline, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
@@ -142,15 +143,20 @@ class RunFrame {
     if (this.state) saveState(this, this.state);
   }
 
+  /** Run-end cleanup (services), before result.json. */
+  readonly cleanups: (() => Promise<void>)[] = [];
+
   async execute(body: () => Promise<void>): Promise<RunResult> {
     try {
       await body();
     } catch (e) {
       const reason = (e as Error).message;
       if (e instanceof Interrupted) this.set({ result: "failed", reason });
-      else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) this.set({ result: "needs_human", reason });
-      else this.set({ result: "failed", reason });
+      else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded || e instanceof EnvMissing) {
+        this.set({ result: "needs_human", reason });
+      } else this.set({ result: "failed", reason });
     }
+    for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
     try {
       return this.finish();
     } finally {
@@ -232,18 +238,22 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing };
 
+    // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
+    // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
+    const baseSha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     const escalation: string[] = [];
-    let planned: PlanOutcome;
-    if (lane === "fast") {
-      const fast = await obtainFastPlan(base);
+    const planned: PlanOutcome = await withBaseWorktree(repoDir, baseSha, join(runDir, "plan-base"), async (planDir) => {
+      const pctx = { ...base, repoDir: planDir };
+      if (lane !== "fast") return obtainPlan(pctx, resolvePlanEffort(opts.planEffort, task.labels));
+      const fast = await obtainFastPlan(pctx);
+      let p: PlanOutcome;
       if (fast.kind === "escalate") {
         escalation.push(fast.reason);
-        planned = await planStep(base, "medium");
-      } else planned = fast;
-      if (planned.kind === "plan" && planned.plan.packages.length > 1) escalation.push(`${planned.plan.packages.length} packages (fast lane takes 1)`);
-    } else {
-      planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
-    }
+        p = await planStep(pctx, "medium");
+      } else p = fast;
+      if (p.kind === "plan" && p.plan.packages.length > 1) escalation.push(`${p.plan.packages.length} packages (fast lane takes 1)`);
+      return p;
+    });
     if (escalation.length) escalate(f, events, "intake", escalation);
     if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
     if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
@@ -255,7 +265,6 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 
     // Base check (SPEC §6.1 step 6) and worktree (step 7).
     checkDeadline(base);
-    const baseSha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     const status = await deps.github.baseStatus(repoDir, baseSha);
     if (status === "red" || status === "pending") {
       return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${status}, not green` });
@@ -273,6 +282,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement" });
     f.save();
     const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation] };
+    const services = (ctx.services = runServices(ctx));
+    f.cleanups.push(() => services.stopAll());
     const env = agentEnv(ctx);
 
     if (repo.setup) {
@@ -282,7 +293,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     }
     if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
-      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree) });
+      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
       throwIfInterrupted(deps);
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
@@ -416,6 +427,8 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline,
     };
+    const services = (ctx.services = runServices(ctx));
+    f.cleanups.push(() => services.stopAll());
     if (st.step === "implement") {
       for (const id of Object.keys(st.packages)) if (st.packages[id] !== "done") delete st.packages[id];
       st.failures = {};

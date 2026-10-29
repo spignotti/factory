@@ -1,0 +1,34 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: sympy__sympy-15809
+repo: https://github.com/sympy/sympy.git
+base: 28d913d3cead6c5646307ffa6540b21d65059dfd
+task: |
+  Zero-argument Min() and Max()
+  Right now `Min()` and `Max()` with no arguments raise `ValueError: The Max/Min functions must have arguments.`. It might be mathematically more convenient to have them return `oo` and `-oo`, respectively. See https://en.wikipedia.org/wiki/Empty_set#Extended_real_numbers for why these are valid answers mathematically.
+plan_effort: medium
+hidden:
+  from_commit: da9fdef5e00f40dfd500bfa356c61ce6bad1b559
+  paths:
+  - sympy/functions/elementary/tests/test_miscellaneous.py
+  check: .venv/bin/python -m pytest -q sympy/functions/elementary/tests/test_miscellaneous.py --deselect sympy/functions/elementary/tests/test_miscellaneous.py::test_issue_11463
+timeout_min: 45
+repo_config:
+  base_branch: main
+  setup: uv venv -q -p 3.9 .venv && uv pip install -q -p .venv -e . pytest mpmath==1.3.0
+  checks:
+  - name: tests
+    run: .venv/bin/python -m pytest -q sympy/functions/elementary/tests/test_miscellaneous.py
+    tier: fast
+  tests:
+    globs:
+    - sympy/**/tests/**
+    run: .venv/bin/python -m pytest -q {files}
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: BSD-3-Clause
+source: 'SWE-bench Verified sympy__sympy-15809 (hidden tests: the upstream test file at the merge commit, equal to base + test_patch)'
+notes: 'test_issue_11463 is deselected: it fails on the fix commit too in this environment. FAIL_TO_PASS: test_Min, test_Max. Upstream merge 2019-01-25T19:00:44Z. Validated 2026-10-29 with `factory eval
+  --validate` (sandboxed): hidden check red on base, green on the merge commit.'

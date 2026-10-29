@@ -12,8 +12,9 @@ export function asset(path: string): string {
   return text;
 }
 
-export function rolePrompt(name: string): string {
-  return asset(`roles/${name}.md`).trim();
+/** A role prompt (`roles/<name>.md`), or its replacement from an eval profile (`RunDeps.prompts`). */
+export function rolePrompt(name: string, overrides?: Partial<Record<string, string>>): string {
+  return (overrides?.[name] ?? asset(`roles/${name}.md`)).trim();
 }
 
 /** Untrusted text (task, PR, diff) is passed as delimited data, never as instructions (SPEC §8.3). */

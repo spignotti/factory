@@ -30,7 +30,8 @@
         "agent_error",
         "model_retry",
         "queued",
-        "sandbox"
+        "sandbox",
+        "service"
       ]
     },
     "role": {

@@ -1,0 +1,456 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/eval-profile.schema.json",
+  "title": "eval profile / experiment variant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "roles": {
+      "type": "object",
+      "properties": {
+        "plan_high": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "plan_medium": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "plan_normalize": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "implement": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "review_plan": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "review_simplicity": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "review_security": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "review_checklist": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "evaluate": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "pr_writer": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
+        "harden": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "base_ms": {
+          "default": 2000,
+          "type": "number",
+          "minimum": 0
+        },
+        "max_ms": {
+          "default": 60000,
+          "type": "number",
+          "minimum": 0
+        },
+        "attempts": {
+          "default": 4,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "env": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "description": {
+      "type": "string"
+    },
+    "prompts": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": [
+          "plan",
+          "plan_normalize",
+          "implement",
+          "pr_writer",
+          "review-plan",
+          "review-simplicity",
+          "review-security",
+          "review-checklist",
+          "review-common"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "flags": {
+      "type": "object",
+      "properties": {
+        "lane": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "fast"
+          ]
+        },
+        "plan_effort": {
+          "type": "string",
+          "enum": [
+            "none",
+            "medium",
+            "high"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

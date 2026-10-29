@@ -126,7 +126,7 @@ async function summarize(ctx: RunContext): Promise<string> {
       role: "pr_writer",
       cwd: ctx.worktree,
       tools: "none",
-      system: rolePrompt("pr_writer"),
+      system: rolePrompt("pr_writer", ctx.deps.prompts),
       prompt: [asData("plan", JSON.stringify(ctx.plan, null, 2)), asData("handoffs", JSON.stringify(ctx.handoffs, null, 2))].join("\n\n"),
     });
     return res.text.trim() || ctx.plan.goal;

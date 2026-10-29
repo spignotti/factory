@@ -1,0 +1,18 @@
+# Eval baseline (§13): the default role chains of profiles/default.yaml as of 2026-10-29, pinned so
+# that results stay comparable when the defaults move. Variants for `factory experiment` override
+# roles, retry, env, prompts and flags on top of this (layered: a variant states only its changes).
+description: default role chains as of 2026-10-29, default prompts, standard lane, task plan effort
+roles:
+  plan_high:         [{ model: openai/gpt-6.1-sol, thinking: high }]
+  plan_medium:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  plan_normalize:    [{ model: opencode-go/deepseek-v4.1-flash }]
+  implement:
+    - { model: opencode-go/deepseek-v4.1-flash, thinking: high }
+    - { model: opencode-go/mimo-v2.6-flash, capacity_only: true }
+  review_plan:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_checklist:  [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_security:   [{ model: openai/gpt-6.1-sol, thinking: high }]
+  review_simplicity: [{ model: openai/gpt-6-luna, thinking: medium }]
+  evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
+  pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
+  harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]

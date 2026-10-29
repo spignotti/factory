@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
+import { renderCiStub } from "./ci.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
@@ -22,9 +24,10 @@ const USAGE = `usage:
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
   factory resume <run-id> [--wait] [--no-pr] [--profile <file>]
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
-  factory doctor [--repo <path>] [--profile <file>] [--ping] [--json]
+  factory doctor [--repo <path>] [--profile <file>] [--ping] [--services] [--json]
               (setup checks, Zen guard, ChatGPT login; effective model per role and its layer;
-               --ping sends one tiny request per configured model)
+               CI stub hash; --ping sends one tiny request per configured model;
+               --services starts and stops each service and the ui once in a clean base worktree)
   models: built-in < $FACTORY_HOME/profile.yaml < --profile <file> < repo.yaml models: (see README)
   factory status [--json]
               (running, waiting for a human, interrupted runs; open factory PRs)
@@ -33,6 +36,16 @@ const USAGE = `usage:
   factory gc [--dry-run] [--force] [--json]
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
+              (--run starts the services its checks need, §6.12)
+  factory eval --profile <name|file> [--profile …] [--tasks <glob>] [--repeat N] [--out <dir>] [--json]
+              (§13: fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
+  factory eval --validate [--tasks <glob>] [--json]
+              (no agents: hidden tests red on base, green on the upstream fix)
+  factory experiment --base <profile> --variant <profile> [--tasks <glob>] [--repeat N≥2] [--out <dir>]
+              (eval of both, decision rule, JSON verdict; schemas/verdict.schema.json)
+              eval/experiment also take [--work-dir <dir>] [--keep]
+  factory ci-stub --ref <tag>
+              (prints .github/workflows/factory.yml for a pinned factory ref; doctor checks its hash)
 `;
 
 function exitCode(result: string, signal: AbortSignal): number {
@@ -67,12 +80,75 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       });
       return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, json: values.json }, io);
     }
+    if (command === "eval" || command === "experiment") {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          profile: { type: "string", multiple: true },
+          base: { type: "string" },
+          variant: { type: "string" },
+          tasks: { type: "string" },
+          repeat: { type: "string" },
+          out: { type: "string" },
+          "work-dir": { type: "string" },
+          keep: { type: "boolean", default: false },
+          validate: { type: "boolean", default: false },
+          json: { type: "boolean", default: false },
+        },
+      });
+      const factoryHome = factoryHomeOf();
+      // Sandbox and provider policy come from the user profile, as for `run`.
+      const sandbox = sandboxFor(resolveProfile(loadLayers({ factoryHome })), io);
+      const workDir = values["work-dir"] ?? join(factoryHome, "eval", "work");
+      if (values.validate) return await validateCommand({ tasks: values.tasks, json: values.json }, { factoryHome, workDir, sandbox, keep: values.keep }, io);
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      const deps = {
+        factoryHome,
+        workDir,
+        sandbox,
+        keep: values.keep,
+        signal: controller.signal,
+        // One runner per run; evalOne closes it.
+        runner: () => new PiRunner(join(factoryHome, "pi")),
+      };
+      try {
+        if (command === "eval") {
+          return await evalCommand({ profiles: values.profile ?? [], tasks: values.tasks, repeat: Number(values.repeat ?? 1), out: values.out, json: values.json }, deps, io);
+        }
+        if (!values.base || !values.variant) {
+          io.err(USAGE);
+          return 2;
+        }
+        return await experimentCommand({ base: values.base, variant: values.variant, tasks: values.tasks, repeat: Number(values.repeat ?? 2), out: values.out }, deps, io);
+      } finally {
+        uninstall();
+      }
+    }
+    if (command === "ci-stub") {
+      const { values } = parseArgs({ args: rest, options: { ref: { type: "string" } } });
+      if (!values.ref) {
+        io.err(USAGE);
+        return 2;
+      }
+      io.out(renderCiStub(values.ref));
+      return 0;
+    }
     if (command === "doctor") {
       const { values } = parseArgs({
         args: rest,
-        options: { repo: { type: "string" }, profile: { type: "string" }, ping: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+        options: {
+          repo: { type: "string" },
+          profile: { type: "string" },
+          ping: { type: "boolean", default: false },
+          services: { type: "boolean", default: false },
+          json: { type: "boolean", default: false },
+        },
       });
-      return await doctorCommand({ factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, json: values.json }, io);
+      return await doctorCommand(
+        { factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, services: values.services, json: values.json },
+        io,
+      );
     }
     if (command === "status") {
       const { values } = parseArgs({ args: rest, options: { json: { type: "boolean", default: false } } });

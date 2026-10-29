@@ -12,7 +12,8 @@ import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
  *   repo's git dir read-only (git is read-only for agents; a writable gitdir could set hooks or
  *   `core.fsmonitor` that would run on the host); a private /tmp. Never bound: /run (docker socket),
  *   other homes, `$FACTORY_HOME` (auth.json) except the run's own dirs.
- * - Network: own namespace through pasta without host loopback (`--no-map-gw`, no port forwards) and
+ * - Network: own namespace through pasta without host loopback (`--no-map-gw`, no port forwards in
+ *   either direction except a service's explicit ports, §6.12) and
  *   with blackhole routes for private, link-local and CGNAT ranges, no on-link subnet and IPv6 off, so
  *   internet works (package installs) but host services, the Docker bridge, cloud metadata and the LAN
  *   do not. The DNS servers from
@@ -45,6 +46,12 @@ export interface Jail {
   ro: string[];
   /** Never bound, not even as part of a PATH prefix (`$FACTORY_HOME`). */
   hide?: string[];
+  /**
+   * Explicit TCP forwards through pasta (services, §6.12); nothing else crosses the namespace.
+   * `expose`: host 127.0.0.1:p → jail :p (a service listening in this jail).
+   * `reach`: jail 127.0.0.1:p → host 127.0.0.1:p (a check talking to a service).
+   */
+  ports?: { expose?: number[]; reach?: number[] };
 }
 
 export const NO_SANDBOX: Sandbox = { mode: "off", fs: "none", net: "shared", warnings: [] };
@@ -67,7 +74,27 @@ export const NET_SETUP = [
   'exec "$@"',
 ].join("\n");
 
-export const PASTA_ARGS = ["--config-net", "--quiet", "--no-map-gw", "-T", "none", "-U", "none"];
+// pasta forwards every port bound in the namespace to the host (all interfaces) by default (`-t auto`):
+// a listener in the jail would be reachable from the LAN. All four directions are off unless a jail asks.
+export const PASTA_ARGS = ["--config-net", "--quiet", "--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none"];
+
+function validPort(p: number): number {
+  if (!Number.isInteger(p) || p < 1 || p > 65535) throw new Error(`sandbox: invalid port ${p}`);
+  return p;
+}
+
+/** pasta argv for a jail: no forwards, or exactly its `ports` (inbound bound to host loopback only). */
+export function pastaArgs(ports: Jail["ports"] = {}): string[] {
+  const expose = [...new Set(ports.expose ?? [])].map(validPort);
+  const reach = [...new Set(ports.reach ?? [])].map(validPort);
+  return [
+    "--config-net", "--quiet", "--no-map-gw",
+    ...(expose.length ? expose.flatMap((p) => ["-t", `127.0.0.1/${p}`]) : ["-t", "none"]),
+    "-u", "none",
+    ...(reach.length ? reach.flatMap((p) => ["-T", String(p)]) : ["-T", "none"]),
+    "-U", "none",
+  ];
+}
 
 const ETC = [
   "resolv.conf", "hosts", "nsswitch.conf", "host.conf", "gai.conf", "passwd", "group", "ssl", "ca-certificates",
@@ -188,7 +215,7 @@ export function jailedArgv(jail: Jail | undefined, shell: string, command: strin
   if (!jail || jail.sandbox.fs === "none") return inner;
   const bw = ["bwrap", ...bwrapArgs(jail, cwd, env), "--", ...inner];
   if (jail.sandbox.net === "shared") return bw;
-  return ["pasta", ...PASTA_ARGS, "--", "sh", "-c", NET_SETUP, "factory-net", ...bw];
+  return ["pasta", ...pastaArgs(jail.ports), "--", "sh", "-c", NET_SETUP, "factory-net", ...bw];
 }
 
 export function shellQuote(s: string): string {

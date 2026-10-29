@@ -1,0 +1,271 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/verdict.schema.json",
+  "title": "factory experiment verdict",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "base": {
+      "type": "string"
+    },
+    "variant": {
+      "type": "string"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "repeat": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 9007199254740991
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "win",
+        "loss",
+        "tie"
+      ]
+    },
+    "keep": {
+      "type": "string",
+      "enum": [
+        "base",
+        "variant"
+      ]
+    },
+    "reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cost_measure": {
+      "type": "string",
+      "enum": [
+        "usd",
+        "tokens"
+      ]
+    },
+    "summaries": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "string"
+            },
+            "runs": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "passes": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "pass_rate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_tokens": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_wall_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_rounds": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "gate_failures": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "bug_findings": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "real_findings": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "determinism_ratio": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "profile",
+            "runs",
+            "passes",
+            "pass_rate",
+            "mean_cost_usd",
+            "mean_tokens",
+            "mean_wall_s",
+            "mean_rounds",
+            "gate_failures",
+            "bug_findings",
+            "real_findings",
+            "errors",
+            "determinism_ratio"
+          ],
+          "additionalProperties": false
+        },
+        "variant": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "type": "string"
+            },
+            "runs": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "passes": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "pass_rate": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_cost_usd": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_tokens": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_wall_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "mean_rounds": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "gate_failures": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "bug_findings": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "real_findings": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "determinism_ratio": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "profile",
+            "runs",
+            "passes",
+            "pass_rate",
+            "mean_cost_usd",
+            "mean_tokens",
+            "mean_wall_s",
+            "mean_rounds",
+            "gate_failures",
+            "bug_findings",
+            "real_findings",
+            "errors",
+            "determinism_ratio"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "base",
+        "variant"
+      ],
+      "additionalProperties": false
+    },
+    "results_file": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "table": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "base",
+    "variant",
+    "tasks",
+    "repeat",
+    "verdict",
+    "keep",
+    "reasons",
+    "cost_measure",
+    "summaries",
+    "results_file",
+    "table"
+  ],
+  "additionalProperties": false
+}

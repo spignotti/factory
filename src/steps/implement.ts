@@ -45,7 +45,7 @@ export async function implementerTurn(ctx: RunContext, step: string, turn: Sessi
       role: "implement",
       cwd: ctx.worktree,
       tools: "coding",
-      system: rolePrompt("implement"),
+      system: rolePrompt("implement", ctx.deps.prompts),
       prompt,
       sessionKey: turn.sessionKey,
     });

@@ -1,8 +1,11 @@
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { factoryHomeOf } from "../config.js";
 import { sh } from "../exec.js";
 import { baseRef, changedFiles } from "../git.js";
 import { selectChecks } from "../gates/select.js";
 import { loadRepoConfig, type Tier, TierSchema } from "../schemas/repo.js";
+import { EnvMissing, Services } from "../services.js";
 import { type CheckResult, runChecks } from "../steps/gates.js";
 
 export interface GatesOptions {
@@ -12,6 +15,8 @@ export interface GatesOptions {
   tier: string;
   base?: string;
   json: boolean;
+  /** Port slots live under `<factoryHome>/ports` (default `factoryHomeOf()`). */
+  factoryHome?: string;
 }
 
 export interface Io {
@@ -21,7 +26,8 @@ export interface Io {
 
 /**
  * `factory gates --select | --run <check|selected>`: the same selection as the pipeline, for local use and CI.
- * Checks run with the caller's environment (CI or the user), not the agent allowlist.
+ * Checks run with the caller's environment (CI or the user), not the agent allowlist, and unsandboxed;
+ * so do the services they need.
  */
 export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> {
   const repoDir = resolve(opts.repo);
@@ -55,7 +61,31 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
       return 1;
     }
   }
-  const results: CheckResult[] = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command });
+  // Services (§6.12) for the checks that need them: started here, unsandboxed like the checks, stopped
+  // before returning. Logs go to a temp dir that is printed when a service fails.
+  const runId = `gates-${new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${process.pid}`;
+  const logDir = join(tmpdir(), `factory-${runId}`, "services");
+  const services = new Services(repo, {
+    runId,
+    logDir,
+    cwd: repoDir,
+    env,
+    factoryHome: opts.factoryHome ?? factoryHomeOf(),
+    onEvent: (action, data) => {
+      if (!opts.json && action !== "ports") io.err(`gates: service ${String(data.service ?? "")} ${action}\n`);
+    },
+  });
+  let results: CheckResult[];
+  try {
+    results = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, services });
+  } catch (e) {
+    if (!(e instanceof EnvMissing)) throw e;
+    io.err(`gates: ${e.message}\n`);
+    if (opts.json) io.out(JSON.stringify({ green: false, env_missing: e.message, checks: [] }) + "\n");
+    return 1;
+  } finally {
+    await services.stopAll();
+  }
   const green = results.every((r) => r.status !== "fail");
   if (opts.json) io.out(JSON.stringify({ green, checks: results }) + "\n");
   else for (const r of results) io.out(`${r.status.padEnd(5)} ${r.name}${r.output_tail ? "\n" + r.output_tail : ""}\n`);
