@@ -8,9 +8,11 @@ tests:
 human_only_paths: [".factory/repo.yaml", "AGENTS.md"]
 review:
   max_rounds: 3
+# A default port (shifted by the run's slot) rather than a named one: test files run in parallel with
+# separate factory homes, and the named ports (20000 + slot offset) of other fixtures would collide.
 ui:
-  start: "node server.mjs --port {port:app}"
-  url: "http://127.0.0.1:{port:app}"
+  start: "node server.mjs --port {port:4300}"
+  url: "http://127.0.0.1:{port:4300}"
   ready_timeout_s: 20
   paths: ["web/**", "server.mjs"]
   pages: ["/"]
