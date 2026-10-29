@@ -220,6 +220,17 @@ describe("factory doctor: Zen guard rules", () => {
 });
 
 describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", () => {
+  it("a repo without repo.yaml: the model table still shows, the repo check names the missing file", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "norepo-"));
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    const c = capture();
+    expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c.io)).toBe(1);
+    const r = JSON.parse(c.text()) as DoctorReport;
+    expect(check(r, "model config")).toMatchObject({ status: "ok" });
+    expect(r.models.length).toBeGreaterThan(0);
+    expect(check(r, "repo.yaml")).toMatchObject({ status: "fail", detail: expect.stringMatching(/missing/) });
+  });
+
   it("fails on credentials embedded in a remote URL without printing them", async () => {
     const repo = createFixtureRepo();
     execFileSync("git", ["remote", "add", "origin", "https://x-access-token:s3cr3t-value@github.com/o/r.git"], { cwd: repo });

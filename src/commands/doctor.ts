@@ -1,9 +1,10 @@
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
 import { GhCli, type GitHub } from "../gh.js";
 import { remotesWithCredentials } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
-import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
+import { loadRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
 import { createSandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
@@ -40,7 +41,8 @@ export interface DoctorOptions {
 export function modelConfigCheck(opts: DoctorOptions): { check: DoctorCheck; profile?: Profile } {
   try {
     let profile = resolveProfile(loadLayers({ factoryHome: opts.factoryHome, profile: opts.profile }));
-    if (opts.repo) profile = withRepoModels(profile, loadRepoConfig(resolve(opts.repo)).models);
+    // A missing repo.yaml is reported by the repo check; the other layers are still shown.
+    if (opts.repo && existsSync(join(resolve(opts.repo), REPO_CONFIG_PATH))) profile = withRepoModels(profile, loadRepoConfig(resolve(opts.repo)).models);
     return { check: { name: "model config", status: "ok", detail: "layers merged; provider policy and family rules hold" }, profile };
   } catch (e) {
     if (!(e instanceof Error)) throw e;
@@ -222,7 +224,8 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       );
       checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, loadRepoConfig(repoDir))));
     } catch (e) {
-      checks.push({ name: "repo.yaml", status: "fail", detail: (e as Error).message.slice(0, 300) });
+      const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
+      checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand until \`factory adopt\`, SPEC §5.2)` : (e as Error).message.slice(0, 300) });
     }
   }
   const report: DoctorReport = {
