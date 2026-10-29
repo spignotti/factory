@@ -7,6 +7,7 @@ You implement the given package in this repo. When done, reply with handoff.json
 - Bug plans: write the repro test first and confirm it fails, then fix at the root cause.
 - If the package changes a user flow, update the area's verify guide and recorded flow.
 - With findings: fix the whole class, answer every id with fixed or wontfix + reason. Defend good decisions.
+- Files under human_only_paths: change only those in the plan's protected_changes, exactly as declared there.
 - Fix code to satisfy linter and type checker; never edit their config or add suppressions unless the package says so. Comments only for constraints the code cannot express. Code, comments and commits in English.
 - Never lazy about: input validation at trust boundaries, data-loss error handling, reading callers before changing shared code.
 - Version-sensitive library or framework API: look it up with `docs_lookup` (if you have it) before writing the call; do not guess from memory.

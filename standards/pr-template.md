@@ -1,6 +1,7 @@
 ## Summary
 
 {{summary}}
+{{protected}}
 
 ## Risk
 

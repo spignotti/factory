@@ -1,4 +1,4 @@
-import { matchesAny, type Plan } from "../schemas/plan.js";
+import { isProtected, matchesAny, type Plan } from "../schemas/plan.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { RepoConfig } from "../schemas/repo.js";
 
@@ -19,6 +19,19 @@ export function refPath(ref: string): string {
 export function forbiddenPaths(changed: string[], globs: string[]): BuiltinResult {
   const hits = changed.filter((f) => matchesAny(f, globs));
   return hits.length ? fail("forbidden_paths", `forbidden paths touched: ${hits.join(", ")}`) : ok("forbidden_paths");
+}
+
+/** Changed `human_only_paths` files: only the plan's declared `protected_changes` may change. */
+export function protectedFiles(changed: string[], humanOnly: string[]): string[] {
+  return changed.filter((f) => isProtected(f, humanOnly));
+}
+
+export function protectedPaths(plan: Plan, changed: string[], humanOnly: string[]): BuiltinResult {
+  const declared = new Set(plan.protected_changes.map((c) => c.file));
+  const bad = protectedFiles(changed, humanOnly).filter((f) => !declared.has(f));
+  return bad.length
+    ? fail("protected_paths", `human_only_paths changed without a protected_changes entry in the plan (revert them): ${bad.join(", ")}`)
+    : ok("protected_paths", declared.size ? `declared: ${[...declared].join(", ")}` : "");
 }
 
 export function diffSize(stat: Map<string, number>, max: number): BuiltinResult {

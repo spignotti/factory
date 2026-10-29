@@ -93,6 +93,13 @@ export async function diffText(cwd: string, base: string, exclude: string[] = []
   return git(cwd, ["diff", "--no-renames", mb, "--", ".", ...exclude.map((p) => `:(exclude,glob)${p}`)]);
 }
 
+/** Unified diff of the given files since the merge base. */
+export async function diffFiles(cwd: string, base: string, files: string[]): Promise<string> {
+  if (!files.length) return "";
+  const mb = await mergeBase(cwd, base);
+  return git(cwd, ["diff", "--no-renames", mb, "--", ...files.map((f) => `:(literal)${f}`)]);
+}
+
 export async function stageAll(cwd: string): Promise<void> {
   await git(cwd, ["add", "-A"]);
 }

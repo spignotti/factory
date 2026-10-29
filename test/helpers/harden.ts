@@ -45,5 +45,6 @@ export const PLAN = (goal: string, resolves: string[] = []): Plan => ({
   packages: [{ id: "P1", title: "check", description: "add the check", files: ["scripts/check.sh"], depends_on: [], changes_flows: [] }],
   acceptance: [{ id: "A1", package: "P1", text: "the check fails on the pattern", verify: "check", kind: "behavior", risk: false }],
   out_of_scope: [],
+  protected_changes: [],
   resolves_findings: resolves,
 });

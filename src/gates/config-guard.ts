@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { diffText, git, mergeBase } from "../git.js";
 import { matchesAny, type Plan } from "../schemas/plan.js";
+import { parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import type { BuiltinResult } from "./builtin.js";
 
 /**
@@ -102,6 +103,69 @@ export function configChange(path: string, before: string | undefined, after: st
   return undefined;
 }
 
+const RISK_RANK = { none: 0, low: 1, medium: 2, high: 3 } as const;
+const POLICY_RANK = { bot_review: 0, human_review: 1 } as const;
+
+/**
+ * Ways a `.factory/repo.yaml` change weakens the factory's own checks or widens what agents get.
+ * Adding checks or protections is fine; this list is never in scope, even for a declared protected
+ * change: only a human makes these edits.
+ */
+export function repoConfigLoosening(before: string | undefined, after: string | undefined): string[] {
+  if (before === undefined || before === after) return [];
+  let b: RepoConfig;
+  try {
+    b = parseRepoConfig(before);
+  } catch {
+    return []; // an invalid base config cannot be loosened
+  }
+  if (after === undefined) return ["repo.yaml deleted"];
+  let a: RepoConfig;
+  try {
+    a = parseRepoConfig(after);
+  } catch (e) {
+    return [`repo.yaml no longer valid: ${(e as Error).message.slice(0, 200)}`];
+  }
+  const out: string[] = [];
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+  const removed = (what: string, xs: string[], ys: string[]) => {
+    const gone = xs.filter((x) => !ys.includes(x));
+    if (gone.length) out.push(`${what} removed: ${gone.join(", ")}`);
+  };
+  for (const c of b.checks) {
+    const now = a.checks.find((x) => x.name === c.name);
+    if (!now) out.push(`check ${c.name} removed`);
+    else if (!same(c, now)) out.push(`check ${c.name} changed (run, tier, paths or services)`);
+  }
+  removed("human_only_paths", b.human_only_paths, a.human_only_paths);
+  removed("sensitive_paths", b.sensitive_paths, a.sensitive_paths);
+  removed("limits.forbidden_paths", b.limits.forbidden_paths, a.limits.forbidden_paths);
+  const skips = a.review.skip_paths.filter((x) => !b.review.skip_paths.includes(x));
+  if (skips.length) out.push(`review.skip_paths added: ${skips.join(", ")}`);
+  if (a.review.max_rounds < b.review.max_rounds) out.push("review.max_rounds lowered");
+  if (b.review.checklist && !a.review.checklist) out.push("review.checklist turned off");
+  if (RISK_RANK[a.merge.auto_merge_max_risk] > RISK_RANK[b.merge.auto_merge_max_risk]) out.push("merge.auto_merge_max_risk raised");
+  for (const r of ["low", "medium"] as const) {
+    if (POLICY_RANK[a.merge.policy[r]] < POLICY_RANK[b.merge.policy[r]]) out.push(`merge.policy.${r} loosened`);
+  }
+  if (a.merge.low_max_diff_lines > b.merge.low_max_diff_lines) out.push("merge.low_max_diff_lines raised");
+  if (a.limits.max_diff_lines > b.limits.max_diff_lines) out.push("limits.max_diff_lines raised");
+  removed("tests.globs", b.tests.globs, a.tests.globs);
+  if (b.tests.run && a.tests.run !== b.tests.run) out.push("tests.run changed");
+  const env = a.agent_env.filter((x) => !b.agent_env.includes(x));
+  if (env.length) out.push(`agent_env added: ${env.join(", ")}`);
+  if (!same(b.secrets, a.secrets)) out.push("secrets changed");
+  if (b.env_command !== a.env_command) out.push("env_command changed");
+  if (b.setup !== a.setup) out.push("setup changed");
+  for (const s of b.services) {
+    const now = a.services.find((x) => x.name === s.name);
+    if (!now || !same(s, now)) out.push(`service ${s.name} changed or removed`);
+  }
+  if (!same(b.models, a.models)) out.push("models changed");
+  if (!same(b.git, a.git)) out.push("git author changed");
+  return out;
+}
+
 /** Suppressions on added lines of a unified diff: `[file, marker, line text]`. */
 export function addedSuppressions(diff: string): { file: string; marker: string; line: string }[] {
   const out: { file: string; marker: string; line: string }[] = [];
@@ -129,6 +193,8 @@ export function configGuard(input: {
   packages: string[];
   configChanges: { file: string; why: string }[];
   suppressions: { file: string; marker: string; line: string }[];
+  /** repo.yaml loosening: fails even when the plan declares the file a protected change. */
+  loosening?: string[];
 }): BuiltinResult {
   const files = input.plan.packages.filter((p) => input.packages.includes(p.id)).flatMap((p) => p.files);
   const text = planText(input.plan, input.packages);
@@ -136,6 +202,7 @@ export function configGuard(input: {
   const bad = [
     ...input.configChanges.filter((c) => !inScope(c.file)).map((c) => `${c.file}: ${c.why} (not in the plan's files)`),
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
+    ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
   ];
   return bad.length
     ? { name: "config_guard", ok: false, detail: `fix the code instead of loosening the tools (bug):\n- ${bad.join("\n- ")}` }
@@ -143,14 +210,16 @@ export function configGuard(input: {
 }
 
 /** Collects config changes and added suppressions in a worktree against `base` (stage first). */
-export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions">> {
+export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening">> {
   const mb = await mergeBase(cwd, base);
   const configChanges: { file: string; why: string }[] = [];
+  let loosening: string[] = [];
   for (const file of changed) {
     const before = await git(cwd, ["show", `${mb}:${file}`]).catch(() => undefined);
     const after = await readFile(join(cwd, file), "utf8").catch(() => undefined);
     const why = configChange(file, before, after);
     if (why) configChanges.push({ file, why });
+    if (file === REPO_CONFIG_PATH) loosening = repoConfigLoosening(before, after);
   }
-  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)) };
+  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening };
 }

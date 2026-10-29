@@ -480,6 +480,10 @@ ${fixed}` } };
           c.merge = { auto_merge_max_risk: "medium" };
           c.human_only_paths = ["src/math.js"];
         },
+        steps: (steps) =>
+          steps.map((s) =>
+            s.role === "plan_high" ? { ...s, output: { ...(s.output as object), protected_changes: [{ file: "src/math.js", change: "add multiply", reason: "task" }] } } : s,
+          ),
       });
       expect(r.result).toMatchObject({ risk: "high", merge_policy: "human_review" });
     });

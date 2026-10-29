@@ -8,7 +8,7 @@ import { sh, tail } from "../exec.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema } from "../schemas/plan.js";
-import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
+import { loadRepoConfig, parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import { withRepoModels } from "../config.js";
 import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from "../memory.js";
 import { finalize, syncBase } from "../steps/finalize.js";
@@ -249,15 +249,21 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 
   return f.execute(async () => {
     events.emit({ step: "intake", event: "step_started" });
-    const repo: RepoConfig = loadRepoConfig(repoDir);
-    deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
-    const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
-    if (!secrets) return;
+    const checkout: RepoConfig = loadRepoConfig(repoDir);
     const task: Task = await readTask(opts, repoDir, deps.github);
     f.taskRef = task.ref;
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
     f.release = lock.release;
+    // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
+    // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
+    const baseSha = await revParse(repoDir, await baseRef(repoDir, checkout.base_branch));
+    // Checks, policies and secrets come from the base commit: a change to repo.yaml on the branch
+    // (a protected change) takes effect only after a human merged it.
+    const repo = await baseRepoConfig(repoDir, baseSha, checkout, events, "intake");
+    deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
+    const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
+    if (!secrets) return;
     const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane }));
     f.save();
 
@@ -266,9 +272,6 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
 
-    // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
-    // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
-    const baseSha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     const escalation: string[] = [];
     const planned: PlanOutcome = await withBaseWorktree(repoDir, baseSha, join(runDir, "plan-base"), async (planDir) => {
       const pctx = { ...base, repoDir: planDir };
@@ -412,6 +415,22 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
 }
 
 /**
+ * repo.yaml as committed at the base (`sha`), never the checkout or the run branch: the agent cannot
+ * weaken the checks that judge its own change. Falls back to the checkout's file (with an event) only
+ * when the base has none, e.g. a repo whose repo.yaml is not committed yet.
+ */
+export async function baseRepoConfig(repoDir: string, sha: string, checkout: RepoConfig, events: EventLog, step: string): Promise<RepoConfig> {
+  const text = await git(repoDir, ["show", `${sha}:${REPO_CONFIG_PATH}`]).catch(() => undefined);
+  if (text === undefined) {
+    events.emit({ step, event: "progress", data: { repo_config: "not committed at base; using the checkout's file" } });
+    return checkout;
+  }
+  const repo = parseRepoConfig(text);
+  if (JSON.stringify(repo) !== JSON.stringify(checkout)) events.emit({ step, event: "progress", data: { repo_config: `checkout differs from base ${sha.slice(0, 8)}; using base` } });
+  return repo;
+}
+
+/**
  * `factory resume <run-id>`: continue a stopped run (needs_human, failed, interrupted) after a human
  * fix. Re-validates first: commits the human's uncommitted changes, merges commits pushed to the PR
  * branch and the moved base (never a rebase or force-push), re-runs the gates (red → one fix
@@ -444,7 +463,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
 
   return f.execute(async () => {
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: st.result } });
-    const repo = loadRepoConfig(st.repo);
+    const repo = st.base_sha ? await baseRepoConfig(st.repo, st.base_sha, loadRepoConfig(st.repo), events, "resume") : loadRepoConfig(st.repo);
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
     if (!secrets) return;

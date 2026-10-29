@@ -25,6 +25,17 @@ export const AcceptanceSchema = z.object({
 });
 export type Acceptance = z.infer<typeof AcceptanceSchema>;
 
+/**
+ * A declared change to a `human_only_paths` file (CI workflows, `.factory/`). Only declared files may
+ * change; such a run always ends with human review and its gates keep the base commit's config.
+ */
+export const ProtectedChangeSchema = z.object({
+  file: z.string().min(1),
+  change: z.string().min(1),
+  reason: z.string().min(1),
+});
+export type ProtectedChange = z.infer<typeof ProtectedChangeSchema>;
+
 export const PlanSchema = z.object({
   version: z.literal(1),
   type: z.enum(["feature", "bug", "chore"]),
@@ -34,6 +45,7 @@ export const PlanSchema = z.object({
   acceptance: z.array(AcceptanceSchema).min(1),
   out_of_scope: z.array(z.string()).default([]),
   resolves_findings: z.array(z.string()).default([]),
+  protected_changes: z.array(ProtectedChangeSchema).default([]),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
@@ -66,6 +78,14 @@ export function quoteOccursIn(quote: string, text: string): boolean {
 
 export function matchesAny(file: string, globs: string[]): boolean {
   return globs.length > 0 && picomatch(globs, { dot: true })(file);
+}
+
+/** Verify guides and flows evolve with the app: never protected, even under a `.factory/**` glob. */
+export const NEVER_PROTECTED = [".factory/verify/**"];
+
+/** Whether `file` is protected config (`human_only_paths`, minus verify guides). */
+export function isProtected(file: string, humanOnly: string[]): boolean {
+  return matchesAny(file, humanOnly) && !matchesAny(file, NEVER_PROTECTED);
 }
 
 export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanValidation {
@@ -126,6 +146,21 @@ export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanVali
       (a) => a.package === p.id && a.kind === "edge_case" && a.verify === "test" && a.risk,
     );
     if (!hasRisk) errors.push(`${p.id}: touches sensitive_paths, needs a kind:edge_case, verify:test, risk:true criterion`);
+  }
+
+  const human = ctx.repo.human_only_paths;
+  const declared = new Set<string>();
+  for (const c of plan.protected_changes) {
+    if (declared.has(c.file)) errors.push(`protected_changes: ${c.file} declared twice`);
+    declared.add(c.file);
+    if (/[*?[\]{}]/.test(c.file)) errors.push(`protected_changes: ${c.file} must be a file path, not a glob`);
+    else if (!isProtected(c.file, human)) errors.push(`protected_changes: ${c.file} is not under human_only_paths (plan it as a normal file)`);
+    if (!plan.packages.some((p) => p.files.includes(c.file))) errors.push(`protected_changes: ${c.file} is in no package's files`);
+  }
+  for (const p of plan.packages) {
+    for (const f of p.files) {
+      if (isProtected(f, human) && !declared.has(f)) errors.push(`${p.id}: ${f} is under human_only_paths; declare it in protected_changes (file, change, reason) or drop it`);
+    }
   }
 
   if (ctx.sourceText !== undefined) {

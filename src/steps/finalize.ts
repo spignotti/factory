@@ -2,12 +2,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { publishEvidence, evidenceUrl } from "../evaluate/evidence.js";
 import { criterionEvidence, type EvidenceLink, evaluationMarkdown } from "../evaluate/pr.js";
-import { baseRef, changedFiles, diffStat, isAncestor, mergeRef, revParse } from "../git.js";
+import { baseRef, changedFiles, diffFiles, diffStat, isAncestor, mergeRef, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
+import { protectedFiles } from "../gates/builtin.js";
 import { type MergePolicy, mergePolicy, riskClass, type RiskAssessment } from "../pipeline/risk.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
@@ -27,6 +28,39 @@ export interface FinalizeInput {
   startedAt: number;
   /** Resume: the run already opened this PR; update it instead of creating one. */
   existingPr?: { url: string; draft: boolean };
+}
+
+/** Label of every PR that changes `human_only_paths`. */
+export const PROTECTED_LABEL = "factory:protected-config";
+
+/** The PR section of a run that changes protected config: declared changes and the exact diff. */
+export function protectedSection(ctx: Pick<RunContext, "plan">, files: string[], diff: string): string {
+  if (!files.length) return "";
+  const declared = new Map(ctx.plan.protected_changes.map((c) => [c.file, c]));
+  const items = files.map((f) => {
+    const c = declared.get(f);
+    return c ? `- \`${f}\`: ${c.change} (why: ${c.reason})` : `- \`${f}\`: not declared in the plan`;
+  });
+  const fence = diff.includes("```") ? "~~~~" : "```";
+  const MAX = 30_000; // GitHub caps PR bodies at 65536 characters
+  const shown = diff.length > MAX ? `${diff.slice(0, MAX)}\n… diff truncated, see the PR's Files tab` : diff;
+  return [
+    "## ⚠️ Changes protected config (CI / factory)",
+    "",
+    "This PR changes files under `human_only_paths`. It is never auto-merged and needs a human's approval.",
+    "The factory's gates ran with the base branch's `.factory/repo.yaml`, not the changed one; CI on this PR runs the changed workflow files.",
+    "",
+    ...items,
+    "",
+    "<details open><summary>Exact diff of the protected files</summary>",
+    "",
+    `${fence}diff`,
+    shown.trimEnd(),
+    fence,
+    "",
+    "</details>",
+    "",
+  ].join("\n");
 }
 
 export interface FinalizeOutput {
@@ -94,6 +128,8 @@ export function renderPrBody(ctx: RunContext, v: {
   changed: string[];
   /** Latest evaluate report and links to its published evidence. */
   evaluation?: { report?: EvaluateReport; link: EvidenceLink; notes: string[] };
+  /** Rendered protectedSection, "" when no protected file changed. */
+  protectedConfig?: string;
 }): string {
   const { plan, handoffs } = ctx;
   const { input, out } = v;
@@ -116,6 +152,7 @@ export function renderPrBody(ctx: RunContext, v: {
   const migrations = v.changed.filter((f) => f.includes("migrations/"));
   const fill: Record<string, string> = {
     summary: v.summary,
+    protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
     risk: out.risk.risk,
     merge_policy: out.mergePolicy,
     risk_reasons: list(out.risk.reasons),
@@ -229,11 +266,15 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const diffLines = [...(await diffStat(ctx.worktree, ctx.baseSha)).values()].reduce((a, b) => a + b, 0);
   const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
-  const policy = mergePolicy(risk.risk, result, ctx.repo.merge);
+  const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
+  // Protected config never merges on its own, whatever the merge settings say.
+  const policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const out = { result, reason, risk, mergePolicy: policy };
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits);
-  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation }));
+  const protectedConfig = protectedSection(ctx, guarded, await diffFiles(ctx.worktree, ctx.baseSha, guarded));
+  if (guarded.length) ctx.events.emit({ step: "finalize", event: "progress", data: { protected_changes: guarded } });
+  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig }));
   writeRunFile(ctx, "pr.md", body);
 
   throwIfInterrupted(ctx.deps);
@@ -247,12 +288,13 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       await ctx.deps.github.push(ctx.worktree, ctx.branch);
       if (input.existingPr) {
         await ctx.deps.github.updatePr(ctx.worktree, input.existingPr.url, { title, body });
+        if (guarded.length) await ctx.deps.github.addLabel(ctx.worktree, input.existingPr.url, PROTECTED_LABEL);
         if (result === "done" && input.existingPr.draft) {
           await ctx.deps.github.markReady(ctx.worktree, input.existingPr.url);
           draft = false;
         }
       } else {
-        pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: result !== "done" });
+        pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: result !== "done", labels: guarded.length ? [PROTECTED_LABEL] : [] });
         draft = result !== "done";
       }
       if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);

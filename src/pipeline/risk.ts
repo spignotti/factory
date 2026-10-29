@@ -1,10 +1,13 @@
 import { DEPENDENCY_GLOBS, MIGRATION_GLOBS } from "../paths.js";
-import { matchesAny } from "../schemas/plan.js";
+import { isProtected, matchesAny } from "../schemas/plan.js";
 import type { RepoConfig, Risk } from "../schemas/repo.js";
 import type { RunResultKind } from "../events.js";
 
 export type MergePolicy = "auto" | "bot_review" | "human_review";
 
+
+/** Risk reason of every run that changes `human_only_paths`: never auto, always a human's OK. */
+export const PROTECTED_REASON = "changes protected config (CI / factory): human approval required, never auto-merged";
 
 export interface RiskAssessment {
   risk: Risk;
@@ -15,8 +18,10 @@ export interface RiskAssessment {
 export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig; laneEscalated?: boolean }): RiskAssessment {
   const { changed, diffLines, repo } = input;
   const hits = (globs: string[]) => changed.filter((f) => matchesAny(f, globs));
-  const humanOnly = hits(repo.human_only_paths);
-  if (humanOnly.length) return { risk: "high", reasons: [`human_only_paths: ${humanOnly.join(", ")}`] };
+  const humanOnly = changed.filter((f) => isProtected(f, repo.human_only_paths));
+  if (humanOnly.length) {
+    return { risk: "high", reasons: [`human_only_paths: ${humanOnly.join(", ")}`, PROTECTED_REASON] };
+  }
   const reasons: string[] = [];
   const sensitive = hits(repo.sensitive_paths);
   if (sensitive.length) reasons.push(`sensitive_paths: ${sensitive.join(", ")}`);

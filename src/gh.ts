@@ -20,6 +20,8 @@ export interface PrRequest {
   title: string;
   body: string;
   draft: boolean;
+  /** Labels to add (created if missing). */
+  labels?: string[];
 }
 
 /** Everything the factory does on GitHub. Only the factory process calls it. */
@@ -29,6 +31,8 @@ export interface GitHub {
   push(repoDir: string, branch: string): Promise<void>;
   createPr(req: PrRequest): Promise<string>;
   enableAutoMerge(repoDir: string, pr: string): Promise<void>;
+  /** Adds a label to a PR, creating it if missing; best effort. */
+  addLabel(repoDir: string, pr: string, label: string): Promise<void>;
   /** Resume: refresh title/body of the run's existing PR. */
   updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void>;
   /** Resume: a draft PR whose run is now done becomes ready for review. */
@@ -142,7 +146,15 @@ export class GhCli implements GitHub {
   async createPr(req: PrRequest): Promise<string> {
     const args = ["pr", "create", "--head", req.head, "--base", req.base, "--title", req.title, "--body", req.body];
     if (req.draft) args.push("--draft");
-    return (await gh(req.repoDir, args)).trim();
+    const url = (await gh(req.repoDir, args)).trim();
+    for (const label of req.labels ?? []) await this.addLabel(req.repoDir, url, label);
+    return url;
+  }
+
+  async addLabel(repoDir: string, pr: string, label: string): Promise<void> {
+    // The PR body carries the same warning; a missing label permission must not fail the run.
+    await gh(repoDir, ["label", "create", label, "--force", "--color", "B60205", "--description", "Changes CI or factory config: human review required"]).catch(() => "");
+    await gh(repoDir, ["pr", "edit", pr, "--add-label", label]).catch(() => "");
   }
 
   async enableAutoMerge(repoDir: string, pr: string): Promise<void> {
@@ -212,7 +224,14 @@ export class FakeGitHub implements GitHub {
   async createPr(req: PrRequest): Promise<string> {
     const url = `https://github.test/pr/${this.prs.length + 1}`;
     this.prs.push({ ...req, url });
+    for (const label of req.labels ?? []) await this.addLabel(req.repoDir, url, label);
     return url;
+  }
+
+  readonly labels: { pr: string; label: string }[] = [];
+
+  async addLabel(_repoDir: string, pr: string, label: string): Promise<void> {
+    this.labels.push({ pr, label });
   }
 
   async enableAutoMerge(_repoDir: string, pr: string): Promise<void> {
