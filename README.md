@@ -40,6 +40,11 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
   (`ruff.toml`, `[tool.ruff|mypy|pyright|…]`, eslint/biome/prettier config, `tsconfig` strictness flags,
   coverage thresholds) or adds inline suppressions (`noqa`, `type: ignore`, `eslint-disable`, `@ts-ignore`,
   `biome-ignore`, …), unless the plan lists that config file in a package's `files` or names the suppression.
+  A `.factory/repo.yaml` change that weakens the factory's own checks (removing or changing a check,
+  dropping `human_only_paths`/`sensitive_paths`/`forbidden_paths` entries, raising merge or diff limits,
+  changing secrets, `setup`, `env_command`, services, models, adding `agent_env`) fails it even when declared.
+  The `protected_paths` gate fails on any changed `human_only_paths` file the plan does not declare (see
+  [Protected config](#protected-config)).
 - **Evaluate** (only with `ui`, see below) runs before the reviewers; any evaluator bug skips review that round.
 - **Review** (`src/steps/review.ts`): reviewers decided in code, read-only tools, structured findings,
   continued sessions with the incremental diff in round ≥ 2.
@@ -132,7 +137,7 @@ env_command: ""                      # prefix for every check command (prefer se
 secrets: { provider: env_file, names: [DATABASE_URL] }   # checks, services, ui only, never agents; see Secrets
 tests: { globs: ["tests/**"], run: "uv run pytest {files}" }   # run enables the red-green proof of bug plans
 sensitive_paths: ["src/auth/**"]     # security reviewer, fast-lane escalation, at least medium risk
-human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]
+human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]   # changed only as declared protected_changes
 review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
 fast_lane: { max_diff_lines: 150 }
 merge:
@@ -153,6 +158,26 @@ models: {}                           # per-repo role chains, see Model configura
 
 `repo.yaml` defines *when* a check runs, the command (nox session, npm script) *how*; the CI workflow is
 wiring. The JSON Schema of every contract is in [`schemas/`](schemas/).
+
+## Protected config
+
+`human_only_paths` (by default `.factory/**` and `.github/workflows/**`; `.factory/verify/**` is never
+protected) are the CI and factory config. A run may change them, the sanctioned way:
+
+1. **Declared in the plan.** Each file is in a package's `files` and in
+   `protected_changes: [{ file, change, reason }]` (exact paths, no globs). A protected file in `files`
+   without a declaration, or a declaration outside `human_only_paths`, makes the plan invalid. The plan
+   reviewer checks that each change is required by the task and that the diff matches it.
+2. **Checked against the base.** The run's `repo.yaml` (checks, policies, secrets, models) is read from the
+   base commit, never from the user's checkout or the run branch, so a changed check list takes effect only
+   after a human merged it. The `protected_paths` gate fails on any undeclared protected file, and the
+   config guard fails on `repo.yaml` loosening even when declared (see Gates).
+3. **Always a human's OK.** Risk is `high`, the merge policy `human_review` whatever `merge:` says (never
+   auto-merge), the PR gets the label `factory:protected-config` and a "⚠️ Changes protected config
+   (CI / factory)" section with each declared change and the exact diff of the protected files. CI on the PR
+   runs the changed workflow files, so read that diff before approving.
+
+Agents still never get secret values; a protected change does not change what agents see.
 
 ## Model configuration
 
@@ -375,7 +400,8 @@ proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>
 5. **Ticket** (`harden` role, read-only tools): ONE file `proposals/<date>.json` with up to 5 ranked proposals
    (`repo.yaml` `harden.max_proposals`, `--max`), each validated as a plan (one retry; overlapping or invalid
    ones are dropped and listed), with its own `<date>.<rank>.plan.json`; their findings become `proposed`.
-   No signals, no LLM call. Each proposal is its own run and PR:
+   No signals, no LLM call. A proposal may change `.factory/` or CI files only as declared
+   `protected_changes` (see [Protected config](#protected-config)). Each proposal is its own run and PR:
    `factory run --plan <dir>/<date>.<rank>.plan.json`.
 
 ## Evals and experiments

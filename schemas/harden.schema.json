@@ -351,6 +351,33 @@
                         "items": {
                           "type": "string"
                         }
+                      },
+                      "protected_changes": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "file": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "change": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "reason": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "file",
+                            "change",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        }
                       }
                     },
                     "required": [
@@ -361,7 +388,8 @@
                       "packages",
                       "acceptance",
                       "out_of_scope",
-                      "resolves_findings"
+                      "resolves_findings",
+                      "protected_changes"
                     ],
                     "additionalProperties": false
                   },

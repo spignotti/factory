@@ -1,6 +1,6 @@
 import { changedFiles, diffStat } from "../git.js";
 import { DEPENDENCY_GLOBS, MIGRATION_GLOBS } from "../paths.js";
-import { matchesAny } from "../schemas/plan.js";
+import { isProtected, matchesAny } from "../schemas/plan.js";
 import type { RunContext } from "./context.js";
 
 /** Fast lane → standard lane triggers after implement, on the whole change since base. */
@@ -16,7 +16,8 @@ export async function fastLaneEscalation(ctx: Pick<RunContext, "worktree" | "bas
   };
   hits("dependencies", DEPENDENCY_GLOBS);
   hits("sensitive_paths", ctx.repo.sensitive_paths);
-  hits("human_only_paths", ctx.repo.human_only_paths);
+  const guarded = changed.filter((f) => isProtected(f, ctx.repo.human_only_paths));
+  if (guarded.length) reasons.push(`human_only_paths: ${guarded.join(", ")}`);
   hits("migrations", MIGRATION_GLOBS);
   return reasons;
 }

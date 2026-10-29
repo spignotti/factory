@@ -16,6 +16,7 @@ const plan = {
   packages: [{ id: "P1", title: "lint rule", description: "", files: ["eslint.config.js"], depends_on: [], changes_flows: [] }],
   acceptance: [{ id: "A1", package: "P1", text: "lint fails on unchecked nulls", verify: "check", kind: "behavior", risk: false }],
   out_of_scope: [],
+  protected_changes: [],
   resolves_findings: ["k1"],
 };
 

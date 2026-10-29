@@ -14,7 +14,7 @@ export const PLAN_SHAPE = `plan.json shape:
 {"version":1,"type":"feature|bug|chore","goal":"","context":"",
  "packages":[{"id":"P1","title":"","description":"","files":[],"depends_on":[],"changes_flows":[]}],
  "acceptance":[{"id":"A1","package":"P1","text":"","verify":"test|check|evaluator|review","kind":"behavior|edge_case|repro","risk":false}],
- "out_of_scope":[]}
+ "out_of_scope":[],"protected_changes":[]}
 or {"version":1,"questions":["..."]}. Return it as a single \`\`\`json block.`;
 
 async function planInput(ctx: PlanContext): Promise<string> {
@@ -30,7 +30,7 @@ async function planInput(ctx: PlanContext): Promise<string> {
     existsSync(join(ctx.repoDir, "AGENTS.md")) ? "" : "AGENTS.md: (none)",
     `Verify areas:\n${areas}`,
     checklist.length ? `Checklist items (the checklist reviewer checks the diff against them; plan for the relevant ones):\n${asData("checklist_items", checklist.map((i) => `- ${i.text}`).join("\n"))}` : "",
-    `sensitive_paths: ${JSON.stringify(ctx.repo.sensitive_paths)}; ui: ${ctx.repo.ui ? "yes" : "no"}`,
+    `sensitive_paths: ${JSON.stringify(ctx.repo.sensitive_paths)}; human_only_paths: ${JSON.stringify(ctx.repo.human_only_paths)}; ui: ${ctx.repo.ui ? "yes" : "no"}`,
     PLAN_SHAPE,
   ].filter(Boolean).join("\n\n");
 }
