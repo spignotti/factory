@@ -20,7 +20,7 @@ A deterministic pipeline that turns a task (issue, plan or plain text) into a re
 The repo contains the factory: pipeline, commands, role prompts, profiles, CI template, eval tasks. **Scheduling, retrospectives, idea collection and scouting are GrokBot routines** that call factory commands (Appendix A). They are not repo functionality.
 
 ### Non-goals v1
-- No parallelism inside a run. Parallel work = multiple `factory run` processes in separate worktrees.
+- No parallelism inside a run. Parallel work = multiple `factory run` processes on different repos, each in its own worktree; one run per repo at a time (§6.10).
 - No dashboard. `status --json`, `stats --json`, the event log and `result.json` are the interfaces.
 - No LLM orchestrator. No Claude CLI, no Codex CLI. **All models run through Pi.**
 - No production data. Runs use fixtures, seeds and per-run service instances only.
@@ -60,8 +60,8 @@ test/
 
 | Command | Purpose |
 |---|---|
-| `factory run --repo <path> (--issue <n> \| --plan <file> \| --text <file>) [--lane standard\|fast] [--plan-effort none\|medium\|high] [--no-pr] [--profile <name>]` | Execute one run |
-| `factory resume <run-id>` | Continue a run from its last completed step |
+| `factory run --repo <path> (--issue <n> \| --plan <file> \| --text <file>) [--lane standard\|fast] [--plan-effort none\|medium\|high] [--no-pr] [--wait] [--profile <name>]` | Execute one run |
+| `factory resume <run-id> [--wait] [--no-pr]` | Continue a run from its saved step after a human fix (§9) |
 | `factory status [--json]` | Running runs; open factory PRs and their merge policy |
 | `factory stats [--since 7d] [--repo <path>] --json` | Deterministic aggregation of all runs (§14) |
 | `factory gates (--select \| --run <check>) [--tier fast\|full\|manual] [--base <ref>] [--json]` | Check selection/execution; used by the pipeline and by CI |
@@ -205,13 +205,13 @@ jobs:
 ```
 intake → [plan] → implement (per package, fast gates after each)
   → loop { fast gates → [evaluate] → review → merge → exit? → fix }
-  → finalize (full gates, rebase, PR, risk, merge policy) → memory flush
+  → finalize (full gates, merge moved base, PR, risk, merge policy) → memory flush
 ```
 
 All steps write to `runs/<run-id>/` (§9). State is persisted after every step.
 
 ### 6.1 Intake (code + LLM: `plan_normalize`)
-1. Acquire the per-task lock (§6.10). Held → `locked`.
+1. Acquire the per-repo lock (§6.10). Held → `locked`, or with `--wait` queue until it is free (`queued` event).
 2. Read the input. GrokBot never has to produce JSON.
 3. A fenced ` ```factory-plan ` JSON block that validates (§7.1) is used as is.
 4. Otherwise, with `--plan-effort none`: `plan_normalize` translates the text into `plan.json`.
@@ -324,7 +324,7 @@ Steps:
 
 ### 6.9 Finalize (code + LLM: `pr_writer`)
 1. `fast` + `full` gates; red → back to fix.
-2. Fetch base; if moved: rebase + re-run gates; conflict or red → `needs_human`.
+2. Fetch base; if moved: merge it into the branch (as `git.author`, never rebase, so a plain push always suffices) + re-run the full gates. Conflict → `merge --abort`, `needs_human` naming the conflicting files; red gates → `needs_human`.
 3. **Evidence:** screenshots, videos (+ GIF preview), pixel diffs are pushed to the orphan branch `factory-evidence` under `<run-id>/`. Screenshots and GIFs are embedded in the PR; videos are linked.
 4. **Risk class (code):**
    - `high`: touches `human_only_paths`.
@@ -352,11 +352,12 @@ Steps:
 Branch protection (set by `adopt`): required status `factory / done`, stale approvals dismissed on new commits.
 
 ### 6.10 Run guards (code)
-- **Per-task lock** `~/.factory/locks/<repo-id>-<task>.lock`; stale locks taken over.
+- **Per-repo lock** `~/.factory/locks/<repo-id>.lock` (`repo-id` = canonical `remote.origin.url`, else the path), held by `run` and `resume`; stale locks (dead pid) taken over. A second run on the same repo returns `locked`, or queues with `--wait`. Parallel runs on one repo and automatic conflict resolution are future work.
 - **No turn or token limits.** Instead:
   - watchdog (`stall_minutes` without an event → abort → `needs_human`);
   - `max_wall_minutes` as the outer limit.
-- **Git:** only the factory commits and pushes, as `git.author`.
+- **Git:** only the factory commits and pushes, as `git.author`. Never force-push; history is only extended (merges, no rebase).
+- **Signals:** SIGINT/SIGTERM kill the running process groups and write `result.json` as `failed` (interrupted); `max_wall_minutes` is also enforced inside agent calls.
 
 ### 6.11 Fast lane (`--lane fast`)
 - `plan_normalize` only, exactly 1 package (more → standard lane).
@@ -569,8 +570,9 @@ roles:
 {"ts":"…","run_id":"…","step":"review","event":"finished","role":"review","model":"…","tokens_in":0,"tokens_out":0,"cost_usd":0,"data":{}}
 ```
 
-- **Events:** `step_started`, `step_finished`, `gate_result`, `model_fallback`, `round_finished`, `lane_escalated`, `watchdog_abort`, `run_finished`.
+- **Events:** `step_started`, `step_finished`, `gate_result`, `model_fallback`, `round_finished`, `lane_escalated`, `watchdog_abort`, `run_finished`, plus `heartbeat`, `progress`, `agent_finished`, `agent_error`, `model_retry`, `queued`.
 - **Results:** `done | needs_human | needs_input | failed | base_red | locked`.
+- `result.json` also carries `branch`, `worktree` and `run_dir`.
 
 **`result.json`** (one line, GrokBot's interface):
 ```json
@@ -579,7 +581,14 @@ roles:
 
 **`status --json`:** running runs, open factory PRs with `merge_policy` and state, runs waiting on `needs_input`/`needs_human`.
 
-`resume` continues after the last completed step. `gc` removes worktrees/branches of merged or closed factory PRs.
+`state.json` is written after every step (step, package status, rounds, findings, PR). `resume <run-id>` (takes the repo lock):
+- after `needs_human`: commits uncommitted changes in the worktree as `fix: human changes before resume`; after `failed`/interrupted: discards uncommitted leftovers instead;
+- refuses a worktree with a merge/rebase/cherry-pick in progress;
+- merges new commits from `origin/<branch>` (e.g. a conflict resolved on GitHub) and a moved base (conflict → `needs_human` again);
+- re-runs the fast gates (red → one fix round), then continues from the saved step; a resumed review starts with a fresh round budget, a resume at `finalize` only re-runs gates;
+- plain push only; an existing PR is updated and marked ready when the run ends `done`.
+
+`gc` removes worktrees/branches of merged or closed factory PRs.
 
 ## 10. Findings memory (repo-scoped, outside the repo)
 - **Location:** `~/.factory/memory/<repo-id>/findings.json` (`repo-id` = canonical `remote.origin.url`); locked writes.
@@ -724,7 +733,7 @@ Also includes the comparison to the previous period of the same length.
   - concurrent memory upsert;
   - checklist marker filtering;
   - flaky classification;
-  - task lock;
+  - repo lock and queue;
   - watchdog;
   - port allocation;
   - CI stub hash;
@@ -831,3 +840,5 @@ e) **Zen guard.** `doctor` hard-fails if any configured model resolves to the pa
 f) **Weekdays only.** Scheduled routines (`harden`, retro, `eval`) run Monday to Friday only.
 
 g) **GitHub Pro is available.** Branch protection and required checks on private repos are OK.
+
+h) **One run per repo, merge not rebase, resume (built in M1).** §4, §6, §6.1, §6.9, §6.10 and §9 describe the per-repo lock with `--wait` queue, merging a moved base before finalize, and `resume` as implemented. Parallel runs per repo and automatic conflict resolution are future work.
