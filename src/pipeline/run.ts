@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError } from "../agents/models.js";
@@ -10,6 +10,7 @@ import { Interrupted } from "../interrupt.js";
 import { PlanSchema } from "../schemas/plan.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
 import { withRepoModels } from "../config.js";
+import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from "../memory.js";
 import { finalize, syncBase } from "../steps/finalize.js";
 import { type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
@@ -44,9 +45,38 @@ function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "task";
 }
 
+async function originUrl(repoDir: string): Promise<string> {
+  return (await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "")).trim();
+}
+
 async function repoId(repoDir: string): Promise<string> {
-  const url = await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "");
-  return url.trim() || repoDir;
+  return (await originUrl(repoDir)) || repoDir;
+}
+
+/** Findings memory of the repo (§10): where it lives and this run's briefing. Never fails the run. */
+async function openMemory(f: RunFrame, deps: RunDeps, repoDir: string): Promise<string> {
+  const id = canonicalRepoId(await originUrl(repoDir), repoDir);
+  f.memory = { factoryHome: deps.factoryHome, repoId: id };
+  try {
+    return briefing(loadMemory(deps.factoryHome, id));
+  } catch (e) {
+    f.events.emit({ step: "intake", event: "progress", data: { memory_error: (e as Error).message } });
+    return "";
+  }
+}
+
+/** Flaky checks of every gate run of this run dir. */
+function flakyChecks(runDir: string): string[] {
+  const names = new Set<string>();
+  for (const file of readdirSync(runDir).filter((n) => /^gates-\d+\.json$/.test(n))) {
+    try {
+      const report = JSON.parse(readFileSync(join(runDir, file), "utf8")) as { checks?: { name: string; status: string }[] };
+      for (const c of report.checks ?? []) if (c.status === "flaky") names.add(c.name);
+    } catch {
+      // unreadable report: nothing to learn from it
+    }
+  }
+  return [...names];
 }
 
 /** One factory process per repository (runs and resumes); `wait` queues instead of `locked`. */
@@ -88,6 +118,8 @@ class RunFrame {
   out: Outcome = { result: "failed", reason: "", type: null, risk: null, merge_policy: null, pr: null, rounds: 0, branch: null, worktree: null };
   state?: RunState;
   release?: () => void;
+  /** Set once the repo lock is held: findings memory to flush at the end. */
+  memory?: { factoryHome: string; repoId: string };
 
   constructor(
     readonly runId: string,
@@ -124,6 +156,17 @@ class RunFrame {
     }
   }
 
+  private flushMemory(): void {
+    if (!this.memory || !this.state) return;
+    try {
+      const obs = observations(this.state.findings, flakyChecks(this.runDir));
+      if (obs.length) flushMemory({ ...this.memory, runId: this.runId, now: new Date(this.now()), observations: obs });
+      this.events.emit({ step: "run", event: "progress", data: { memory: { repo: this.memory.repoId, observations: obs.length } } });
+    } catch (e) {
+      this.events.emit({ step: "run", event: "progress", data: { memory_error: (e as Error).message } });
+    }
+  }
+
   private finish(): RunResult {
     const { out } = this;
     const result: RunResult = {
@@ -145,6 +188,7 @@ class RunFrame {
       worktree: out.worktree,
       run_dir: this.runDir,
     };
+    this.flushMemory();
     this.events.emit({ step: "run", event: "run_finished", data: { result: result.result, reason: result.reason } });
     if (this.state) {
       this.state.result = result.result;
@@ -184,7 +228,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 
     const agentHome = prepareAgentHome(runDir);
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
-    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline };
+    const memoryBriefing = await openMemory(f, deps, repoDir);
+    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing };
 
     const planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
     if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
@@ -342,8 +387,9 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
     f.set({ type: plan.type });
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
+    const memoryBriefing = await openMemory(f, deps, st.repo);
     const ctx: RunContext = {
-      deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task,
+      deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline,
     };
     if (st.step === "implement") {

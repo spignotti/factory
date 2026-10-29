@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
+import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
 import type { AgentRequest } from "../../src/agents/runner.js";
 import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
 import { addOrigin, commitFile } from "../helpers/repo.js";
@@ -155,6 +156,27 @@ describe("E2E with fake-runner on a fixture repo", () => {
     const decisions = eventsOf(r, "round_finished").map((e) => (e.data.decision as { rule: number }).rule);
     expect(decisions).toEqual([6, 4, 5]);
     expect(r.runner.remaining()).toEqual({});
+  });
+
+  it("findings memory: open findings at exit are remembered; the next run briefs implement and review", async () => {
+    const first = await runScenario({ script: "bug-max-rounds.json" });
+    const mem = loadMemory(first.factoryHome, canonicalRepoId("", first.repo));
+    expect(mem.entries.length).toBeGreaterThan(0);
+    expect(mem.entries.every((e) => e.status === "open" && e.count === 1 && e.runs[0] === first.runId)).toBe(true);
+    expect(eventsOf(first, "progress").some((e) => (e.data.memory as { observations: number } | undefined)?.observations === mem.entries.length)).toBe(true);
+    expect(first.github.prs[0]?.body).not.toContain("Recurring");
+
+    const text = mem.entries[0]!.text;
+    const second = await runScenario({
+      script: "clean.json",
+      before: (repo, factoryHome) =>
+        void flushMemory({ factoryHome, repoId: canonicalRepoId("", repo), runId: "old", now: new Date(), observations: mem.entries.map((e) => ({ ...e })) }),
+    });
+    expect(second.result.result).toBe("done");
+    expect(second.runner.calls.find((c) => c.role === "implement")?.prompt).toContain(text);
+    expect(second.runner.calls.filter((c) => c.role.startsWith("review_")).every((c) => c.prompt.includes(text))).toBe(true);
+    expect(second.runner.calls.find((c) => c.role === "pr_writer")?.prompt ?? "").not.toContain(text);
+    expect(second.github.prs[0]?.body).not.toContain(text);
   });
 
   it("fallback: capacity error -> backoff retry on the same model -> fallback", async () => {

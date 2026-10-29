@@ -58,6 +58,8 @@ export interface RunContext {
   gateCount: number;
   /** `max_wall_minutes` outer limit (epoch ms), enforced between steps and inside agent calls. */
   deadline: number;
+  /** Findings memory briefing (§10): top open recurring findings, or "". */
+  briefing: string;
 }
 
 export class WallTimeExceeded extends Error {

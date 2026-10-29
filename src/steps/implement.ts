@@ -72,6 +72,7 @@ async function packagePrompt(ctx: RunContext, pkg: Package): Promise<string> {
     asData("plan", JSON.stringify({ ...ctx.plan, current_package: pkg.id }, null, 2)),
     ctx.handoffs.length ? asData("previous_handoffs", JSON.stringify(ctx.handoffs, null, 2)) : "",
     diff ? asData("diff_since_base", diff) : "",
+    ctx.briefing ? `Recurring findings in this repo (avoid them):\n${asData("findings_briefing", ctx.briefing)}` : "",
     HANDOFF_SHAPE.replace("<id>", pkg.id),
   ].filter(Boolean).join("\n\n");
 }

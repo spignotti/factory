@@ -36,8 +36,9 @@ function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, d
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", JSON.stringify({ checks: input.gates.checks.map((c) => ({ name: c.name, status: c.status })), scope_report: input.gates.scope_report }, null, 2)),
       `Review rules:\n${rules}`,
+      ctx.briefing ? `Recurring findings in this repo (check whether this diff repeats them):\n${asData("findings_briefing", ctx.briefing)}` : "",
       shape,
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
   }
   const prior = input.findings
     .filter((f) => f.reviewer === reviewer && f.status === "open")
