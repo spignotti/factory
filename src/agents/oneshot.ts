@@ -27,7 +27,8 @@ export class OneShot {
     mkdirSync(logDir, { recursive: true });
     this.events = new EventLog(logDir, id, deps.now);
     this.agentHome = mkdtempSync(join(tmpdir(), "factory-agent-home-"));
-    this.deadline = (deps.now ?? Date.now)() + minutes * 60_000;
+    // Wall clock, like the run deadline (`deps.now` is a logical clock that tests pin).
+    this.deadline = Date.now() + minutes * 60_000;
   }
 
   call(step: string, req: AgentCall) {
