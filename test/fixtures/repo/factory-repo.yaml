@@ -1,0 +1,24 @@
+base_branch: main
+setup: ""
+checks:
+  - { name: syntax, run: "node --check src/math.js", tier: fast }
+  - { name: unit, run: "node --test 'test/**/*.test.js'", tier: fast, paths: ["src/**", "test/**"] }
+  - { name: docs, run: "test -f docs/index.md", tier: full, paths: ["docs/**"] }
+  - { name: suite, run: "node --test 'test/**/*.test.js'", tier: full }
+  - { name: cloud, run: "false", tier: manual }
+tests:
+  globs: ["test/**"]
+  run: "node --test {files}"
+sensitive_paths: ["src/auth/**"]
+human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]
+review:
+  max_rounds: 2
+  max_nits: 2
+merge:
+  low_max_diff_lines: 300
+limits:
+  max_diff_lines: 1500
+  stall_minutes: 15
+  forbidden_paths: [".env*", "**/*.pem"]
+git:
+  author: factory-bot

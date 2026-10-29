@@ -1,0 +1,16 @@
+# Role -> model fallback chains. Exact ids are resolved by `doctor` against `pi --list-models`.
+# The chains are placeholders (TBD by Silas, Amendment c). `implement` must stay in one model family.
+roles:
+  plan_high:      [{ model: openai/sol, thinking: high },   { model: opencode-go/grok-4.7, thinking: high }]
+  plan_medium:    [{ model: openai/sol, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
+  plan_normalize: [{ model: opencode-go/deepseek-v4.1-flash }]
+  implement:      [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
+  review:         [{ model: openai/mid-codex, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
+  evaluate:       [{ model: opencode-go/claude-haiku-5.5 }]
+  pr_writer:      [{ model: opencode-go/deepseek-v4.1-flash }]
+  harden:         [{ model: openai/sol, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
+retry:
+  base_ms: 2000
+  max_ms: 60000
+  attempts: 4
+env: {}

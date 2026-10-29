@@ -1,0 +1,44 @@
+{
+  "steps": [
+    {
+      "role": "plan_high",
+      "output": {
+        "version": 1,
+        "type": "feature",
+        "goal": "Add a multiply function",
+        "context": "",
+        "packages": [
+          {
+            "id": "P1",
+            "title": "multiply",
+            "description": "Add multiply to src/math.js",
+            "files": [
+              "src/math.js",
+              "test/multiply.test.js"
+            ],
+            "depends_on": [],
+            "changes_flows": [],
+            "source_quote": "Add a multiply function to src/math.js."
+          }
+        ],
+        "acceptance": [
+          {
+            "id": "A1",
+            "package": "P1",
+            "text": "multiply(2, 3) returns 6",
+            "verify": "test",
+            "kind": "behavior",
+            "risk": false,
+            "source_quote": "multiply(2, 3) returns 6."
+          }
+        ],
+        "out_of_scope": []
+      },
+      "usage": {
+        "tokens_in": 500,
+        "tokens_out": 100,
+        "cost_usd": 0.01
+      }
+    }
+  ]
+}

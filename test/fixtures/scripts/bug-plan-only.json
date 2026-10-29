@@ -1,0 +1,33 @@
+{
+  "steps": [
+    {
+      "role": "plan_high",
+      "output": {
+        "version": 1,
+        "type": "bug",
+        "goal": "max returns the larger value",
+        "context": "",
+        "packages": [
+          {
+            "id": "P1",
+            "title": "fix max",
+            "files": [
+              "src/math.js",
+              "test/max.test.js"
+            ],
+            "depends_on": []
+          }
+        ],
+        "acceptance": [
+          {
+            "id": "A1",
+            "package": "P1",
+            "text": "max(1, 2) returns 2",
+            "verify": "test",
+            "kind": "repro"
+          }
+        ]
+      }
+    }
+  ]
+}
