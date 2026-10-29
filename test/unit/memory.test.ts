@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -68,6 +69,32 @@ describe("findings memory", () => {
     expect(e.runs.at(-1)).toBe("r25");
     expect(readdirSync(dirname(path))).toEqual(["findings.json"]); // no lock or tmp left
   });
+
+  it("concurrent upserts from several processes lose no update", async () => {
+    const factoryHome = home();
+    const id = "github.com/a/concurrent";
+    const writers = 6;
+    const helpers = join(import.meta.dirname, "..", "helpers");
+    await Promise.all(
+      Array.from({ length: writers }, (_, w) =>
+        new Promise<void>((done, fail) => {
+          const child = spawn(
+            process.execPath,
+            ["--import", join(helpers, "ts-register.mjs"), join(helpers, "memory-writer.ts"), factoryHome, id, `w${w}`, `shared,own-${w}`],
+            { stdio: ["ignore", "ignore", "pipe"] },
+          );
+          let err = "";
+          child.stderr.on("data", (d) => (err += String(d)));
+          child.on("close", (code) => (code === 0 ? done() : fail(new Error(`writer ${w} exited ${code}: ${err.slice(-500)}`))));
+        }),
+      ),
+    );
+    const mem = loadMemory(factoryHome, id);
+    const byKey = new Map(mem.entries.map((e) => [e.key, e]));
+    expect(byKey.get("shared")!.count).toBe(writers * 5);
+    for (let w = 0; w < writers; w++) expect(byKey.get(`own-${w}`)!.count).toBe(5);
+    expect(readdirSync(dirname(memoryPath(factoryHome, id)))).toEqual(["findings.json"]);
+  }, 60_000);
 
   it("a broken file is kept aside, not overwritten", () => {
     const factoryHome = home();
