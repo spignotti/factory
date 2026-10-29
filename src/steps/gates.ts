@@ -98,6 +98,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       testCommand: repo.tests.run,
       setup: repo.setup,
       env,
+      deadline: ctx.deadline,
     });
     reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
     builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail });

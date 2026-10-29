@@ -29,7 +29,7 @@ describe("intake helpers", () => {
     expect(await readTask({ issue: 12 }, "/repo", gh)).toMatchObject({ ref: "#12", issue: 12, title: "Fix max", labels: ["factory:plan-none"] });
     const file = join(mkdtempSync(join(tmpdir(), "t-")), "task.md");
     writeFileSync(file, "\n# Do it\nbody");
-    expect(await readTask({ textFile: file }, "/repo", gh)).toMatchObject({ ref: "task.md", title: "Do it", text: "\n# Do it\nbody" });
+    expect(await readTask({ textFile: file }, "/repo", gh)).toMatchObject({ ref: file, title: "Do it", text: "\n# Do it\nbody" });
   });
 });
 
@@ -67,6 +67,13 @@ describe("task lock", () => {
     expect(again).toBeTypeOf("function");
     again!();
     writeFileSync(join(home, "locks", "git_github.com_o_r.git-_12.lock"), "999999999");
-    expect(acquireTaskLock(home, "git@github.com:o/r.git", "#12")).toBeTypeOf("function");
+    const taken = acquireTaskLock(home, "git@github.com:o/r.git", "#12");
+    expect(taken).toBeTypeOf("function");
+    expect(acquireTaskLock(home, "git@github.com:o/r.git", "#12")).toBeUndefined();
+    taken!();
+    // a takeover in progress (guard held by a live process) blocks a second taker
+    writeFileSync(join(home, "locks", "git_github.com_o_r.git-_12.lock"), "999999999");
+    writeFileSync(join(home, "locks", "git_github.com_o_r.git-_12.lock.takeover"), String(process.pid));
+    expect(acquireTaskLock(home, "git@github.com:o/r.git", "#12")).toBeUndefined();
   });
 });

@@ -29,6 +29,8 @@ export function capNits(findings: Finding[], maxNits: number): Finding[] {
 export interface MergeResult {
   findings: TrackedFinding[];
   added: TrackedFinding[];
+  /** Resolved findings reported again. */
+  reopened: string[];
   /** Prior findings whose wontfix the reviewer rejected. */
   stalemate: string[];
   dropped: { repeats: number; nits: number };
@@ -52,8 +54,10 @@ export function mergeRound(prior: TrackedFinding[], round: number, reviews: Revi
     }
   }
 
-  const seen = new Set(findings.map(findingKey));
+  const known = new Map(findings.map((f) => [findingKey(f), f]));
+  const seen = new Set<string>();
   const added: TrackedFinding[] = [];
+  const reopened: string[] = [];
   let repeats = 0;
   let nitsDropped = 0;
   for (const review of reviews) {
@@ -62,7 +66,15 @@ export function mergeRound(prior: TrackedFinding[], round: number, reviews: Revi
     let n = 0;
     for (const f of capped) {
       const key = findingKey(f);
-      if (seen.has(key)) {
+      const prev = known.get(key);
+      if (prev?.status === "resolved" && !seen.has(key)) {
+        // Reported again after it was resolved: a regression, not a repeat.
+        prev.status = "open";
+        reopened.push(prev.id);
+        seen.add(key);
+        continue;
+      }
+      if (prev || seen.has(key)) {
         repeats++;
         continue;
       }
@@ -72,7 +84,7 @@ export function mergeRound(prior: TrackedFinding[], round: number, reviews: Revi
       findings.push(tracked);
     }
   }
-  return { findings, added, stalemate, dropped: { repeats, nits: nitsDropped } };
+  return { findings, added, reopened, stalemate, dropped: { repeats, nits: nitsDropped } };
 }
 
 export const openFindings = (fs: TrackedFinding[]): TrackedFinding[] => fs.filter((f) => f.status === "open");

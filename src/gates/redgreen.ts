@@ -29,6 +29,8 @@ export async function redGreenProof(opts: {
   /** repo.yaml `setup`, run in the base worktree so a missing environment is not mistaken for the bug. */
   setup?: string;
   env: Record<string, string>;
+  /** `max_wall_minutes` deadline (epoch ms); commands are killed when it passes. */
+  deadline?: number;
 }): Promise<RedGreenResult> {
   const { worktree, baseSha, files, testCommand, env } = opts;
   const inconclusive = (detail: string): RedGreenResult => ({ ok: false, redOnBase: false, greenOnHead: false, inconclusive: true, detail });
@@ -36,6 +38,7 @@ export async function redGreenProof(opts: {
   if (files.length === 0) return inconclusive("no repro test named in evidence");
   const missing = files.filter((f) => !existsSync(join(worktree, f)));
   if (missing.length) return inconclusive(`repro file missing: ${missing.join(", ")}`);
+  const timeoutMs = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline - Date.now()));
   const cmd = testCommand.replace("{files}", files.map(shellQuote).join(" "));
   const tmp = mkdtempSync(join(tmpdir(), "factory-base-"));
   const baseDir = join(tmp, "wt");
@@ -46,11 +49,11 @@ export async function redGreenProof(opts: {
       copyFileSync(join(worktree, f), join(baseDir, f));
     }
     if (opts.setup) {
-      const setup = await sh(opts.setup, { cwd: baseDir, env });
+      const setup = await sh(opts.setup, { cwd: baseDir, env, timeoutMs: timeoutMs() });
       if (setup.code !== 0) return inconclusive(`setup failed in the base worktree:\n${tail(setup.output, 20)}`);
     }
-    const base = await sh(cmd, { cwd: baseDir, env });
-    const head = await sh(cmd, { cwd: worktree, env });
+    const base = await sh(cmd, { cwd: baseDir, env, timeoutMs: timeoutMs() });
+    const head = await sh(cmd, { cwd: worktree, env, timeoutMs: timeoutMs() });
     const redOnBase = base.code !== 0;
     const greenOnHead = head.code === 0;
     const detail = [

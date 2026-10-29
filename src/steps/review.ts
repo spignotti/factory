@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import { InvalidOutputError } from "../agents/models.js";
-import { diffText, stageAll } from "../git.js";
+import { diffText, git, stageAll } from "../git.js";
 import { callAgent, type RunContext, writeJson } from "../pipeline/context.js";
 import type { TrackedFinding } from "../pipeline/merge.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
@@ -16,9 +16,9 @@ const REVIEW_SHAPE = `Reply with a single \`\`\`json block:
 {"reviewer":"<name>","prior":[{"finding_id":"R1-plan-1","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
  "findings":[{"severity":"bug|suggestion|nit","file":"","line":0,"claim":"","evidence":"","fix":"","checkable":"lint|test|script|no","check_sketch":""}]}`;
 
-function reviewRules(ctx: RunContext): string {
-  const repoRules = join(ctx.worktree, ".factory", "review-rules.md");
-  return existsSync(repoRules) ? readFileSync(repoRules, "utf8") : asset("standards/review-rules.md");
+/** Rules from the base commit: the implementer must not be able to rewrite its reviewers' rules. */
+async function reviewRules(ctx: RunContext): Promise<string> {
+  return git(ctx.worktree, ["show", `${ctx.baseSha}:.factory/review-rules.md`]).catch(() => asset("standards/review-rules.md"));
 }
 
 export interface ReviewInput {
@@ -29,7 +29,7 @@ export interface ReviewInput {
   lastReviewedSha?: string;
 }
 
-function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string): string {
+function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string, rules: string): string {
   const shape = REVIEW_SHAPE.replace("<name>", reviewer);
   if (input.round === 1 || !input.lastReviewedSha) {
     return [
@@ -37,7 +37,7 @@ function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, d
       asData("diff", diff),
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", JSON.stringify({ checks: input.gates.checks.map((c) => ({ name: c.name, status: c.status })), scope_report: input.gates.scope_report }, null, 2)),
-      `Review rules:\n${reviewRules(ctx)}`,
+      `Review rules:\n${rules}`,
       shape,
     ].join("\n\n");
   }
@@ -53,10 +53,10 @@ function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, d
   ].join("\n\n");
 }
 
-async function runReviewer(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string): Promise<ReviewOutput> {
+async function runReviewer(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string, rules: string): Promise<ReviewOutput> {
   const role = `review_${reviewer}`;
   const system = `${rolePrompt(`review-${reviewer}`)}\n\n${rolePrompt("review-common")}`;
-  let prompt = reviewPrompt(ctx, reviewer, input, diff);
+  let prompt = reviewPrompt(ctx, reviewer, input, diff, rules);
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await callAgent(ctx, "review", {
@@ -86,7 +86,12 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
   const since = input.round === 1 || !input.lastReviewedSha ? ctx.baseSha : input.lastReviewedSha;
   const diff = await diffText(ctx.worktree, since, ctx.repo.review.skip_paths);
   writeFileSync(join(ctx.runDir, `diff-${input.round}.patch`), diff);
-  const outputs = await Promise.all(M1_REVIEWERS.map((r) => runReviewer(ctx, r, input, diff)));
+  const rules = await reviewRules(ctx);
+  // allSettled: a failing reviewer must not leave its sibling running after the run has finished.
+  const settled = await Promise.allSettled(M1_REVIEWERS.map((r) => runReviewer(ctx, r, input, diff, rules)));
+  const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+  if (failed) throw failed.reason;
+  const outputs = settled.map((s) => (s as PromiseFulfilledResult<ReviewOutput>).value);
   ctx.events.emit({ step: "review", event: "step_finished", data: { round: input.round } });
   return outputs;
 }

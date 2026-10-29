@@ -53,7 +53,7 @@ export async function implementerTurn(ctx: RunContext, step: string, turn: Sessi
     errors = parsed.ok ? (turn.validate?.(parsed.handoff) ?? []) : parsed.errors;
     if (parsed.ok && errors.length === 0) return { handoff: parsed.handoff, errors };
     ctx.events.emit({ step, event: "progress", role: "implement", data: { invalid_handoff: errors } });
-    prompt = `Your handoff was invalid:\n- ${errors.join("\n- ")}\n\n${HANDOFF_SHAPE}`;
+    prompt = `Your handoff was invalid:\n- ${errors.join("\n- ")}\n\n${HANDOFF_SHAPE.replace("<id>", turn.packageId)}`;
   }
   return { errors };
 }

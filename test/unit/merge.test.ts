@@ -29,6 +29,16 @@ describe("merge / dedupe / nit cap", () => {
     expect(r2.added[0]?.claim).toBe("new");
   });
 
+  it("reopens a resolved finding reported again (regression) instead of dropping it", () => {
+    const r1 = mergeRound([], 1, [review("plan", [f({ claim: "null deref", severity: "bug" })])], 5);
+    const r2 = mergeRound(r1.findings, 2, [review("plan", [], [{ finding_id: "R1-plan-1", verdict: "resolved" }])], 5);
+    expect(openFindings(r2.findings)).toEqual([]);
+    const r3 = mergeRound(r2.findings, 3, [review("plan", [f({ claim: "Null deref", severity: "bug" })])], 5);
+    expect(r3.reopened).toEqual(["R1-plan-1"]);
+    expect(r3.added).toEqual([]);
+    expect(openFindings(r3.findings).map((x) => x.id)).toEqual(["R1-plan-1"]);
+  });
+
   it("caps nits per reviewer per round, never other severities", () => {
     const fs = [f({ claim: "n1", severity: "nit" }), f({ claim: "b", severity: "bug" }), f({ claim: "n2", severity: "nit" }), f({ claim: "n3", severity: "nit" })];
     expect(capNits(fs, 2).map((x) => x.claim)).toEqual(["n1", "b", "n2"]);

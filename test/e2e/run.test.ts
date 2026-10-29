@@ -128,8 +128,11 @@ describe("E2E with fake-runner on a fixture repo", () => {
     const impl = r.runner.calls.filter((c) => c.role === "implement");
     expect(impl).toHaveLength(2);
     expect(impl[1]?.prompt).toContain("Your handoff was invalid");
-    expect(git(r.repo, "status", "--porcelain")).toBe("");
-    expect(r.github.prs[0]?.draft).toBe(true);
+    expect(impl[1]?.prompt).toContain('{"package":"P1"');
+    expect(git(join(r.runDir, "worktree"), "status", "--porcelain")).toBe("");
+    // all work was discarded, so there is nothing to open a PR for
+    expect(r.github.prs).toEqual([]);
+    expect(r.result.reason).toContain("no commits, no PR");
   });
 
   it("base_red: fast checks red on base stop the run before implement", async () => {
@@ -142,10 +145,22 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
   });
 
-  it("base_red: red CI status on base", async () => {
-    const r = await runScenario({ script: "base-red.json", github: (gh) => void (gh.status = "red") });
+  it.each(["red", "pending"] as const)("base_red: %s CI status on base", async (status) => {
+    const r = await runScenario({ script: "base-red.json", github: (gh) => void (gh.status = status) });
     expect(r.result.result).toBe("base_red");
     expect(eventsOf(r, "gate_result")).toEqual([]);
+  });
+
+  it("green CI status on base skips the local base check", async () => {
+    const r = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "green") });
+    expect(r.result.result).toBe("done");
+    expect(eventsOf(r, "gate_result").some((e) => e.data.base)).toBe(false);
+  });
+
+  it("bug plans need tests.run for the red-green proof", async () => {
+    const r = await runScenario({ script: "bug-plan-only.json", patch: (c) => void delete (c.tests as Record<string, unknown>).run, task: "max-bug.md" });
+    expect(r.result).toMatchObject({ result: "needs_human", type: "bug" });
+    expect(r.result.reason).toMatch(/tests.run is required/);
   });
 
   it("invented normalize content is rejected: one retry, then plan step at medium", async () => {
@@ -216,6 +231,15 @@ describe("E2E with fake-runner on a fixture repo", () => {
       });
       expect(r.result).toMatchObject({ risk: "high", merge_policy: "human_review" });
     });
+  });
+
+  it("a failing push ends as needs_human, not failed", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => void (gh.push = async () => Promise.reject(new Error("remote rejected"))),
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", pr: null });
+    expect(r.result.reason).toMatch(/PR step failed: remote rejected/);
   });
 
   it("--no-pr skips push and PR", async () => {

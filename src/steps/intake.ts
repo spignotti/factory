@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { resolve } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import type { GitHub } from "../gh.js";
 import { type AgentCall, callAgent, type RunContext, type Task } from "../pipeline/context.js";
@@ -28,7 +28,7 @@ export async function readTask(input: TaskInput, repoDir: string, github: GitHub
   const file = input.planFile ?? input.textFile;
   if (!file) throw new Error("one of --issue, --plan or --text is required");
   const text = readFileSync(file, "utf8");
-  return { ref: basename(file), title: firstLine(text), text, labels: [] };
+  return { ref: resolve(file), title: firstLine(text), text, labels: [] };
 }
 
 /** CLI flag, else issue label `factory:plan-<effort>`, else `high`. */

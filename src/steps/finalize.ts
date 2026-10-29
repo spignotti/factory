@@ -148,19 +148,28 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   writeFileSync(join(ctx.runDir, "pr.md"), body);
 
   let pr: string | null = null;
-  if (!input.noPr) {
+  const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
+  if (!input.noPr && hasCommits) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
-    await ctx.deps.github.push(ctx.worktree, ctx.branch);
-    pr = await ctx.deps.github.createPr({
-      repoDir: ctx.worktree,
-      head: ctx.branch,
-      base: ctx.repo.base_branch,
-      title: `${prefix}: ${ctx.plan.goal}`,
-      body,
-      draft: result !== "done",
-    });
-    if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr);
+    try {
+      await ctx.deps.github.push(ctx.worktree, ctx.branch);
+      pr = await ctx.deps.github.createPr({
+        repoDir: ctx.worktree,
+        head: ctx.branch,
+        base: ctx.repo.base_branch,
+        title: `${prefix}: ${ctx.plan.goal}`,
+        body,
+        draft: result !== "done",
+      });
+      if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr);
+    } catch (e) {
+      const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
+      ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
+      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr };
+    }
+  } else if (!input.noPr) {
+    reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, pr };
+  return { ...out, reason, pr };
 }

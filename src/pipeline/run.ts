@@ -94,6 +94,14 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const ref = await baseRef(repoDir, repo.base_branch);
     const baseSha = await revParse(repoDir, ref);
     const status = await deps.github.baseStatus(repoDir, baseSha);
+    if (status === "red" || status === "pending") {
+      out = { ...out, result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${status}, not green` };
+      return finish();
+    }
+    if (plan.type === "bug" && !repo.tests.run) {
+      out = { ...out, result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans" };
+      return finish();
+    }
     let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
     if (await gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${branch}`])) branch += `-${runId.slice(-6)}`;
     const worktree = join(runDir, "worktree");
@@ -109,11 +117,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
         return finish();
       }
     }
-    if (status === "red") {
-      out = { ...out, result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is red` };
-      return finish();
-    }
-    if (status !== "green") {
+    if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
       const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline });
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
