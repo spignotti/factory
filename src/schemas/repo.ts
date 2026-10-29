@@ -46,6 +46,8 @@ const VerifyAreaSchema = z.object({
   paths: z.array(z.string()).default([]),
   guide: z.string().optional(),
   flows: z.array(z.string()).default([]),
+  /** Pages of this area (paths under `ui.url`) screenshotted base vs HEAD when the area is touched. */
+  pages: z.array(z.string()).default([]),
 });
 
 /** Default and upper bound of proposals per harden ticket (Amendment w). */
@@ -111,10 +113,22 @@ export const RepoConfigSchema = z
         ready_timeout_s: z.number().positive().default(120),
         paths: z.array(z.string()).default([]),
         services: z.array(z.string()).default([]),
+        // Amendment x (M4): Playwright device names the evaluator emulates on Chromium; the first one is
+        // the LLM session's device. Mobile apps are evaluated through their web build (Expo / React
+        // Native Web) with a phone device: viewport, user agent, touch.
+        devices: z.array(z.string().min(1)).min(1).default(["Desktop Chrome"]),
+        // Pages (paths under `url`) screenshotted base vs HEAD and checked for console/network errors.
+        pages: z.array(z.string()).default(["/"]),
       })
       .loose()
       .optional(),
-    verify: z.object({ areas: z.array(VerifyAreaSchema).default([]) }).default({ areas: [] }),
+    verify: z
+      .object({
+        areas: z.array(VerifyAreaSchema).default([]),
+        // Runs recorded flow files of affected areas; `{files}` = the flow paths. Default: `tests.run`.
+        run: z.string().optional(),
+      })
+      .default({ areas: [] }),
     // Amendment w: ranked proposals per harden ticket (`--max` overrides).
     harden: z
       .object({ max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS) })
@@ -150,7 +164,7 @@ export const RepoConfigSchema = z
 export type RepoConfig = z.infer<typeof RepoConfigSchema>;
 
 /** Every text of repo.yaml that may carry service placeholders, with where it comes from. */
-export function placeholderTexts(cfg: Pick<RepoConfig, "services" | "checks" | "ui">): { where: string; text: string }[] {
+export function placeholderTexts(cfg: Pick<RepoConfig, "services" | "checks" | "ui"> & { verify?: { run?: string } }): { where: string; text: string }[] {
   const out: { where: string; text: string }[] = [];
   for (const s of cfg.services) {
     for (const [k, v] of Object.entries({ start: s.start, stop: s.stop, ready: s.ready })) if (v) out.push({ where: `service ${s.name} ${k}`, text: v });
@@ -158,6 +172,7 @@ export function placeholderTexts(cfg: Pick<RepoConfig, "services" | "checks" | "
   }
   for (const c of cfg.checks) out.push({ where: `check ${c.name}`, text: c.run });
   if (cfg.ui) out.push({ where: "ui start", text: cfg.ui.start }, { where: "ui url", text: cfg.ui.url });
+  if (cfg.verify?.run) out.push({ where: "verify run", text: cfg.verify.run });
   return out;
 }
 
@@ -166,7 +181,7 @@ export const MAX_PORT_OFFSET = 9900;
 export const MAX_NAMED_PORTS = 100;
 const PLACEHOLDER = /\{(run_id|port_offset|port:[A-Za-z0-9_-]+)\}/g;
 
-function placeholderIssues(cfg: Pick<RepoConfig, "services" | "checks" | "ui">): string[] {
+function placeholderIssues(cfg: Parameters<typeof placeholderTexts>[0]): string[] {
   const issues: string[] = [];
   const named = new Set<string>();
   for (const { where, text } of placeholderTexts(cfg)) {

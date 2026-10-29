@@ -214,7 +214,7 @@ export class Services {
   private readonly refs: { names: string[]; numbers: number[] };
 
   constructor(
-    readonly repo: Pick<RepoConfig, "services" | "checks" | "ui">,
+    readonly repo: Pick<RepoConfig, "services" | "checks" | "ui"> & { verify?: { run?: string } },
     private readonly opts: ServicesOptions,
   ) {
     this.defs = new Map(repo.services.map((s) => [s.name, s]));
