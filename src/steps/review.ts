@@ -173,6 +173,7 @@ async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput,
       return out.reviews;
     }
     errors = out.errors;
+    ctx.events.emit({ step: "review", event: "progress", role: s.role, data: { rejected: errors } });
     prompt = `Your review output was invalid:\n- ${errors.join("\n- ")}\n\n${shapeOf(s)}`;
   }
   throw new InvalidOutputError(`${s.key === "lean" ? "review (lean)" : s.role} output invalid: ${errors.join("; ")}`);
