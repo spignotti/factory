@@ -1,0 +1,142 @@
+{
+  "steps": [
+    {
+      "role": "plan_high",
+      "output": {
+        "version": 1,
+        "type": "feature",
+        "goal": "Add a multiply function",
+        "context": "",
+        "packages": [
+          {
+            "id": "P1",
+            "title": "multiply",
+            "description": "Add multiply to src/math.js",
+            "files": [
+              "src/math.js",
+              "test/multiply.test.js"
+            ],
+            "depends_on": [],
+            "changes_flows": [],
+            "source_quote": "Add a multiply function to src/math.js."
+          }
+        ],
+        "acceptance": [
+          {
+            "id": "A1",
+            "package": "P1",
+            "text": "multiply(2, 3) returns 6",
+            "verify": "test",
+            "kind": "behavior",
+            "risk": false,
+            "source_quote": "multiply(2, 3) returns 6."
+          }
+        ],
+        "out_of_scope": []
+      },
+      "usage": {
+        "tokens_in": 500,
+        "tokens_out": 100,
+        "cost_usd": 0.01
+      }
+    },
+    {
+      "role": "implement",
+      "writes": {
+        "src/math.js": "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function multiply(a, b) {\n  return a * b;\n}\n",
+        "test/multiply.test.js": "import assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { multiply } from \"../src/math.js\";\n\ntest(\"multiply\", () => {\n  assert.equal(multiply(2, 3), 6);\n});\n"
+      },
+      "output": {
+        "package": "P1",
+        "done": [
+          "added multiply"
+        ],
+        "decisions": [],
+        "deviations_from_plan": [],
+        "skipped": [],
+        "uncertain": [],
+        "evidence": [
+          {
+            "acceptance_id": "A1",
+            "kind": "test",
+            "ref": "test/multiply.test.js::multiply"
+          }
+        ],
+        "responses": []
+      },
+      "usage": {
+        "tokens_in": 1000,
+        "tokens_out": 200,
+        "cost_usd": 0.002
+      }
+    },
+    {
+      "role": "review_plan",
+      "output": {
+        "reviewer": "plan",
+        "prior": [],
+        "findings": [
+          {
+            "severity": "bug",
+            "file": "src/math.js",
+            "line": 9,
+            "claim": "multiply ignores negative zero",
+            "evidence": "e",
+            "fix": "f",
+            "checkable": "no",
+            "check_sketch": ""
+          }
+        ]
+      }
+    },
+    {
+      "role": "review_simplicity",
+      "output": {
+        "reviewer": "simplicity",
+        "prior": [],
+        "findings": []
+      }
+    },
+    {
+      "role": "implement",
+      "output": {
+        "package": "fix",
+        "done": [
+          "fix round"
+        ],
+        "responses": [
+          {
+            "finding_id": "R1-plan-1",
+            "status": "wontfix",
+            "response": "out of scope"
+          }
+        ]
+      }
+    },
+    {
+      "role": "review_plan",
+      "output": {
+        "reviewer": "plan",
+        "prior": [
+          {
+            "finding_id": "R1-plan-1",
+            "verdict": "reject_wontfix"
+          }
+        ],
+        "findings": []
+      }
+    },
+    {
+      "role": "review_simplicity",
+      "output": {
+        "reviewer": "simplicity",
+        "prior": [],
+        "findings": []
+      }
+    },
+    {
+      "role": "pr_writer",
+      "raw": "Adds multiply(a, b) to src/math.js with a test."
+    }
+  ]
+}

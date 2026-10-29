@@ -1,0 +1,13 @@
+{
+  "steps": [
+    {
+      "role": "plan_high",
+      "output": {
+        "version": 1,
+        "questions": [
+          "Should multiply accept more than two arguments?"
+        ]
+      }
+    }
+  ]
+}
