@@ -130,6 +130,30 @@ selects the checks with the same code as a local run and runs each one (`factory
 required status is `factory / done`. `factory doctor --repo .` checks the file is the unedited template
 for its ref. Bumping the ref is a deliberate PR. The ref must be a published tag of this repo.
 
+## Adopt
+
+`factory adopt --repo <path> --ref <tag>` onboards a repository in one PR (branch `factory/adopt`, from the
+base branch; the user's checkout is not touched):
+
+- **Detect** (code): stack (node: package manager and scripts; python: uv/poetry/pip, nox sessions or
+  ruff/mypy/pytest; rust; go), test files and the command that runs specific ones, UI, database, cloud/secrets,
+  CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …).
+- **Measure**: setup and every check once in a clean base worktree, in the sandbox (`--no-measure` skips).
+- **Draft**: `.factory/repo.yaml` (tiers: e2e/build, CI `services:` or > 120 s → `full`; secrets or failing on
+  the base → `manual`; reasons as comments), `.factory/review-rules.md`, the CI stub for `--ref`, and an
+  AGENTS.md "Test strategy" section when there is none.
+- **Legacy setup**: Claude Code (`CLAUDE.md`, `.claude/`), Cursor rules and Bugbot, opencode and grok
+  configs/agents/commands, workflows running coding bots, and PR/push workflows whose every command a drafted
+  check covers are deleted in the same PR. Skills with scripts, other assistants' files, uncovered or special
+  workflows and AGENTS.md sections about old tools are only listed as proposed removals. Deploy, release and
+  scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths, e.g.
+  `--keep CLAUDE.md --keep .claude`. The PR description lists every removed, proposed and kept item.
+- **Baseline plan** (`plan_medium`): saved as proposal `<date>-adopt` (see Harden); run it after the merge
+  with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
+- **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
+  no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
+  `.factory/repo.yaml`) is refused unless `--force`.
+
 ## Evals and experiments
 
 ```
