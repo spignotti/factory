@@ -179,6 +179,59 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(second.github.prs[0]?.body).not.toContain(text);
   });
 
+  it("security and checklist reviewers join when the diff touches sensitive paths and unmarked checklist items exist", async () => {
+    const checklist = "- Every exported function has a test\n- No TODO comments <!-- check: lint -->\n";
+    const r = await runScenario({
+      script: "clean.json",
+      setup: (repo) => commitFile(repo, ".factory/checklist.md", checklist),
+      steps: (steps) => {
+        // Not in the plan (a sensitive plan file needs a risk criterion): the diff decides, not the plan.
+        steps[1]!.writes = { ...steps[1]!.writes, "src/auth/session.js": "export const ttl = 60;\n" };
+        return [
+          ...steps,
+          { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } },
+          { role: "review_checklist", output: { reviewer: "checklist", prior: [], findings: [] } },
+        ];
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.remaining()).toEqual({});
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "security", "checklist"]);
+    const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
+    expect(prompt("review_security")).toMatch(/security_trigger_files[\s\S]*src\/auth\/session\.js/);
+    expect(prompt("review_checklist")).toContain("C1 (checklist.md:1): Every exported function has a test");
+    expect(prompt("review_checklist")).not.toContain("No TODO comments");
+    expect(prompt("review_plan")).not.toContain("checklist_items");
+    expect(prompt("plan_high")).toMatch(/checklist_items[\s\S]*Every exported function has a test/);
+    expect(prompt("plan_high")).not.toContain("No TODO comments");
+  });
+
+  it("no security reviewer for ordinary files; no checklist reviewer when review.checklist is off or all items are marked", async () => {
+    const off = await runScenario({
+      script: "clean.json",
+      patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
+      setup: (repo) => commitFile(repo, ".factory/checklist.md", "- Every exported function has a test\n"),
+    });
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/checklist.md", "- Tests pass <!-- check: unit -->\n") });
+    for (const r of [off, marked]) {
+      expect(r.result.result).toBe("done");
+      expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
+    }
+  });
+
+  it("a dependency file anywhere activates security", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      steps: (steps) => {
+        (steps[0]!.output as { packages: { files: string[] }[] }).packages[0]!.files.push("tools/package.json");
+        steps[1]!.writes = { ...steps[1]!.writes, "tools/package.json": "{\"name\":\"tools\"}\n" };
+        return [...steps, { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } }];
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.calls.find((c) => c.role === "review_security")?.prompt).toContain("tools/package.json");
+  });
+
   it("fallback: capacity error -> backoff retry on the same model -> fallback", async () => {
     const r = await runScenario({ script: "fallback.json" });
     expect(r.result.result).toBe("done");

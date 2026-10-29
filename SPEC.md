@@ -869,3 +869,11 @@ k) **Findings memory details (§10, M2a).**
    - Flushed: findings still `open` at exit, nits excluded (noise); `accepted_wontfix` and `resolved` are not recurring problems. A run counts once per entry (`runs` keeps the last 20 run ids), so resume does not inflate `count`; a `resolved` entry seen again is reopened.
    - Written under a lock file with an atomic rename; an unreadable file is moved to `findings.json.broken-<ts>` and memory starts fresh. Memory errors never change a run's result (logged as `progress` events).
    - Briefing: top 10 `open` by count, then `last_seen`, as data in the implement package prompt and the round-1 review prompt; not in the planner, `pr_writer` or the PR.
+
+l) **Security and checklist reviewers (§6.6, M2a).**
+   - Activation is decided in code before every round on all files changed since base (committed, staged, untracked; renames count with both names):
+     - `security`: a file matches `sensitive_paths` or is a dependency manifest or lockfile in any directory (`DEPENDENCY_FILES` in `src/paths.ts`, also used by the risk class and fast-lane escalation: npm/pnpm/yarn/bun, Python, Cargo, Go, Ruby, PHP, JVM, .NET, Elixir, Swift, Dart, Deno, Nix). The matching files are passed as `security_trigger_files`; `skip_paths` still keeps lockfile bodies out of the diff (the reviewer can read them).
+     - `checklist`: `review.checklist: true` and `.factory/checklist.md` at the **base commit** has unmarked items (read from base like `review-rules.md`, so the implementer cannot edit it away). Items go in as data with ids `C1…` and their line.
+     - A reviewer that ran once in a run stays active for later rounds (its open findings need its verdicts). A reviewer joining after round 1 gets the full round-1 input.
+   - **Checklist marker syntax:** every Markdown list item (`-`, `*`, `+`, `1.`, optional `[ ]`/`[x]`, any indentation) is one item; indented non-bullet lines continue it. An item already enforced by a deterministic check carries `<!-- check: <check name> -->` anywhere in it and is skipped by the checklist reviewer (and counted as done by `harden`). Other HTML comments are ignored. The task box state (`[x]`) has no meaning.
+   - The planner gets the unmarked items too (§6.2 "relevant checklist items"; all of them, the planner picks), from the repo checkout it plans in.

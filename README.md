@@ -104,6 +104,17 @@ tools are confined to the worktree. Set `sandbox: required | preferred | off` in
 `~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
 (bubblewrap), `pasta` (passt) and `ip` (iproute2); `factory doctor` shows what is in effect.
 
+## Reviewers
+
+`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `checklist` joins when `review.checklist` is on (default) and `.factory/checklist.md` has unmarked items:
+
+```markdown
+- Every API route checks the session
+- Migrations are reversible <!-- check: migrations -->
+```
+
+One list item per rule. Mark an item with `<!-- check: <check name> -->` once a deterministic check enforces it; marked items are no longer reviewed by an LLM. The checklist is read from the base commit.
+
 ## Findings memory
 
 Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory harden` (M3) turns them into checks. Delete the file to forget.
