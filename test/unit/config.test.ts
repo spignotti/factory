@@ -16,7 +16,7 @@ const SILAS = `
 providers: { allow: [opencode-go, openai], deny: [opencode] }
 `;
 
-describe("layered model config (Amendment i)", () => {
+describe("layered model config", () => {
   it("built-in defaults alone resolve, every role from the built-in layer", () => {
     const p = resolveProfile(loadLayers({ factoryHome: home() }));
     expect(p.roles.implement[0]!.model).toBe("opencode-go/deepseek-v4.1-flash");

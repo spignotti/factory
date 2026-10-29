@@ -1,4 +1,4 @@
-# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+# Curated eval task. Third-party code: see license and source; evals/README.md.
 id: psf__requests-6028
 repo: https://github.com/psf/requests.git
 base: 0192aac24123735b3eaf9b08df46429bb770c283

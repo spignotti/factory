@@ -80,7 +80,7 @@ export const GcReportSchema = z.strictObject({
     }),
   ),
   skipped: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, reason: z.string() })),
-  // Amendment x: evidence-branch retention per repository (folders removed, or why not).
+  // Evidence-branch retention per repository (folders removed, or why not).
   evidence: z.array(z.strictObject({ repo: z.string(), removed: z.array(z.string()), note: z.string().optional() })).default([]),
 });
 

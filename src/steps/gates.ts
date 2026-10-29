@@ -44,7 +44,7 @@ export function withEnvCommand(run: string, envCommand: string): string {
 
 /**
  * Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green.
- * A check with `services` starts them first (§6.12; EnvMissing when one does not come up), gets their
+ * A check with `services` starts them first (EnvMissing when one does not come up), gets their
  * env and, jailed, reaches exactly their ports.
  */
 export async function runChecks(

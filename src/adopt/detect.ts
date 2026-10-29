@@ -6,7 +6,7 @@ import { matchesAny } from "../schemas/plan.js";
 import { joinArgv, mutatingName, noxSessionBodies, readOnlyCommand, analyzeCommand } from "./mutation.js";
 
 /**
- * `factory adopt` step 1 (SPEC §12): what a repository is made of, read from its files only (no
+ * `factory adopt` step 1: what a repository is made of, read from its files only (no
  * commands; `measure` runs them). Everything here is a proposal a human reviews in the adopt PR.
  */
 

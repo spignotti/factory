@@ -27,7 +27,7 @@ describe("risk class", () => {
   });
 });
 
-describe("merge policy (Amendment a)", () => {
+describe("merge policy", () => {
   const merge = (yaml: string) => parseRepoConfig(yaml).merge;
 
   it("default auto_merge_max_risk none: everything human_review", () => {

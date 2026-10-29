@@ -132,7 +132,7 @@ function prBody(r: AdoptReport, d: Detection): string {
   const list = (items: { path: string; reason: string }[]) => (items.length ? items.map((i) => `- \`${i.path}\`: ${i.reason}`).join("\n") : "- none");
   const checks = r.checks.map((c) => `| \`${c.name}\` | ${c.tier} | ${c.seconds ?? "–"} | ${c.note ?? ""} |`).join("\n");
   return [
-    "Factory onboarding (`factory adopt`, SPEC §12). Review every file; nothing here changes repository settings.",
+    "Factory onboarding (`factory adopt`). Review every file; nothing here changes repository settings.",
     "",
     `Detected: ${d.stacks.join(", ") || "no known stack"}. Setup: \`${d.setup || "(none)"}\`${r.setup_seconds != null ? ` (${r.setup_seconds}s)` : ""}.`,
     "",
@@ -171,7 +171,7 @@ function prBody(r: AdoptReport, d: Detection): string {
   ].join("\n");
 }
 
-/** `factory adopt` (SPEC §12): detect, measure, draft, remove legacy setup, baseline plan, one PR. */
+/** `factory adopt`: detect, measure, draft, remove legacy setup, baseline plan, one PR. */
 export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptReport> {
   const repoDir = resolve(opts.repo);
   const now = new Date((deps.now ?? Date.now)());
@@ -271,7 +271,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
           id: nextProposalId(proposalsDir(deps.factoryHome, repoId), date, "adopt"),
           repo: repoId,
           created_at: now.toISOString(),
-          proposals: [{ status: "open", rationale: "Establish factory baseline (SPEC §12 step 3).", plan: res.plan, references: { findings: [], checklist: [] }, resolution: null }],
+          proposals: [{ status: "open", rationale: "Establish factory baseline.", plan: res.plan, references: { findings: [], checklist: [] }, resolution: null }],
           signals: { detection: report.detection, legacy: { removed: legacy.removed.length, proposed: legacy.proposed.length, kept: legacy.kept.length } },
           metrics: null,
         });

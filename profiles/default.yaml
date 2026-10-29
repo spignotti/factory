@@ -1,4 +1,4 @@
-# Built-in role -> model chains (Silas's defaults, Amendment c as amended 2026-10-29).
+# Built-in role -> model chains (Silas's defaults).
 # Override per user in ~/.factory/profile.yaml and per repo in .factory/repo.yaml `models:`.
 roles:
   plan_high:         [{ model: openai/gpt-6.1-sol, thinking: high }]

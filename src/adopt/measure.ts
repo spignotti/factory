@@ -44,7 +44,7 @@ async function restore(dir: string, base: { patch: string }, tmp: string): Promi
 
 /**
  * Runs setup and every candidate check once in `dir` (a clean base worktree), with the sandbox and env
- * allowlist of a run (SPEC §12 step 1: "run once, with durations"). Never throws for a failing command.
+ * allowlist of a run. Never throws for a failing command.
  */
 export async function measureChecks(
   dir: string,

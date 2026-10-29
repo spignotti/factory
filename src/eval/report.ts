@@ -4,7 +4,7 @@ const round = (n: number, d = 4) => Math.round(n * 10 ** d) / 10 ** d;
 const mean = (xs: number[]) => (xs.length ? round(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
 
 /**
- * Determinism ratio (SPEC amendment q): over the tasks a profile ran at least twice, the share whose
+ * Determinism ratio: over the tasks a profile ran at least twice, the share whose
  * repeats all agree on hidden pass and on the run result. Null when no task ran twice.
  */
 export function determinismRatio(records: EvalRecord[]): number | null {
@@ -51,7 +51,7 @@ const costOf = (s: ProfileSummary, m: CostMeasure) => (m === "usd" ? s.mean_cost
 const lower = (b: number, a: number) => a > 0 && b <= a * (1 - MARGIN) + EPS;
 
 /**
- * §13 decision rule: B beats A when B's pass rate is ≥ A's and at least one of: a higher pass rate,
+ * Decision rule: B beats A when B's pass rate is ≥ A's and at least one of: a higher pass rate,
  * ≥ 10 % lower cost, ≥ 10 % lower wall time. Returns the reasons, or null when B does not beat A.
  */
 export function beats(b: ProfileSummary, a: ProfileSummary, measure = costMeasure(a, b)): string[] | null {

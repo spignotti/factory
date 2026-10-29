@@ -3,7 +3,7 @@ import { sh } from "../exec.js";
 import { type Jail, shellQuote } from "../sandbox/sandbox.js";
 
 /**
- * GIF preview of a session video (§6.9.3) with the system ffmpeg: 8 fps, 640 px wide, palette pass.
+ * GIF preview of a session video with the system ffmpeg: 8 fps, 640 px wide, palette pass.
  * Runs jailed when a jail is given (only the evidence dir writable). Returns an error text or undefined.
  */
 export async function videoToGif(video: string, gif: string, opts: { env: Record<string, string>; jail?: Jail; fps?: number; width?: number }): Promise<string | undefined> {

@@ -198,7 +198,7 @@ function roundFiles(runDir: string): { round: number; findings: TrackedFinding[]
 }
 
 /**
- * Real findings (SPEC amendment q): a `bug` finding the implementer answered `fixed` in round n's fix
+ * Real findings: a `bug` finding the implementer answered `fixed` in round n's fix
  * session counts when a check that is red on the commit reviewed in round n is green on the commit
  * after that fix. Checks: the hidden check (hidden tests copied in) and the repo's fast and full
  * checks that need no services. Several bugs fixed in one session share the credit.

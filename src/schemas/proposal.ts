@@ -2,7 +2,7 @@ import { z } from "zod";
 import { PlanSchema } from "./plan.js";
 
 /**
- * Proposal contract (SPEC §11, §12; Amendment w). One `harden` writes ONE ticket file with a ranked list
+ * Proposal contract. One `harden` writes ONE ticket file with a ranked list
  * of up to `harden.max_proposals` proposals; `adopt` writes a ticket with one (the baseline plan). The
  * ticket is `$FACTORY_HOME/memory/<repo>/proposals/<id>.json`; every proposal's plan sits next to it as
  * `<id>.<rank>.plan.json` (input for `factory run --plan`). GrokBot decides what to do with them; each
@@ -63,7 +63,7 @@ export { DEFAULT_MAX_PROPOSALS, MAX_PROPOSALS_LIMIT } from "./repo.js";
 /** A proposal without a merged or closed PR after this many days is dropped (entries reopen). */
 export const STALE_DAYS = 28;
 
-/** One line of `$FACTORY_HOME/memory/<repo>/metrics.jsonl` (SPEC §11 step 2), one per `harden`. */
+/** One line of `$FACTORY_HOME/memory/<repo>/metrics.jsonl`, one per `harden`. */
 export const MetricsSchema = z
   .object({
     ts: z.string(),

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 
 /**
- * CI stub (§5.3): `.github/workflows/factory.yml` is `templates/ci/factory.yml` with the pinned factory
+ * CI stub: `.github/workflows/factory.yml` is `templates/ci/factory.yml` with the pinned factory
  * ref filled in, identical in every repo. `doctor` compares hashes.
  */
 export const CI_STUB_PATH = ".github/workflows/factory.yml";
@@ -56,7 +56,7 @@ export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE
 
 /**
  * Other workflows that run on pull requests may gate merges with checks repo.yaml does not know
- * (§15: "no other workflow runs checks unknown to repo.yaml"). Returned as file names for a hint.
+ * (no other workflow should run checks unknown to repo.yaml). Returned as file names for a hint.
  */
 export function otherPrWorkflows(repoDir: string): string[] {
   const dir = join(repoDir, ".github", "workflows");

@@ -21,7 +21,7 @@ describe("events", () => {
     ]);
   });
 
-  it("appends typed events with all SPEC fields and sums usage", () => {
+  it("appends typed events with all required fields and sums usage", () => {
     const dir = mkdtempSync(join(tmpdir(), "ev-"));
     const log = new EventLog(dir, "run-1", () => Date.UTC(2026, 9, 29));
     const seen: string[] = [];

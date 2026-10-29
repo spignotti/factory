@@ -95,7 +95,7 @@ export interface ReviewLoopOptions {
 }
 
 /**
- * Evaluate before the reviewers (§6.5): any evaluator bug skips the reviewers this round and goes
+ * Evaluate before the reviewers: any evaluator bug skips the reviewers this round and goes
  * straight to fix, so reviewers never read code that does not work. Without a ui change the
  * evaluator's still open findings are resolved (the change no longer touches the app).
  */
@@ -108,14 +108,14 @@ export async function evaluateFirst(ctx: RunContext, round: number, findings: Tr
   return { review: report.review, bugs: report.review.findings.filter((f) => f.severity === "bug").length };
 }
 
-/** loop { fast gates → evaluate → review → merge → exit? → fix } (SPEC §6, §6.5, §6.7). */
+/** loop { fast gates → evaluate → review → merge → exit? → fix }. */
 export async function reviewLoop(
   ctx: RunContext,
   initialGates: GateReport,
   opts: ReviewLoopOptions = {},
   state: FixState = { gateFailures: 0 },
 ): Promise<LoopOutcome> {
-  // Fast lane (§6.11): at most one fix round, no extra round for an open bug.
+  // Fast lane: at most one fix round, no extra round for an open bug.
   const fast = () => ctx.lane === "fast";
   const maxRounds = () => (fast() ? Math.min(2, ctx.repo.review.max_rounds) : ctx.repo.review.max_rounds);
   const firstRound = opts.firstRound ?? 1;

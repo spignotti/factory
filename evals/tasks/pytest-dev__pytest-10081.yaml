@@ -1,4 +1,4 @@
-# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+# Curated eval task. Third-party code: see license and source; evals/README.md.
 id: pytest-dev__pytest-10081
 repo: https://github.com/pytest-dev/pytest.git
 base: da9a2b584eb7a6c7e924b2621ed0ddaeca0a7bea

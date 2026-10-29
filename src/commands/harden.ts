@@ -166,7 +166,7 @@ async function select(
   return { error: `harden selection invalid after retry: ${last.errors.join("; ")}` };
 }
 
-/** `factory harden` (SPEC §11): lifecycle, compaction, signals, metrics, at most one proposal. */
+/** `factory harden`: lifecycle, compaction, signals, metrics, at most one proposal. */
 export async function harden(opts: HardenOptions, deps: HardenDeps): Promise<HardenReport> {
   const repoDir = resolve(opts.repo);
   const now = new Date((deps.now ?? Date.now)());

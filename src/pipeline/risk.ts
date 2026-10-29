@@ -11,7 +11,7 @@ export interface RiskAssessment {
   reasons: string[];
 }
 
-/** SPEC §6.9 step 4, in code. */
+/** Risk classification, in code. */
 export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig; laneEscalated?: boolean }): RiskAssessment {
   const { changed, diffLines, repo } = input;
   const hits = (globs: string[]) => changed.filter((f) => matchesAny(f, globs));
@@ -32,7 +32,7 @@ export function riskClass(input: { changed: string[]; diffLines: number; repo: R
 const RANK: Record<Risk | "none", number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 /**
- * Merge policy (Amendment a): `auto` only when risk <= `auto_merge_max_risk` (never for high);
+ * Merge policy: `auto` only when risk <= `auto_merge_max_risk` (never for high);
  * otherwise `merge.policy[risk]`. A result other than `done` always forces `human_review`.
  */
 export function mergePolicy(risk: Risk, result: RunResultKind, merge: RepoConfig["merge"]): MergePolicy {

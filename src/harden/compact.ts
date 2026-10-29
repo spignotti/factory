@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { MemoryEntry, MemoryFile } from "../memory.js";
 
-/** SPEC §11 step 3: the LLM names duplicates; merging them is code. */
+/** Harden compaction: the LLM names duplicates; merging them is code. */
 export const CompactionSchema = z.object({ merge: z.array(z.object({ keep: z.string().min(1), drop: z.array(z.string().min(1)).min(1) }).strict()) }).strict();
 export type Compaction = z.infer<typeof CompactionSchema>;
 

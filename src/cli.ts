@@ -39,19 +39,19 @@ const USAGE = `usage:
   factory gc [--dry-run] [--force] [--json]
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
-              (--run starts the services its checks need, §6.12)
+              (--run starts the services its checks need)
   factory eval --profile <name|file> [--profile …] [--tasks <glob>] [--repeat N] [--out <dir>] [--json]
-              (§13: fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
+              (fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
   factory eval --validate [--tasks <glob>] [--json]
               (no agents: hidden tests red on base, green on the upstream fix)
   factory experiment --base <profile> --variant <profile> [--tasks <glob>] [--repeat N≥2] [--out <dir>]
               (eval of both, decision rule, JSON verdict; schemas/verdict.schema.json)
               eval/experiment also take [--work-dir <dir>] [--keep]
   factory adopt --repo <path> --ref <tag> [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
-              (§12: drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md test strategy; removes the legacy
+              (drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md (template if missing); removes the legacy
                coding setup (--keep spares paths); baseline plan as proposal; one PR; settings only as hints)
   factory harden --repo <path> [--no-compact] [--max <1-10>] [--profile <file>] [--json]
-              (§11: resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
+              (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
                $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
   factory ci-stub --ref <tag>

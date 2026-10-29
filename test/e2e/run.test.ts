@@ -87,7 +87,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
       expect(() => r.file(f)).not.toThrow();
     }
 
-    // events: SPEC fields and lifecycle
+    // events: required fields and lifecycle
     for (const e of r.events) {
       expect(Object.keys(e).sort()).toEqual(["cost_usd", "data", "event", "model", "role", "run_id", "step", "tokens_in", "tokens_out", "ts"]);
       expect(e.run_id).toBe(r.result.run_id);

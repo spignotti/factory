@@ -7,7 +7,7 @@ import { type Jail, jailedArgv } from "./sandbox/sandbox.js";
 import { MAX_NAMED_PORTS, MAX_PORT_OFFSET, placeholderTexts, type RepoConfig, type Service } from "./schemas/repo.js";
 
 /**
- * Services (§6.12): one instance per run per declared service, started before the first check that
+ * Services: one instance per run per declared service, started before the first check that
  * needs it, stopped at run end, logs in `<logDir>/<name>.log`.
  *
  * Port scheme: a run claims a slot k (1..99, the lowest free one) under `$FACTORY_HOME/ports/`:
@@ -25,7 +25,7 @@ export const PORT_SLOTS = 99;
 export const SLOT_SIZE = 100;
 export const NAMED_PORT_BASE = 20000;
 
-/** A required service could not start: the run stops with needs_human (env_missing, §6.4). */
+/** A required service could not start: the run stops with needs_human (env_missing). */
 export class EnvMissing extends Error {
   constructor(message: string) {
     super(`env_missing: ${message}`);

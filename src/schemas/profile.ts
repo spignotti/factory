@@ -3,7 +3,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 /**
- * Provider policy (Amendment i). Built-in default: every provider except `opencode` — that is
+ * Provider policy. Built-in default: every provider except `opencode` — that is
  * OpenCode Zen, billed pay-per-use and one typo away from `opencode-go`. A user profile may pin the
  * list (Silas: `allow: [opencode-go, openai]`); repo.yaml cannot change it. `deny` wins over `allow`;
  * `*` in `allow` means any provider.
@@ -59,7 +59,7 @@ export const ModelEntrySchema = z.object({
   family: z.string().optional(),
   /**
    * Only used after the previous entries failed with a capacity error and their same-model retries
-   * are exhausted (Amendment c). Required for a cross-family `implement` backup.
+   * are exhausted. Required for a cross-family `implement` backup.
    */
   capacity_only: z.boolean().optional(),
 });
@@ -98,7 +98,7 @@ export const RetrySchema = z.object({
 const RolesSchema = z.object(Object.fromEntries(PROFILE_ROLES.map((r) => [r, Chain])) as Record<ProfileRole, typeof Chain>);
 
 /**
- * Safety rules on a complete set of role chains (Amendment c, SPEC §8.2). Also applied after the
+ * Safety rules on a complete set of role chains. Also applied after the
  * layered merge (config.ts), so no layer can switch them off.
  */
 export function chainIssues(roles: Partial<Record<ProfileRole, ModelEntry[]>>): { path: string[]; message: string }[] {
@@ -154,11 +154,11 @@ export const ProfileSchema = z
     providers: ProvidersSchema.default(DEFAULT_PROVIDERS),
     /** Billing kind per provider (subscription → tokens in reports, metered → USD). */
     billing: BillingSchema.default({ ...DEFAULT_BILLING }),
-    /** Process sandbox for agents and repo commands (Amendment j). */
+    /** Process sandbox for agents and repo commands. */
     sandbox: SandboxModeSchema.default("preferred"),
     /** Same-model exponential backoff on capacity errors before falling back. */
     retry: RetrySchema.default({ base_ms: 2000, max_ms: 60_000, attempts: 4 }),
-    /** Extra env var names per role for agent tool processes (Amendment b). */
+    /** Extra env var names per role for agent tool processes. */
     env: z.record(z.string(), z.array(z.string())).default({}),
   })
   .superRefine((p, ctx) => {
@@ -186,7 +186,7 @@ export function profileRoleOf(role: string): ProfileRole {
   return role as ProfileRole;
 }
 
-/** Partial role → chain map: a layer replaces whole chains, role by role (Amendment i). */
+/** Partial role → chain map: a layer replaces whole chains, role by role. */
 export const RoleOverridesSchema = z.object(
   Object.fromEntries(PROFILE_ROLES.map((r) => [r, Chain.optional()])) as Record<ProfileRole, z.ZodOptional<typeof Chain>>,
 ).strict();

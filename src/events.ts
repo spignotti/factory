@@ -11,18 +11,18 @@ export const EVENT_TYPES = [
   "lane_escalated",
   "watchdog_abort",
   "run_finished",
-  // Amendment d: liveness signals from agent sessions.
+  // Liveness signals from agent sessions.
   "heartbeat",
   "progress",
-  // Per agent call, so usage is recorded on success and on error (Amendment c).
+  // Per agent call, so usage is recorded on success and on error.
   "agent_finished",
   "agent_error",
   "model_retry",
   // Waiting for the per-repo lock (`--wait`).
   "queued",
-  // Sandbox in effect for this run, with degradation warnings (Amendment j).
+  // Sandbox in effect for this run, with degradation warnings.
   "sandbox",
-  // Services (§6.12): data.action = ports | starting | ready | failed | stopped.
+  // Services: data.action = ports | starting | ready | failed | stopped.
   "service",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];

@@ -34,7 +34,7 @@ export function dropMutating(d: Detection, m: MeasureResult | null): void {
   }
 }
 
-/** Proposed tiers (SPEC §12 step 2): DB → full, cloud/secrets → manual, failing → manual, slow → full. */
+/** Proposed tiers: DB → full, cloud/secrets → manual, failing → manual, slow → full. */
 export function draftChecks(d: Detection, m: MeasureResult | null): DraftCheck[] {
   return d.candidates.filter((c) => !m?.checks.find((x) => x.name === c.name)?.mutated?.length).map((c) => {
     const measured = m?.checks.find((x) => x.name === c.name);
@@ -76,7 +76,7 @@ export function draftRepoYaml(input: DraftInput): { text: string; config: RepoCo
     body = body.replace(line, comment + line);
   }
   const header = [
-    `# Drafted by \`factory adopt\` on ${input.date}. Review before merging; SPEC §5.1 documents every field.`,
+    `# Drafted by \`factory adopt\` on ${input.date}. Review before merging; the factory README documents every field.`,
     `# Detected: ${d.stacks.join(", ") || "no known stack"}${d.ui.present ? `; UI (${d.ui.reasons.join(", ")})` : ""}${d.db.present ? `; DB (${d.db.reasons.join(", ")})` : ""}.`,
     "# paths: per check, services and ui are left to the baseline plan (proposals/<date>-adopt.plan.json).",
     "",
@@ -85,7 +85,7 @@ export function draftRepoYaml(input: DraftInput): { text: string; config: RepoCo
   return { text, config: parseRepoConfig(text) };
 }
 
-/** 3–5 lines of repo facts for AGENTS.md (§12 step 3), from what adopt knows. */
+/** 3–5 lines of repo facts for AGENTS.md, from what adopt knows. */
 export function testStrategySection(d: Detection, checks: DraftCheck[]): string {
   const tier = (t: string) => checks.filter((c) => c.tier === t).map((c) => `\`${c.name}\``).join(", ");
   const lines = [

@@ -92,7 +92,7 @@ export function renderPrBody(ctx: RunContext, v: {
   out: Omit<FinalizeOutput, "pr" | "draft">;
   gates?: GateReport;
   changed: string[];
-  /** Latest evaluate report and links to its published evidence (§6.9.3). */
+  /** Latest evaluate report and links to its published evidence. */
   evaluation?: { report?: EvaluateReport; link: EvidenceLink; notes: string[] };
 }): string {
   const { plan, handoffs } = ctx;

@@ -17,7 +17,7 @@ import type { TrackedFinding } from "./merge.js";
 export const RUN_STEPS = ["intake", "implement", "review", "finalize", "finished"] as const;
 export type RunStep = (typeof RUN_STEPS)[number];
 
-/** `<runDir>/state.json`, written after every step (SPEC §6). */
+/** `<runDir>/state.json`, written after every step. */
 export interface RunState {
   version: 1;
   run_id: string;

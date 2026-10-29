@@ -22,7 +22,7 @@ export interface PrRequest {
   draft: boolean;
 }
 
-/** Everything the factory does on GitHub. Only the factory process calls it (Amendment b). */
+/** Everything the factory does on GitHub. Only the factory process calls it. */
 export interface GitHub {
   baseStatus(repoDir: string, sha: string): Promise<BaseStatus>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
@@ -121,7 +121,6 @@ export class GhCli implements GitHub {
   }
 
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
-    // UNVERIFIED: check-runs response shape on the user's repos.
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {status, conclusion}]"]);
     const runs = JSON.parse(out || "[]") as { status: string; conclusion: string | null }[];
     if (runs.length === 0) return "none";
@@ -159,7 +158,6 @@ export class GhCli implements GitHub {
   }
 
   async ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]> {
-    // UNVERIFIED: `gh run list/view --json` field names on the user's repos (docs/VERIFY.md).
     const list = JSON.parse(
       await gh(repoDir, ["run", "list", "--limit", String(limit), "--created", `>=${since.slice(0, 10)}`, "--json", "databaseId,headSha,workflowName,event,conclusion,createdAt"]),
     ) as { databaseId: number; headSha: string; workflowName: string; event: string; conclusion: string | null; createdAt: string }[];

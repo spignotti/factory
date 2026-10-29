@@ -9,7 +9,7 @@ import { trackProcessGroup } from "../exec.js";
 import { type Jail, jailedArgv, shellQuote } from "../sandbox/sandbox.js";
 
 /**
- * The evaluator's browser (§6.5, Amendment x): Playwright's Chromium headless shell. With the
+ * The evaluator's browser: Playwright's Chromium headless shell. With the
  * sandbox on, the browser runs in its own bwrap/pasta jail like every repo command: it reaches only
  * the app's ports (never host services such as a local Docker API), writes only its private /tmp,
  * and Playwright drives it over CDP through one exposed debug port. pasta closes inherited fds, so

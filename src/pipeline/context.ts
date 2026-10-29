@@ -29,9 +29,9 @@ export interface RunDeps {
   lockPollMs?: number;
   /** Aborted on SIGINT/SIGTERM (reason: Interrupted). */
   signal?: AbortSignal;
-  /** Process sandbox for agents and repo commands (Amendment j); absent = none (tests). */
+  /** Process sandbox for agents and repo commands; absent = none (tests). */
   sandbox?: Sandbox;
-  /** Role prompt replacements by name (`roles/<name>.md`), from an eval profile (§13). */
+  /** Role prompt replacements by name (`roles/<name>.md`), from an eval profile. */
   prompts?: Partial<Record<string, string>>;
 }
 
@@ -61,13 +61,13 @@ export interface RunContext {
   gateCount: number;
   /** `max_wall_minutes` outer limit (epoch ms), enforced between steps and inside agent calls. */
   deadline: number;
-  /** Findings memory briefing (§10): top open recurring findings, or "". */
+  /** Findings memory briefing: top open recurring findings, or "". */
   briefing: string;
-  /** Effective lane (§6.11): `fast` until escalated. */
+  /** Effective lane: `fast` until escalated. */
   lane: Lane;
   /** Why a fast-lane run moved to the standard lane (empty = not escalated). */
   laneEscalation: string[];
-  /** Services of this run (§6.12), stopped at run end. */
+  /** Services of this run, stopped at run end. */
   services?: Services;
 }
 
@@ -98,7 +98,7 @@ export function writeRunFile(ctx: Pick<RunContext, "runDir" | "events">, name: s
   writeFileSync(join(ctx.runDir, name), ctx.events.redact(text));
 }
 
-/** Allowlisted env for agent tool processes and checks of this run (Amendment b). */
+/** Allowlisted env for agent tool processes and checks of this run. */
 export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome">, role?: string): Record<string, string> {
   const roleEnv = role ? (ctx.deps.profile.env[profileRoleOf(role)] ?? []) : [];
   return buildAgentEnv(ctx.deps.parentEnv ?? process.env, { home: ctx.agentHome, extra: [...ctx.repo.agent_env, ...roleEnv] });

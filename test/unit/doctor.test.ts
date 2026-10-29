@@ -309,7 +309,7 @@ describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", 
   });
 });
 
-describe("factory doctor: services and ui (§15)", () => {
+describe("factory doctor: services and ui", () => {
   const SERVE = `node -e "require('http').createServer((q,r)=>r.end('ok')).listen(Number(process.argv[1]),'0.0.0.0')"`;
   const services = (c: Record<string, unknown>) => {
     c.services = [

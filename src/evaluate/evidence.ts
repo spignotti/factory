@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 const execFileP = promisify(execFile);
 
 /**
- * Evidence branch (§6.9.3, Amendment x): screenshots, diffs, GIFs and videos of a run are committed
+ * Evidence branch: screenshots, diffs, GIFs and videos of a run are committed
  * under `<run-id>/` on the orphan branch `factory-evidence` with git plumbing (a private index; the
  * user's worktrees and index are never touched) and pushed with a plain push; PR links pin the
  * commit. `gc` drops run folders older than the retention with a normal commit (no force-push, so

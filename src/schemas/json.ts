@@ -6,7 +6,7 @@ import { DoctorReportSchema, GcReportSchema, StatsReportSchema, StatusReportSche
 import { HardenReportSchema, MetricsSchema, ProposalSchema } from "./proposal.js";
 import { LeanOutputSchema, ReviewOutputSchema } from "./review.js";
 
-/** One line of `events.jsonl`. `data` depends on the event (documented in SPEC §9 and the amendments). */
+/** One line of `events.jsonl`. `data` depends on the event. */
 export const EventLineSchema = z.object({
   ts: z.string(),
   run_id: z.string(),

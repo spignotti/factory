@@ -1,51 +1,74 @@
 # Software Factory
 
 A deterministic pipeline that turns a task (issue, plan file or plain text) into a reviewed, verified pull
-request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. `SPEC.md` is the
-source of truth.
+request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. The code is the
+source of truth; this README is the reference for concepts, configuration and commands.
 
-## Status: M4 + M5 — evaluate, adopt, harden
+## Principles
 
-M1 core loop (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
+1. **Code first.** Control flow, limits, check selection, model selection and fallback, merging findings,
+   stalemates, risk and merge policy, git and PR assembly are code. LLMs plan, implement, judge, summarize.
+2. **Derive, don't ask.** What git, the filesystem or GitHub can tell is computed; verifiable LLM claims are
+   verified in code.
+3. **Checks in CI, judgment in review.** Lint, types, tests, scanners and recorded flows are checks; LLM
+   review covers plan fidelity, simplicity, impact and security reasoning.
+4. **Ratchet toward determinism.** Recurring findings and checklist items become checks (`factory harden`).
+5. **Tests prove criteria.** Every test proves an acceptance criterion the plan names.
+6. **Minimal prompts.** `roles/*.md` are short, role-specific and the factory's only global agent
+   instructions; repo facts live in the repo's `AGENTS.md`.
+7. **Evidence over feelings.** Prompt, profile or pipeline changes need an `eval` comparison.
 
-- **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks used as is;
-  `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check (one retry,
-  then plan step at `medium`); questions → `needs_input`; per-repo lock (one run per repository; `--wait` queues, `queued` event); base check (`base_red`); worktree
-  and branch `factory/<task>-<slug>`.
+All models run through Pi; no Claude/Codex CLI, no production data, one run per repository at a time.
+
+## Pipeline
+
+`intake → plan → implement → loop { fast gates → evaluate → review → merge findings → exit? → fix } → finalize`
+
+- **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks are used as
+  is; `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check; questions
+  → `needs_input`; per-repo lock (`--wait` queues); base check (`base_red`); worktree and branch
+  `factory/<task>-<slug>`.
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
-  bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity).
+  bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity). The planner
+  reads the repo's `AGENTS.md` at the base commit.
 - **Implement** (`src/steps/implement.ts`): DAG order, fresh session per package, handoff validation with one
-  re-prompt, fast gates with the failure tail back into the same session (max 3), factory commits, cascade-skip.
+  re-prompt, fast gates with the failure tail back into the same session (max 3), factory commits,
+  cascade-skip. Bug plans prove the repro red on base and green after the fix.
 - **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, flaky re-run, built-ins
-  (forbidden paths, diff size, test presence, evidence, guide update, scope report, red-green proof).
-- **Review** (`src/steps/review.ts`): `plan` and `simplicity` reviewers, read-only tools, structured findings,
+  (forbidden paths, diff size, test presence, evidence, guide update, scope report, red-green proof, config
+  guard). The config guard fails the gates when the change loosens lint/type/format/test-runner config
+  (`ruff.toml`, `[tool.ruff|mypy|pyright|…]`, eslint/biome/prettier config, `tsconfig` strictness flags,
+  coverage thresholds) or adds inline suppressions (`noqa`, `type: ignore`, `eslint-disable`, `@ts-ignore`,
+  `biome-ignore`, …), unless the plan lists that config file in a package's `files` or names the suppression.
+- **Evaluate** (only with `ui`, see below) runs before the reviewers; any evaluator bug skips review that round.
+- **Review** (`src/steps/review.ts`): reviewers decided in code, read-only tools, structured findings,
   continued sessions with the incremental diff in round ≥ 2.
 - **Merge/exit** (`src/pipeline/merge.ts`, `loop.ts`): ids, dedupe, nit cap, stalemate, exit rules, fix rounds.
-- **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (not a
-  rebase, so no force-push is ever needed) plus full gates again, conflict → `needs_human`; risk class,
-  merge policy (Amendment a: `merge.auto_merge_max_risk: none|low|medium`, default `none`), PR body from
-  `standards/pr-template.md`, push/PR through the `GitHub` interface (`src/gh.ts`).
-- **Agents** (`src/agents/`): one `AgentRunner` interface; `fake-runner` (scripted fixtures) and `pi-runner`
-  (Pi SDK); env allowlist and isolated `HOME` (Amendment b); capacity/limit/auth/invalid_output/other
-  classification with same-model backoff before fallback, `implement` never crossing model families
-  (Amendment c); heartbeat/progress events and the watchdog (Amendment d).
-- **Events** (`src/events.ts`): `events.jsonl` and one-line `result.json`.
+- **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (no
+  rebase, so never a force-push) plus full gates again, conflict → `needs_human`; risk class and merge
+  policy; PR body from `standards/pr-template.md`; push/PR through `src/gh.ts`.
+- **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
+  env allowlist and isolated `HOME`; capacity/limit/auth/invalid_output classification with same-model
+  backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog.
+  Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
+  an override is ignored with a warning).
+- **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
 
-M2a (Amendments e–p): layered model config and provider allowlist, Linux sandbox (bubblewrap + pasta),
-findings memory, `security` and `checklist` reviewers, fast lane, `status`/`stats`/`gc --json`, `doctor` with
-the Zen guard, JSON Schemas; see the sections below.
+## Commands
 
-M2b (Amendments q–t): per-run services with port slots, explicit sandbox port forwards, the CI stub
-(`factory ci-stub`), `doctor` checks for the stub, services and `ui`.
+| Command | Purpose |
+| --- | --- |
+| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
+| `factory resume <run-id>` | continue after a human fix |
+| `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub |
+| `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
+| `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
+| `factory adopt --repo <p> --ref <tag>` | onboarding PR |
+| `factory harden --repo <p>` | signals → ranked proposals |
+| `factory eval` / `experiment` | compare profiles on curated tasks |
+| `factory ci-stub --ref <tag>` | print the CI workflow |
 
-M3 (Amendment u): `factory eval`, `factory experiment`, the `baseline` profile and ten curated tasks
-(see [`evals/README.md`](evals/README.md)).
-
-M5 (Amendments v–w): `factory adopt` (onboarding PR, legacy setup removal) and `factory harden` (signals,
-metrics, one proposal with a lifecycle); see the sections below.
-
-M4 (Amendment x): the evaluator (browser checks of web apps and web builds of mobile apps, recorded
-flows, base vs HEAD pixel diffs, evidence on the `factory-evidence` branch and in the PR); see below.
+`factory` without arguments prints every flag. All commands take `--json` where the output is machine-readable.
 
 ## Resume
 
@@ -79,11 +102,58 @@ node dist/cli.js gates --run unit --json
 ```
 
 Runs live in `~/.factory/runs/<run-id>/` (override with `FACTORY_HOME`). The target repo needs
-`.factory/repo.yaml` (SPEC §5.2; `tests.run` with a `{files}` placeholder enables the red-green proof).
+`.factory/repo.yaml` (see below; `factory adopt` drafts it).
+
+## Repo contract
+
+```
+.factory/repo.yaml         # checks, services, policies (required)
+.factory/review-rules.md   # repo-specific review rules
+.factory/checklist.md      # optional checklist reviewer items
+.factory/verify/<area>.md  # verification guides per app area (not human-only: they evolve with the app)
+.github/workflows/factory.yml   # CI stub, generated, never edited by hand
+AGENTS.md                  # repo facts for every agent (purpose, commands, test strategy, do-not rules)
+```
+
+`repo.yaml` reference (every key is optional except what a run needs; defaults in brackets):
+
+```yaml
+base_branch: main
+setup: "uv sync --frozen"            # once per worktree
+checks:                              # tier: fast = every package and fix round, full = before the PR,
+                                     # manual = never by the factory (CI workflow_dispatch only)
+  - { name: lint, run: "nox -s lint", tier: fast }
+  - { name: unit, run: "nox -s test_unit", tier: fast, paths: ["src/**", "tests/unit/**"] }   # paths: run only if touched
+  - { name: db,   run: "nox -s test_db", tier: full, services: [db] }
+services:                            # one instance per run; see Services
+  - { name: db, start: "…", stop: "…", env: { DATABASE_URL: "postgresql://…:{port:db}/postgres" } }
+env_command: ""                      # prefix for every command, e.g. "infisical run --"
+tests: { globs: ["tests/**"], run: "uv run pytest {files}" }   # run enables the red-green proof of bug plans
+sensitive_paths: ["src/auth/**"]     # security reviewer, fast-lane escalation, at least medium risk
+human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]
+review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
+fast_lane: { max_diff_lines: 150 }
+merge:
+  auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
+  policy: { low: human_review, medium: human_review }   # bot_review | human_review
+  low_max_diff_lines: 300            # larger diffs are at least medium
+limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, forbidden_paths: [".env*"] }
+ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: ["src/app/**"], pages: ["/"], devices: ["Desktop Chrome"] }
+verify:
+  areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]
+  run: "uv run pytest {files}"       # runs recorded flows [tests.run]
+harden: { max_proposals: 5 }
+git: { author: factory, email: "…" }
+agent_env: []                        # extra env var names for agent tools and checks
+models: {}                           # per-repo role chains, see Model configuration
+```
+
+`repo.yaml` defines *when* a check runs, the command (nox session, npm script) *how*; the CI workflow is
+wiring. The JSON Schema of every contract is in [`schemas/`](schemas/).
 
 ## Model configuration
 
-Layers, most specific wins (SPEC Amendment i), each replacing whole role chains:
+Layers, most specific wins, each replacing whole role chains:
 
 1. built-in `profiles/default.yaml`;
 2. your user profile `$FACTORY_HOME/profile.yaml` (default `~/.factory/profile.yaml`);
@@ -93,6 +163,10 @@ Layers, most specific wins (SPEC Amendment i), each replacing whole role chains:
 ```yaml
 # ~/.factory/profile.yaml
 providers: { allow: [opencode-go, openai], deny: [opencode] }   # only here or built-in
+billing: { opencode-go: subscription, openai: subscription }    # only here or built-in
+sandbox: preferred                                              # only here or built-in
+retry: { base_ms: 2000, max_ms: 60000, attempts: 4 }            # same-model backoff on capacity errors
+env: { implement: [MY_TOOL_TOKEN] }                             # extra env var names per role
 roles:
   pr_writer: [{ model: opencode-go/mimo-v2.6-flash }]
 ```
@@ -108,10 +182,14 @@ rules (provider policy, reviewers in another model family than every `implement`
 `implement` backup must be `capacity_only`) are checked after the merge. `factory doctor [--repo <path>]`
 shows the effective model per role and the layer it came from.
 
+`billing` names each provider's billing kind: `subscription` usage is reported in tokens (PR body, `stats`),
+`metered` usage in USD. Unlisted providers are metered; the built-in default lists
+`opencode-go` and `openai` as subscriptions.
+
 ## Sandbox (Linux)
 
 Agent bash, repo `setup`, gate checks and red-green test runs are jailed with bubblewrap inside a pasta
-network namespace (SPEC Amendment j): only the run's worktree and agent HOME are writable, git metadata is
+network namespace: only the run's worktree and agent HOME are writable, git metadata is
 read-only, host loopback, Docker bridge, metadata service and LAN are unreachable, the internet works. File
 tools are confined to the worktree. Set `sandbox: required | preferred | off` in
 `~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
@@ -160,17 +238,23 @@ base branch; the user's checkout is not touched):
 
 - **Detect** (code): stack (node: package manager and scripts; python: uv/poetry/pip, nox sessions or
   ruff/mypy/pytest; rust; go), test files and the command that runs specific ones, UI, database, cloud/secrets,
-  CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …).
+  CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …). Mutating commands
+  (`--fix`, `--write`, `format` without `--check`, …) become their read-only variant or are skipped, never a
+  check that rewrites files; identical commands are drafted once.
 - **Measure**: setup and every check once in a clean base worktree, in the sandbox (`--no-measure` skips).
 - **Draft**: `.factory/repo.yaml` (tiers: e2e/build, CI `services:` or > 120 s → `full`; secrets or failing on
-  the base → `manual`; reasons as comments), `.factory/review-rules.md`, the CI stub for `--ref`, and an
-  AGENTS.md "Test strategy" section when there is none.
-- **Legacy setup**: Claude Code (`CLAUDE.md`, `.claude/`), Cursor rules and Bugbot, opencode and grok
-  configs/agents/commands, workflows running coding bots, and PR/push workflows whose every command a drafted
-  check covers are deleted in the same PR. Skills with scripts, other assistants' files, uncovered or special
-  workflows and AGENTS.md sections about old tools are only listed as proposed removals. Deploy, release and
-  scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths, e.g.
-  `--keep .cursorrules --keep tools/`. The PR description lists every removed, proposed and kept item.
+  the base → `manual`; reasons as comments), `.factory/review-rules.md`, the CI stub for `--ref`, and
+  `AGENTS.md`: a full template (purpose, stack & commands, test strategy, architecture, conventions, domain,
+  data & secrets, do not, verify) when there is none, else a "Test strategy" section when missing.
+- **Legacy setup**: Claude Code (`CLAUDE.md`, `.claude/`), Cursor rules and Bugbot, opencode and grok configs,
+  workflows running coding bots, and PR/push workflows whose every command a drafted check covers are deleted
+  in the same PR. Operator tooling (commands, skills, agents someone runs by hand), skills with scripts, other
+  assistants' files, uncovered or special workflows are only proposed. Review rules from removed review
+  configs are migrated into `.factory/review-rules.md`. In `AGENTS.md`, rules and commands under
+  tool-specific headings move to "Do not" / "Stack & commands"; workflow sections are proposed for removal.
+  Duplicate rules across AGENTS.md and CLAUDE.md and a CLAUDE.md that differs from AGENTS.md are warnings.
+  Deploy, release and scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths. The PR
+  description lists every removed, proposed, kept and moved item and every warning.
 - **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
 - **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so

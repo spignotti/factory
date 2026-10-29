@@ -106,7 +106,7 @@ describe("fallback", () => {
   });
 });
 
-describe("implement model family (Amendment c, amended)", () => {
+describe("implement model family", () => {
   it("rejects a cross-family implement entry that is not capacity_only", () => {
     expect(() => parseProfile(rolesYaml({ implement: "[{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/grok-4.7 }]" }))).toThrow(
       /capacity_only/,

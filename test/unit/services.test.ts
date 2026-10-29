@@ -17,7 +17,7 @@ function repoWith(yaml: string): RepoConfig {
   return parseRepoConfig(yaml);
 }
 
-describe("service placeholders and port scheme (§6.12)", () => {
+describe("service placeholders and port scheme", () => {
   it("collects named and numeric port references in first-use order", () => {
     expect(portRefs(["a {port:db} {port:54322} {port:web}", "{port:db} {run_id} {port_offset}"])).toEqual({ names: ["db", "web"], numbers: [54322] });
   });

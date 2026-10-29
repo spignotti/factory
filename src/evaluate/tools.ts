@@ -4,7 +4,7 @@ import { type TSchema, Type } from "typebox";
 import type { EvalBrowser } from "./browser.js";
 
 /**
- * Browser tools of the evaluator (§6.5 step 5). They run in the factory process against the jailed
+ * Browser tools of the evaluator. They run in the factory process against the jailed
  * browser; Pi gets them as custom tools, the fake runner calls them from scripted `tool_calls`.
  */
 export interface BrowserToolResult {

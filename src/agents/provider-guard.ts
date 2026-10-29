@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 /**
- * Zen guard (Amendment e). OpenCode Zen (`opencode`) bills per use; OpenCode Go (`opencode-go`) is the
+ * Zen guard. OpenCode Zen (`opencode`) bills per use; OpenCode Go (`opencode-go`) is the
  * subscription on the same host under `/go`. Both read the same API key, so a model id or a `models.json`
  * `baseUrl` override is all it takes to bill Zen. OpenAI may only run on the ChatGPT login
  * (subscription), never on an API key.

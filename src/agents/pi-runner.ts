@@ -78,7 +78,7 @@ export class PiRunner implements AgentRunner {
     const { provider, model: modelId } = splitModel(req.model);
     const model = runtime.getModel(provider, modelId);
     if (!model) throw new AgentError(`unknown model ${req.model}`);
-    // Zen guard at runtime (Amendment e), the same rules as `doctor`: never the Zen endpoint by a
+    // Zen guard at runtime, the same rules as `doctor`: never the Zen endpoint by a
     // models.json override, never OpenAI on an API key.
     const zen = endpointViolation(req.model, model.baseUrl);
     if (zen) throw new AgentError(`refused: ${zen}`, undefined, 403);
@@ -116,7 +116,7 @@ export class PiRunner implements AgentRunner {
       tools,
       customTools,
       sessionManager: SessionManager.inMemory(req.cwd),
-      // Pi's own retries are off: the factory decides on backoff and fallback (Amendment c).
+      // Pi's own retries are off: the factory decides on backoff and fallback.
       settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true } }),
     });
     return session;
@@ -178,8 +178,8 @@ export class PiRunner implements AgentRunner {
 
 /**
  * Custom tools replace the built-ins of the same name (AgentSession._refreshToolRegistry).
- * bash: exactly the allowlisted env (Amendment b), jailed by bwrap/pasta when a jail is given; the
- * in-process file tools go through a PathGuard confined to the session cwd (Amendment j).
+ * bash: exactly the allowlisted env, jailed by bwrap/pasta when a jail is given; the
+ * in-process file tools go through a PathGuard confined to the session cwd.
  */
 export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail">, tools: string[]): ToolDefinition[] {
   const { cwd, env, jail } = req;

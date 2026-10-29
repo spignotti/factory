@@ -21,8 +21,7 @@
     "evals/tasks",
     "evals/profiles",
     "evals/README.md",
-    "README.md",
-    "SPEC.md"
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

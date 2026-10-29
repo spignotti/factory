@@ -1,4 +1,4 @@
-# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+# Curated eval task. Third-party code: see license and source; evals/README.md.
 id: django__django-16819
 repo: https://github.com/django/django.git
 base: 0b0998dc151feb77068e2387c34cc50ef6b356ae

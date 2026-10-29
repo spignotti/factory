@@ -30,13 +30,13 @@ export interface AgentRequest {
   system: string;
   prompt: string;
   tools: ToolSet;
-  /** Complete environment for agent tool processes (already allowlisted, Amendment b). */
+  /** Complete environment for agent tool processes (already allowlisted). */
   env: Record<string, string>;
-  /** Factory-owned Pi config dir (`PI_CODING_AGENT_DIR`, SPEC §8.3). */
+  /** Factory-owned Pi config dir (`PI_CODING_AGENT_DIR`). */
   agentDir?: string;
-  /** Sandbox for bash and the path guard for in-process tools (Amendment j); absent = unconfined. */
+  /** Sandbox for bash and the path guard for in-process tools; absent = unconfined. */
   jail?: Jail;
-  /** Evaluator browser tools (§6.5), added to the tool set; absent for every other role. */
+  /** Evaluator browser tools, added to the tool set; absent for every other role. */
   browser?: BrowserTools;
   /** Continue an earlier session with the same key (reviewers in round >= 2). */
   sessionKey?: string;

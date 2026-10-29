@@ -19,7 +19,7 @@ import { shellQuote } from "../sandbox/sandbox.js";
 import { EnvMissing, Services } from "../services.js";
 
 /**
- * Evaluate (§6.5, Amendment x): code first (app start, recorded flows, console/network capture, pixel
+ * Evaluate: code first (app start, recorded flows, console/network capture, pixel
  * diff base vs HEAD), then the `evaluate` LLM session for `verify: evaluator` criteria. Output is a
  * review (`reviewer: evaluator`); every code finding has a stable claim so it dedupes across rounds.
  * Artifacts land in `runs/<id>/evidence/` and are listed in `evaluate-<round>.json`.
@@ -101,7 +101,7 @@ export function normalizeEntry(text: string, origin: string): string {
 const consoleKey = (e: ConsoleEntry, origin: string) => `${e.kind}:${normalizeEntry(e.text, origin)}`;
 const networkKey = (e: NetworkEntry, origin: string) => `${e.method} ${normalizeEntry(e.url, origin)} ${e.status ?? e.failure}`;
 
-/** Flow findings: a red flow is a bug; the claim says whether it is a regression (§6.5 step 2). */
+/** Flow findings: a red flow is a bug; the claim says whether it is a regression. */
 export function flowFindings(flows: FlowResult[]): Finding[] {
   return flows
     .filter((f) => f.status === "fail")
@@ -119,7 +119,7 @@ export function flowFindings(flows: FlowResult[]): Finding[] {
     }));
 }
 
-/** New console errors and failed requests on HEAD: bugs without LLM judgment (§6.5 step 3). */
+/** New console errors and failed requests on HEAD: bugs without LLM judgment. */
 export function pageFindings(pages: PageCheck[]): Finding[] {
   const out: Finding[] = [];
   for (const p of pages) {
@@ -245,7 +245,7 @@ async function baseCaptures(ctx: RunContext, devices: string[], pages: string[],
   return result;
 }
 
-/** Recorded flows of the affected areas, jailed, reaching the app (§6.5 step 2). */
+/** Recorded flows of the affected areas, jailed, reaching the app. */
 async function runFlows(ctx: RunContext, services: Services, areas: Area[], url: string, reach: number[], notes: string[]): Promise<FlowResult[]> {
   const run = ctx.repo.verify.run ?? ctx.repo.tests.run;
   const changes = new Set(ctx.plan.packages.flatMap((p) => p.changes_flows));

@@ -88,7 +88,7 @@ const modelsOf = (profile: Profile) => [...new Set(Object.values(profile.roles).
 const providerOf = (model: string) => model.split("/")[0]!;
 
 /**
- * Zen guard (Amendment e): every configured model resolved through Pi (with `models.json` overrides)
+ * Zen guard: every configured model resolved through Pi (with `models.json` overrides)
  * must stay off the Zen endpoint, `opencode` (Zen) only when the provider policy names it explicitly,
  * OpenAI only on the ChatGPT login, every provider logged in.
  */
@@ -174,7 +174,7 @@ export async function pingChecks(profile: Profile, view: ProviderView, timeoutMs
 /**
  * GitHub (`--repo`): `gh` must be logged in; branch protection and auto-merge are hints only. Neither
  * needs admin rights nor GitHub Pro: without protection the factory still enforces its merge policy,
- * PRs just wait for a manual merge (Amendment g as amended).
+ * PRs just wait for a manual merge.
  */
 export async function githubChecks(github: GitHub, repoDir: string, repo: RepoConfig): Promise<DoctorCheck[]> {
   if (!(await github.authenticated(repoDir))) return [{ name: "gh", status: "fail", detail: "gh is not logged in (gh auth login)" }];
@@ -197,7 +197,7 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   return checks;
 }
 
-/** CI stub hash (§5.3, §15) and other workflows gating pull requests (hint). */
+/** CI stub hash and other workflows gating pull requests (hint). */
 export function ciChecks(repoDir: string, repo: RepoConfig): DoctorCheck[] {
   const stub = ciStubCheck(repoDir);
   const checks: DoctorCheck[] = [{ name: "ci stub", ...stub }];
@@ -212,7 +212,7 @@ export function ciChecks(repoDir: string, repo: RepoConfig): DoctorCheck[] {
 }
 
 /**
- * Evaluator prerequisites for a repo with `ui` (§6.9.3): the Chromium headless shell, known
+ * Evaluator prerequisites for a repo with `ui`: the Chromium headless shell, known
  * Playwright device names, ffmpeg for the session GIF (without it the PR gets the video only).
  */
 export function evaluatorChecks(repo: RepoConfig, env: { shell: string | undefined; browsers: string; ffmpeg: boolean }): DoctorCheck[] {
@@ -237,7 +237,7 @@ export function serviceConfigChecks(repo: RepoConfig): DoctorCheck[] {
 }
 
 /**
- * Live service/ui check (`--services`, §15 "services start/stop; ui reachable"): setup, then every
+ * Live service/ui check (`--services`: services start/stop, ui reachable): setup, then every
  * service and the ui started (ready probe) and stopped once, in a clean detached worktree of the base,
  * with the same sandbox and env allowlist as a run. Never touches the user's checkout.
  */
@@ -356,7 +356,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, repo)));
     } catch (e) {
       const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
-      checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand until \`factory adopt\`, SPEC §5.2)` : (e as Error).message.slice(0, 300) });
+      checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand or run \`factory adopt\`)` : (e as Error).message.slice(0, 300) });
     }
   }
   const report: DoctorReport = {

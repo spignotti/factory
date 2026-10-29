@@ -7,7 +7,7 @@ import type { z } from "zod";
 import type { StatsPeriodSchema, StatsReportSchema } from "../schemas/reports.js";
 import { billingOf, type BillingKind, DEFAULT_BILLING } from "../schemas/profile.js";
 
-/** One period of `factory stats` (SPEC §14; schema `schemas/stats.schema.json`). */
+/** One period of `factory stats` (schema `schemas/stats.schema.json`). */
 export type StatsPeriod = z.infer<typeof StatsPeriodSchema>;
 
 export type StatsReport = z.infer<typeof StatsReportSchema>;

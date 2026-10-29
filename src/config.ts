@@ -15,7 +15,7 @@ import {
 } from "./schemas/profile.js";
 
 /**
- * Layered model configuration (Amendment i), most specific wins:
+ * Layered model configuration, most specific wins:
  *   built-in (`profiles/default.yaml`) < user (`$FACTORY_HOME/profile.yaml`) < `--profile <file>`
  *   < repo (`.factory/repo.yaml` `models:`).
  * Layers replace whole role chains. Provider policy, billing kinds and the sandbox mode come only

@@ -13,7 +13,7 @@ export class InvalidOutputError extends Error {
   }
 }
 
-/** Amendment c: provider capacity errors are their own class. */
+/** Provider capacity errors are their own class. */
 export function classifyError(err: unknown): ErrorClass {
   if (err instanceof InvalidOutputError) return "invalid_output";
   const message = err instanceof Error ? err.message : String(err);
@@ -51,7 +51,7 @@ export function backoffMs(attempt: number, retry: Profile["retry"]): number {
 }
 
 /**
- * The chain for a role. Defense in depth for Amendment c (the profile is validated at load too):
+ * The chain for a role. Defense in depth (the profile is validated at load too):
  * an `implement` entry of another model family than the first is kept only when it is
  * `capacity_only`.
  */
