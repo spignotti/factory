@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
+import { renderCiStub } from "./ci.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { gcCommand } from "./commands/gc.js";
@@ -33,6 +34,9 @@ const USAGE = `usage:
   factory gc [--dry-run] [--force] [--json]
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
+              (--run starts the services its checks need, §6.12)
+  factory ci-stub --ref <tag>
+              (prints .github/workflows/factory.yml for a pinned factory ref; doctor checks its hash)
 `;
 
 function exitCode(result: string, signal: AbortSignal): number {
@@ -66,6 +70,15 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         },
       });
       return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, json: values.json }, io);
+    }
+    if (command === "ci-stub") {
+      const { values } = parseArgs({ args: rest, options: { ref: { type: "string" } } });
+      if (!values.ref) {
+        io.err(USAGE);
+        return 2;
+      }
+      io.out(renderCiStub(values.ref));
+      return 0;
     }
     if (command === "doctor") {
       const { values } = parseArgs({

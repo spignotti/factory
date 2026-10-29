@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
+import { ciStubCheck, otherPrWorkflows } from "../ci.js";
 import { GhCli, type GitHub } from "../gh.js";
 import { remotesWithCredentials } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
@@ -187,6 +188,20 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   return checks;
 }
 
+/** CI stub hash (§5.3, §15) and other workflows gating pull requests (hint). */
+export function ciChecks(repoDir: string, repo: RepoConfig): DoctorCheck[] {
+  const stub = ciStubCheck(repoDir);
+  const checks: DoctorCheck[] = [{ name: "ci stub", ...stub }];
+  if (repo.base_branch !== "main") {
+    checks.push({ name: "ci stub", status: "warn", detail: `base_branch is ${repo.base_branch}; the stub's push trigger and default base are main` });
+  }
+  const others = otherPrWorkflows(repoDir);
+  if (others.length) {
+    checks.push({ name: "other workflows", status: "info", detail: `${others.join(", ")} also run on pull requests; checks there are unknown to repo.yaml (move them into repo.yaml checks, or keep them out of required statuses)` });
+  }
+  return checks;
+}
+
 /** `factory doctor`: setup checks, the Zen guard and the effective model per role with its layer. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
@@ -222,7 +237,9 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
           ? { name: "git remotes", status: "fail", detail: `credentials embedded in the URL of remote ${leaky.join(", ")}; agents can read .git/config inside the sandbox. Use gh's credential helper (gh auth setup-git) and a plain URL` }
           : { name: "git remotes", status: "ok", detail: "no credentials in remote URLs" },
       );
-      checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, loadRepoConfig(repoDir))));
+      const repo = loadRepoConfig(repoDir);
+      checks.push(...ciChecks(repoDir, repo));
+      checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, repo)));
     } catch (e) {
       const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
       checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand until \`factory adopt\`, SPEC §5.2)` : (e as Error).message.slice(0, 300) });
