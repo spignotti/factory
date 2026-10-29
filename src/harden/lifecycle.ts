@@ -37,7 +37,7 @@ export function runsFor(p: Proposal, runs: RunRecord[]): RunRecord[] {
 
 /**
  * SPEC §11 step 5 for earlier proposals: a merged factory PR resolves the proposal and its entries; a PR
- * closed unmerged, or no merged PR within `STALE_DAYS`, drops it and reopens its `proposed` entries.
+ * closed unmerged, or no merged PR within `STALE_DAYS`, drops it and reopens its `proposed` entries (only those it still owns: `ref` = its id).
  */
 export async function resolveProposals(opts: { factoryHome: string; repoId: string; repoDir: string; runs: RunRecord[]; github: GitHub; now: Date }): Promise<LifecycleChange[]> {
   const changes: LifecycleChange[] = [];
@@ -62,7 +62,7 @@ export async function resolveProposals(opts: { factoryHome: string; repoId: stri
     const refs = new Set(p.references.findings);
     updateMemory(opts.factoryHome, opts.repoId, (mem) => {
       for (const e of mem.entries) {
-        if (!refs.has(e.key) || e.status !== "proposed") continue;
+        if (!refs.has(e.key) || e.status !== "proposed" || e.ref !== p.id) continue;
         if (change.status === "resolved") {
           e.status = "resolved";
           e.ref = change.pr;

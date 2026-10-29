@@ -100,11 +100,12 @@ describe("factory harden", () => {
       entry("m", { status: "proposed", ref: "p-merged" }),
       entry("c", { status: "proposed", ref: "p-closed", count: 2 }),
       entry("s", { status: "proposed", ref: "p-stale" }),
+      entry("y", { status: "proposed", ref: "p-young" }),
     ]);
     const mk = (id: string, created: string, goal: string, findings: string[]) =>
       writeProposal(ctx.factoryHome, { version: 1, kind: "harden", id, repo: ctx.repoId, created_at: created, status: "open", rationale: "r", plan: PLAN(goal, findings), references: { findings, checklist: [] }, signals: {}, metrics: {}, resolution: null });
     mk("p-merged", "2026-10-20T00:00:00Z", "merged goal", ["m"]);
-    mk("p-closed", "2026-10-20T00:00:00Z", "closed goal", ["c"]);
+    mk("p-closed", "2026-10-20T00:00:00Z", "closed goal", ["c", "y"]);
     mk("p-stale", "2026-09-01T00:00:00Z", "stale goal", ["s"]);
     mk("p-young", "2026-10-28T00:00:00Z", "young goal", []);
     const gh = new FakeGitHub();
@@ -124,6 +125,8 @@ describe("factory harden", () => {
     // c was reopened by the drop and is proposed again by the new proposal; s is open again.
     expect(mem.c).toEqual(["proposed", "2026-10-29"]);
     expect(mem.s![0]).toBe("open");
+    // y belongs to the newer proposal now; dropping p-closed leaves it alone.
+    expect(mem.y).toEqual(["proposed", "p-young"]);
   });
 
   it("an unavailable CI audit is a signal error, not a failure", async () => {
