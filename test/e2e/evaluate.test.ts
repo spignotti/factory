@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { findHeadlessShell } from "../../src/evaluate/browser.js";
 import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
@@ -8,6 +9,7 @@ import { addOrigin, gitIn } from "../helpers/repo.js";
 import { runScenario } from "../helpers/scenario.js";
 
 const browser = findHeadlessShell() !== undefined;
+const ffmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
 const realSandbox = ((): Sandbox | undefined => {
   try {
     return createSandbox("required", hostProbe);
@@ -47,7 +49,7 @@ describe.skipIf(!browser)("evaluate (ui fixture, real headless shell, fake LLM)"
       expect(home).toMatchObject({ device: "Desktop Chrome", head: "r1-desktop-chrome-root.png", base: "base-desktop-chrome-root.png", new_console: [], new_network: [] });
       expect(home.diff_ratio).toBeGreaterThan(0);
       const files = readdirSync(join(r.runDir, "evidence"));
-      expect(files).toEqual(expect.arrayContaining(["r1-A1.png", home.diff!, "r1-session.webm", "r1-session.gif"]));
+      expect(files).toEqual(expect.arrayContaining(["r1-A1.png", home.diff!, "r1-session.webm", ...(ffmpeg ? ["r1-session.gif"] : [])]));
       // The fake evaluator really drove the browser.
       const evalCall = r.runner.calls.find((c) => c.role === "evaluate")!;
       expect(evalCall.toolResults).toEqual([
@@ -61,12 +63,12 @@ describe.skipIf(!browser)("evaluate (ui fixture, real headless shell, fake LLM)"
 
       // Evidence: pinned links into the orphan branch, embedded in the PR.
       const tip = gitIn(bare, "rev-parse", "factory-evidence").trim();
-      expect(gitIn(bare, "ls-tree", "-r", "--name-only", "factory-evidence").trim().split("\n")).toEqual(expect.arrayContaining([`${r.runId}/r1-A1.png`, `${r.runId}/r1-session.gif`]));
+      expect(gitIn(bare, "ls-tree", "-r", "--name-only", "factory-evidence").trim().split("\n")).toEqual(expect.arrayContaining([`${r.runId}/r1-A1.png`, `${r.runId}/r1-session.webm`]));
       const body = r.github.prs[0]!.body;
       const link = (f: string) => `https://github.com/acme/tours/blob/${tip}/${r.runId}/${f}?raw=true`;
       expect(body).toContain(`| [x] | A1 | The home page shows the subtitle Guided tours | evaluator | evaluator: met, [screenshot](${link("r1-A1.png")}) |`);
       expect(body).toContain("## Evaluation (round 1)");
-      expect(body).toContain(`![evaluator session](${link("r1-session.gif")})`);
+      if (ffmpeg) expect(body).toContain(`![evaluator session](${link("r1-session.gif")})`);
       expect(body).toContain(`[diff](${link(home.diff!)})`);
       expect(readdirSync(join(r.factoryHome, "ports"))).toEqual([]);
     }, 180_000);

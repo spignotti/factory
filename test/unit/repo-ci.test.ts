@@ -13,6 +13,6 @@ describe("factory's own CI workflow", () => {
     expect(wf.on.push.branches).toEqual(["main"]);
     expect(wf.permissions).toEqual({ contents: "read" });
     const runs = Object.values(wf.jobs).flatMap((j) => j.steps.map((s) => s.run).filter(Boolean));
-    expect(runs).toEqual(["pnpm install --frozen-lockfile", "pnpm exec playwright-core install --with-deps --only-shell chromium", "pnpm typecheck", "pnpm lint", "pnpm test"]);
+    expect(runs).toEqual(["pnpm install --frozen-lockfile", "pnpm exec playwright-core install --with-deps --only-shell chromium", "command -v ffmpeg || (sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg)", "pnpm typecheck", "pnpm lint", "pnpm test"]);
   });
 });
