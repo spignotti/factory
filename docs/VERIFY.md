@@ -71,3 +71,5 @@ the gate commands it started itself. Killing bash children that Pi spawned relie
 - `GhCli.push` is a plain `git push -u origin <branch>` (never forced); resume relies on the branch only
   moving forward (merges, no rebase). Verified against a local bare remote in the e2e tests.
 - None of these run in tests; they are exercised only against a real repository.
+- `harden` CI audit: `GhCli.ciRuns` uses `gh run list --created >=<date> --limit 200 --json databaseId,headSha,workflowName,event,conclusion,createdAt` and one `gh run view <id> --json jobs` per run (job durations from `startedAt`/`completedAt`); `GhCli.latestTag` uses `gh api repos/spignotti/factory/tags`. Field names follow the gh docs; not yet run against a real repository.
+- `adopt` push/PR use the same `push`/`createPr` as runs; branch protection and auto-merge are only printed as hints.

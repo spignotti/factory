@@ -4,7 +4,7 @@ A deterministic pipeline that turns a task (issue, plan file or plain text) into
 request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. `SPEC.md` is the
 source of truth.
 
-## Status: M3 — services, CI stub, evals
+## Status: M5 — adopt, harden
 
 M1 core loop (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 
@@ -41,7 +41,10 @@ M2b (Amendments q–t): per-run services with port slots, explicit sandbox port 
 M3 (Amendment u): `factory eval`, `factory experiment`, the `baseline` profile and ten curated tasks
 (see [`evals/README.md`](evals/README.md)).
 
-Not yet: evaluator, `adopt`, `harden`.
+M5 (Amendments v–w): `factory adopt` (onboarding PR, legacy setup removal) and `factory harden` (signals,
+metrics, one proposal with a lifecycle); see the sections below.
+
+Not yet: evaluator (M4; harden's evaluator signals are empty until then).
 
 ## Resume
 
