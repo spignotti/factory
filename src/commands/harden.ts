@@ -12,6 +12,7 @@ import {
   ciAudit,
   factoryPrNumbers,
   findingSignals,
+  evaluatorSignals,
   hasSignals,
   reverts,
   type Signals,
@@ -204,7 +205,7 @@ export async function harden(opts: HardenOptions, deps: HardenDeps): Promise<Har
         reasons: period.reasons,
         lane_escalations: period.lane_escalations,
       },
-      evaluator: [],
+      evaluator: evaluatorSignals(windowRuns, repo),
       stale_guides: await staleGuides(repoDir, repo, base),
       reverts: await reverts(repoDir, base, since, prs),
     };

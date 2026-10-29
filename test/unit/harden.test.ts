@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { renderCiStub } from "../../src/ci.js";
 import { newestTag } from "../../src/gh.js";
 import { applyCompaction, validateCompaction } from "../../src/harden/compact.js";
 import { computeMetrics } from "../../src/harden/metrics.js";
-import { ciAudit, factoryPrNumbers, findingSignals, hasSignals, reverts, type Signals, staleGuides } from "../../src/harden/signals.js";
+import { ciAudit, evaluatorSignals, factoryPrNumbers, findingSignals, hasSignals, reverts, type Signals, staleGuides } from "../../src/harden/signals.js";
 import type { MemoryFile } from "../../src/memory.js";
 import { listRuns } from "../../src/runs.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
@@ -102,5 +102,29 @@ describe("harden metrics", () => {
     expect(m.ci_minutes_per_week).toBeCloseTo(0.2, 1);
     expect(hasSignals(signals)).toBe(true);
     expect(hasSignals({ ...signals, checklist: [], reverts: [] })).toBe(false);
+  });
+});
+
+describe("harden evaluator signal", () => {
+  function evalRun(root: string, id: string, gotos: string[], met = true) {
+    const dir = join(root, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "evaluate-1.json"), JSON.stringify({ criteria: [{ id: "A0", met: false }] }));
+    writeFileSync(join(dir, "evaluate-2.json"), JSON.stringify({ criteria: [{ id: "A1", met }] }));
+    writeFileSync(join(dir, "evaluate-2-tools.json"), JSON.stringify([...gotos.map((url) => ({ tool: "goto", args: { url }, text: "200" })), { tool: "goto", args: { url: "/broken" }, text: "x", isError: true }]));
+    return { run_id: id, dir, started_at: new Date() };
+  }
+
+  it("pages verified in two or more runs without a recorded flow are candidates", () => {
+    const root = mkdtempSync(join(tmpdir(), "runs-"));
+    const runs = [
+      evalRun(root, "r1", ["/", "http://127.0.0.1:4100/tours?x=1", "/cart"]),
+      evalRun(root, "r2", ["/tours", "/cart"]),
+      evalRun(root, "r3", ["/tours"], false),
+      { run_id: "r4", dir: join(root, "missing"), started_at: new Date() },
+    ];
+    const cfg = parseRepoConfig("checks: []\nverify:\n  areas:\n    - { name: cart, paths: [src/cart/**], flows: [flows/cart.mjs], pages: [/cart] }\n");
+    expect(evaluatorSignals(runs, cfg)).toEqual(["page /tours: evaluator verified criteria in 2 runs (r1/A1, r2/A1); no recorded flow covers it"]);
+    expect(evaluatorSignals(runs.slice(0, 1), cfg)).toEqual([]);
   });
 });
