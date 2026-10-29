@@ -64,8 +64,13 @@ export function checkDeadline(ctx: Pick<RunContext, "deadline" | "repo">): void 
   if (Date.now() > ctx.deadline) throw new WallTimeExceeded(ctx.repo.limits.max_wall_minutes);
 }
 
-export function writeJson(ctx: Pick<RunContext, "runDir">, name: string, data: unknown): void {
-  writeFileSync(join(ctx.runDir, name), JSON.stringify(data, null, 2) + "\n");
+/** Writes a run artifact, redacted like the event log. */
+export function writeJson(ctx: Pick<RunContext, "runDir" | "events">, name: string, data: unknown): void {
+  writeRunFile(ctx, name, JSON.stringify(data, null, 2) + "\n");
+}
+
+export function writeRunFile(ctx: Pick<RunContext, "runDir" | "events">, name: string, text: string): void {
+  writeFileSync(join(ctx.runDir, name), ctx.events.redact(text));
 }
 
 /** Allowlisted env for agent tool processes and checks of this run (Amendment b). */

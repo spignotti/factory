@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FakeRunner } from "../../src/agents/fake-runner.js";
+import { FakeRunner, FakeScriptSchema, type FakeStep } from "../../src/agents/fake-runner.js";
 import type { FactoryEvent, RunResult } from "../../src/events.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { type RunOptions, runFactory } from "../../src/pipeline/run.js";
@@ -16,6 +16,8 @@ export interface Scenario {
   patch?: (cfg: Record<string, unknown>) => void;
   options?: Partial<RunOptions>;
   github?: (gh: FakeGitHub) => void;
+  /** Rewrites the scripted steps before the run (e.g. to inject values). */
+  steps?: (steps: FakeStep[]) => FakeStep[];
 }
 
 export interface ScenarioRun {
@@ -34,7 +36,8 @@ export interface ScenarioRun {
 export async function runScenario(s: Scenario): Promise<ScenarioRun> {
   const repo = createFixtureRepo(s.patch);
   const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
-  const runner = FakeRunner.fromFile(join(FIXTURES, "scripts", s.script));
+  const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", s.script), "utf8"))).steps;
+  const runner = new FakeRunner(s.steps ? s.steps(scripted) : scripted);
   const github = new FakeGitHub();
   s.github?.(github);
   const slept: number[] = [];

@@ -57,10 +57,15 @@ export class EventLog {
     readonly runId: string,
     private readonly now: Clock = Date.now,
     /** Values that must never reach the log (defense in depth; nothing logs env on purpose). */
-    private readonly secrets: string[] = [],
+    readonly secrets: string[] = [],
   ) {
     this.path = join(runDir, "events.jsonl");
     mkdirSync(runDir, { recursive: true });
+  }
+
+  /** Redacts this run's secret values from any text that leaves the process (files, PR body). */
+  redact(text: string): string {
+    return redact(text, this.secrets);
   }
 
   onEvent(listener: (e: FactoryEvent) => void): () => void {
@@ -133,8 +138,10 @@ export const ResultSchema = z.object({
 });
 export type RunResult = z.infer<typeof ResultSchema>;
 
-/** Writes `result.json` as a single line (GrokBot's interface). */
-export function writeResult(path: string, result: RunResult): void {
+/** Writes `result.json` as a single line (GrokBot's interface), redacted. Returns what was written. */
+export function writeResult(path: string, result: RunResult, secrets: string[] = []): RunResult {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(ResultSchema.parse(result)) + "\n");
+  const line = redact(JSON.stringify(ResultSchema.parse(result)), secrets);
+  writeFileSync(path, line + "\n");
+  return JSON.parse(line) as RunResult;
 }

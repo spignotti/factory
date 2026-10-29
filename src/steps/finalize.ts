@@ -1,7 +1,5 @@
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { baseRef, changedFiles, diffStat, gitOk, revParse } from "../git.js";
-import { callAgent, type RunContext } from "../pipeline/context.js";
+import { callAgent, type RunContext, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
@@ -144,8 +142,8 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const risk = riskClass({ changed, diffLines, repo: ctx.repo });
   const policy = mergePolicy(risk.risk, result, ctx.repo.merge);
   const out = { result, reason, risk, mergePolicy: policy };
-  const body = renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed });
-  writeFileSync(join(ctx.runDir, "pr.md"), body);
+  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed }));
+  writeRunFile(ctx, "pr.md", body);
 
   let pr: string | null = null;
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
@@ -157,7 +155,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         repoDir: ctx.worktree,
         head: ctx.branch,
         base: ctx.repo.base_branch,
-        title: `${prefix}: ${ctx.plan.goal}`,
+        title: ctx.events.redact(`${prefix}: ${ctx.plan.goal}`),
         body,
         draft: result !== "done",
       });

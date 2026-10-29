@@ -168,7 +168,6 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       ...(out.questions ? { questions: out.questions } : {}),
     };
     events.emit({ step: "run", event: "run_finished", data: { result: result.result, reason: result.reason } });
-    writeResult(join(runDir, "result.json"), result);
-    return result;
+    return writeResult(join(runDir, "result.json"), result, events.secrets);
   }
 }

@@ -40,6 +40,27 @@ describe("events", () => {
 });
 
 describe("redaction", () => {
+  it("redacts result.json and returns what was written", () => {
+    const dir = mkdtempSync(join(tmpdir(), "res-"));
+    const path = join(dir, "result.json");
+    const written = writeResult(path, {
+      run_id: "r", repo: "/x", task: "#1", type: null, lane: "standard", result: "failed", risk: null,
+      merge_policy: null, pr: null, rounds: 0, minutes: 0, cost_usd: 0, reason: "auth failed for s3cr3t-value",
+    }, ["s3cr3t-value"]);
+    expect(readFileSync(path, "utf8")).not.toContain("s3cr3t-value");
+    expect(written.reason).toBe("auth failed for [redacted]");
+  });
+
+  it("redacts run artifacts written with writeJson / writeRunFile", async () => {
+    const { writeJson, writeRunFile } = await import("../../src/pipeline/context.js");
+    const dir = mkdtempSync(join(tmpdir(), "art-"));
+    const ctx = { runDir: dir, events: new EventLog(dir, "r", Date.now, ["s3cr3t-value"]) };
+    writeJson(ctx, "a.json", { note: "token s3cr3t-value", nested: ["x s3cr3t-value"] });
+    writeRunFile(ctx, "b.patch", "+const key = 's3cr3t-value';\n");
+    expect(readFileSync(join(dir, "a.json"), "utf8")).not.toContain("s3cr3t-value");
+    expect(readFileSync(join(dir, "b.patch"), "utf8")).toBe("+const key = '[redacted]';\n");
+  });
+
   it("never writes secret env values to the log", async () => {
     const { secretValues } = await import("../../src/events.js");
     const dir = mkdtempSync(join(tmpdir(), "ev-"));

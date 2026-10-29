@@ -64,6 +64,27 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.file("pr.md")).not.toContain(SECRET);
   });
 
+  it("secret values that reach agent output are redacted from artifacts, PR body and result", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      steps: (steps) =>
+        steps.map((s) => {
+          if (s.role === "implement") {
+            const out = s.output as { done: string[]; uncertain: string[] };
+            const writes = { ...s.writes, "src/leak.js": `export const k = "${SECRET}";\n` };
+            return { ...s, writes, output: { ...out, done: [...out.done, `used ${SECRET}`], uncertain: [`is ${SECRET} ok?`] } };
+          }
+          if (s.role === "pr_writer") return { ...s, raw: `Adds multiply. Token: ${SECRET}` };
+          return s;
+        }),
+    });
+    expect(r.result.result).toBe("done");
+    for (const f of ["handoff-P1.json", "pr.md", "diff-1.patch", "result.json", "events.jsonl"]) expect(r.file(f)).not.toContain(SECRET);
+    expect(r.file("pr.md")).toContain("uncertain (P1): is [redacted] ok?");
+    expect(r.github.prs[0]!.body).not.toContain(SECRET);
+    expect(r.github.prs[0]!.body).toContain("Token: [redacted]");
+  });
+
   it("gate failure then fix: failure tail goes back into the same session", async () => {
     const r = await runScenario({ script: "gate-fail-fix.json" });
     expect(r.result.result).toBe("done");

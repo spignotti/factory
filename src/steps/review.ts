@@ -1,9 +1,7 @@
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import { InvalidOutputError } from "../agents/models.js";
 import { diffText, git, stageAll } from "../git.js";
-import { callAgent, type RunContext, writeJson } from "../pipeline/context.js";
+import { callAgent, type RunContext, writeJson, writeRunFile } from "../pipeline/context.js";
 import type { TrackedFinding } from "../pipeline/merge.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema } from "../schemas/review.js";
@@ -85,7 +83,7 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
   await stageAll(ctx.worktree);
   const since = input.round === 1 || !input.lastReviewedSha ? ctx.baseSha : input.lastReviewedSha;
   const diff = await diffText(ctx.worktree, since, ctx.repo.review.skip_paths);
-  writeFileSync(join(ctx.runDir, `diff-${input.round}.patch`), diff);
+  writeRunFile(ctx, `diff-${input.round}.patch`, diff);
   const rules = await reviewRules(ctx);
   // allSettled: a failing reviewer must not leave its sibling running after the run has finished.
   const settled = await Promise.allSettled(M1_REVIEWERS.map((r) => runReviewer(ctx, r, input, diff, rules)));
