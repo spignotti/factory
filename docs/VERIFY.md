@@ -26,8 +26,43 @@ Unverified (needs a real provider):
 - Exact provider names and model ids (`opencode-go/*`, `openai/*`) in `profiles/default.yaml`; the fallback
   chains are placeholders (TBD by Silas).
 
+### Providers (checked in the Pi 1.4.0 model registry, not against live endpoints)
+
+- `opencode` is **OpenCode Zen**: pay-per-use, base URL `https://opencode.ai/inference/v1`. Never used;
+  the profile schema rejects every `opencode/*` model.
+- `opencode-go` is the subscription, base URL `https://opencode.ai/inference/go/v1`. It reads the same
+  `OPENCODE_API_KEY` as Zen, so a misconfigured model id (not the key) is what would bill pay-per-use;
+  hence the allowlist (`ALLOWED_PROVIDERS` in `src/schemas/profile.ts`: `opencode-go`, `openai`).
+- `openai` uses `OPENAI_API_KEY` (pay-per-use API) or ChatGPT OAuth in `auth.json` (subscription). Which
+  one applies depends on the factory-owned `auth.json`; only OAuth is intended. `openai-codex` is legacy
+  and not allowed.
+
+### HTTP idle timeout
+
+Pi aborts a provider request after `httpIdleTimeoutMs` without bytes (default `300_000` = 5 min, `0` =
+off). The factory leaves the default (`SettingsManager.inMemory` does not set it). Its own silence
+watchdog (`src/pipeline/watchdog.ts`) and `max_wall_minutes` (enforced inside every agent call) sit on top. Long silent reasoning phases
+may hit the 5 min limit; unverified with real models.
+
+### No filesystem sandbox
+
+Agents run with the bash tool in the worktree, but nothing confines them to it. The env is scrubbed
+(`spawnHook`), but an agent can still read `/proc/<pid>/environ` of the factory process (which holds the
+provider keys), the real `gh` config/token under `$HOME`, and the main repository `.git` (shared object
+store and refs of the worktree). Redaction only covers what the factory writes. Needs a sandbox
+(bubblewrap/container, separate user) before running untrusted tasks; not part of M1.
+
+### Abort
+
+On SIGINT/SIGTERM or `max_wall_minutes` the factory aborts the Pi session and kills the process groups of
+the gate commands it started itself. Killing bash children that Pi spawned relies on Pi's abort handling
+(unverified with long-running tool calls).
+
 ## GitHub (`src/gh.ts`)
 
 - `GhCli.baseStatus` reads check runs via `gh api repos/{owner}/{repo}/commits/<sha>/check-runs`.
 - `GhCli.createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue` (`gh issue view --json`).
+- Resume: `GhCli.updatePr` (`gh pr edit <url> --title --body`) and `markReady` (`gh pr ready <url>`).
+- `GhCli.push` is a plain `git push -u origin <branch>` (never forced); resume relies on the branch only
+  moving forward (merges, no rebase). Verified against a local bare remote in the e2e tests.
 - None of these run in tests; they are exercised only against a real repository.
