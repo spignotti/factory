@@ -56,6 +56,8 @@ export class EventLog {
     runDir: string,
     readonly runId: string,
     private readonly now: Clock = Date.now,
+    /** Values that must never reach the log (defense in depth; nothing logs env on purpose). */
+    private readonly secrets: string[] = [],
   ) {
     this.path = join(runDir, "events.jsonl");
     mkdirSync(runDir, { recursive: true });
@@ -85,10 +87,29 @@ export class EventLog {
     this.totals.tokens_in += event.tokens_in;
     this.totals.tokens_out += event.tokens_out;
     this.totals.cost_usd += event.cost_usd;
-    appendFileSync(this.path, JSON.stringify(event) + "\n");
+    appendFileSync(this.path, redact(JSON.stringify(event), this.secrets) + "\n");
     for (const l of this.listeners) l(event);
     return event;
   }
+}
+
+const SECRET_NAME = /TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL|AUTH/i;
+
+/** Values of secret-looking environment variables, for redaction. */
+export function secretValues(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
+    .filter(([name, value]) => SECRET_NAME.test(name) && value !== undefined && value.length >= 6)
+    .map(([, value]) => value as string);
+}
+
+export function redact(text: string, secrets: string[]): string {
+  let out = text;
+  for (const s of secrets) {
+    out = out.split(s).join("[redacted]");
+    const encoded = JSON.stringify(s).slice(1, -1);
+    if (encoded !== s) out = out.split(encoded).join("[redacted]");
+  }
+  return out;
 }
 
 export const RESULTS = ["done", "needs_human", "needs_input", "failed", "base_red", "locked"] as const;

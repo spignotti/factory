@@ -38,3 +38,15 @@ describe("events", () => {
     expect(() => writeResult(path, { ...result, result: "weird" as never })).toThrow();
   });
 });
+
+describe("redaction", () => {
+  it("never writes secret env values to the log", async () => {
+    const { secretValues } = await import("../../src/events.js");
+    const dir = mkdtempSync(join(tmpdir(), "ev-"));
+    const secrets = secretValues({ FOO_TOKEN: "s3cr3t-value", PATH: "/usr/bin", SHORT_KEY: "abc" });
+    expect(secrets).toEqual(["s3cr3t-value"]);
+    const log = new EventLog(dir, "r", Date.now, secrets);
+    log.emit({ step: "x", event: "agent_error", data: { message: "failed with s3cr3t-value" } });
+    expect(readFileSync(log.path, "utf8")).not.toContain("s3cr3t-value");
+  });
+});
