@@ -16,6 +16,8 @@ export interface Scenario {
   patch?: (cfg: Record<string, unknown>) => void;
   options?: Partial<RunOptions>;
   github?: (gh: FakeGitHub) => void;
+  /** Prepares the fixture repo before the run (e.g. adds an origin). */
+  setup?: (repo: string) => void;
   /** Rewrites the scripted steps before the run (e.g. to inject values). */
   steps?: (steps: FakeStep[]) => FakeStep[];
 }
@@ -35,6 +37,7 @@ export interface ScenarioRun {
 
 export async function runScenario(s: Scenario): Promise<ScenarioRun> {
   const repo = createFixtureRepo(s.patch);
+  s.setup?.(repo);
   const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
   const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", s.script), "utf8"))).steps;
   const runner = new FakeRunner(s.steps ? s.steps(scripted) : scripted);

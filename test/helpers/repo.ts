@@ -30,3 +30,12 @@ export function commitFile(dir: string, path: string, content: string, message =
   gitIn(dir, "add", "-A");
   gitIn(dir, "-c", "user.name=fixture", "-c", "user.email=fixture@test", "commit", "-q", "-m", message);
 }
+
+/** Adds a bare `origin` with `main` pushed (plus optional extra branches pointing at main). Returns its path. */
+export function addOrigin(dir: string, extraBranches: string[] = []): string {
+  const bare = join(mkdtempSync(join(tmpdir(), "factory-origin-")), "origin.git");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", bare]);
+  gitIn(dir, "remote", "add", "origin", bare);
+  gitIn(dir, "push", "-q", "origin", "main", ...extraBranches.map((b) => `main:refs/heads/${b}`));
+  return bare;
+}

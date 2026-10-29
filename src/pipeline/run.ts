@@ -5,7 +5,7 @@ import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError } from "../agents/models.js";
 import { EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
-import { baseRef, git, gitOk, revParse } from "../git.js";
+import { baseRef, git, gitOk, remoteBranchExists, revParse } from "../git.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
 import { finalize } from "../steps/finalize.js";
 import { runChecks } from "../steps/gates.js";
@@ -46,6 +46,8 @@ interface Outcome {
   pr: string | null;
   rounds: number;
   questions?: string[];
+  branch: string | null;
+  worktree: string | null;
 }
 
 /** `factory run`: intake → plan → implement → review loop → finalize. Always writes `result.json`. */
@@ -59,7 +61,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   const repoDir = resolve(opts.repo);
   const lane = opts.lane ?? "standard";
   let taskRef = opts.issue !== undefined ? `#${opts.issue}` : (opts.planFile ?? opts.textFile ?? "");
-  let out: Outcome = { result: "failed", reason: "", type: null, risk: null, merge_policy: null, pr: null, rounds: 0 };
+  let out: Outcome = { result: "failed", reason: "", type: null, risk: null, merge_policy: null, pr: null, rounds: 0, branch: null, worktree: null };
   let release: (() => void) | undefined;
 
   try {
@@ -103,9 +105,12 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       return finish();
     }
     let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
-    if (await gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${branch}`])) branch += `-${runId.slice(-6)}`;
+    const taken = (b: string) =>
+      gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${b}`]).then(async (local) => local || remoteBranchExists(repoDir, b));
+    if (await taken(branch)) branch += `-${runId.slice(-6)}`;
     const worktree = join(runDir, "worktree");
     await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
+    out = { ...out, branch, worktree };
     const deadline = Date.now() - (now() - startedAt) + repo.limits.max_wall_minutes * 60_000;
     const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline };
     const env = agentEnv(ctx);
@@ -166,6 +171,9 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       cost_usd: Math.round(events.totals.cost_usd * 10_000) / 10_000,
       reason: out.reason,
       ...(out.questions ? { questions: out.questions } : {}),
+      branch: out.branch,
+      worktree: out.worktree,
+      run_dir: runDir,
     };
     events.emit({ step: "run", event: "run_finished", data: { result: result.result, reason: result.reason } });
     return writeResult(join(runDir, "result.json"), result, events.secrets);

@@ -135,6 +135,10 @@ export const ResultSchema = z.object({
   cost_usd: z.number().min(0),
   reason: z.string(),
   questions: z.array(z.string()).optional(),
+  /** Where to find the work (null until created); needed to fix and `factory resume` a run. */
+  branch: z.string().nullable(),
+  worktree: z.string().nullable(),
+  run_dir: z.string(),
 });
 export type RunResult = z.infer<typeof ResultSchema>;
 

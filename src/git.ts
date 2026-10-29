@@ -38,6 +38,20 @@ export async function baseRef(repoDir: string, branch: string): Promise<string> 
   return branch;
 }
 
+/**
+ * Whether `branch` exists on `origin`. No origin → false. If the remote cannot be asked (network,
+ * auth), assume it exists so the caller picks a fresh name instead of colliding on push.
+ */
+export async function remoteBranchExists(repoDir: string, branch: string): Promise<boolean> {
+  if (!(await gitOk(repoDir, ["remote", "get-url", "origin"]))) return false;
+  try {
+    await execFileP("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], { cwd: repoDir, timeout: 60_000 });
+    return true;
+  } catch (e) {
+    return (e as { code?: unknown }).code !== 2;
+  }
+}
+
 async function mergeBase(cwd: string, base: string): Promise<string> {
   return (await git(cwd, ["merge-base", base, "HEAD"])).trim();
 }

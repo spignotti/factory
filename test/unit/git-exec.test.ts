@@ -2,8 +2,8 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { sh } from "../../src/exec.js";
-import { changedFiles, discardChanges, stageAll } from "../../src/git.js";
-import { createFixtureRepo, gitIn } from "../helpers/repo.js";
+import { changedFiles, discardChanges, remoteBranchExists, stageAll } from "../../src/git.js";
+import { addOrigin, createFixtureRepo, gitIn } from "../helpers/repo.js";
 
 describe("git helpers", () => {
   it("discardChanges removes staged edits and new files", async () => {
@@ -21,6 +21,18 @@ describe("git helpers", () => {
     const base = gitIn(dir, "rev-parse", "HEAD").trim();
     gitIn(dir, "mv", "AGENTS.md", "docs-agents.md");
     expect(await changedFiles(dir, base)).toEqual(["AGENTS.md", "docs-agents.md"]);
+  });
+});
+
+describe("remoteBranchExists", () => {
+  it("is false without an origin, true/false by ls-remote, and true when origin is unreachable", async () => {
+    const dir = createFixtureRepo();
+    expect(await remoteBranchExists(dir, "main")).toBe(false);
+    addOrigin(dir, ["factory/taken"]);
+    expect(await remoteBranchExists(dir, "factory/taken")).toBe(true);
+    expect(await remoteBranchExists(dir, "factory/free")).toBe(false);
+    gitIn(dir, "remote", "set-url", "origin", join(dir, "does-not-exist.git"));
+    expect(await remoteBranchExists(dir, "factory/free")).toBe(true);
   });
 });
 

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
+import { addOrigin } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -83,6 +84,14 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.file("pr.md")).toContain("uncertain (P1): is [redacted] ok?");
     expect(r.github.prs[0]!.body).not.toContain(SECRET);
     expect(r.github.prs[0]!.body).toContain("Token: [redacted]");
+  });
+
+  it("a branch name taken on the remote gets the run id suffix; result.json says where the work is", async () => {
+    const r = await runScenario({ script: "clean.json", setup: (repo) => void addOrigin(repo, ["factory/task-add-a-multiply-function"]) });
+    expect(r.result.result).toBe("done");
+    const head = r.github.prs[0]!.head;
+    expect(head).toBe(`factory/task-add-a-multiply-function-${r.result.run_id.slice(-6)}`);
+    expect(r.resultFile).toMatchObject({ branch: head, worktree: join(r.runDir, "worktree"), run_dir: r.runDir });
   });
 
   it("gate failure then fix: failure tail goes back into the same session", async () => {
@@ -276,5 +285,6 @@ describe("run guards", () => {
     const r = await runScenario({ script: "base-red.json", patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.00001) });
     expect(r.result).toMatchObject({ result: "needs_human" });
     expect(r.result.reason).toMatch(/max_wall_minutes/);
+    expect(r.resultFile).toMatchObject({ worktree: join(r.runDir, "worktree"), run_dir: r.runDir });
   });
 });

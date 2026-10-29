@@ -29,7 +29,7 @@ describe("events", () => {
     const result = {
       run_id: "r", repo: "/x", task: "#12", type: "bug" as const, lane: "standard" as const, result: "done" as const,
       risk: "low" as const, merge_policy: "human_review" as const, pr: "https://pr", rounds: 1, minutes: 4.2,
-      cost_usd: 0.03, reason: "",
+      cost_usd: 0.03, reason: "", branch: "factory/12-x", worktree: "/runs/r/worktree", run_dir: "/runs/r",
     };
     writeResult(path, result);
     const text = readFileSync(path, "utf8");
@@ -46,6 +46,7 @@ describe("redaction", () => {
     const written = writeResult(path, {
       run_id: "r", repo: "/x", task: "#1", type: null, lane: "standard", result: "failed", risk: null,
       merge_policy: null, pr: null, rounds: 0, minutes: 0, cost_usd: 0, reason: "auth failed for s3cr3t-value",
+      branch: null, worktree: null, run_dir: "/runs/r",
     }, ["s3cr3t-value"]);
     expect(readFileSync(path, "utf8")).not.toContain("s3cr3t-value");
     expect(written.reason).toBe("auth failed for [redacted]");
