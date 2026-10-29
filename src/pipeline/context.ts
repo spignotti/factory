@@ -178,7 +178,7 @@ export async function callAgent(
           env: agentEnv(ctx, req.role),
           jail: jailFor(ctx, req.cwd),
           agentDir: join(deps.factoryHome, "pi"),
-          ...(docs ? { docs } : {}),
+          ...(docs ? { docs: redactedTools(docs, (t) => events.redact(t)) } : {}),
           signal,
           onActivity: (a) => void events.emit({ step, event: a.kind, role: req.role, data: a.detail ? { detail: a.detail } : {} }),
         }),

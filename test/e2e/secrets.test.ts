@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { Context7Client, type FetchLike } from "../../src/docs/context7.js";
 import { runScenario } from "../helpers/scenario.js";
 
 const VALUE = "app-secret-value-7f3a9c2e51";
@@ -60,6 +61,25 @@ describe("repo secrets in a run (env_file provider)", () => {
     const pr = r.github.prs[0]!;
     expect(pr.body).toContain("[redacted]");
     expect(pr.body + pr.title).not.toContain(VALUE);
+  });
+
+  it("factory tool results (docs, browser) are redacted before they reach the model", async () => {
+    const fetch: FetchLike = async (href) => ({
+      status: 200,
+      headers: { get: () => null },
+      text: async () => (new URL(href).pathname.endsWith("/search") ? JSON.stringify({ results: [{ id: "/x/y", title: "Y" }] }) : `config example: KEY=${VALUE}`),
+    });
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (cfg) => void (cfg.secrets = { provider: "env_file", names: ["APP_SECRET"] }),
+      before: (repo, home) => writeSecrets(home, repo, `APP_SECRET=${VALUE}\n`),
+      deps: { docs: new Context7Client({ fetch }) },
+      steps: (steps) => steps.map((s) => (s.role === "implement" ? { ...s, tool_calls: [{ tool: "docs_lookup", args: { library: "y", topic: "config" } }] } : s)),
+    });
+    expect(r.result.result).toBe("done");
+    const text = r.runner.calls.find((c) => c.role === "implement")!.toolResults![0]!.text;
+    expect(text).toContain("KEY=[redacted]");
+    expect(text).not.toContain(VALUE);
   });
 
   it("a name that does not resolve stops the run before any agent call (needs_human)", async () => {
