@@ -70,6 +70,26 @@ export interface Detection {
   cloud: { present: boolean; reasons: string[] };
   workflows: Workflow[];
   special_jobs: SpecialJob[];
+  /** Secret names from an env template (never values) and whether a secrets-manager config is present. */
+  secrets: { names: string[]; sources: string[]; infisical: boolean };
+}
+
+export const ENV_TEMPLATES = [".env.example", ".env.sample", ".env.template", ".env.dist"];
+
+/** Variable names of the env templates (values are never read into the draft). */
+export function envTemplateNames(dir: string): { names: string[]; sources: string[] } {
+  const names = new Set<string>();
+  const sources: string[] = [];
+  for (const f of ENV_TEMPLATES) {
+    const text = read(dir, f);
+    if (text === undefined) continue;
+    sources.push(f);
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
+      if (m) names.add(m[1]!);
+    }
+  }
+  return { names: [...names], sources };
 }
 
 const read = (dir: string, f: string): string | undefined => (existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : undefined);
@@ -372,5 +392,6 @@ export function detect(dir: string, files: string[]): Detection {
     cloud: { present: cloudReasons.length > 0, reasons: cloudReasons },
     workflows,
     special_jobs: specialJobs(workflows),
+    secrets: { ...envTemplateNames(dir), infisical: existsSync(join(dir, ".infisical.json")) },
   };
 }

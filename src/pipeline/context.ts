@@ -14,6 +14,8 @@ import type { RepoConfig } from "../schemas/repo.js";
 import { supervise, WatchdogAbort } from "./watchdog.js";
 import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
 import { Services } from "../services.js";
+import type { ResolvedSecrets } from "../secrets.js";
+import type { FactoryTools } from "../agents/runner.js";
 
 export interface RunDeps {
   runner: AgentRunner;
@@ -72,6 +74,8 @@ export interface RunContext {
   laneEscalation: string[];
   /** Services of this run, stopped at run end. */
   services?: Services;
+  /** repo.yaml `secrets:` resolved for this run (commands only, never agents); absent = none. */
+  secrets?: ResolvedSecrets;
 }
 
 export type Lane = "standard" | "fast";
@@ -101,21 +105,27 @@ export function writeRunFile(ctx: Pick<RunContext, "runDir" | "events">, name: s
   writeFileSync(join(ctx.runDir, name), ctx.events.redact(text));
 }
 
-/** Allowlisted env for agent tool processes and checks of this run. */
-export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome">, role?: string): Record<string, string> {
+/** Allowlisted env for agent tool processes of this run (never a repo secret, even if listed in agent_env). */
+export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "secrets">, role?: string): Record<string, string> {
   const roleEnv = role ? (ctx.deps.profile.env[profileRoleOf(role)] ?? []) : [];
-  return buildAgentEnv(ctx.deps.parentEnv ?? process.env, { home: ctx.agentHome, extra: [...ctx.repo.agent_env, ...roleEnv] });
+  const exclude = [...(ctx.repo.secrets?.names ?? []), ...(ctx.secrets?.names ?? [])];
+  return buildAgentEnv(ctx.deps.parentEnv ?? process.env, { home: ctx.agentHome, extra: [...ctx.repo.agent_env, ...roleEnv], exclude });
+}
+
+/** Env for repo commands the factory runs itself (checks, red-green tests, services, the ui, flows): agentEnv plus the repo secrets. */
+export function commandEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "secrets">): Record<string, string> {
+  return { ...agentEnv(ctx), ...(ctx.secrets?.env ?? {}) };
 }
 
 /**
  * Jail for agent bash and repo commands with `cwd` writable (worktree or a temp base worktree), the
  * agent HOME writable and the main repo git dir read-only. Undefined when the sandbox is off.
  */
-export function jailFor(ctx: Pick<RunContext, "deps" | "agentHome">, cwd: string): Jail | undefined {
+export function jailFor(ctx: Pick<RunContext, "deps" | "agentHome" | "secrets">, cwd: string): Jail | undefined {
   const sandbox = ctx.deps.sandbox;
   if (!sandbox || sandbox.mode === "off") return undefined;
   const common = gitCommonDir(cwd);
-  return { sandbox, rw: [cwd, ctx.agentHome], ro: common ? [common] : [], hide: [ctx.deps.factoryHome] };
+  return { sandbox, rw: [cwd, ctx.agentHome], ro: common ? [common] : [], hide: [ctx.deps.factoryHome, ...(ctx.secrets?.files ?? [])] };
 }
 
 export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "agentDir" | "jail" | "docs">;
@@ -127,8 +137,20 @@ export function docsEnabled(ctx: Pick<RunContext, "deps" | "repo">, step: string
 }
 
 /** One supervised agent call: model chain with backoff/fallback, heartbeat events, watchdog. */
+/** Tool results redacted before they reach the model (an app page or doc could echo a secret). */
+function redactedTools(tools: FactoryTools | undefined, redact: (s: string) => string): FactoryTools | undefined {
+  if (!tools) return undefined;
+  return {
+    specs: tools.specs,
+    call: async (name, args) => {
+      const r = await tools.call(name, args);
+      return { ...r, text: redact(r.text) };
+    },
+  };
+}
+
 export async function callAgent(
-  ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "deadline">,
+  ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "deadline" | "secrets">,
   step: string,
   req: AgentCall,
 ): Promise<ModelResponse> {
@@ -149,6 +171,10 @@ export async function callAgent(
       (signal) =>
         callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep }, step, {
           ...req,
+          // Prompts carry gate output and app text: exact-match redaction of every secret value.
+          system: events.redact(req.system),
+          prompt: events.redact(req.prompt),
+          ...(req.browser ? { browser: redactedTools(req.browser, (t) => events.redact(t)) } : {}),
           env: agentEnv(ctx, req.role),
           jail: jailFor(ctx, req.cwd),
           agentDir: join(deps.factoryHome, "pi"),
@@ -168,12 +194,12 @@ export async function callAgent(
 }
 
 /** Services of a run in its worktree, with the run's env and jail; events as `service`. */
-export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "runId" | "runDir" | "events" | "worktree">): Services {
+export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "runId" | "runDir" | "events" | "worktree" | "secrets">): Services {
   return new Services(ctx.repo, {
     runId: ctx.runId,
     logDir: join(ctx.runDir, "services"),
     cwd: ctx.worktree,
-    env: agentEnv(ctx),
+    env: commandEnv(ctx),
     factoryHome: ctx.deps.factoryHome,
     jail: jailFor(ctx, ctx.worktree),
     onEvent: (action, data) => void ctx.events.emit({ step: "gates", event: "service", data: { action, ...data } }),

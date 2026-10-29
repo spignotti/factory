@@ -127,7 +127,8 @@ checks:                              # tier: fast = every package and fix round,
   - { name: db,   run: "nox -s test_db", tier: full, services: [db] }
 services:                            # one instance per run; see Services
   - { name: db, start: "…", stop: "…", env: { DATABASE_URL: "postgresql://…:{port:db}/postgres" } }
-env_command: ""                      # prefix for every command, e.g. "infisical run --"
+env_command: ""                      # prefix for every check command (prefer secrets: below for secrets)
+secrets: { provider: env_file, names: [DATABASE_URL] }   # checks, services, ui only, never agents; see Secrets
 tests: { globs: ["tests/**"], run: "uv run pytest {files}" }   # run enables the red-green proof of bug plans
 sensitive_paths: ["src/auth/**"]     # security reviewer, fast-lane escalation, at least medium risk
 human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]
@@ -203,6 +204,73 @@ with `docs_lookup: { roles: [...] }` (`plan`, `implement`, `fix`, `review`, `eva
 layer or in repo.yaml; `roles: []` turns it off. `factory doctor` checks that Context7 is reachable and
 that a configured key is accepted. Evals use the profile's setting, so `factory experiment` can compare
 with and without it.
+
+## Secrets
+
+Checks, red-green test runs, services and the app the evaluator starts often need secrets (a database
+URL, an API key). Declare them per repo; the values never reach agent sessions, their tools, bash or prompts:
+
+```yaml
+# .factory/repo.yaml: a dotenv file outside the repo
+secrets: { provider: env_file, path: ~/.factory/secrets/shop.env, names: [DATABASE_URL, STRIPE_KEY] }
+
+# or a generic wrapper that runs a command with the secrets in its env (a secrets manager CLI)
+secrets:
+  provider: command
+  command: "infisical run --env=dev --"      # the factory runs `<command> env -0` and keeps `names`
+  credentials: ~/.factory/secrets/shop.env  # the wrapper's own auth vars (optional), only for the wrapper
+  names: [DATABASE_URL, STRIPE_KEY]
+```
+
+- The factory resolves the names once per run (and on `resume`), in the user's checkout, outside the
+  sandbox; a name that does not resolve stops the run with `needs_human` before any agent call. Files
+  (`path`, default `~/.factory/secrets/<repo dir name>.env`, and `credentials`) must lie outside the
+  repo with mode `0600`.
+- Values go only to checks, red-green runs, services, the ui and recorded flows, through the process env
+  (jailed commands too: never on a command line). Agent tool processes never get them, even when a name
+  is also in `agent_env`; the secret files are hidden from the jail.
+- The wrapper gets the base env (`PATH`, `HOME`, locale) plus the `credentials` variables; those stay
+  with the wrapper and are never passed to checks or agents.
+- Every value (and every credential) is redacted by exact match from events, run files (service logs
+  included), gate output, prompts, browser tool results, PR title and body. Values shorter than 6
+  characters are not redacted; `factory doctor` warns about them.
+- `factory gates` resolves them too, unless the caller's env already sets every name (CI).
+- `factory doctor --repo` checks the file (outside the repo, `0600`) and that every name resolves, by
+  count, never printing a value. `factory adopt` drafts the block from `.env.example` names (never
+  values): the `command` provider with `infisical run --env=dev --` when the repo has `.infisical.json`,
+  else `env_file`.
+
+Example: Infisical with a per-repo, read-only machine identity (nothing in the factory is
+Infisical-specific; any CLI that runs a command with secrets in its env works the same way):
+
+1. In the Infisical project, create a project role (e.g. `factory-read-dev`) that may only **read**
+   secrets, restricted to the `dev` environment.
+2. Create a machine identity per repo (e.g. `factory-shop`, organization role *No Access*) with
+   Universal Auth, add it to the project with that role, and create a client secret.
+3. Write its credentials (and `INFISICAL_DOMAIN` for EU Cloud or self-hosting) to the credentials file:
+
+   ```sh
+   install -m 600 /dev/null ~/.factory/secrets/shop.env
+   printf 'INFISICAL_UNIVERSAL_AUTH_CLIENT_ID=%s\nINFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET=%s\n' "$ID" "$SECRET" >> ~/.factory/secrets/shop.env
+   ```
+
+4. Let the wrapper log in with them for each resolution (the access token never leaves the wrapper):
+
+   ```yaml
+   secrets:
+     provider: command
+     command: 'env INFISICAL_TOKEN="$(infisical login --method=universal-auth --silent --plain)" infisical run --env=dev --projectId=<project-id> --'
+     credentials: ~/.factory/secrets/shop.env
+     names: [DATABASE_URL, STRIPE_KEY]
+   ```
+
+   With an `INFISICAL_TOKEN` in the credentials file, or your own `infisical login`, the plain
+   `infisical run --env=dev --` is enough. Then run `factory doctor --repo <path>`.
+
+Residual risks: checks run code the agents wrote, so a test can read a value from its env and encode it
+somewhere exact-match redaction does not catch (e.g. base64 into a file in the worktree), or send it
+over the network; use dev-only, read-only, low-value secrets. Screenshots and videos are not redacted.
+With `sandbox: off` agents can read the secret files themselves.
 
 ## Sandbox (Linux)
 
@@ -337,7 +405,7 @@ Open review findings left at the end of a run (no nits) and flaky checks are rem
 is resolved through the factory's own Pi config (`$FACTORY_HOME/pi`), and it fails if a model would hit the
 pay-per-use OpenCode Zen endpoint (also via a `models.json` override), if OpenAI is not on the ChatGPT login
 (an API key bills per use), or if a provider has no credential. It warns that "Extra Usage" must be off
-(not readable via API). `--ping` sends one tiny request per model. With `--repo` it checks `gh` and gives
+(not readable via API). `--ping` sends one tiny request per model. With `--repo` it checks repo `secrets:` (see Secrets), `gh` and gives
 hints on auto-merge and branch protection (neither needs admin rights or GitHub Pro). The run applies the
 same Zen and ChatGPT-login rules before every agent session.
 

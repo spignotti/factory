@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { MIGRATION_GLOBS } from "../paths.js";
-import { type Check, parseRepoConfig, type RepoConfig } from "../schemas/repo.js";
+import { type Check, parseRepoConfig, type RepoConfig, RESERVED_SECRET_NAMES } from "../schemas/repo.js";
 import type { Candidate, Detection } from "./detect.js";
 import { lineCovered } from "./legacy.js";
 import type { MeasureResult } from "./measure.js";
@@ -54,6 +54,29 @@ export interface DraftInput {
   checks: DraftCheck[];
   baseBranch: string;
   date: string;
+  /** Repo directory name, for the default secrets file `~/.factory/secrets/<name>.env`. */
+  repoName?: string;
+}
+
+
+/**
+ * `secrets:` draft from the env template (names only): `.infisical.json` → the `command` provider with
+ * a per-repo credentials file for the wrapper; otherwise `env_file`. Undefined without names.
+ */
+export function draftSecrets(d: Detection, repoName = "<repo>"): { block: Record<string, unknown>; comment: string } | undefined {
+  const names = d.secrets.names.filter((n) => !RESERVED_SECRET_NAMES.includes(n));
+  if (!names.length) return undefined;
+  const file = `~/.factory/secrets/${repoName}.env`;
+  if (d.secrets.infisical) {
+    return {
+      block: { provider: "command", command: "infisical run --env=dev --", credentials: file, names },
+      comment: `# secrets: names from ${d.secrets.sources.join(", ")}; .infisical.json found, so the wrapper resolves them. ${file} (mode 0600) holds the wrapper's machine-identity credentials. Checks, services and the ui get the values, agents never.`,
+    };
+  }
+  return {
+    block: { provider: "env_file", names },
+    comment: `# secrets: names from ${d.secrets.sources.join(", ")}; values in ${file} (mode 0600, outside the repo). Checks, services and the ui get them, agents never.`,
+  };
 }
 
 /** `.factory/repo.yaml` text (validated by `parseRepoConfig`); notes become comments. */
@@ -68,7 +91,10 @@ export function draftRepoYaml(input: DraftInput): { text: string; config: RepoCo
     human_only_paths: DEFAULT_HUMAN_ONLY,
     merge: { auto_merge_max_risk: "none" },
   };
+  const secrets = draftSecrets(d, input.repoName);
+  if (secrets) doc.secrets = secrets.block;
   let body = stringify(doc, { lineWidth: 0 });
+  if (secrets) body = body.replace(/^secrets:\n/m, `${secrets.comment}\nsecrets:\n`);
   for (const c of input.checks) {
     const line = `  - name: ${stringify(c.name).trim()}\n`;
     const seconds = c.seconds != null ? `${c.seconds}s at adopt` : "not measured";
@@ -145,7 +171,9 @@ export function agentsTemplate(input: { detection: Detection; checks: DraftCheck
   const data = [
     d.db.present ? `- Database: ${d.db.reasons.join("; ")}.` : "",
     "- No secrets or real customer data in code, tests, fixtures, logs or prompts; test data is synthetic.",
-    "- TODO: where secrets live and how commands that need them are run.",
+    draftSecrets(d)
+      ? `- Secrets (${d.secrets.names.length} names from ${d.secrets.sources.join(", ")}) reach checks, services and the app via \`.factory/repo.yaml\` \`secrets:\`; agent sessions never see them. Do not ask for, print or hardcode them.`
+      : "- TODO: where secrets live and how commands that need them are run.",
   ].filter(Boolean);
   const fast = input.checks.filter((c) => c.tier === "fast").map((c) => `\`${c.name}\``);
   const verify = [

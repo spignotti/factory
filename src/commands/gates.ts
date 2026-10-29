@@ -5,6 +5,8 @@ import { sh } from "../exec.js";
 import { baseRef, changedFiles } from "../git.js";
 import { selectChecks } from "../gates/select.js";
 import { loadRepoConfig, type Tier, TierSchema } from "../schemas/repo.js";
+import { redact } from "../events.js";
+import { resolveSecrets, SecretsError } from "../secrets.js";
 import { EnvMissing, Services } from "../services.js";
 import { type CheckResult, runChecks } from "../steps/gates.js";
 
@@ -33,7 +35,8 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   const repoDir = resolve(opts.repo);
   const repo = loadRepoConfig(repoDir);
   const tier: Tier = TierSchema.parse(opts.tier);
-  const env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined));
+  let env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined));
+  let secretValues: string[] = [];
 
   const selected = async () => {
     const base = opts.base ?? (await baseRef(repoDir, repo.base_branch));
@@ -54,10 +57,26 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
     io.err(`gates: unknown check ${opts.run}\n`);
     return 2;
   }
+  // repo.yaml `secrets:` unless the caller already sets every name (CI passes them as env).
+  if (repo.secrets && !repo.secrets.names.every((n) => env[n] !== undefined)) {
+    try {
+      const s = await resolveSecrets(repo.secrets, { repoDir, factoryHome: opts.factoryHome ?? factoryHomeOf() });
+      if (s.missing.length) {
+        io.err(`gates: secrets not resolved: ${s.missing.join(", ")}\n`);
+        return 1;
+      }
+      env = { ...env, ...s.env };
+      secretValues = s.redact;
+    } catch (e) {
+      if (!(e instanceof SecretsError)) throw e;
+      io.err(`gates: secrets: ${e.message}\n`);
+      return 1;
+    }
+  }
   if (repo.setup) {
     const setup = await sh(repo.setup, { cwd: repoDir, env });
     if (setup.code !== 0) {
-      io.err(`gates: setup failed\n${setup.output}`);
+      io.err(`gates: setup failed\n${redact(setup.output, secretValues)}`);
       return 1;
     }
   }
@@ -77,7 +96,9 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   });
   let results: CheckResult[];
   try {
-    results = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, services });
+    results = (await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, services })).map((r) =>
+      secretValues.length && r.output_tail ? { ...r, output_tail: redact(r.output_tail, secretValues) } : r,
+    );
   } catch (e) {
     if (!(e instanceof EnvMissing)) throw e;
     io.err(`gates: ${e.message}\n`);

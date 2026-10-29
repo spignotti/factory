@@ -52,6 +52,8 @@ export interface AgentEnvOptions {
   home: string;
   /** Explicitly configured extra names (repo.yaml `agent_env`, profile role `env`). */
   extra?: readonly string[];
+  /** Names never passed (repo secrets and their wrapper credentials: commands get them, agents never). */
+  exclude?: readonly string[];
   /** Values the factory sets itself (e.g. service URLs); never taken from the parent env. */
   set?: Record<string, string>;
 }
@@ -60,7 +62,7 @@ export interface AgentEnvOptions {
 export function buildAgentEnv(parent: NodeJS.ProcessEnv, opts: AgentEnvOptions): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of [...BASE_ENV_ALLOWLIST, ...(opts.extra ?? [])]) {
-    if (NEVER_PASSED.has(name)) continue;
+    if (NEVER_PASSED.has(name) || opts.exclude?.includes(name)) continue;
     const value = parent[name];
     if (value !== undefined) env[name] = value;
   }

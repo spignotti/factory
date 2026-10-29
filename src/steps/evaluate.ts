@@ -9,7 +9,7 @@ import { diffPngs } from "../evaluate/pixeldiff.js";
 import { BrowserSession } from "../evaluate/tools.js";
 import { sh, tail } from "../exec.js";
 import { changedFiles, withBaseWorktree } from "../git.js";
-import { agentEnv, callAgent, jailFor, type RunContext, runServices, writeJson } from "../pipeline/context.js";
+import { agentEnv, callAgent, commandEnv, jailFor, type RunContext, runServices, writeJson } from "../pipeline/context.js";
 import { findingKey, type TrackedFinding } from "../pipeline/merge.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { matchesAny } from "../schemas/plan.js";
@@ -214,10 +214,10 @@ async function baseCaptures(ctx: RunContext, devices: string[], pages: string[],
   }
   const ui = ctx.repo.ui!;
   const result = await withBaseWorktree(ctx.repoDir, ctx.baseSha, join(ctx.runDir, "eval-base"), async (wt) => {
-    const env = agentEnv(ctx);
+    const env = commandEnv(ctx);
     const jail = jailFor(ctx, wt);
     if (ctx.repo.setup) {
-      const s = await sh(ctx.repo.setup, { cwd: wt, env, jail, timeoutMs: 30 * 60_000 });
+      const s = await sh(ctx.repo.setup, { cwd: wt, env: agentEnv(ctx), jail, timeoutMs: 30 * 60_000 });
       if (s.code !== 0) return { error: `setup failed on base (exit ${s.code}): ${tail(s.output, 5)}` };
     }
     const services = new Services(ctx.repo, {
@@ -260,7 +260,7 @@ async function runFlows(ctx: RunContext, services: Services, areas: Area[], url:
     }
     const cmd = (await services.expand(run)).replaceAll("{files}", area.flows.map(shellQuote).join(" "));
     const browsers = browsersPath();
-    const env = { ...agentEnv(ctx), ...(await services.envOf([...(ctx.repo.ui?.services ?? []), "ui"])), BASE_URL: url, PLAYWRIGHT_BROWSERS_PATH: browsers };
+    const env = { ...commandEnv(ctx), ...(await services.envOf([...(ctx.repo.ui?.services ?? []), "ui"])), BASE_URL: url, PLAYWRIGHT_BROWSERS_PATH: browsers };
     const jail = services.jailWith({ reach });
     const r = await sh(cmd, { cwd: ctx.worktree, env, jail: jail ? { ...jail, ro: [...jail.ro, browsers, "/etc/fonts"] } : undefined, timeoutMs: 15 * 60_000 });
     out.push({ ...base, status: r.code === 0 ? "pass" : "fail", ...(r.code === 0 ? {} : { output: tail(r.output, 30) }) });
