@@ -69,8 +69,12 @@ export function repoDirName(id: string): string {
   return `${safe}-${createHash("sha256").update(id).digest("hex").slice(0, 8)}`;
 }
 
+export function memoryDir(factoryHome: string, repoId: string): string {
+  return join(factoryHome, "memory", repoDirName(repoId));
+}
+
 export function memoryPath(factoryHome: string, repoId: string): string {
-  return join(factoryHome, "memory", repoDirName(repoId), "findings.json");
+  return join(memoryDir(factoryHome, repoId), "findings.json");
 }
 
 export function loadMemory(factoryHome: string, repoId: string): MemoryFile {
@@ -148,10 +152,21 @@ function withLock<T>(path: string, fn: () => T): T {
  * Upserts this run's observations by key (locked, atomic). A run counts once per entry, so a resumed
  * run does not inflate counts. A `resolved` entry seen again is reopened.
  */
-export function flushMemory(opts: { factoryHome: string; repoId: string; runId: string; now: Date; observations: Observation[] }): MemoryFile {
-  const path = memoryPath(opts.factoryHome, opts.repoId);
+/** Read-modify-write of a repo's memory under its lock, written atomically (harden, adopt, flush). */
+export function updateMemory(factoryHome: string, repoId: string, fn: (mem: MemoryFile) => void): MemoryFile {
+  const path = memoryPath(factoryHome, repoId);
   return withLock(path, () => {
-    const mem = loadMemory(opts.factoryHome, opts.repoId);
+    const mem = loadMemory(factoryHome, repoId);
+    fn(mem);
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(mem, null, 2) + "\n");
+    renameSync(tmp, path);
+    return mem;
+  });
+}
+
+export function flushMemory(opts: { factoryHome: string; repoId: string; runId: string; now: Date; observations: Observation[] }): MemoryFile {
+  return updateMemory(opts.factoryHome, opts.repoId, (mem) => {
     const ts = opts.now.toISOString();
     const byKey = new Map(mem.entries.map((e) => [e.key, e]));
     for (const o of opts.observations) {
@@ -170,10 +185,6 @@ export function flushMemory(opts: { factoryHome: string; repoId: string; runId: 
       if (e.status === "resolved") e.status = "open";
       if (o.check_sketch && !e.check_sketch) e.check_sketch = o.check_sketch;
     }
-    const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(mem, null, 2) + "\n");
-    renameSync(tmp, path);
-    return mem;
   });
 }
 
