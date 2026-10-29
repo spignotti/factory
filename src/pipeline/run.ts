@@ -5,7 +5,7 @@ import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
-import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
+import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema } from "../schemas/plan.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
@@ -232,18 +232,22 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing };
 
+    // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
+    // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
+    const baseSha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     const escalation: string[] = [];
-    let planned: PlanOutcome;
-    if (lane === "fast") {
-      const fast = await obtainFastPlan(base);
+    const planned: PlanOutcome = await withBaseWorktree(repoDir, baseSha, join(runDir, "plan-base"), async (planDir) => {
+      const pctx = { ...base, repoDir: planDir };
+      if (lane !== "fast") return obtainPlan(pctx, resolvePlanEffort(opts.planEffort, task.labels));
+      const fast = await obtainFastPlan(pctx);
+      let p: PlanOutcome;
       if (fast.kind === "escalate") {
         escalation.push(fast.reason);
-        planned = await planStep(base, "medium");
-      } else planned = fast;
-      if (planned.kind === "plan" && planned.plan.packages.length > 1) escalation.push(`${planned.plan.packages.length} packages (fast lane takes 1)`);
-    } else {
-      planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
-    }
+        p = await planStep(pctx, "medium");
+      } else p = fast;
+      if (p.kind === "plan" && p.plan.packages.length > 1) escalation.push(`${p.plan.packages.length} packages (fast lane takes 1)`);
+      return p;
+    });
     if (escalation.length) escalate(f, events, "intake", escalation);
     if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
     if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
@@ -255,7 +259,6 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 
     // Base check (SPEC §6.1 step 6) and worktree (step 7).
     checkDeadline(base);
-    const baseSha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     const status = await deps.github.baseStatus(repoDir, baseSha);
     if (status === "red" || status === "pending") {
       return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${status}, not green` });

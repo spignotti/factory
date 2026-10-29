@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -156,4 +157,19 @@ export async function remotesWithCredentials(repoDir: string): Promise<string[]>
     if (m && /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]+@/i.test(m[2]!) && !/^ssh:\/\/[^/:@\s]+@/i.test(m[2]!)) names.add(m[1]!);
   }
   return [...names].sort();
+}
+
+/**
+ * Runs `fn` in a temporary detached worktree of `repoDir` at `sha` (clean: tracked files only, no
+ * untracked or ignored files of the user's checkout), removed afterwards.
+ */
+export async function withBaseWorktree<T>(repoDir: string, sha: string, dir: string, fn: (dir: string) => Promise<T>): Promise<T> {
+  await git(repoDir, ["worktree", "add", "-q", "--detach", dir, sha]);
+  try {
+    return await fn(dir);
+  } finally {
+    await git(repoDir, ["worktree", "remove", "--force", dir]).catch(() => "");
+    rmSync(dir, { recursive: true, force: true });
+    await gitOk(repoDir, ["worktree", "prune"]);
+  }
 }
