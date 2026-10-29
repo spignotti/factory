@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -64,6 +65,15 @@ function collectBaseUrls(node: unknown, path: string, out: { path: string; baseU
   }
 }
 
+/**
+ * Options of the one-shot `doctor --ping` request. OpenCode (Go included) rejects a request without a
+ * per-conversation `x-opencode-session` header (400 MissingSessionID); Pi derives that header from
+ * `sessionId`, so every ping carries a fresh one. Other providers ignore it.
+ */
+export function pingRequestOptions(signal: AbortSignal): { signal: AbortSignal; maxTokens: number; sessionId: string } {
+  return { signal, maxTokens: 16, sessionId: `factory-doctor-${randomUUID()}` };
+}
+
 /** The view of the factory-owned Pi agent dir (`$FACTORY_HOME/pi`): same files PiRunner uses. */
 export async function piProviderView(agentDir: string): Promise<ProviderView> {
   const modelsPath = join(agentDir, "models.json");
@@ -97,7 +107,7 @@ export async function piProviderView(agentDir: string): Promise<ProviderView> {
       const p = split(model);
       const m = p && runtime.getModel(p[0], p[1]);
       if (!m) throw new Error(`unknown model ${model}`);
-      const res = await runtime.completeSimple(m, { messages: [{ role: "user", content: "Reply with: ok", timestamp: Date.now() }] }, { signal, maxTokens: 16 });
+      const res = await runtime.completeSimple(m, { messages: [{ role: "user", content: "Reply with: ok", timestamp: Date.now() }] }, pingRequestOptions(signal));
       if (res.stopReason === "error" || res.stopReason === "aborted") throw new Error((res.errorMessage ?? res.stopReason).slice(0, 200));
     },
   };

@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PiRunner } from "../../src/agents/pi-runner.js";
-import { isZenEndpoint, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
+import { isZenEndpoint, pingRequestOptions, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
 import { doctorCommand, type DoctorReport, evaluatorChecks } from "../../src/commands/doctor.js";
 import { loadRepoConfig } from "../../src/schemas/repo.js";
 import { FakeGitHub } from "../../src/gh.js";
@@ -149,6 +151,40 @@ describe("factory doctor: Zen guard (real Pi registry, offline, fake credentials
     const home = piHome({ models: { providers: { x: { models: [{ id: "m", baseUrl: "https://zen.opencode.ai/v1" }] } } } });
     const v = await piProviderView(join(home, "pi"));
     expect(v.modelsJsonBaseUrls()).toEqual([{ path: "models.json.providers.x.models[0].baseUrl", baseUrl: "https://zen.opencode.ai/v1" }]);
+  });
+});
+
+describe("factory doctor: live ping request", () => {
+  it("every ping carries a fresh session id (OpenCode needs x-opencode-session)", () => {
+    const signal = new AbortController().signal;
+    const a = pingRequestOptions(signal);
+    const b = pingRequestOptions(signal);
+    expect(a.sessionId).toMatch(/^factory-doctor-/);
+    expect(a.sessionId).not.toBe(b.sessionId);
+    expect(a.signal).toBe(signal);
+  });
+
+  it("an opencode-go ping sends the x-opencode-session header (loopback server)", async () => {
+    const seen: (string | undefined)[] = [];
+    const server = createServer((req, res) => {
+      seen.push(req.headers["x-opencode-session"] as string | undefined);
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "stub" } }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const home = piHome({ auth: SUBSCRIPTIONS, models: { providers: { "opencode-go": { baseUrl: `http://127.0.0.1:${port}/inference/go/v1` } } } });
+      const v = await piProviderView(join(home, "pi"));
+      await expect(v.ping("opencode-go/deepseek-v4.1-flash", new AbortController().signal)).rejects.toThrow();
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[0]).toMatch(/^factory-doctor-/);
+    } finally {
+      server.close();
+    }
   });
 });
 
