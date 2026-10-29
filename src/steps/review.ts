@@ -148,7 +148,7 @@ function parseSession(s: ReviewSession, text: string): { ok: true; reviews: Revi
 }
 
 async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<ReviewOutput[]> {
-  const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`)), rolePrompt("review-common")].join("\n\n");
+  const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`, ctx.deps.prompts)), rolePrompt("review-common", ctx.deps.prompts)].join("\n\n");
   let prompt = await reviewPrompt(ctx, s, input, diffs, rules, plan);
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {

@@ -44,7 +44,7 @@ export async function planStep(ctx: PlanContext, level: "medium" | "high"): Prom
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const prompt = errors.length ? `${base}\n\nYour previous plan was rejected:\n- ${errors.join("\n- ")}` : base;
-    const res = await callAgent(ctx, "plan", { role, cwd: ctx.repoDir, tools: "read_only", system: rolePrompt("plan"), prompt });
+    const res = await callAgent(ctx, "plan", { role, cwd: ctx.repoDir, tools: "read_only", system: rolePrompt("plan", ctx.deps.prompts), prompt });
     const json = extractJson(res.text);
     const questions = QuestionsSchema.safeParse(json);
     if (questions.success) {

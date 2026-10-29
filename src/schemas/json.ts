@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EVENT_TYPES, ResultSchema } from "../events.js";
 import { MemoryFileSchema } from "../memory.js";
+import { EvalProfileSchema, EvalRecordSchema, EvalTaskSchema, VerdictSchema as ExperimentVerdictSchema } from "./eval.js";
 import { DoctorReportSchema, GcReportSchema, StatsReportSchema, StatusReportSchema } from "./reports.js";
 import { LeanOutputSchema, ReviewOutputSchema } from "./review.js";
 
@@ -32,6 +33,10 @@ export const JSON_SCHEMAS: Record<string, { schema: z.ZodType; io: "input" | "ou
   "memory.schema.json": { schema: MemoryFileSchema, io: "output", title: "findings memory ($FACTORY_HOME/memory/<repo>/findings.json)" },
   "review-output.schema.json": { schema: ReviewOutputSchema, io: "input", title: "reviewer output (one reviewer)" },
   "review-lean.schema.json": { schema: LeanOutputSchema, io: "input", title: "fast lane lean review output" },
+  "eval-task.schema.json": { schema: EvalTaskSchema, io: "input", title: "eval task (evals/tasks/<id>.yaml)" },
+  "eval-profile.schema.json": { schema: EvalProfileSchema, io: "input", title: "eval profile / experiment variant" },
+  "eval-record.schema.json": { schema: EvalRecordSchema, io: "output", title: "eval result line (evals/results/<date>.jsonl)" },
+  "verdict.schema.json": { schema: ExperimentVerdictSchema, io: "output", title: "factory experiment verdict" },
 };
 
 export function renderJsonSchema(name: string): string {

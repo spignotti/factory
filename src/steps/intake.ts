@@ -64,7 +64,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
       role: "plan_normalize",
       cwd: ctx.repoDir,
       tools: "none",
-      system: rolePrompt("plan_normalize"),
+      system: rolePrompt("plan_normalize", ctx.deps.prompts),
       prompt: [
         asData("task", ctx.task.text),
         "Return only plan.json (SPEC §7.1 shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",

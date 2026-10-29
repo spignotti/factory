@@ -119,7 +119,7 @@ export async function reviewLoop(
     ctx.events.emit({
       step: "review",
       event: "round_finished",
-      data: { round, open: open.length, open_bugs: open.filter((f) => f.severity === "bug").length, added: merged.added.length, dropped: merged.dropped, decision },
+      data: { round, head: lastReviewedSha, open: open.length, open_bugs: open.filter((f) => f.severity === "bug").length, added: merged.added.length, dropped: merged.dropped, decision },
     });
     if (decision.action !== "fix") return { result: decision.action, reason: decision.reason, rounds: round, findings, gates };
 

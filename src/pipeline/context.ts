@@ -31,6 +31,8 @@ export interface RunDeps {
   signal?: AbortSignal;
   /** Process sandbox for agents and repo commands (Amendment j); absent = none (tests). */
   sandbox?: Sandbox;
+  /** Role prompt replacements by name (`roles/<name>.md`), from an eval profile (§13). */
+  prompts?: Partial<Record<string, string>>;
 }
 
 export interface Task {

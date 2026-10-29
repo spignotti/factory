@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { renderCiStub } from "./ci.js";
 import { doctorCommand } from "./commands/doctor.js";
+import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
@@ -36,6 +37,13 @@ const USAGE = `usage:
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
               (--run starts the services its checks need, §6.12)
+  factory eval --profile <name|file> [--profile …] [--tasks <glob>] [--repeat N] [--out <dir>] [--json]
+              (§13: fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
+  factory eval --validate [--tasks <glob>] [--json]
+              (no agents: hidden tests red on base, green on the upstream fix)
+  factory experiment --base <profile> --variant <profile> [--tasks <glob>] [--repeat N≥2] [--out <dir>]
+              (eval of both, decision rule, JSON verdict; schemas/verdict.schema.json)
+              eval/experiment also take [--work-dir <dir>] [--keep]
   factory ci-stub --ref <tag>
               (prints .github/workflows/factory.yml for a pinned factory ref; doctor checks its hash)
 `;
@@ -71,6 +79,51 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         },
       });
       return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, json: values.json }, io);
+    }
+    if (command === "eval" || command === "experiment") {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          profile: { type: "string", multiple: true },
+          base: { type: "string" },
+          variant: { type: "string" },
+          tasks: { type: "string" },
+          repeat: { type: "string" },
+          out: { type: "string" },
+          "work-dir": { type: "string" },
+          keep: { type: "boolean", default: false },
+          validate: { type: "boolean", default: false },
+          json: { type: "boolean", default: false },
+        },
+      });
+      const factoryHome = factoryHomeOf();
+      // Sandbox and provider policy come from the user profile, as for `run`.
+      const sandbox = sandboxFor(resolveProfile(loadLayers({ factoryHome })), io);
+      const workDir = values["work-dir"] ?? join(factoryHome, "eval", "work");
+      if (values.validate) return await validateCommand({ tasks: values.tasks, json: values.json }, { factoryHome, workDir, sandbox, keep: values.keep }, io);
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      const deps = {
+        factoryHome,
+        workDir,
+        sandbox,
+        keep: values.keep,
+        signal: controller.signal,
+        // One runner per run; evalOne closes it.
+        runner: () => new PiRunner(join(factoryHome, "pi")),
+      };
+      try {
+        if (command === "eval") {
+          return await evalCommand({ profiles: values.profile ?? [], tasks: values.tasks, repeat: Number(values.repeat ?? 1), out: values.out, json: values.json }, deps, io);
+        }
+        if (!values.base || !values.variant) {
+          io.err(USAGE);
+          return 2;
+        }
+        return await experimentCommand({ base: values.base, variant: values.variant, tasks: values.tasks, repeat: Number(values.repeat ?? 2), out: values.out }, deps, io);
+      } finally {
+        uninstall();
+      }
     }
     if (command === "ci-stub") {
       const { values } = parseArgs({ args: rest, options: { ref: { type: "string" } } });
