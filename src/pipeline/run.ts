@@ -17,7 +17,8 @@ import { gitAuthor, implementPackages } from "../steps/implement.js";
 import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
 import { planStep } from "../steps/plan.js";
 import { fastLaneEscalation } from "./lane.js";
-import { agentEnv, checkDeadline, jailFor, type Lane, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { EnvMissing } from "../services.js";
+import { agentEnv, checkDeadline, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
@@ -142,15 +143,20 @@ class RunFrame {
     if (this.state) saveState(this, this.state);
   }
 
+  /** Run-end cleanup (services), before result.json. */
+  readonly cleanups: (() => Promise<void>)[] = [];
+
   async execute(body: () => Promise<void>): Promise<RunResult> {
     try {
       await body();
     } catch (e) {
       const reason = (e as Error).message;
       if (e instanceof Interrupted) this.set({ result: "failed", reason });
-      else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) this.set({ result: "needs_human", reason });
-      else this.set({ result: "failed", reason });
+      else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded || e instanceof EnvMissing) {
+        this.set({ result: "needs_human", reason });
+      } else this.set({ result: "failed", reason });
     }
+    for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
     try {
       return this.finish();
     } finally {
@@ -276,6 +282,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement" });
     f.save();
     const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation] };
+    const services = (ctx.services = runServices(ctx));
+    f.cleanups.push(() => services.stopAll());
     const env = agentEnv(ctx);
 
     if (repo.setup) {
@@ -285,7 +293,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     }
     if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
-      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree) });
+      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
       throwIfInterrupted(deps);
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
@@ -419,6 +427,8 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline,
     };
+    const services = (ctx.services = runServices(ctx));
+    f.cleanups.push(() => services.stopAll());
     if (st.step === "implement") {
       for (const id of Object.keys(st.packages)) if (st.packages[id] !== "done") delete st.packages[id];
       st.failures = {};

@@ -15,6 +15,7 @@ import { selectChecks } from "../gates/select.js";
 import { topoOrder } from "../pipeline/dag.js";
 import { agentEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
 import type { Jail } from "../sandbox/sandbox.js";
+import { EnvMissing, type Services } from "../services.js";
 import type { Check, Tier } from "../schemas/repo.js";
 
 export interface CheckResult {
@@ -40,19 +41,35 @@ export function withEnvCommand(run: string, envCommand: string): string {
   return envCommand ? `${envCommand} ${run}` : run;
 }
 
-/** Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green. */
+/**
+ * Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green.
+ * A check with `services` starts them first (§6.12; EnvMissing when one does not come up), gets their
+ * env and, jailed, reaches exactly their ports.
+ */
 export async function runChecks(
   checks: Check[],
-  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: number; jail?: Jail },
+  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: number; jail?: Jail; services?: Services },
 ): Promise<CheckResult[]> {
   const timeout = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline - Date.now()));
   const results: CheckResult[] = [];
   for (const check of checks) {
-    const cmd = withEnvCommand(check.run, opts.envCommand);
-    let r = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout(), jail: opts.jail });
+    const needs = check.services ?? [];
+    let env = opts.env;
+    let jail = opts.jail;
+    let run = check.run;
+    if (opts.services) {
+      await opts.services.ensure(needs);
+      env = { ...env, ...(await opts.services.envOf(needs)) };
+      if (jail && needs.length) jail = { ...jail, ports: { reach: opts.services.reachOf(needs) } };
+      run = await opts.services.expand(run);
+    } else if (needs.length) {
+      throw new EnvMissing(`check ${check.name} needs services ${needs.join(", ")} but none are configured for this call`);
+    }
+    const cmd = withEnvCommand(run, opts.envCommand);
+    let r = await sh(cmd, { cwd: opts.cwd, env, timeoutMs: timeout(), jail });
     let status: CheckResult["status"] = r.code === 0 ? "pass" : "fail";
     if (status === "fail") {
-      const again = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout(), jail: opts.jail });
+      const again = await sh(cmd, { cwd: opts.cwd, env, timeoutMs: timeout(), jail });
       if (again.code === 0) status = "flaky";
       else r = again;
     }
@@ -81,6 +98,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     envCommand: repo.env_command,
     deadline: ctx.deadline,
     jail: jailFor(ctx, worktree),
+    services: ctx.services,
   });
 
   const builtins: BuiltinResult[] = [

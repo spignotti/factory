@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
@@ -576,6 +576,36 @@ describe("run guards", () => {
       return undefined;
     }
   })();
+
+  const SERVE = `node -e "require('http').createServer((q,r)=>r.end('hello')).listen(Number(process.argv[1]),'0.0.0.0')" {port:web}`;
+  const FETCH = `node -e "fetch(process.env.WEB_URL).then(r=>r.text()).then(t=>process.exit(t==='hello'?0:1),()=>process.exit(2))"`;
+  const withWeb = (start: string) => (c: Record<string, unknown>) => {
+    c.services = [{ name: "web", start, env: { WEB_URL: "http://127.0.0.1:{port:web}/" }, ready_timeout_s: 20 }];
+    (c.checks as unknown[]).push({ name: "web", run: FETCH, tier: "fast", services: ["web"] });
+  };
+
+  for (const jailed of [false, true]) {
+    it.skipIf(jailed && !realSandbox)(`services: started once for their check, env passed, logs in the run dir, stopped at run end${jailed ? " (sandboxed, pasta forwards)" : ""}`, async () => {
+      const r = await runScenario({ script: "clean.json", patch: withWeb(SERVE), deps: jailed ? { sandbox: realSandbox } : {} });
+      expect(r.result.result).toBe("done");
+      const svc = eventsOf(r, "service").map((e) => e.data.action);
+      expect(svc).toEqual(["ports", "service_starting", "service_ready", "service_stopped"]);
+      expect(eventsOf(r, "service")[1]!.data.sandboxed).toBe(jailed);
+      expect(eventsOf(r, "gate_result").filter((e) => e.data.check === "web").every((e) => e.data.status === "pass")).toBe(true);
+      expect(r.file("services/web.log")).toContain("[factory] start web");
+      expect(readdirSync(join(r.factoryHome, "ports"))).toEqual([]);
+      // stopped before result.json was written
+      const stopped = r.events.findIndex((e) => e.event === "service" && e.data.action === "service_stopped");
+      expect(stopped).toBeLessThan(r.events.findIndex((e) => e.event === "run_finished"));
+    }, 90_000);
+  }
+
+  it("services: a service that does not come up stops the run as needs_human (env_missing)", async () => {
+    const r = await runScenario({ script: "clean.json", patch: withWeb("echo cannot-bind >&2; exit 1"), steps: (s) => s.filter((x) => x.role === "plan_high") });
+    expect(r.result).toMatchObject({ result: "needs_human" });
+    expect(r.result.reason).toMatch(/^env_missing: service web exited with code 1[\s\S]*cannot-bind/);
+    expect(readdirSync(join(r.factoryHome, "ports"))).toEqual([]);
+  });
 
   it.skipIf(!realSandbox)("sandbox: setup and checks run jailed; agents get the jail; the run still passes", async () => {
     const reqs: AgentRequest[] = [];

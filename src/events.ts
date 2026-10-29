@@ -22,6 +22,8 @@ export const EVENT_TYPES = [
   "queued",
   // Sandbox in effect for this run, with degradation warnings (Amendment j).
   "sandbox",
+  // Services (§6.12): data.action = ports | starting | ready | failed | stopped.
+  "service",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
