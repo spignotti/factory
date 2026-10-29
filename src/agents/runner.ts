@@ -1,4 +1,4 @@
-import type { BrowserTools } from "../evaluate/tools.js";
+import type { TSchema } from "typebox";
 import type { Jail } from "../sandbox/sandbox.js";
 /** One interface for every LLM role: plan, implement, reviewers, summarize. */
 
@@ -20,6 +20,26 @@ export interface AgentActivity {
   detail?: string;
 }
 
+/** A tool the factory process runs for the model (Pi custom tool; the fake runner calls it from `tool_calls`). */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  parameters: TSchema;
+}
+
+export interface ToolResult {
+  text: string;
+  /** PNG screenshot, base64 (shown to the model). */
+  image?: string;
+  isError?: boolean;
+}
+
+/** Tools that run in the factory process, outside the agent sandbox. Errors are returned, never thrown. */
+export interface FactoryTools {
+  readonly specs: ToolSpec[];
+  call(name: string, args: Record<string, unknown>): Promise<ToolResult>;
+}
+
 export interface AgentRequest {
   /** Logical role, e.g. `plan_high`, `implement`, `review_plan`, `pr_writer`. */
   role: string;
@@ -37,7 +57,9 @@ export interface AgentRequest {
   /** Sandbox for bash and the path guard for in-process tools; absent = unconfined. */
   jail?: Jail;
   /** Evaluator browser tools, added to the tool set; absent for every other role. */
-  browser?: BrowserTools;
+  browser?: FactoryTools;
+  /** `docs_lookup` (Context7) for roles that have it enabled; absent otherwise. */
+  docs?: FactoryTools;
   /** Continue an earlier session with the same key (reviewers in round >= 2). */
   sessionKey?: string;
   signal?: AbortSignal;

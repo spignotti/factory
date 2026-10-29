@@ -11,6 +11,7 @@ import { git, gitOk, revParse, withBaseWorktree } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import type { TrackedFinding } from "../pipeline/merge.js";
 import { runFactory } from "../pipeline/run.js";
+import type { Context7Client } from "../docs/context7.js";
 import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
 import { type EvalProfile, EvalProfileSchema, type EvalRecord, EvalRecordSchema, type EvalTask, EvalTaskSchema } from "../schemas/eval.js";
 import type { Profile } from "../schemas/profile.js";
@@ -142,6 +143,8 @@ export interface EvalDeps {
   signal?: AbortSignal;
   /** Keep clones and run homes (debugging). */
   keep?: boolean;
+  /** Context7 client for `docs_lookup` (the profile's `docs_lookup.roles` decides who gets it). */
+  docs?: Context7Client;
 }
 
 interface Env {
@@ -324,6 +327,7 @@ export async function evalOne(task: EvalTask, profile: LoadedEvalProfile, repeat
           sandbox: deps.sandbox,
           signal: timeout.signal,
           prompts: profile.prompts,
+          ...(deps.docs ? { docs: deps.docs } : {}),
         },
       );
     } finally {

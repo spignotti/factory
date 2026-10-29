@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { OneShot, type OneShotDeps } from "../agents/oneshot.js";
 import { extractJson } from "../agents/runner.js";
 import { staleClaudeMd, trimAgentsMd } from "../adopt/agents-md.js";
@@ -200,7 +200,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     }
     dropMutating(detection, measured);
     const checks: DraftCheck[] = draftChecks(detection, measured);
-    const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date });
+    const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: basename(resolve(repoDir)) });
     const agentsPath = join(wt, "AGENTS.md");
     const agentsMd = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : undefined;
     const read = (rel: string) => {

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
-import { RoleOverridesSchema } from "./profile.js";
+import { DocsLookupSchema, RoleOverridesSchema } from "./profile.js";
 
 export const TierSchema = z.enum(["fast", "full", "manual"]);
 export type Tier = z.infer<typeof TierSchema>;
@@ -49,6 +49,26 @@ const VerifyAreaSchema = z.object({
   /** Pages of this area (paths under `ui.url`) screenshotted base vs HEAD when the area is touched. */
   pages: z.array(z.string()).default([]),
 });
+
+const EnvNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "environment variable names use letters, digits and _");
+/** Names a secrets provider may not set: the factory controls them for every command. */
+export const RESERVED_SECRET_NAMES = ["PATH", "HOME", "SHELL", "TMPDIR", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GH_CONFIG_DIR"];
+const SecretNamesSchema = z
+  .array(EnvNameSchema)
+  .min(1)
+  .refine((names) => names.every((n) => !RESERVED_SECRET_NAMES.includes(n)), { message: `secrets.names may not include ${RESERVED_SECRET_NAMES.join(", ")}` });
+
+/**
+ * Per-repo secrets for checks, services and the evaluated app (never agents). `env_file`: a dotenv file
+ * outside the repo [`$FACTORY_HOME/secrets/<repo dir name>.env`]. `command`: a wrapper prefix that runs a
+ * command with the secrets in its env (e.g. a secrets manager CLI); `credentials` is a dotenv file with the
+ * wrapper's own auth variables, passed only to the wrapper.
+ */
+export const SecretsSchema = z.discriminatedUnion("provider", [
+  z.object({ provider: z.literal("env_file"), path: z.string().min(1).optional(), names: SecretNamesSchema }).strict(),
+  z.object({ provider: z.literal("command"), command: z.string().min(1), credentials: z.string().min(1).optional(), names: SecretNamesSchema }).strict(),
+]);
+export type SecretsConfig = z.infer<typeof SecretsSchema>;
 
 /** Default and upper bound of proposals per harden ticket. */
 export const DEFAULT_MAX_PROPOSALS = 5;
@@ -137,6 +157,10 @@ export const RepoConfigSchema = z
       .default({ author: "factory" }),
     // Names of extra environment variables passed to agent tool processes and checks.
     agent_env: z.array(z.string()).default([]),
+    // Secrets for checks, services and the ui app; never for agents.
+    secrets: SecretsSchema.optional(),
+    // Agent steps with the `docs_lookup` tool for this repo; replaces the profile's list.
+    docs_lookup: DocsLookupSchema.optional(),
     // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
   })

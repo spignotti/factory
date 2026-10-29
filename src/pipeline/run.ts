@@ -18,7 +18,8 @@ import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask
 import { planStep } from "../steps/plan.js";
 import { fastLaneEscalation } from "./lane.js";
 import { EnvMissing } from "../services.js";
-import { agentEnv, checkDeadline, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "../secrets.js";
+import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
@@ -157,6 +158,8 @@ class RunFrame {
       } else this.set({ result: "failed", reason });
     }
     for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
+    // Service logs and browser captures are written by child processes: redact them in place.
+    if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
     try {
       return this.finish();
     } finally {
@@ -207,6 +210,29 @@ class RunFrame {
   }
 }
 
+/**
+ * repo.yaml `secrets:` for this run: values are added to the redaction list before anything can
+ * print them. Undefined (and the run set to needs_human) when a name does not resolve.
+ */
+async function openSecrets(f: RunFrame, repo: RepoConfig, repoDir: string, deps: RunDeps, step: string): Promise<ResolvedSecrets | undefined> {
+  if (!repo.secrets) return { env: {}, missing: [], redact: [], short: [], files: [], names: [] };
+  let s: ResolvedSecrets;
+  try {
+    s = await resolveSecrets(repo.secrets, { repoDir, factoryHome: deps.factoryHome, parentEnv: deps.parentEnv });
+  } catch (e) {
+    if (!(e instanceof SecretsError)) throw e;
+    f.set({ result: "needs_human", reason: `secrets: ${e.message}` });
+    return undefined;
+  }
+  f.events.addSecrets(s.redact);
+  f.events.emit({ step, event: "progress", data: { secrets: { provider: repo.secrets.provider, resolved: Object.keys(s.env).length, missing: s.missing } } });
+  if (s.missing.length) {
+    f.set({ result: "needs_human", reason: `secrets not resolved: ${s.missing.join(", ")} (see factory doctor --repo)` });
+    return undefined;
+  }
+  return s;
+}
+
 /** `factory run`: intake → plan → implement → review loop → finalize. Always writes `result.json`. */
 export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunResult> {
   const now = deps.now ?? Date.now;
@@ -225,6 +251,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     events.emit({ step: "intake", event: "step_started" });
     const repo: RepoConfig = loadRepoConfig(repoDir);
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
+    const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
+    if (!secrets) return;
     const task: Task = await readTask(opts, repoDir, deps.github);
     f.taskRef = task.ref;
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
@@ -236,7 +264,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const agentHome = prepareAgentHome(runDir);
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
     const memoryBriefing = await openMemory(f, deps, repoDir);
-    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing };
+    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
 
     // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
     // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
@@ -293,7 +321,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     }
     if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
-      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
+      const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
       throwIfInterrupted(deps);
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
@@ -418,6 +446,8 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: st.result } });
     const repo = loadRepoConfig(st.repo);
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
+    const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
+    if (!secrets) return;
     const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
     f.set({ type: plan.type });
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
@@ -425,7 +455,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     const ctx: RunContext = {
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
       lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
-      worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline,
+      worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline, secrets,
     };
     const services = (ctx.services = runServices(ctx));
     f.cleanups.push(() => services.stopAll());

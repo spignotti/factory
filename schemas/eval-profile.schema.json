@@ -420,6 +420,28 @@
         ]
       }
     },
+    "docs_lookup": {
+      "type": "object",
+      "properties": {
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "implement",
+              "fix",
+              "review",
+              "evaluate"
+            ]
+          }
+        }
+      },
+      "required": [
+        "roles"
+      ],
+      "additionalProperties": false
+    },
     "description": {
       "type": "string"
     },

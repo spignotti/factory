@@ -14,7 +14,7 @@ import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { topoOrder } from "../pipeline/dag.js";
-import { agentEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
+import { commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
 import type { Jail } from "../sandbox/sandbox.js";
 import { EnvMissing, type Services } from "../services.js";
 import type { Check, Tier } from "../schemas/repo.js";
@@ -92,7 +92,8 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const { repo, plan, worktree, handoffs } = ctx;
   await stageAll(worktree);
   const changed = await changedFiles(worktree, ctx.baseSha);
-  const env = agentEnv(ctx);
+  // Checks and red-green tests get the repo secrets; agents never do.
+  const env = commandEnv(ctx);
   const checks = await runChecks(selectChecks(repo.checks, tier, changed), {
     cwd: worktree,
     env,

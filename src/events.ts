@@ -24,6 +24,8 @@ export const EVENT_TYPES = [
   "sandbox",
   // Services: data.action = ports | starting | ready | failed | stopped.
   "service",
+  // One `docs_lookup` tool call (Context7): library, topic, estimated tokens, status.
+  "docs_lookup",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -114,6 +116,12 @@ export class EventLog {
   /** Usage per role and model, in first-use order (resumed runs include the earlier attempts). */
   usage(): RoleUsage[] {
     return [...this.byRole.values()].map((u) => ({ ...u }));
+  }
+
+  /** Adds values to redact (repo secrets resolved after the log was opened); longest first. */
+  addSecrets(values: string[]): void {
+    for (const v of values) if (v && !this.secrets.includes(v)) this.secrets.push(v);
+    this.secrets.sort((a, b) => b.length - a.length);
   }
 
   /** Redacts this run's secret values from any text that leaves the process (files, PR body). */

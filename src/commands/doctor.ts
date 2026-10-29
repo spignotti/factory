@@ -18,6 +18,9 @@ import { Services } from "../services.js";
 import { browsersPath, findHeadlessShell, INSTALL_HINT, knownDevice } from "../evaluate/browser.js";
 import type { z } from "zod";
 import type { DoctorReportSchema } from "../schemas/reports.js";
+import { type Context7Client, context7Probe } from "../docs/context7.js";
+import { redact } from "../events.js";
+import { isInside, looseMode, MIN_REDACT_LENGTH, type ResolvedSecrets, resolveSecrets, SecretsError, secretsFile } from "../secrets.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -45,6 +48,8 @@ export interface DoctorOptions {
   pingTimeoutMs?: number;
   /** `--services`: start and stop every service and the ui once in a clean base worktree. */
   services?: boolean;
+  /** Context7 client of `docs_lookup` (the CLI passes one; absent = not checked). */
+  context7?: Context7Client;
 }
 
 /** Resolves the layered model config (with the repo layer if `--repo`), reporting errors as a failed check. */
@@ -241,7 +246,7 @@ export function serviceConfigChecks(repo: RepoConfig): DoctorCheck[] {
  * service and the ui started (ready probe) and stopped once, in a clean detached worktree of the base,
  * with the same sandbox and env allowlist as a run. Never touches the user's checkout.
  */
-export async function liveServiceChecks(repoDir: string, repo: RepoConfig, factoryHome: string, sandbox: Sandbox): Promise<DoctorCheck[]> {
+export async function liveServiceChecks(repoDir: string, repo: RepoConfig, factoryHome: string, sandbox: Sandbox, secrets?: ResolvedSecrets): Promise<DoctorCheck[]> {
   const names = [...repo.services.map((s) => s.name), ...(repo.ui ? ["ui"] : [])];
   if (!names.length) return [];
   const tmp = mkdtempSync(join(tmpdir(), "factory-doctor-"));
@@ -251,11 +256,13 @@ export async function liveServiceChecks(repoDir: string, repo: RepoConfig, facto
     const sha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     await withBaseWorktree(repoDir, sha, join(tmp, "wt"), async (wt) => {
       const home = prepareAgentHome(tmp);
-      const env = buildAgentEnv(process.env, { home, extra: repo.agent_env });
+      const base = buildAgentEnv(process.env, { home, extra: repo.agent_env, exclude: secrets?.names ?? [] });
+      // Services get the repo secrets like in a run; setup does not.
+      const env = { ...base, ...(secrets?.env ?? {}) };
       const common = gitCommonDir(wt);
-      const jail = sandbox.mode === "off" ? undefined : { sandbox, rw: [wt, home], ro: common ? [common] : [], hide: [factoryHome] };
+      const jail = sandbox.mode === "off" ? undefined : { sandbox, rw: [wt, home], ro: common ? [common] : [], hide: [factoryHome, ...(secrets?.files ?? [])] };
       if (repo.setup) {
-        const setup = await sh(repo.setup, { cwd: wt, env, jail, timeoutMs: 15 * 60_000 });
+        const setup = await sh(repo.setup, { cwd: wt, env: base, jail, timeoutMs: 15 * 60_000 });
         if (setup.code !== 0) {
           checks.push({ name: "services", status: "fail", detail: `setup failed in a clean base worktree: ${tail(setup.output, 5)}` });
           return;
@@ -269,7 +276,7 @@ export async function liveServiceChecks(repoDir: string, repo: RepoConfig, facto
           const what = name === "ui" ? `reachable at ${await services.expand(repo.ui!.url)}` : "started";
           checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "ok", detail: `${what} in ${Math.round((Date.now() - t0) / 100) / 10}s and stopped` });
         } catch (e) {
-          checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "fail", detail: (e as Error).message.slice(0, 600) });
+          checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "fail", detail: redact((e as Error).message, secrets?.redact ?? []).slice(0, 600) });
         } finally {
           await services.stopAll();
         }
@@ -304,6 +311,51 @@ export function contextFileChecks(factoryHome: string, repoDir?: string): Doctor
   return checks;
 }
 
+/**
+ * repo.yaml `secrets:`: the file (env_file, or the wrapper's credentials) exists outside the repo with
+ * mode 0600, and every name resolves. Reports names and counts only, never a value.
+ */
+export async function secretsChecks(repoDir: string, repo: RepoConfig, factoryHome: string, parentEnv: NodeJS.ProcessEnv = process.env): Promise<{ checks: DoctorCheck[]; resolved?: ResolvedSecrets }> {
+  const cfg = repo.secrets;
+  if (!cfg) return { checks: [] };
+  const checks: DoctorCheck[] = [];
+  const file = secretsFile(cfg, repoDir, factoryHome);
+  const what = cfg.provider === "env_file" ? "secrets file" : "secrets credentials";
+  if (file) {
+    if (isInside(repoDir, file)) checks.push({ name: what, status: "fail", detail: `${file} is inside the repo; move it outside (agents work in the repo)` });
+    else if (!existsSync(file)) checks.push({ name: what, status: "fail", detail: `${file} is missing (create it with mode 0600: install -m 600 /dev/null ${file})` });
+    else if (looseMode(file)) checks.push({ name: what, status: "fail", detail: `${file} is readable by group or others (chmod 600 ${file})` });
+    else checks.push({ name: what, status: "ok", detail: `${file} (0600, outside the repo)` });
+  } else if (cfg.provider === "command") {
+    checks.push({ name: what, status: "info", detail: "none: the wrapper uses its own login (credentials: <file> for a per-repo machine identity)" });
+  }
+  const both = cfg.names.filter((n) => repo.agent_env.includes(n));
+  if (both.length) checks.push({ name: "secrets", status: "warn", detail: `${both.join(", ")} also in agent_env: never passed to agents (secrets win)` });
+  if (checks.some((c) => c.status === "fail")) return { checks };
+  try {
+    const r = await resolveSecrets(cfg, { repoDir, factoryHome, parentEnv });
+    const found = cfg.names.length - r.missing.length;
+    checks.push(
+      r.missing.length
+        ? { name: "secrets", status: "fail", detail: `${found}/${cfg.names.length} names resolve via ${cfg.provider}; missing: ${r.missing.join(", ")}` }
+        : { name: "secrets", status: "ok", detail: `${found}/${cfg.names.length} names resolve via ${cfg.provider} (values not shown; checks, services and the ui get them, agents never)` },
+    );
+    if (r.short.length) checks.push({ name: "secrets", status: "warn", detail: `${r.short.join(", ")} shorter than ${MIN_REDACT_LENGTH} characters: not redacted from logs` });
+    return { checks, resolved: r.missing.length ? undefined : r };
+  } catch (e) {
+    if (!(e instanceof SecretsError)) throw e;
+    checks.push({ name: "secrets", status: "fail", detail: e.message });
+    return { checks };
+  }
+}
+
+/** Context7 behind `docs_lookup`: reachable, and the key accepted when `CONTEXT7_API_KEY` is set. */
+export async function docsLookupCheck(client: Context7Client, roles: readonly string[]): Promise<DoctorCheck> {
+  if (!roles.length) return { name: "docs_lookup", status: "info", detail: "off (profile docs_lookup.roles is empty)" };
+  const probe = await context7Probe(client);
+  return { name: "docs_lookup", status: probe.status, detail: `Context7 for ${roles.join(", ")}: ${probe.detail}` };
+}
+
 /** `factory doctor`: setup checks, the Zen guard and the effective model per role with its layer. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
@@ -331,6 +383,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
     }
   }
   checks.push(...contextFileChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined));
+  if (opts.context7 && profile) checks.push(await docsLookupCheck(opts.context7, profile.docs_lookup.roles));
   if (opts.repo) {
     try {
       const repoDir = resolve(opts.repo);
@@ -343,10 +396,12 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       const repo = loadRepoConfig(repoDir);
       checks.push(...ciChecks(repoDir, repo));
       checks.push(...serviceConfigChecks(repo));
+      const sec = await secretsChecks(repoDir, repo, opts.factoryHome);
+      checks.push(...sec.checks);
       if (repo.ui) checks.push(...evaluatorChecks(repo, { shell: findHeadlessShell(), browsers: browsersPath(), ffmpeg: (await sh("command -v ffmpeg", { cwd: repoDir, env: { PATH: process.env.PATH ?? "" } })).code === 0 }));
       if (opts.services && profile) {
         try {
-          checks.push(...(await liveServiceChecks(repoDir, repo, opts.factoryHome, createSandbox(profile.sandbox, opts.probe))));
+          checks.push(...(await liveServiceChecks(repoDir, repo, opts.factoryHome, createSandbox(profile.sandbox, opts.probe), sec.resolved)));
         } catch (e) {
           checks.push({ name: "services", status: "fail", detail: `not started: ${(e as Error).message}` });
         }

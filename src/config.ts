@@ -107,7 +107,9 @@ export function resolveProfile(layers: Layer[]): Profile {
   const providers: Record<string, unknown> = { ...DEFAULT_PROVIDERS };
   const billing: Record<string, string> = { ...DEFAULT_BILLING };
   let sandbox: string | undefined;
+  let docsLookup: unknown;
   for (const layer of layers) {
+    docsLookup = layer.data.docs_lookup ?? docsLookup;
     for (const [role, chain] of Object.entries(layer.data.roles ?? {})) {
       if (!chain) continue;
       roles[role] = chain;
@@ -121,7 +123,7 @@ export function resolveProfile(layers: Layer[]): Profile {
       sandbox = layer.data.sandbox ?? sandbox;
     }
   }
-  const parsed = ProfileSchema.safeParse({ roles, retry, env, providers, billing, sandbox });
+  const parsed = ProfileSchema.safeParse({ roles, retry, env, providers, billing, sandbox, docs_lookup: docsLookup });
   if (!parsed.success) {
     const where = (path: PropertyKey[]) => {
       const role = path[0] === "roles" ? (path[1] as ProfileRole | undefined) : undefined;
@@ -140,7 +142,7 @@ export function withRepoModels(profile: Profile, models: RoleOverrides | undefin
   const base: Layer = {
     name: "built-in",
     source: "(resolved)",
-    data: { roles: profile.roles, retry: profile.retry, env: profile.env, providers: profile.providers, billing: profile.billing, sandbox: profile.sandbox },
+    data: { roles: profile.roles, retry: profile.retry, env: profile.env, providers: profile.providers, billing: profile.billing, sandbox: profile.sandbox, docs_lookup: profile.docs_lookup },
     roleSources: profile.sources,
   };
   return resolveProfile([base, layer]);
