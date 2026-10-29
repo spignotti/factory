@@ -531,23 +531,27 @@ Return plan.json with resolves_findings and a short rationale referencing the si
 ```
 
 ### 8.2 `profiles/default.yaml`
-Exact ids resolved by `doctor` against `pi --list-models`.
+Built-in role → model chains (Silas's defaults; see Amendment c and i for overrides). Exact ids are checked by `doctor` against Pi's model registry.
 
 ```yaml
 roles:
-  plan_high:      [{ model: openai/<sol>, thinking: high },   { model: opencode-go/grok-4.7, thinking: high }]
-  plan_medium:    [{ model: openai/<sol>, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
-  plan_normalize: [{ model: opencode-go/deepseek-v4.1-flash }]
-  implement:      [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
-  review:         [{ model: openai/<mid-codex>, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
-  evaluate:       [{ model: opencode-go/claude-haiku-5.5 }]
-  pr_writer:      [{ model: opencode-go/deepseek-v4.1-flash }]
-  harden:         [{ model: openai/<sol>, thinking: medium }, { model: opencode-go/grok-4.7, thinking: medium }]
+  plan_high:         [{ model: openai/gpt-6.1-sol, thinking: high }]
+  plan_medium:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  plan_normalize:    [{ model: opencode-go/deepseek-v4.1-flash }]
+  implement:         [{ model: opencode-go/deepseek-v4.1-flash, thinking: high },
+                      { model: opencode-go/mimo-v2.6-flash, capacity_only: true }]
+  review_plan:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_checklist:  [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  review_security:   [{ model: openai/gpt-6.1-sol, thinking: high }]
+  review_simplicity: [{ model: openai/gpt-6-luna, thinking: medium }]
+  evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
+  pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
+  harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
 ```
 
-- OpenAI via Pi's subscription login; Grok via OpenCode Go.
-- Reviewers ≠ implement model family (`doctor`).
-- **Fallback:** next entry on rate limit, quota, auth error, 5xx or timeout — never on bad output. Logged as an event.
+- OpenAI only via Pi's stored ChatGPT login ("Sign in with ChatGPT"), never an API key; DeepSeek and MiMo via OpenCode Go.
+- Every reviewer has its own role. Reviewer families ≠ every implement family, including the backup's (validated at load).
+- **Fallback:** next entry on rate limit, quota, auth error, 5xx or timeout — never on bad output. A `capacity_only` entry is only used after a capacity error once the same-model retries are exhausted. Logged as an event.
 
 ### 8.3 Pi isolation and security
 - `PI_CODING_AGENT_DIR` → factory-owned dir with provider auth only; no user extensions, skills or memory; repo `AGENTS.md` allowed.
@@ -567,7 +571,7 @@ roles:
 
 `events.jsonl` line:
 ```json
-{"ts":"…","run_id":"…","step":"review","event":"finished","role":"review","model":"…","tokens_in":0,"tokens_out":0,"cost_usd":0,"data":{}}
+{"ts":"…","run_id":"…","step":"review","event":"finished","role":"review_plan","model":"…","tokens_in":0,"tokens_out":0,"cost_usd":0,"data":{}}
 ```
 
 - **Events:** `step_started`, `step_finished`, `gate_result`, `model_fallback`, `round_finished`, `lane_escalated`, `watchdog_abort`, `run_finished`, plus `heartbeat`, `progress`, `agent_finished`, `agent_error`, `model_retry`, `queued`.
@@ -792,7 +796,7 @@ Also includes the comparison to the previous period of the same length.
 
 ## 18. To verify during the build
 - Pi SDK API (sessions, tool selection, thinking levels, usage/cost, persistence).
-- Provider names and exact model ids (OpenAI subscription; OpenCode Go: DeepSeek V4.1 Flash, Grok 4.7, Claude Haiku 5.5).
+- Provider names and exact model ids (OpenAI subscription: GPT-6.1 Sol, GPT-6 Luna; OpenCode Go: DeepSeek V4.1 Flash, MiMo V2.6 Flash).
 - Pi custom tool API for browser tools.
 - `npx github:…` install time in CI (prebuilt bundle if slow).
 - Supabase CLI per-run instances with port offsets in parallel.
@@ -831,7 +835,8 @@ a) **Auto-merge is implemented but configured off.** The per-risk merge policy d
 
 b) **Env allowlist, not denylist.** Agent tool processes (Pi sessions and any tool they spawn) get an explicit environment ALLOWLIST and an isolated `HOME` without gh or git credentials. Only the factory process itself pushes and uses `gh`. Reason: the old runner leaked the full environment into logs.
 
-c) **Provider capacity errors are their own class.** Errors such as "at capacity", `ttft_admission_refused`, or 429/503 "retry shortly" are classified separately from other failures: retry the SAME model with exponential backoff first, then fall back. The `implement` role must NOT fall back to a different model family (no DeepSeek -> Grok). Exact model fallback chains are TBD and decided by Silas later. Token usage must be recorded from error events too.
+c) **Provider capacity errors are their own class.** Errors such as "at capacity", `ttft_admission_refused`, or 429/503 "retry shortly" are classified separately from other failures: retry the SAME model with exponential backoff first, then fall back. Token usage must be recorded from error events too.
+   *Amended 2026-10-29 (Silas):* `implement` may have exactly the fallbacks configured in its chain. Entries of the primary's model family are normal fallbacks. An entry of another family is allowed only when it is marked `capacity_only: true`, and it is used only after a capacity error once the capacity retries are exhausted (never on limit, auth, other or invalid output). Default: DeepSeek V4.1 Flash (thinking high) with MiMo V2.6 Flash as the capacity-only backup. The rule is validated at profile load and after the layered merge (Amendment i), and re-applied at runtime. Role defaults: `plan_high` and `review_security` GPT-6.1 Sol high; `plan_medium`, `harden`, `review_plan` and `review_checklist` Sol medium; `review_simplicity` and `evaluate` GPT-6 Luna medium; `plan_normalize` and `pr_writer` DeepSeek V4.1 Flash. Claude Haiku is removed.
 
 d) **Heartbeats.** Pi sessions emit heartbeat/progress events into `events.jsonl`, so the watchdog does not kill long but active sessions, and `status` shows live progress.
 

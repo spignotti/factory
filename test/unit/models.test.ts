@@ -6,18 +6,24 @@ import { FakeRunner } from "../../src/agents/fake-runner.js";
 import { backoffMs, callModel, chainFor, classifyError, InvalidOutputError } from "../../src/agents/models.js";
 import { AgentError } from "../../src/agents/runner.js";
 import { EventLog } from "../../src/events.js";
-import { loadProfile, parseProfile } from "../../src/schemas/profile.js";
+import { loadProfile, parseProfile, PROFILE_ROLES } from "../../src/schemas/profile.js";
 
-const profile = parseProfile(`
-roles:
-  plan_high: [{ model: openai/sol, thinking: high }, { model: opencode-go/grok-4.7 }]
-  plan_medium: [{ model: openai/sol }]
-  plan_normalize: [{ model: opencode-go/deepseek-v4.1-flash }]
-  implement: [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
-  review: [{ model: openai/codex }, { model: opencode-go/grok-4.7 }]
-  pr_writer: [{ model: opencode-go/deepseek-v4.1-flash }]
-retry: { base_ms: 100, max_ms: 250, attempts: 3 }
-`);
+/** Every role on one model, then overrides. */
+function rolesYaml(overrides: Record<string, string> = {}): string {
+  const roles: Record<string, string> = Object.fromEntries(PROFILE_ROLES.map((r) => [r, "[{ model: openai/x }]"]));
+  roles.implement = "[{ model: opencode-go/deepseek-v4.1-flash }]";
+  Object.assign(roles, overrides);
+  return `roles:\n${Object.entries(roles).map(([k, v]) => `  ${k}: ${v}`).join("\n")}\n`;
+}
+
+const profile = parseProfile(
+  rolesYaml({
+    plan_high: "[{ model: openai/sol, thinking: high }, { model: opencode-go/grok-4.7 }]",
+    plan_medium: "[{ model: openai/sol }]",
+    implement: "[{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }, { model: opencode-go/mimo-v2.6-flash, capacity_only: true }]",
+    review_plan: "[{ model: openai/codex }, { model: opencode-go/grok-4.7 }]",
+  }) + "retry: { base_ms: 100, max_ms: 250, attempts: 3 }\n",
+);
 
 function setup(steps: ConstructorParameters<typeof FakeRunner>[0]) {
   const dir = mkdtempSync(join(tmpdir(), "m-"));
@@ -99,54 +105,80 @@ describe("fallback", () => {
   });
 });
 
-describe("implement model family", () => {
-  it("rejects an implement chain that crosses model families at config load", () => {
-    expect(() =>
-      parseProfile(`
-roles:
-  plan_high: [{ model: openai/x }]
-  plan_medium: [{ model: openai/x }]
-  plan_normalize: [{ model: openai/x }]
-  implement: [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/grok-4.7 }]
-  review: [{ model: openai/x }]
-  pr_writer: [{ model: openai/x }]
-`),
-    ).toThrow(/one model family/);
+describe("implement model family (Amendment c, amended)", () => {
+  it("rejects a cross-family implement entry that is not capacity_only", () => {
+    expect(() => parseProfile(rolesYaml({ implement: "[{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/grok-4.7 }]" }))).toThrow(
+      /capacity_only/,
+    );
   });
 
-  it("stays within the family at runtime even with an explicit family override", () => {
+  it("accepts an explicit cross-family capacity_only backup", () => {
+    const p = parseProfile(rolesYaml({ implement: "[{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/mimo-v2.6-flash, capacity_only: true }]" }));
+    expect(chainFor(p, "implement").map((e) => e.model)).toEqual(["opencode-go/deepseek-v4.1-flash", "opencode-go/mimo-v2.6-flash"]);
+  });
+
+  it("rejects capacity_only as the first entry", () => {
+    expect(() => parseProfile(rolesYaml({ review_plan: "[{ model: openai/x, capacity_only: true }]" }))).toThrow(/first entry/);
+  });
+
+  it("rejects a reviewer in an implement model family, including the backup's family", () => {
+    expect(() => parseProfile(rolesYaml({ review_security: "[{ model: opencode-go/deepseek-v4-pro }]" }))).toThrow(/reviewers must differ/);
+    expect(() =>
+      parseProfile(
+        rolesYaml({
+          implement: "[{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/mimo-v2.6-flash, capacity_only: true }]",
+          review_simplicity: "[{ model: opencode-go/mimo-v2.6-flash }]",
+        }),
+      ),
+    ).toThrow(/reviewers must differ/);
+  });
+
+  it("drops a cross-family entry without capacity_only at runtime (defense in depth)", () => {
     const p = { ...profile, roles: { ...profile.roles, implement: [{ model: "a/deepseek-1" }, { model: "b/grok-2" }] } };
     expect(chainFor(p, "implement").map((e) => e.model)).toEqual(["a/deepseek-1"]);
   });
 
-  it("falls back within the implement family", async () => {
+  it("falls back within the family on a limit error and never to the capacity-only backup", async () => {
     const { deps, runner } = setup([
       { role: "implement", error: { message: "quota exceeded" } },
-      { role: "implement", raw: "ok" },
+      { role: "implement", error: { message: "quota exceeded" } },
     ]);
-    await callModel(deps, "implement", req("implement"));
+    await expect(callModel(deps, "implement", req("implement"))).rejects.toThrow(/quota/);
     expect(runner.calls.map((c) => c.model)).toEqual(["opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4-pro"]);
   });
 
-  it("ships a valid default profile", () => {
-    expect(loadProfile("default").roles.implement.length).toBeGreaterThan(0);
+  it("uses the capacity-only backup only after capacity retries are exhausted", async () => {
+    const cap = { message: "at capacity", status: 503 };
+    const { deps, runner, slept, read } = setup([
+      ...Array.from({ length: 3 }, () => ({ role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: cap })),
+      ...Array.from({ length: 3 }, () => ({ role: "implement", model: "opencode-go/deepseek-v4-pro", error: cap })),
+      { role: "implement", model: "opencode-go/mimo-v2.6-flash", raw: "ok" },
+    ]);
+    const res = await callModel(deps, "implement", req("implement"));
+    expect(res.model).toBe("opencode-go/mimo-v2.6-flash");
+    expect(runner.calls).toHaveLength(7);
+    expect(slept).toEqual([100, 200, 100, 200]);
+    expect(read().filter((e) => e.event === "model_fallback").at(-1)).toMatchObject({ data: { to: "opencode-go/mimo-v2.6-flash", class: "capacity", capacity_only: true } });
+  });
+
+  it("ships a valid default profile with Silas's models", () => {
+    const p = loadProfile("default");
+    expect(p.roles.implement).toEqual([
+      { model: "opencode-go/deepseek-v4.1-flash", thinking: "high" },
+      { model: "opencode-go/mimo-v2.6-flash", capacity_only: true },
+    ]);
+    expect(p.roles.review_security[0]).toEqual({ model: "openai/gpt-6.1-sol", thinking: "high" });
+    expect(p.roles.review_simplicity[0]).toEqual({ model: "openai/gpt-6-luna", thinking: "medium" });
+    expect(JSON.stringify(p)).not.toMatch(/haiku/);
   });
 });
 
 describe("provider allowlist", () => {
-  const withImplement = (model: string) => `
-roles:
-  plan_high: [{ model: openai/x }]
-  plan_medium: [{ model: openai/x }]
-  plan_normalize: [{ model: openai/x }]
-  implement: [{ model: ${model} }]
-  review: [{ model: openai/x }]
-  pr_writer: [{ model: openai/x }]
-`;
+  const withImplement = (model: string) => rolesYaml({ implement: `[{ model: ${model} }]` });
 
   it("accepts opencode-go and openai", () => {
     expect(() => parseProfile(withImplement("opencode-go/deepseek-v4-pro"))).not.toThrow();
-    expect(() => parseProfile(withImplement("openai/mid-codex"))).not.toThrow();
+    expect(() => parseProfile(rolesYaml({ review_plan: "[{ model: openai/mid-codex }]" }))).not.toThrow();
   });
 
   it("rejects the pay-per-use opencode (Zen) provider with a pointed message", () => {
@@ -157,8 +189,8 @@ roles:
     expect(() => parseProfile(withImplement(model))).toThrow(/is not allowed/);
   });
 
-  it("checks every role, including optional ones", () => {
-    expect(() => parseProfile(withImplement("openai/x") + "  evaluate: [{ model: opencode/x }]\n")).toThrow(/Zen/);
+  it("checks every role", () => {
+    expect(() => parseProfile(rolesYaml({ evaluate: "[{ model: opencode/x }]" }))).toThrow(/Zen/);
   });
 
   it("every shipped profile passes the allowlist", () => {

@@ -50,27 +50,39 @@ export function backoffMs(attempt: number, retry: Profile["retry"]): number {
   return Math.min(retry.base_ms * 2 ** attempt, retry.max_ms);
 }
 
-/** The chain for a role; `implement` is restricted to the family of its first entry (Amendment c). */
+/**
+ * The chain for a role. Defense in depth for Amendment c (the profile is validated at load too):
+ * an `implement` entry of another model family than the first is kept only when it is
+ * `capacity_only`.
+ */
 export function chainFor(profile: Profile, role: string): ModelEntry[] {
   const profileRole = profileRoleOf(role);
   const chain = profile.roles[profileRole];
-  if (!chain) throw new Error(`profile has no models for role ${profileRole}`);
+  if (!chain?.length) throw new Error(`profile has no models for role ${profileRole}`);
   if (profileRole !== "implement") return chain;
   const family = familyOf(chain[0]!);
-  return chain.filter((e) => familyOf(e) === family);
+  return chain.filter((e) => familyOf(e) === family || e.capacity_only === true);
+}
+
+/** Next usable entry after index i for an error class: capacity_only entries only after capacity errors. */
+function nextEntry(chain: ModelEntry[], i: number, cls: ErrorClass): number {
+  for (let j = i + 1; j < chain.length; j++) if (!chain[j]!.capacity_only || cls === "capacity") return j;
+  return -1;
 }
 
 /**
  * Runs one agent call with the role's model chain: capacity errors retry the same model with
- * exponential backoff, then fall back; limit/auth/other fall back directly; invalid output never
- * falls back. Usage is recorded from successful and failed calls.
+ * exponential backoff, then fall back; limit/auth/other fall back directly, skipping
+ * `capacity_only` entries; invalid output never falls back. Usage is recorded from successful and failed calls.
  */
 export async function callModel(deps: CallDeps, step: string, req: ModelRequest): Promise<ModelResponse> {
   const { profile, events } = deps;
   const sleep = deps.sleep ?? realSleep;
   const chain = chainFor(profile, req.role);
   let lastError: unknown;
-  for (const [i, entry] of chain.entries()) {
+  for (let i = 0; i >= 0 && i < chain.length; ) {
+    const entry = chain[i]!;
+    let next: number;
     for (let attempt = 0; ; attempt++) {
       try {
         const res = await deps.runner.run({ ...req, model: entry.model, thinking: entry.thinking });
@@ -96,19 +108,20 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
           await sleep(delay, req.signal);
           continue;
         }
-        const next = chain[i + 1];
-        if (next) {
+        next = nextEntry(chain, i, cls);
+        if (next >= 0) {
           events.emit({
             step,
             event: "model_fallback",
             role: req.role,
             model: entry.model,
-            data: { from: entry.model, to: next.model, class: cls },
+            data: { from: entry.model, to: chain[next]!.model, class: cls, ...(chain[next]!.capacity_only ? { capacity_only: true } : {}) },
           });
         }
         break;
       }
     }
+    i = next;
   }
   throw lastError;
 }
