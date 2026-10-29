@@ -19,6 +19,8 @@ export interface FinalizeInput {
   gates?: GateReport;
   noPr: boolean;
   startedAt: number;
+  /** Resume: the run already opened this PR; update it instead of creating one. */
+  existingPr?: { url: string; draft: boolean };
 }
 
 export interface FinalizeOutput {
@@ -27,6 +29,8 @@ export interface FinalizeOutput {
   risk: RiskAssessment;
   mergePolicy: MergePolicy;
   pr: string | null;
+  /** Whether the PR is (still) a draft; null without a PR. */
+  draft: boolean | null;
 }
 
 /**
@@ -62,7 +66,7 @@ function cell(s: string): string {
 export function renderPrBody(ctx: RunContext, v: {
   summary: string;
   input: FinalizeInput;
-  out: Omit<FinalizeOutput, "pr">;
+  out: Omit<FinalizeOutput, "pr" | "draft">;
   gates?: GateReport;
   changed: string[];
 }): string {
@@ -160,29 +164,34 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   writeRunFile(ctx, "pr.md", body);
 
   throwIfInterrupted(ctx.deps);
-  let pr: string | null = null;
+  let pr: string | null = input.existingPr?.url ?? null;
+  let draft: boolean | null = input.existingPr?.draft ?? null;
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   if (!input.noPr && hasCommits) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
+    const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
     try {
+      // Plain push: the branch only ever gains commits (merges, never rebases), so no force-push.
       await ctx.deps.github.push(ctx.worktree, ctx.branch);
-      pr = await ctx.deps.github.createPr({
-        repoDir: ctx.worktree,
-        head: ctx.branch,
-        base: ctx.repo.base_branch,
-        title: ctx.events.redact(`${prefix}: ${ctx.plan.goal}`),
-        body,
-        draft: result !== "done",
-      });
-      if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr);
+      if (input.existingPr) {
+        await ctx.deps.github.updatePr(ctx.worktree, input.existingPr.url, { title, body });
+        if (result === "done" && input.existingPr.draft) {
+          await ctx.deps.github.markReady(ctx.worktree, input.existingPr.url);
+          draft = false;
+        }
+      } else {
+        pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: result !== "done" });
+        draft = result !== "done";
+      }
+      if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr };
+      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft };
     }
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, reason, pr };
+  return { ...out, reason, pr, draft };
 }

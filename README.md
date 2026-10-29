@@ -31,8 +31,19 @@ Implemented (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
   (Amendment c); heartbeat/progress events and the watchdog (Amendment d).
 - **Events** (`src/events.ts`): `events.jsonl` and one-line `result.json`.
 
-Not in M1: CI stub, services, security/checklist reviewers, findings memory, fast lane, `resume`/`status`/
+Not in M1: CI stub, services, security/checklist reviewers, findings memory, fast lane, `status`/
 `stats`/`gc`/`doctor`, eval, evaluator, `adopt`, `harden`.
+
+## Resume
+
+Every run keeps `state.json` (current step, package status, rounds, PR) next to `result.json` in
+`~/.factory/runs/<run-id>/`. After a `needs_human` stop, fix things in the run's worktree (or push to the
+PR branch), then `factory resume <run-id>`: it commits the uncommitted fix as `fix: human changes before
+resume`, merges new commits from `origin/<branch>` and the moved base (conflict → `needs_human` again),
+re-runs the gates (red → one fixer round) and continues from the saved step. It never force-pushes; an
+existing PR is updated and marked ready when the run ends `done`. After an interrupted/failed run,
+uncommitted leftovers are discarded instead and the step re-runs. A resumed review starts with a fresh round
+budget; a resume at `finalize` only re-runs the gates (no new review of the human change).
 
 ## Usage
 
@@ -40,6 +51,7 @@ Not in M1: CI stub, services, security/checklist reviewers, findings memory, fas
 pnpm install
 pnpm build
 node dist/cli.js run --repo <path> --text task.md [--plan-effort none|medium|high] [--no-pr]
+node dist/cli.js resume <run-id> [--wait] [--no-pr]
 node dist/cli.js gates --select --tier full --base origin/main --json
 node dist/cli.js gates --run unit --json
 ```

@@ -60,3 +60,11 @@ describe("factory gates CLI on the fixture repo", () => {
     expect((await cli(["gates", "--repo", repo])).code).toBe(2);
   });
 });
+
+describe("factory resume CLI", () => {
+  it("needs exactly one run id and lists resume in the usage", async () => {
+    const r = await cli(["resume"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("factory resume <run-id>");
+  });
+});

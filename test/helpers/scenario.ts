@@ -6,7 +6,7 @@ import type { AgentRequest, AgentRunner } from "../../src/agents/runner.js";
 import type { FactoryEvent, RunResult } from "../../src/events.js";
 import { FakeGitHub } from "../../src/gh.js";
 import type { RunDeps } from "../../src/pipeline/context.js";
-import { type RunOptions, runFactory } from "../../src/pipeline/run.js";
+import { resumeFactory, type RunOptions, runFactory } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { createFixtureRepo, FIXTURES } from "./repo.js";
 
@@ -39,6 +39,8 @@ export interface ScenarioRun {
   eventsText: string;
   runner: FakeRunner;
   github: FakeGitHub;
+  factoryHome: string;
+  runId: string;
   slept: number[];
   file: (name: string) => string;
 }
@@ -67,7 +69,11 @@ export async function runScenario(s: Scenario): Promise<ScenarioRun> {
     },
   );
   const [runId] = readdirSync(join(factoryHome, "runs"));
-  const runDir = join(factoryHome, "runs", runId!);
+  return collect(result, repo, factoryHome, runId!, runner, github, slept);
+}
+
+function collect(result: RunResult, repo: string, factoryHome: string, runId: string, runner: FakeRunner, github: FakeGitHub, slept: number[]): ScenarioRun {
+  const runDir = join(factoryHome, "runs", runId);
   const eventsText = readFileSync(join(runDir, "events.jsonl"), "utf8");
   return {
     result,
@@ -78,7 +84,34 @@ export async function runScenario(s: Scenario): Promise<ScenarioRun> {
     eventsText,
     runner,
     github,
+    factoryHome,
+    runId,
     slept,
     file: (name) => readFileSync(join(runDir, name), "utf8"),
   };
+}
+
+export interface ResumeScenario {
+  /** Scripted steps for the resumed run (taken from `script`, optionally filtered by `steps`). */
+  script: string;
+  steps?: (steps: FakeStep[]) => FakeStep[];
+  options?: { wait?: boolean; noPr?: boolean };
+  deps?: Partial<RunDeps>;
+}
+
+/** Resumes a previous scenario run with the same repo, factory home and (fake) GitHub. */
+export async function resumeScenario(prev: ScenarioRun, s: ResumeScenario): Promise<ScenarioRun> {
+  const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", s.script), "utf8"))).steps;
+  const runner = new FakeRunner(s.steps ? s.steps(scripted) : scripted);
+  const slept: number[] = [];
+  const result = await resumeFactory(prev.runId, s.options ?? {}, {
+    runner,
+    github: prev.github,
+    profile: loadProfile(join(FIXTURES, "profile.yaml")),
+    factoryHome: prev.factoryHome,
+    parentEnv: { ...process.env, FOO_TOKEN: SECRET },
+    sleep: async (ms) => void slept.push(ms),
+    ...s.deps,
+  });
+  return collect(result, prev.repo, prev.factoryHome, prev.runId, runner, prev.github, slept);
 }

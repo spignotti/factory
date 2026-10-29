@@ -1,20 +1,22 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError } from "../agents/models.js";
-import { EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
+import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
-import { baseRef, git, gitOk, remoteBranchExists, revParse } from "../git.js";
-import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
-import { finalize } from "../steps/finalize.js";
-import { runChecks } from "../steps/gates.js";
-import { implementPackages } from "../steps/implement.js";
-import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
+import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, remoteBranchExists, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
-import { agentEnv, checkDeadline, throwIfInterrupted, type RunContext, type RunDeps, type Task, WallTimeExceeded, writeJson } from "./context.js";
+import { PlanSchema } from "../schemas/plan.js";
+import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
+import { finalize, syncBase } from "../steps/finalize.js";
+import { type GateReport, runChecks, runGates } from "../steps/gates.js";
+import { gitAuthor, implementPackages } from "../steps/implement.js";
+import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
+import { agentEnv, checkDeadline, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
-import { reviewLoop } from "./loop.js";
+import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
+import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 
 export interface RunOptions extends TaskInput {
@@ -24,6 +26,12 @@ export interface RunOptions extends TaskInput {
   noPr?: boolean;
   /** Repo locked by another run: wait in a queue instead of returning `locked`. */
   wait?: boolean;
+}
+
+export interface ResumeOptions {
+  wait?: boolean;
+  /** Overrides the original run's --no-pr. */
+  noPr?: boolean;
 }
 
 function newRunId(now: number): string {
@@ -74,6 +82,78 @@ interface Outcome {
   worktree: string | null;
 }
 
+/** Shared frame of `run` and `resume`: error → result kind, result.json + state.json, lock release. */
+class RunFrame {
+  out: Outcome = { result: "failed", reason: "", type: null, risk: null, merge_policy: null, pr: null, rounds: 0, branch: null, worktree: null };
+  state?: RunState;
+  release?: () => void;
+
+  constructor(
+    readonly runId: string,
+    readonly runDir: string,
+    readonly repoDir: string,
+    readonly lane: "standard" | "fast",
+    readonly events: EventLog,
+    readonly startedAt: number,
+    readonly now: Clock,
+    public taskRef: string,
+  ) {}
+
+  set(o: Partial<Outcome>): void {
+    this.out = { ...this.out, ...o };
+  }
+
+  save(): void {
+    if (this.state) saveState(this, this.state);
+  }
+
+  async execute(body: () => Promise<void>): Promise<RunResult> {
+    try {
+      await body();
+    } catch (e) {
+      const reason = (e as Error).message;
+      if (e instanceof Interrupted) this.set({ result: "failed", reason });
+      else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) this.set({ result: "needs_human", reason });
+      else this.set({ result: "failed", reason });
+    }
+    try {
+      return this.finish();
+    } finally {
+      this.release?.();
+    }
+  }
+
+  private finish(): RunResult {
+    const { out } = this;
+    const result: RunResult = {
+      run_id: this.runId,
+      repo: this.repoDir,
+      task: this.taskRef,
+      type: out.type,
+      lane: this.lane,
+      result: out.result,
+      risk: out.risk,
+      merge_policy: out.merge_policy,
+      pr: out.pr,
+      rounds: out.rounds,
+      minutes: Math.round(((this.now() - this.startedAt) / 60_000) * 10) / 10,
+      cost_usd: Math.round(this.events.totals.cost_usd * 10_000) / 10_000,
+      reason: out.reason,
+      ...(out.questions ? { questions: out.questions } : {}),
+      branch: out.branch,
+      worktree: out.worktree,
+      run_dir: this.runDir,
+    };
+    this.events.emit({ step: "run", event: "run_finished", data: { result: result.result, reason: result.reason } });
+    if (this.state) {
+      this.state.result = result.result;
+      this.state.reason = result.reason;
+      this.save();
+    }
+    return writeResult(join(this.runDir, "result.json"), result, this.events.secrets);
+  }
+}
+
 /** `factory run`: intake → plan → implement → review loop → finalize. Always writes `result.json`. */
 export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunResult> {
   const now = deps.now ?? Date.now;
@@ -84,52 +164,43 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   const repoDir = resolve(opts.repo);
   const lane = opts.lane ?? "standard";
-  let taskRef = opts.issue !== undefined ? `#${opts.issue}` : (opts.planFile ?? opts.textFile ?? "");
-  let out: Outcome = { result: "failed", reason: "", type: null, risk: null, merge_policy: null, pr: null, rounds: 0, branch: null, worktree: null };
-  let release: (() => void) | undefined;
+  const ref = opts.issue !== undefined ? `#${opts.issue}` : (opts.planFile ?? opts.textFile ?? "");
+  const f = new RunFrame(runId, runDir, repoDir, lane, events, startedAt, now, ref);
 
-  try {
+  return f.execute(async () => {
     if (lane === "fast") throw new Error("--lane fast is not available in M1");
     events.emit({ step: "intake", event: "step_started" });
     const repo: RepoConfig = loadRepoConfig(repoDir);
     const task: Task = await readTask(opts, repoDir, deps.github);
-    taskRef = task.ref;
+    f.taskRef = task.ref;
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
-    if (!lock.release) {
-      out = { ...out, result: "locked", reason: lock.reason };
-      return finish();
-    }
-    release = lock.release;
+    if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
+    f.release = lock.release;
+    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false }));
+    f.save();
+
     const agentHome = prepareAgentHome(runDir);
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline };
 
     const planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
-    if (planned.kind === "needs_input") {
-      out = { ...out, result: "needs_input", reason: "plan needs input", questions: planned.questions };
-      return finish();
-    }
-    if (planned.kind === "failed") {
-      out = { ...out, result: "failed", reason: planned.reason };
-      return finish();
-    }
+    if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
+    if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
     const plan = planned.plan;
-    out.type = plan.type;
+    f.set({ type: plan.type });
     writeJson(base, "plan.json", plan);
     events.emit({ step: "intake", event: "step_finished", data: { plan_source: planned.source, packages: plan.packages.length } });
+    f.save();
 
     // Base check (SPEC §6.1 step 6) and worktree (step 7).
     checkDeadline(base);
-    const ref = await baseRef(repoDir, repo.base_branch);
-    const baseSha = await revParse(repoDir, ref);
+    const baseSha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     const status = await deps.github.baseStatus(repoDir, baseSha);
     if (status === "red" || status === "pending") {
-      out = { ...out, result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${status}, not green` };
-      return finish();
+      return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${status}, not green` });
     }
     if (plan.type === "bug" && !repo.tests.run) {
-      out = { ...out, result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans" };
-      return finish();
+      return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans" });
     }
     let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
     const taken = (b: string) =>
@@ -137,17 +208,16 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     if (await taken(branch)) branch += `-${runId.slice(-6)}`;
     const worktree = join(runDir, "worktree");
     await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
-    out = { ...out, branch, worktree };
+    f.set({ branch, worktree });
+    Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement" });
+    f.save();
     const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline };
     const env = agentEnv(ctx);
 
     if (repo.setup) {
       const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline - Date.now()) });
       checkDeadline(ctx);
-      if (setup.code !== 0) {
-        out = { ...out, result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` };
-        return finish();
-      }
+      if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` });
     }
     if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
@@ -155,56 +225,177 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       throwIfInterrupted(deps);
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
-      if (red.length) {
-        out = { ...out, result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` };
-        return finish();
-      }
+      if (red.length) return f.set({ result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` });
     }
+    await advance(f, ctx, { noPr: opts.noPr ?? false, startedAt });
+  });
+}
 
-    const impl = await implementPackages(ctx);
-    if (impl.needsInput) {
-      out = { ...out, result: "needs_input", reason: "bug without failing repro", questions: impl.needsInput };
-      return finish();
-    }
+/**
+ * implement → review loop → finalize, starting at `state.step`, persisting state.json after every
+ * package, round and step. Shared by run and resume.
+ */
+async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
+  const st = f.state!;
+  const sync = () => {
+    st.handoffs = ctx.handoffs;
+    st.gate_count = ctx.gateCount;
+    st.base_sha = ctx.baseSha;
+    f.save();
+  };
+  let gates = opts.gates;
+  let loop: LoopOutcome | undefined;
+
+  if (st.step === "implement") {
+    const done = Object.keys(st.packages).filter((id) => st.packages[id] === "done");
+    const impl = await implementPackages(ctx, {
+      done,
+      onPackage: (id, status, failure) => {
+        st.packages[id] = status;
+        if (failure) st.failures[id] = failure;
+        else delete st.failures[id];
+        sync();
+      },
+    });
+    st.packages = Object.fromEntries(impl.status);
+    st.failures = impl.failures;
+    sync();
+    if (impl.needsInput) return f.set({ result: "needs_input", reason: "bug without failing repro", questions: impl.needsInput });
+    gates = impl.lastGates ?? gates;
     const failed = [...impl.status].filter(([, s]) => s !== "done").map(([id, s]) => `${id} ${s}${impl.failures[id] ? `: ${impl.failures[id]}` : ""}`);
-    const loop = failed.length || !impl.lastGates
-      ? { result: "needs_human" as const, reason: `packages not done: ${failed.join("; ")}`, rounds: 0, findings: [], gates: impl.lastGates }
-      : await reviewLoop(ctx, impl.lastGates);
-
-    const fin = await finalize(ctx, { ...loop, packages: impl.status, failures: impl.failures, noPr: opts.noPr ?? false, startedAt });
-    out = { ...out, result: fin.result, reason: fin.reason, risk: fin.risk.risk, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: loop.rounds };
-    return finish();
-  } catch (e) {
-    const reason = (e as Error).message;
-    if (e instanceof Interrupted) out = { ...out, result: "failed", reason };
-    else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) out = { ...out, result: "needs_human", reason };
-    else out = { ...out, result: "failed", reason };
-    return finish();
-  } finally {
-    release?.();
+    if (failed.length || !gates) {
+      loop = { result: "needs_human", reason: `packages not done: ${failed.join("; ")}`, rounds: st.rounds, findings: [], gates };
+    } else {
+      st.step = "review";
+      sync();
+    }
   }
+  if (st.step === "review") {
+    loop = await reviewLoop(ctx, gates!, {
+      firstRound: st.rounds + 1,
+      onRound: (round, findings) => {
+        st.rounds = round;
+        st.findings = findings;
+        sync();
+      },
+    });
+    if (loop.result === "done") {
+      st.step = "finalize";
+      sync();
+    }
+  }
+  loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates };
 
-  function finish(): RunResult {
-    const result: RunResult = {
-      run_id: runId,
-      repo: repoDir,
-      task: taskRef,
-      type: out.type,
-      lane,
-      result: out.result,
-      risk: out.risk,
-      merge_policy: out.merge_policy,
-      pr: out.pr,
-      rounds: out.rounds,
-      minutes: Math.round(((now() - startedAt) / 60_000) * 10) / 10,
-      cost_usd: Math.round(events.totals.cost_usd * 10_000) / 10_000,
-      reason: out.reason,
-      ...(out.questions ? { questions: out.questions } : {}),
-      branch: out.branch,
-      worktree: out.worktree,
-      run_dir: runDir,
+  const fin = await finalize(ctx, {
+    ...loop,
+    packages: new Map(Object.entries(st.packages)),
+    failures: st.failures,
+    noPr: opts.noPr,
+    startedAt: opts.startedAt,
+    existingPr: st.pr ? { url: st.pr, draft: st.pr_draft ?? true } : undefined,
+  });
+  st.pr = fin.pr;
+  st.pr_draft = fin.draft;
+  if (st.step === "finalize" && fin.result === "done") st.step = "finished";
+  sync();
+  f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds });
+}
+
+/**
+ * `factory resume <run-id>`: continue a stopped run (needs_human, failed, interrupted) after a human
+ * fix. Re-validates first: commits the human's uncommitted changes, merges commits pushed to the PR
+ * branch and the moved base (never a rebase or force-push), re-runs the gates (red → one fix
+ * session), then continues from the saved step and updates the existing PR.
+ */
+export async function resumeFactory(runId: string, opts: ResumeOptions, deps: RunDeps): Promise<RunResult> {
+  const runDir = join(deps.factoryHome, "runs", runId);
+  const st = readState(runDir);
+  if (st.step === "intake" || !st.worktree || !st.branch || !st.base_sha) {
+    throw new Error(`run ${runId} stopped before its worktree existed (${st.result ?? "running"}: ${st.reason}); start a new run`);
+  }
+  if (st.step === "finished") throw new Error(`run ${runId} is finished (${st.result}); nothing to resume`);
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+  const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
+  const f = new RunFrame(runId, runDir, st.repo, "standard", events, startedAt, now, st.task.ref);
+  f.set({ branch: st.branch, worktree: st.worktree, pr: st.pr, rounds: st.rounds });
+
+  // Locked: report without touching this run's result.json/state.json (they describe the run, not this attempt).
+  const lock = await takeRepoLock(deps, st.repo, runId, events, opts.wait ?? false);
+  if (!lock.release) {
+    return {
+      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: "standard", result: "locked", risk: null, merge_policy: null,
+      pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: lock.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
     };
-    events.emit({ step: "run", event: "run_finished", data: { result: result.result, reason: result.reason } });
-    return writeResult(join(runDir, "result.json"), result, events.secrets);
   }
+  f.release = lock.release;
+  f.state = st;
+
+  return f.execute(async () => {
+    events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: st.result } });
+    const repo = loadRepoConfig(st.repo);
+    const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
+    f.set({ type: plan.type });
+    const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
+    const ctx: RunContext = {
+      deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task,
+      worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline,
+    };
+    if (st.step === "implement") {
+      for (const id of Object.keys(st.packages)) if (st.packages[id] !== "done") delete st.packages[id];
+      st.failures = {};
+    }
+    const ready = await prepareResume(ctx, st);
+    st.base_sha = ctx.baseSha;
+    st.gate_count = ctx.gateCount;
+    f.save();
+    if (!ready.ok) return f.set({ result: "needs_human", reason: ready.reason });
+    let gates = ready.gates;
+    if (gates && !gates.green) {
+      const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });
+      if (!fixed.ok) return f.set({ result: "needs_human", reason: `resume: ${fixed.reason}` });
+      gates = fixed.gates;
+    }
+    events.emit({ step: "resume", event: "step_finished", data: { continue_at: st.step } });
+    await advance(f, ctx, { noPr: opts.noPr ?? st.no_pr, startedAt, gates });
+  });
+}
+
+type Ready = { ok: true; gates?: GateReport } | { ok: false; reason: string };
+
+/** Re-validation before a resumed run continues. */
+async function prepareResume(ctx: RunContext, st: RunState): Promise<Ready> {
+  const { worktree: wt, branch } = ctx;
+  const fail = (reason: string): Ready => ({ ok: false, reason: `resume: ${reason}` });
+  if (!existsSync(wt)) return fail(`worktree ${wt} is missing`);
+  const head = (await git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+  if (head !== branch) return fail(`worktree is on ${head}, expected ${branch}`);
+  for (const [ref, what] of [["MERGE_HEAD", "merge"], ["REBASE_HEAD", "rebase"], ["CHERRY_PICK_HEAD", "cherry-pick"]] as const) {
+    if (await gitOk(wt, ["rev-parse", "-q", "--verify", ref])) return fail(`a ${what} is in progress in the worktree; finish or abort it first`);
+  }
+  if (st.result === "needs_human") {
+    // The run stopped for a human: whatever is uncommitted now is their fix.
+    if (await commitAll(wt, "fix: human changes before resume", gitAuthor(ctx))) {
+      ctx.events.emit({ step: "resume", event: "progress", data: { human_changes_committed: await headSha(wt) } });
+    }
+  } else if ((await git(wt, ["status", "--porcelain"])).trim() !== "") {
+    // Interrupted/crashed: uncommitted changes are unvalidated agent leftovers; the step re-runs anyway.
+    await discardChanges(wt);
+    ctx.events.emit({ step: "resume", event: "progress", data: { discarded_uncommitted: true } });
+  }
+  // Commits a human pushed to the PR branch (e.g. a conflict resolved on GitHub).
+  if (await remoteBranchExists(ctx.repoDir, branch)) {
+    const remote = `refs/remotes/origin/${branch}`;
+    if (await gitOk(wt, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`]) && !(await isAncestor(wt, remote))) {
+      const merged = await mergeRef(wt, remote, `chore: merge origin/${branch}`, gitAuthor(ctx));
+      if (!merged.ok) return fail(`commits on origin/${branch} conflict with the worktree in ${merged.conflicts.join(", ") || merged.error.slice(0, 200)}`);
+      ctx.events.emit({ step: "resume", event: "progress", data: { remote_branch_merged: await headSha(wt) } });
+    }
+  }
+  const synced = await syncBase(ctx, "resume");
+  if (!synced.ok && !synced.gates) return fail(synced.reason);
+  if (synced.gates) return { ok: true, gates: synced.gates };
+  const done = st.step === "implement" ? Object.keys(st.packages).filter((id) => st.packages[id] === "done") : ctx.plan.packages.map((p) => p.id);
+  if (done.length === 0) return { ok: true };
+  return { ok: true, gates: await runGates(ctx, "fast", done) };
 }

@@ -8,13 +8,15 @@ import { PiRunner } from "./agents/pi-runner.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
-import { runFactory } from "./pipeline/run.js";
+import { resumeFactory, runFactory } from "./pipeline/run.js";
 import { loadProfile } from "./schemas/profile.js";
 
 const USAGE = `usage:
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
               [--plan-effort none|medium|high] [--no-pr] [--profile <name>] [--wait]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
+  factory resume <run-id> [--wait] [--no-pr] [--profile <name>]
+              (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
 `;
 
@@ -81,6 +83,37 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             noPr: values["no-pr"],
             wait: values.wait,
           },
+          { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome, signal: controller.signal },
+        );
+        io.out(JSON.stringify(result) + "\n");
+        return exitCode(result.result, controller.signal);
+      } finally {
+        uninstall();
+        await runner.close();
+      }
+    }
+    if (command === "resume") {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: {
+          wait: { type: "boolean", default: false },
+          "no-pr": { type: "boolean" },
+          profile: { type: "string", default: "default" },
+        },
+      });
+      if (positionals.length !== 1) {
+        io.err(USAGE);
+        return 2;
+      }
+      const factoryHome = process.env.FACTORY_HOME ?? join(homedir(), ".factory");
+      const runner = new PiRunner(join(factoryHome, "pi"));
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      try {
+        const result = await resumeFactory(
+          positionals[0]!,
+          { wait: values.wait, noPr: values["no-pr"] },
           { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome, signal: controller.signal },
         );
         io.out(JSON.stringify(result) + "\n");

@@ -82,13 +82,29 @@ export async function fixStep(
   }
 }
 
+export interface ReviewLoopOptions {
+  /**
+   * Round number to start at (resume continues the numbering so finding ids stay unique). A resumed
+   * loop starts with fresh findings and a fresh round budget: the human fix supersedes them.
+   */
+  firstRound?: number;
+  /** Called after every round (state persistence). */
+  onRound?: (round: number, findings: TrackedFinding[]) => void;
+}
+
 /** loop { fast gates → review → merge → exit? → fix } (SPEC §6, §6.7). */
-export async function reviewLoop(ctx: RunContext, initialGates: GateReport, state: FixState = { gateFailures: 0 }): Promise<LoopOutcome> {
+export async function reviewLoop(
+  ctx: RunContext,
+  initialGates: GateReport,
+  opts: ReviewLoopOptions = {},
+  state: FixState = { gateFailures: 0 },
+): Promise<LoopOutcome> {
   const maxRounds = ctx.repo.review.max_rounds;
+  const firstRound = opts.firstRound ?? 1;
   let findings: TrackedFinding[] = [];
   let gates = initialGates;
   let lastReviewedSha: string | undefined;
-  for (let round = 1; ; round++) {
+  for (let round = firstRound; ; round++) {
     checkDeadline(ctx);
     const reviews = await reviewRound(ctx, { round, gates, findings, lastReviewedSha });
     lastReviewedSha = await headSha(ctx.worktree);
@@ -96,7 +112,8 @@ export async function reviewLoop(ctx: RunContext, initialGates: GateReport, stat
     findings = merged.findings;
     writeJson(ctx, `merged-${round}.json`, { ...merged, findings });
     const open = openFindings(findings);
-    const decision = decideExit({ round, maxRounds, stalemate: isStalemate(merged), open });
+    opts.onRound?.(round, findings);
+    const decision = decideExit({ round: round - firstRound + 1, maxRounds, stalemate: isStalemate(merged), open });
     ctx.events.emit({
       step: "review",
       event: "round_finished",

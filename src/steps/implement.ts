@@ -84,14 +84,29 @@ export interface ImplementOutcome {
   lastGates?: GateReport;
 }
 
+export interface ImplementOptions {
+  /** Packages already done (resume): not run again. */
+  done?: Iterable<string>;
+  /** Called after every package that ran (state persistence). */
+  onPackage?: (id: string, status: PackageStatus, failure?: string) => void;
+}
+
 /** Implements every package in DAG order; a failed package cascade-skips its dependents. */
-export async function implementPackages(ctx: RunContext): Promise<ImplementOutcome> {
+export async function implementPackages(ctx: RunContext, opts: ImplementOptions = {}): Promise<ImplementOutcome> {
   const failures: Record<string, string> = {};
-  const done: string[] = [];
+  const alreadyDone = new Set(opts.done ?? []);
+  const done: string[] = ctx.plan.packages.map((p) => p.id).filter((id) => alreadyDone.has(id));
   let needsInput: string[] | undefined;
   let lastGates: GateReport | undefined;
 
   const status = await runInDagOrder(ctx.plan.packages, async (pkg) => {
+    if (alreadyDone.has(pkg.id)) return true;
+    const ok = await implementOne(pkg);
+    opts.onPackage?.(pkg.id, ok ? "done" : "failed", failures[pkg.id]);
+    return ok;
+  });
+
+  async function implementOne(pkg: Package): Promise<boolean> {
     if (needsInput) {
       failures[pkg.id] = "not run: needs_input";
       return false;
@@ -134,10 +149,12 @@ export async function implementPackages(ctx: RunContext): Promise<ImplementOutco
     await discardChanges(ctx.worktree);
     ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "failed", reason } });
     return false;
-  });
+  }
 
   for (const [id, s] of status) {
-    if (s === "skipped") ctx.events.emit({ step: "implement", event: "step_finished", data: { package: id, status: "skipped" } });
+    if (s !== "skipped") continue;
+    ctx.events.emit({ step: "implement", event: "step_finished", data: { package: id, status: "skipped" } });
+    opts.onPackage?.(id, "skipped");
   }
   return { status, failures, needsInput, lastGates };
 }

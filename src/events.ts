@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 
@@ -63,6 +63,20 @@ export class EventLog {
   ) {
     this.path = join(runDir, "events.jsonl");
     mkdirSync(runDir, { recursive: true });
+    // A resumed run appends to its log; totals (cost) continue from what is already there.
+    if (existsSync(this.path)) {
+      for (const line of readFileSync(this.path, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line) as Partial<FactoryEvent>;
+          this.totals.tokens_in += e.tokens_in ?? 0;
+          this.totals.tokens_out += e.tokens_out ?? 0;
+          this.totals.cost_usd += e.cost_usd ?? 0;
+        } catch {
+          // torn last line after a crash
+        }
+      }
+    }
   }
 
   /** Redacts this run's secret values from any text that leaves the process (files, PR body). */
