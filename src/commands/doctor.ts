@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
 import { sh, tail } from "../exec.js";
 import { Services } from "../services.js";
+import { browsersPath, findHeadlessShell, INSTALL_HINT, knownDevice } from "../evaluate/browser.js";
 import type { z } from "zod";
 import type { DoctorReportSchema } from "../schemas/reports.js";
 
@@ -209,6 +210,20 @@ export function ciChecks(repoDir: string, repo: RepoConfig): DoctorCheck[] {
   return checks;
 }
 
+/**
+ * Evaluator prerequisites for a repo with `ui` (§6.9.3): the Chromium headless shell, known
+ * Playwright device names, ffmpeg for the session GIF (without it the PR gets the video only).
+ */
+export function evaluatorChecks(repo: RepoConfig, env: { shell: string | undefined; browsers: string; ffmpeg: boolean }): DoctorCheck[] {
+  if (!repo.ui) return [];
+  const unknown = repo.ui.devices.filter((d) => !knownDevice(d));
+  return [
+    env.shell ? { name: "browser", status: "ok", detail: `headless shell ${env.shell}` } : { name: "browser", status: "fail", detail: `no Chromium headless shell under ${env.browsers}; evaluate stops runs with needs_human (install: ${INSTALL_HINT})` },
+    unknown.length ? { name: "ui devices", status: "fail", detail: `unknown Playwright device ${unknown.join(", ")}` } : { name: "ui devices", status: "ok", detail: repo.ui.devices.join(", ") },
+    env.ffmpeg ? { name: "ffmpeg", status: "ok", detail: "session GIFs" } : { name: "ffmpeg", status: "warn", detail: "not found: evaluator sessions get a video but no GIF preview" },
+  ];
+}
+
 /** Static service/ui checks: what runs unsandboxed, what nothing uses. */
 export function serviceConfigChecks(repo: RepoConfig): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
@@ -305,6 +320,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       const repo = loadRepoConfig(repoDir);
       checks.push(...ciChecks(repoDir, repo));
       checks.push(...serviceConfigChecks(repo));
+      if (repo.ui) checks.push(...evaluatorChecks(repo, { shell: findHeadlessShell(), browsers: browsersPath(), ffmpeg: (await sh("command -v ffmpeg", { cwd: repoDir, env: { PATH: process.env.PATH ?? "" } })).code === 0 }));
       if (opts.services && profile) {
         try {
           checks.push(...(await liveServiceChecks(repoDir, repo, opts.factoryHome, createSandbox(profile.sandbox, opts.probe))));

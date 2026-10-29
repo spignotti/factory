@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PiRunner } from "../../src/agents/pi-runner.js";
 import { isZenEndpoint, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
-import { doctorCommand, type DoctorReport } from "../../src/commands/doctor.js";
+import { doctorCommand, type DoctorReport, evaluatorChecks } from "../../src/commands/doctor.js";
+import { loadRepoConfig } from "../../src/schemas/repo.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { createSandbox, hostProbe } from "../../src/sandbox/sandbox.js";
 import { createFixtureRepo } from "../helpers/repo.js";
@@ -316,4 +317,24 @@ describe("factory doctor: services and ui (§15)", () => {
     expect(execFileSync("git", ["worktree", "list"], { cwd: repo, encoding: "utf8" }).trim().split("\n")).toHaveLength(1);
     expect(execFileSync("ls", [join(fh, "ports")], { encoding: "utf8" }).trim()).toBe(""); // slot released
   }, 60_000);
+});
+
+describe("evaluator checks", () => {
+  const ui = (devices: string[]) =>
+    loadRepoConfig(createFixtureRepo((c) => void (c.ui = { start: "node server.mjs --port {port:app}", url: "http://127.0.0.1:{port:app}", paths: ["web/**"], devices })));
+
+  it("names the missing headless shell with the install command, unknown devices and a missing ffmpeg", () => {
+    const checks = evaluatorChecks(ui(["Desktop Chrome", "Nokia 3310"]), { shell: undefined, browsers: "/cache/ms-playwright", ffmpeg: false });
+    expect(checks).toEqual([
+      { name: "browser", status: "fail", detail: expect.stringContaining("npx playwright-core install --only-shell chromium") },
+      { name: "ui devices", status: "fail", detail: "unknown Playwright device Nokia 3310" },
+      { name: "ffmpeg", status: "warn", detail: expect.stringContaining("no GIF") },
+    ]);
+  });
+
+  it("is ok with a shell, mobile emulation and ffmpeg; silent without ui", () => {
+    const checks = evaluatorChecks(ui(["Desktop Chrome", "iPhone 15"]), { shell: "/x/chrome-headless-shell", browsers: "/x", ffmpeg: true });
+    expect(checks.map((c) => c.status)).toEqual(["ok", "ok", "ok"]);
+    expect(evaluatorChecks(loadRepoConfig(createFixtureRepo()), { shell: undefined, browsers: "/x", ffmpeg: false })).toEqual([]);
+  });
 });
