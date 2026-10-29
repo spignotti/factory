@@ -18,9 +18,11 @@ export function isZenEndpoint(baseUrl: string): boolean {
   } catch {
     return false;
   }
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
   if (host !== "opencode.ai" && !host.endsWith(".opencode.ai")) return false;
-  return !url.pathname.split("/").includes("go");
+  // Go lives under `/<prefix>/go/…` (Pi 1.4.0: `/inference/go/v1`; formerly `/zen/go/v1`); anything
+  // else on the host is billed per use. A changed path fails closed (doctor fails, sessions refused).
+  return !/^\/(?:inference|zen)\/go(?:\/|$)/.test(url.pathname);
 }
 
 /** Why a resolved model must not be used, or undefined. `opencode` itself is governed by the provider policy. */

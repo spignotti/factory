@@ -8,6 +8,8 @@ import { z } from "zod";
  * list (Silas: `allow: [opencode-go, openai]`); repo.yaml cannot change it. `deny` wins over `allow`;
  * `*` in `allow` means any provider.
  */
+const ZEN = "opencode";
+
 export const DEFAULT_PROVIDERS = { allow: ["*"], deny: ["opencode"] };
 
 export const ProvidersSchema = z.object({
@@ -18,7 +20,10 @@ export type Providers = z.infer<typeof ProvidersSchema>;
 
 export function providerIssue(model: string, providers: Providers): string | undefined {
   const provider = providerOf(model);
-  const allowed = (providers.allow.includes("*") || providers.allow.includes(provider)) && !providers.deny.includes(provider);
+  // Zen is never allowed through `*`: only an explicit `allow: [opencode]` (and no deny) opts in, the
+  // same rule `doctor` applies.
+  const wildcard = providers.allow.includes("*") && provider !== ZEN;
+  const allowed = (wildcard || providers.allow.includes(provider)) && !providers.deny.includes(provider);
   if (allowed) return undefined;
   if (provider === "opencode") return `provider "opencode" is OpenCode Zen (pay-per-use) and not allowed; use opencode-go/* (${model})`;
   return `provider "${provider}" is not allowed (allow: ${providers.allow.join(", ")}; deny: ${providers.deny.join(", ") || "none"}) (${model})`;

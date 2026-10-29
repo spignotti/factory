@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
 import { GhCli, type GitHub } from "../gh.js";
+import { remotesWithCredentials } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
@@ -213,6 +214,12 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
   if (opts.repo) {
     try {
       const repoDir = resolve(opts.repo);
+      const leaky = await remotesWithCredentials(repoDir);
+      checks.push(
+        leaky.length
+          ? { name: "git remotes", status: "fail", detail: `credentials embedded in the URL of remote ${leaky.join(", ")}; agents can read .git/config inside the sandbox. Use gh's credential helper (gh auth setup-git) and a plain URL` }
+          : { name: "git remotes", status: "ok", detail: "no credentials in remote URLs" },
+      );
       checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, loadRepoConfig(repoDir))));
     } catch (e) {
       checks.push({ name: "repo.yaml", status: "fail", detail: (e as Error).message.slice(0, 300) });

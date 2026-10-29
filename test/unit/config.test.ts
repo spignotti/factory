@@ -80,6 +80,17 @@ describe("layered model config (Amendment i)", () => {
     ).toThrow(/capacity_only/);
   });
 
+  it("a repo layer cannot set family (it would disguise a model's family)", () => {
+    const base = resolveProfile(loadLayers({ factoryHome: home() }));
+    expect(() => withRepoModels(base, { review_plan: [{ model: "opencode-go/deepseek-v4-pro", family: "gpt" }] })).toThrow(/family can only be set/);
+  });
+
+  it("Zen is never allowed through allow: [*], only when named explicitly", () => {
+    expect(() => resolveProfile(loadLayers({ factoryHome: home(`providers: { allow: ["*"], deny: [] }\nroles:\n  pr_writer: [{ model: opencode/x }]\n`) }))).toThrow(/OpenCode Zen/);
+    const p = resolveProfile(loadLayers({ factoryHome: home(`providers: { allow: ["*", opencode], deny: [] }\nroles:\n  pr_writer: [{ model: opencode/x }]\n`) }));
+    expect(p.roles.pr_writer[0]!.model).toBe("opencode/x");
+  });
+
   it("rejects unknown roles and keys in a layer", () => {
     expect(() => parseLayer("user", "p.yaml", `roles:\n  review: [{ model: openai/x }]\n`)).toThrow(/review/);
     expect(() => parseLayer("user", "p.yaml", `modles: {}\n`)).toThrow(ConfigError);

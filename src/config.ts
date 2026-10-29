@@ -86,6 +86,13 @@ export function loadLayers(opts: { factoryHome: string; profile?: string; builti
 
 /** The repo layer from repo.yaml `models:` (role → chain). */
 export function repoLayer(models: RoleOverrides | undefined, source = ".factory/repo.yaml"): Layer | undefined {
+  // `family` overrides the family derived from the model id; from a repo it could disguise a
+  // reviewer as another family or a cross-family implement fallback as the primary's.
+  for (const [role, chain] of Object.entries(models ?? {})) {
+    for (const e of chain ?? []) {
+      if (e.family !== undefined) throw new ConfigError(`${source} models.${role}: family can only be set in the built-in, user or --profile layer (${e.model})`);
+    }
+  }
   return models && Object.keys(models).length ? { name: "repo", source, data: { roles: models } } : undefined;
 }
 

@@ -143,3 +143,17 @@ export async function originUrl(repoDir: string): Promise<string> {
 export async function repoLockId(repoDir: string): Promise<string> {
   return (await originUrl(repoDir)) || repoDir;
 }
+
+/**
+ * Remotes whose URL embeds credentials (`https://user:token@…`, `https://token@…`). The main repo's git
+ * dir is readable inside the sandbox, so such a token would reach the agents. Names only, never URLs.
+ */
+export async function remotesWithCredentials(repoDir: string): Promise<string[]> {
+  const out = await git(repoDir, ["config", "--get-regexp", "^remote\\..*\\.(push)?url$"]).catch(() => "");
+  const names = new Set<string>();
+  for (const line of out.split("\n")) {
+    const m = /^remote\.(.+)\.(?:push)?url (.*)$/.exec(line.trim());
+    if (m && /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]+@/i.test(m[2]!) && !/^ssh:\/\/[^/:@\s]+@/i.test(m[2]!)) names.add(m[1]!);
+  }
+  return [...names].sort();
+}

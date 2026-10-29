@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -159,6 +160,10 @@ describe("factory doctor: Zen guard rules", () => {
     expect(isZenEndpoint("https://opencode.ai/inference/gopher/v1")).toBe(true);
     expect(isZenEndpoint("https://api.openai.com/v1")).toBe(false);
     expect(isZenEndpoint("https://notopencode.ai/v1")).toBe(false);
+    expect(isZenEndpoint("https://opencode.ai./inference/v1")).toBe(true);
+    expect(isZenEndpoint("https://opencode.ai/inference/v1/go")).toBe(true);
+    expect(isZenEndpoint("https://opencode.ai/inference/go/../v1")).toBe(true);
+    expect(isZenEndpoint("https://opencode.ai/zen/go/v1")).toBe(false);
     expect(isZenEndpoint("not a url")).toBe(false);
   });
 
@@ -173,7 +178,9 @@ describe("factory doctor: Zen guard rules", () => {
     writeFileSync(join(star, "profile.yaml"), "providers: { allow: ['*'], deny: [] }\nroles:\n  pr_writer: [{ model: opencode/kimi-k3 }]\n");
     const c2 = capture();
     expect(await doctorCommand({ factoryHome: star, json: true, probe, view }, c2.io)).toBe(1);
-    expect(check(JSON.parse(c2.text()) as DoctorReport, "zen guard")).toMatchObject({ status: "fail", detail: expect.stringMatching(/explicitly/) });
+    // Rejected already when the profile is loaded (same rule as the runtime), so no run can start.
+    const r2 = JSON.parse(c2.text()) as DoctorReport;
+    expect(r2.checks.find((x) => x.status === "fail")).toMatchObject({ detail: expect.stringMatching(/OpenCode Zen/) });
   });
 
   it("an opencode-go model off the /go/ path fails; an unknown model fails", async () => {
@@ -213,6 +220,16 @@ describe("factory doctor: Zen guard rules", () => {
 });
 
 describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", () => {
+  it("fails on credentials embedded in a remote URL without printing them", async () => {
+    const repo = createFixtureRepo();
+    execFileSync("git", ["remote", "add", "origin", "https://x-access-token:s3cr3t-value@github.com/o/r.git"], { cwd: repo });
+    execFileSync("git", ["remote", "add", "mirror", "git@github.com:o/r.git"], { cwd: repo });
+    const c = capture();
+    expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c.io)).toBe(1);
+    expect(check(JSON.parse(c.text()) as DoctorReport, "git remotes")).toMatchObject({ status: "fail", detail: expect.stringMatching(/remote origin;/) });
+    expect(c.text()).not.toContain("s3cr3t-value");
+  });
+
   it("gh not logged in fails", async () => {
     const gh = new FakeGitHub();
     gh.authOk = false;
