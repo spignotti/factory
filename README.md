@@ -68,10 +68,10 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub |
 | `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
-| `factory adopt --repo <p> --ref <tag>` | onboarding PR |
+| `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
-| `factory ci-stub --ref <tag>` | print the CI workflow |
+| `factory ci-stub [--ref <tag>]` | print the CI workflow |
 | `factory --version` | package version (plus the commit for a checkout install) |
 
 `factory` without arguments prints every flag. All commands take `--json` where the output is machine-readable.
@@ -346,14 +346,14 @@ GIFs; `factory doctor --repo .` checks both.
 
 ## CI
 
-`factory ci-stub --ref <tag> > .github/workflows/factory.yml` writes the CI stub: on every pull request it
+`factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
 selects the checks with the same code as a local run and runs each one (`factory gates --run`); the single
 required status is `factory / done`. `factory doctor --repo .` checks the file is the unedited template
 for its ref. Bumping the ref is a deliberate PR. The ref must be a published tag of this repo.
 
 ## Adopt
 
-`factory adopt --repo <path> --ref <tag>` onboards a repository in one PR (branch `factory/adopt`, from the
+`factory adopt --repo <path> [--ref <tag>]` (default `v<version>`) onboards a repository in one PR (branch `factory/adopt`, from the
 base branch; the user's checkout is not touched):
 
 - **Detect** (code): stack (node: package manager and scripts; python: uv/poetry/pip, nox sessions or

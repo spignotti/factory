@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CI_STUB_PATH, CI_TEMPLATE, ciStubCheck, otherPrWorkflows, renderCiStub, sha256 } from "../../src/ci.js";
-import { main } from "../../src/cli.js";
+import { defaultRef, main } from "../../src/cli.js";
 import { ciChecks } from "../../src/commands/doctor.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 import { createFixtureRepo } from "../helpers/repo.js";
@@ -58,7 +58,11 @@ describe("CI stub", () => {
     let out = "";
     expect(await main(["ci-stub", "--ref", "v0.3.0"], { out: (s) => void (out += s), err: () => {} })).toBe(0);
     expect(out).toBe(readFileSync(CI_TEMPLATE, "utf8").replaceAll("@FACTORY_REF@", "v0.3.0"));
-    expect(await main(["ci-stub"], { out: () => {}, err: () => {} })).toBe(2);
+    let pinned = "";
+    expect(await main(["ci-stub"], { out: (s) => void (pinned += s), err: () => {} })).toBe(0);
+    const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
+    expect(pinned).toBe(renderCiStub(`v${version}`)); // default pin: this factory's release tag
+    expect(defaultRef()).toBe("v0.2.0");
   });
 });
 
