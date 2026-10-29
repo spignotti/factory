@@ -35,6 +35,7 @@ export function evaluationMarkdown(report: EvaluateReport | undefined, link: Evi
   const gif = report.evidence.find((e) => e.kind === "gif");
   const gifUrl = gif && link(gif.file);
   if (gifUrl) lines.push("", `![evaluator session](${gifUrl})`);
+  else if (gif) lines.push("", `GIF: \`${gif.file}\``);
   const video = report.evidence.find((e) => e.kind === "video");
   if (video) lines.push("", `Video: ${ref(video.file, video.file, link)}`);
   const shots = report.criteria.filter((c) => c.screenshot && isImage(c.screenshot));

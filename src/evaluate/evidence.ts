@@ -114,7 +114,8 @@ export async function publishEvidence(repoDir: string, opts: { runId: string; di
     return paths.size > 0;
   });
   if (!sha) throw new Error("no evidence file to publish");
-  const url = await run(repoDir, ["remote", "get-url", "origin"]).catch(() => "");
+  // The configured URL (not `get-url`, which applies `insteadOf` rewrites).
+  const url = await run(repoDir, ["config", "--get", "remote.origin.url"]).catch(() => "");
   return { sha, slug: githubSlug(url), paths, skipped };
 }
 
