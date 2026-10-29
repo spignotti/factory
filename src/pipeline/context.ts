@@ -60,7 +60,13 @@ export interface RunContext {
   deadline: number;
   /** Findings memory briefing (§10): top open recurring findings, or "". */
   briefing: string;
+  /** Effective lane (§6.11): `fast` until escalated. */
+  lane: Lane;
+  /** Why a fast-lane run moved to the standard lane (empty = not escalated). */
+  laneEscalation: string[];
 }
+
+export type Lane = "standard" | "fast";
 
 export class WallTimeExceeded extends Error {
   constructor(minutes: number) {

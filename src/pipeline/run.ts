@@ -14,8 +14,10 @@ import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from
 import { finalize, syncBase } from "../steps/finalize.js";
 import { type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
-import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
-import { agentEnv, checkDeadline, jailFor, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
+import { planStep } from "../steps/plan.js";
+import { fastLaneEscalation } from "./lane.js";
+import { agentEnv, checkDeadline, jailFor, type Lane, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
@@ -63,6 +65,13 @@ async function openMemory(f: RunFrame, deps: RunDeps, repoDir: string): Promise<
     f.events.emit({ step: "intake", event: "progress", data: { memory_error: (e as Error).message } });
     return "";
   }
+}
+
+/** Fast lane → standard lane (§6.11): logged, reported in result.json and the PR. */
+function escalate(f: RunFrame, events: EventLog, step: string, reasons: string[]): void {
+  f.lane = "standard";
+  if (f.state) f.state.lane = "standard";
+  events.emit({ step, event: "lane_escalated", data: { from: "fast", to: "standard", reasons } });
 }
 
 /** Flaky checks of every gate run of this run dir. */
@@ -125,7 +134,7 @@ class RunFrame {
     readonly runId: string,
     readonly runDir: string,
     readonly repoDir: string,
-    readonly lane: "standard" | "fast",
+    public lane: Lane,
     readonly events: EventLog,
     readonly startedAt: number,
     readonly now: Clock,
@@ -214,7 +223,6 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   const f = new RunFrame(runId, runDir, repoDir, lane, events, startedAt, now, ref);
 
   return f.execute(async () => {
-    if (lane === "fast") throw new Error("--lane fast is not available in M1");
     events.emit({ step: "intake", event: "step_started" });
     const repo: RepoConfig = loadRepoConfig(repoDir);
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
@@ -223,7 +231,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
     f.release = lock.release;
-    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false }));
+    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane }));
     f.save();
 
     const agentHome = prepareAgentHome(runDir);
@@ -231,7 +239,19 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing };
 
-    const planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
+    const escalation: string[] = [];
+    let planned: PlanOutcome;
+    if (lane === "fast") {
+      const fast = await obtainFastPlan(base);
+      if (fast.kind === "escalate") {
+        escalation.push(fast.reason);
+        planned = await planStep(base, "medium");
+      } else planned = fast;
+      if (planned.kind === "plan" && planned.plan.packages.length > 1) escalation.push(`${planned.plan.packages.length} packages (fast lane takes 1)`);
+    } else {
+      planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
+    }
+    if (escalation.length) escalate(f, events, "intake", escalation);
     if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
     if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
     const plan = planned.plan;
@@ -259,7 +279,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     f.set({ branch, worktree });
     Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement" });
     f.save();
-    const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline };
+    const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation] };
     const env = agentEnv(ctx);
 
     if (repo.setup) {
@@ -286,6 +306,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
   const st = f.state!;
   const sync = () => {
+    st.lane = ctx.lane;
+    st.lane_escalation = ctx.laneEscalation;
     st.handoffs = ctx.handoffs;
     st.gate_count = ctx.gateCount;
     st.base_sha = ctx.baseSha;
@@ -315,6 +337,14 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
       loop = { result: "needs_human", reason: `packages not done: ${failed.join("; ")}`, rounds: st.rounds, findings: [], gates };
     } else {
       st.step = "review";
+      if (ctx.lane === "fast") {
+        const reasons = await fastLaneEscalation(ctx);
+        if (reasons.length) {
+          escalate(f, ctx.events, "implement", reasons);
+          ctx.lane = "standard";
+          ctx.laneEscalation.push(...reasons);
+        }
+      }
       sync();
     }
   }
@@ -366,14 +396,14 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });
-  const f = new RunFrame(runId, runDir, st.repo, "standard", events, startedAt, now, st.task.ref);
+  const f = new RunFrame(runId, runDir, st.repo, st.lane ?? "standard", events, startedAt, now, st.task.ref);
   f.set({ branch: st.branch, worktree: st.worktree, pr: st.pr, rounds: st.rounds });
 
   // Locked: report without touching this run's result.json/state.json (they describe the run, not this attempt).
   const lock = await takeRepoLock(deps, st.repo, runId, events, opts.wait ?? false);
   if (!lock.release) {
     return {
-      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: "standard", result: "locked", risk: null, merge_policy: null,
+      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
       pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: lock.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
     };
   }
@@ -390,6 +420,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     const memoryBriefing = await openMemory(f, deps, st.repo);
     const ctx: RunContext = {
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
+      lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline,
     };
     if (st.step === "implement") {

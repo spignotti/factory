@@ -55,6 +55,7 @@ export const RepoConfigSchema = z
         per_package: z.boolean().default(false),
       })
       .default({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5, per_package: false }),
+    fast_lane: z.object({ max_diff_lines: z.number().int().min(1).default(150) }).default({ max_diff_lines: 150 }),
     merge: z
       .object({
         auto_merge_max_risk: z.enum(["none", "low", "medium"]).default("none"),

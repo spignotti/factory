@@ -100,6 +100,9 @@ export function renderPrBody(ctx: RunContext, v: {
     gates: v.gates ? v.gates.checks.map((c) => `- ${c.status === "pass" ? "✅" : c.status === "flaky" ? "⚠️" : "❌"} ${c.name} (${c.kind}${c.status === "flaky" ? ", flaky" : ""})`).join("\n") : "- not run",
     review: list(input.findings.filter((f) => f.status !== "open").map((f) => `${f.id} ${f.severity}: ${f.status}`)),
     stats: [
+      ctx.laneEscalation.length
+        ? `- lane: fast → standard (${ctx.laneEscalation.join("; ")})`
+        : `- lane: ${ctx.lane}${ctx.lane === "fast" ? " (lean review, at most one fix round)" : ""}`,
       `- rounds: ${input.rounds}`,
       `- duration: ${((Date.now() - input.startedAt) / 60_000).toFixed(1)} min`,
       `- tokens: ${ctx.events.totals.tokens_in} in / ${ctx.events.totals.tokens_out} out`,
@@ -161,7 +164,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
 
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const diffLines = [...(await diffStat(ctx.worktree, ctx.baseSha)).values()].reduce((a, b) => a + b, 0);
-  const risk = riskClass({ changed, diffLines, repo: ctx.repo });
+  const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
   const policy = mergePolicy(risk.risk, result, ctx.repo.merge);
   const out = { result, reason, risk, mergePolicy: policy };
   const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed }));

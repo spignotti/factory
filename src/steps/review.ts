@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { z } from "zod";
 import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import { type ChecklistItem, parseChecklist, unmarkedItems } from "../checklist.js";
@@ -71,76 +72,127 @@ function reviewerExtras(reviewer: Reviewer, plan: ReviewerPlan): string {
   return "";
 }
 
-function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string, rules: string, plan: ReviewerPlan): string {
-  const shape = REVIEW_SHAPE.replace("<name>", reviewer);
-  if (input.round === 1 || !input.lastReviewedSha || !reviewedBefore(ctx, reviewer, input.round)) {
+/** One reviewer session: a single reviewer (mode `full`) or `plan` + `simplicity` together (mode `lean`). */
+interface ReviewSession {
+  key: string;
+  role: string;
+  reviewers: Reviewer[];
+}
+
+function sessionsFor(ctx: RunContext, reviewers: Reviewer[]): ReviewSession[] {
+  const single = (r: Reviewer): ReviewSession => ({ key: r, role: `review_${r}`, reviewers: [r] });
+  if (ctx.lane !== "fast") return reviewers.map(single);
+  const lean: Reviewer[] = ["plan", "simplicity"];
+  return [{ key: "lean", role: "review_plan", reviewers: lean }, ...reviewers.filter((r) => !lean.includes(r)).map(single)];
+}
+
+const LEAN_SHAPE = `Reply with a single \`\`\`json block {"reviews":[<plan review>,<simplicity review>]}, each review shaped like:
+{"reviewer":"plan|simplicity","prior":[{"finding_id":"R1-plan-1","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
+ "findings":[{"severity":"bug|suggestion|nit","file":"","line":0,"claim":"","evidence":"","fix":"","checkable":"lint|test|script|no","check_sketch":""}]}
+Give the verdict on a prior finding in the review of the reviewer that raised it.`;
+
+const shapeOf = (s: ReviewSession): string => (s.reviewers.length > 1 ? LEAN_SHAPE : REVIEW_SHAPE.replace("<name>", s.reviewers[0]!));
+
+interface Diffs {
+  /** Since base: round 1 and reviewers joining later. */
+  full: () => Promise<string>;
+  /** Since the HEAD reviewed last round. */
+  incremental: string;
+}
+
+async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<string> {
+  const continued = input.round > 1 && input.lastReviewedSha && s.reviewers.every((r) => reviewedBefore(ctx, r, input.round));
+  if (!continued) {
     return [
       asData("plan", JSON.stringify(ctx.plan, null, 2)),
-      asData("diff", diff),
+      asData("diff", await diffs.full()),
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", JSON.stringify({ checks: input.gates.checks.map((c) => ({ name: c.name, status: c.status })), scope_report: input.gates.scope_report }, null, 2)),
       `Review rules:\n${rules}`,
-      reviewerExtras(reviewer, plan),
+      ...s.reviewers.map((r) => reviewerExtras(r, plan)),
       ctx.briefing ? `Recurring findings in this repo (check whether this diff repeats them):\n${asData("findings_briefing", ctx.briefing)}` : "",
-      shape,
+      // Prior findings of a reviewer joining late: open ones still need its verdict.
+      input.round > 1 ? priorBlock(input, s) : "",
+      shapeOf(s),
     ].filter(Boolean).join("\n\n");
   }
-  const prior = input.findings
-    .filter((f) => f.reviewer === reviewer && f.status === "open")
-    .map((f) => ({ id: f.id, severity: f.severity, file: f.file, line: f.line, claim: f.claim, response: f.response ?? null }));
   return [
     `Round ${input.round}. Give a verdict for every prior finding below and report only new findings.`,
-    asData("prior_findings_with_responses", JSON.stringify(prior, null, 2)),
-    asData("incremental_diff", diff),
+    priorBlock(input, s),
+    asData("incremental_diff", diffs.incremental),
     asData("gate_results", JSON.stringify({ scope_report: input.gates.scope_report }, null, 2)),
-    shape,
+    shapeOf(s),
   ].join("\n\n");
 }
 
-async function runReviewer(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string, rules: string, plan: ReviewerPlan): Promise<ReviewOutput> {
-  const role = `review_${reviewer}`;
-  const system = `${rolePrompt(`review-${reviewer}`)}\n\n${rolePrompt("review-common")}`;
-  let prompt = reviewPrompt(ctx, reviewer, input, diff, rules, plan);
-  let errors: string[] = [];
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await callAgent(ctx, "review", {
-      role,
-      cwd: ctx.worktree,
-      tools: "read_only",
-      system,
-      prompt,
-      sessionKey: `${ctx.runId}-review-${reviewer}`,
-    });
-    const parsed = ReviewOutputSchema.safeParse(extractJson(res.text));
-    if (parsed.success && parsed.data.reviewer === reviewer) {
-      writeJson(ctx, `review-${input.round}-${reviewer}.json`, parsed.data);
-      return parsed.data;
-    }
-    errors = parsed.success ? [`reviewer must be ${reviewer}`] : parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`);
-    prompt = `Your review output was invalid:\n- ${errors.join("\n- ")}\n\n${REVIEW_SHAPE.replace("<name>", reviewer)}`;
-  }
-  throw new InvalidOutputError(`review_${reviewer} output invalid: ${errors.join("; ")}`);
+function priorBlock(input: ReviewInput, s: ReviewSession): string {
+  const prior = input.findings
+    .filter((f) => s.reviewers.includes(f.reviewer) && f.status === "open")
+    .map((f) => ({ id: f.id, reviewer: f.reviewer, severity: f.severity, file: f.file, line: f.line, claim: f.claim, response: f.response ?? null }));
+  return prior.length || input.round > 1 ? asData("prior_findings_with_responses", JSON.stringify(prior, null, 2)) : "";
 }
 
-/** One review round: every active reviewer in its own parallel session (mode `full`). */
+function parseSession(s: ReviewSession, text: string): { ok: true; reviews: ReviewOutput[] } | { ok: false; errors: string[] } {
+  const json = extractJson(text);
+  if (s.reviewers.length === 1) {
+    const parsed = ReviewOutputSchema.safeParse(json);
+    if (!parsed.success) return { ok: false, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) };
+    return parsed.data.reviewer === s.reviewers[0] ? { ok: true, reviews: [parsed.data] } : { ok: false, errors: [`reviewer must be ${s.reviewers[0]}`] };
+  }
+  const parsed = LeanOutputSchema.safeParse(json);
+  if (!parsed.success) return { ok: false, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) };
+  const got = parsed.data.reviews.map((r) => r.reviewer);
+  if (got.length !== s.reviewers.length || !s.reviewers.every((r) => got.includes(r))) {
+    return { ok: false, errors: [`reviews must be exactly one each for ${s.reviewers.join(", ")}`] };
+  }
+  return { ok: true, reviews: s.reviewers.map((r) => parsed.data.reviews.find((x) => x.reviewer === r)!) };
+}
+
+const LeanOutputSchema = z.object({ reviews: z.array(ReviewOutputSchema) });
+
+async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<ReviewOutput[]> {
+  const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`)), rolePrompt("review-common")].join("\n\n");
+  let prompt = await reviewPrompt(ctx, s, input, diffs, rules, plan);
+  let errors: string[] = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await callAgent(ctx, "review", { role: s.role, cwd: ctx.worktree, tools: "read_only", system, prompt, sessionKey: `${ctx.runId}-review-${s.key}` });
+    const out = parseSession(s, res.text);
+    if (out.ok) {
+      for (const r of out.reviews) writeJson(ctx, `review-${input.round}-${r.reviewer}.json`, r);
+      return out.reviews;
+    }
+    errors = out.errors;
+    prompt = `Your review output was invalid:\n- ${errors.join("\n- ")}\n\n${shapeOf(s)}`;
+  }
+  throw new InvalidOutputError(`${s.key === "lean" ? "review (lean)" : s.role} output invalid: ${errors.join("; ")}`);
+}
+
+/** One review round: every active reviewer in parallel sessions (mode `full`; fast lane `lean`). */
 export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<ReviewOutput[]> {
   // Stage and diff once: parallel reviewers must not touch the git index concurrently.
   await stageAll(ctx.worktree);
   const plan = await planReviewers(ctx, input.round);
+  const sessions = sessionsFor(ctx, plan.reviewers);
   ctx.events.emit({
     step: "review",
     event: "step_started",
-    data: { round: input.round, reviewers: plan.reviewers, security_files: plan.security.length, checklist_items: plan.checklist.length },
+    data: {
+      round: input.round, reviewers: plan.reviewers, mode: ctx.lane === "fast" ? "lean" : "full",
+      security_files: plan.security.length, checklist_items: plan.checklist.length,
+    },
   });
-  const since = input.round === 1 || !input.lastReviewedSha ? ctx.baseSha : input.lastReviewedSha;
-  const diff = await diffText(ctx.worktree, since, ctx.repo.review.skip_paths);
-  writeRunFile(ctx, `diff-${input.round}.patch`, diff);
+  const skip = ctx.repo.review.skip_paths;
+  const first = input.round === 1 || !input.lastReviewedSha;
+  const incremental = await diffText(ctx.worktree, first ? ctx.baseSha : input.lastReviewedSha!, skip);
+  let full: Promise<string> | undefined;
+  const diffs: Diffs = { incremental, full: () => (full ??= first ? Promise.resolve(incremental) : diffText(ctx.worktree, ctx.baseSha, skip)) };
+  writeRunFile(ctx, `diff-${input.round}.patch`, incremental);
   const rules = await reviewRules(ctx);
   // allSettled: a failing reviewer must not leave its sibling running after the run has finished.
-  const settled = await Promise.allSettled(plan.reviewers.map((r) => runReviewer(ctx, r, input, diff, rules, plan)));
+  const settled = await Promise.allSettled(sessions.map((s) => runSession(ctx, s, input, diffs, rules, plan)));
   const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
   if (failed) throw failed.reason;
-  const outputs = settled.map((s) => (s as PromiseFulfilledResult<ReviewOutput>).value);
+  const outputs = settled.flatMap((s) => (s as PromiseFulfilledResult<ReviewOutput[]>).value);
   ctx.events.emit({ step: "review", event: "step_finished", data: { round: input.round } });
   return outputs;
 }

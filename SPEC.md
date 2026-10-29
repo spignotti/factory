@@ -877,3 +877,10 @@ l) **Security and checklist reviewers (§6.6, M2a).**
      - A reviewer that ran once in a run stays active for later rounds (its open findings need its verdicts). A reviewer joining after round 1 gets the full round-1 input.
    - **Checklist marker syntax:** every Markdown list item (`-`, `*`, `+`, `1.`, optional `[ ]`/`[x]`, any indentation) is one item; indented non-bullet lines continue it. An item already enforced by a deterministic check carries `<!-- check: <check name> -->` anywhere in it and is skipped by the checklist reviewer (and counted as done by `harden`). Other HTML comments are ignored. The task box state (`[x]`) has no meaning.
    - The planner gets the unmarked items too (§6.2 "relevant checklist items"; all of them, the planner picks), from the repo checkout it plans in.
+
+m) **Fast lane (§6.11, M2a).**
+   - Intake: a valid plan block, else `plan_normalize` only. Invalid normalize output (after its retry) or more than one package moves the run to the standard lane at intake (invalid output → `plan_medium` plans it; several packages → the normalized plan is kept).
+   - Escalation after implement (once, on the whole change since base): diff lines (added + removed) > `fast_lane.max_diff_lines` (default 150), any dependency manifest or lockfile (`src/paths.ts`), `sensitive_paths`, `human_only_paths` or `**/migrations/**`. A fix round that later touches such a file is not re-checked; the risk class at finalize still sees it.
+   - Every escalation is a `lane_escalated` event `{from, to, reasons}`, is kept in `state.json` (resume keeps the lane), sets `result.lane` to `standard`, adds the risk reason "fast-lane escalation" (so never `low`) and is named in the PR stats (`lane: fast → standard (…)`).
+   - `lean` review: `plan` and `simplicity` share one session on the `review_plan` model chain and answer `{"reviews":[…]}` with one review each; `security`/`checklist` still run as their own sessions when active (security cannot be active without escalation; checklist can).
+   - At most one fix round: `max_rounds` is capped at 2 and an open `bug` after round 2 is `needs_human` (no extra round).

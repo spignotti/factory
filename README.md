@@ -104,6 +104,10 @@ tools are confined to the worktree. Set `sandbox: required | preferred | off` in
 `~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
 (bubblewrap), `pasta` (passt) and `ip` (iproute2); `factory doctor` shows what is in effect.
 
+## Fast lane
+
+`factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when the task needs more than one package or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged and listed in the PR.
+
 ## Reviewers
 
 `plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `checklist` joins when `review.checklist` is on (default) and `.factory/checklist.md` has unmarked items:
