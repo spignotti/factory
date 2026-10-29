@@ -24,6 +24,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The evaluator's browser tests run against Playwright's Chromium headless shell.
+      - run: pnpm exec playwright-core install --with-deps --only-shell chromium
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
