@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { gc } from "../../src/commands/gc.js";
+import { publishEvidence } from "../../src/evaluate/evidence.js";
 import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { FakeGitHub } from "../../src/gh.js";
@@ -175,7 +176,7 @@ describe("factory gc", () => {
     expect(remoteHas(r.repo, branch)).toBe(false);
     expect(stateOf(r.runDir).gc_at).toEqual(expect.any(String));
     expect(git(r.repo, "branch", "--show-current").trim()).toBe("main");
-    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [] });
+    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [], evidence: [{ repo: r.repo, removed: [] }] });
     const s = await statusReport({ factoryHome: r.factoryHome, github: r.github });
     expect(s.prs).toEqual([]);
   });
@@ -196,6 +197,23 @@ describe("factory gc", () => {
     expect(res.cleaned[0]).toMatchObject({ pr_state: "closed", worktree_removed: true, branch_deleted: true, remote_branch_deleted: false, notes: [expect.stringMatching(/remote branch moved/)] });
     expect(remoteHas(r.repo, branch)).toBe(true);
     expect(existsSync(wt)).toBe(false);
+  });
+
+  it("evidence retention: run folders older than 30 days leave factory-evidence with a plain commit", async () => {
+    const { r } = await pushedRun();
+    const dir = mkdtempSync(join(tmpdir(), "evidence-"));
+    writeFileSync(join(dir, "r1-A1.png"), "png");
+    const author = { name: "factory-bot", email: "factory-bot@users.noreply.github.com" };
+    const pub = await publishEvidence(r.repo, { runId: r.runId, dir, files: ["r1-A1.png"], author });
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github })).evidence).toEqual([{ repo: r.repo, removed: [] }]);
+    const later = () => Date.now() + 31 * 86_400_000;
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true })).evidence).toEqual([{ repo: r.repo, removed: [r.runId] }]);
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github, now: later })).evidence).toEqual([{ repo: r.repo, removed: [r.runId] }]);
+    expect(git(r.repo, "ls-remote", "origin", "refs/heads/factory-evidence").split(/\s/)[0]).not.toBe(pub.sha);
+    expect(git(r.repo, "ls-tree", "-r", "refs/factory/evidence").trim()).not.toBe("");
+    git(r.repo, "fetch", "-q", "origin", "+refs/heads/factory-evidence:refs/factory/evidence");
+    expect(git(r.repo, "ls-tree", "-r", "refs/factory/evidence").trim()).toBe("");
+    expect(git(r.repo, "rev-parse", "refs/factory/evidence^").trim()).toBe(pub.sha);
   });
 
   it("skips a repository whose lock is held; never deletes a branch outside factory/*", async () => {

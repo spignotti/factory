@@ -86,12 +86,39 @@
         ],
         "additionalProperties": false
       }
+    },
+    "evidence": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "removed"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
     "dry_run",
     "cleaned",
-    "skipped"
+    "skipped",
+    "evidence"
   ],
   "additionalProperties": false
 }
