@@ -23,6 +23,8 @@ export interface RunDeps {
   sleep?: Sleep;
   now?: Clock;
   watchdogPollMs?: number;
+  /** Aborted on SIGINT/SIGTERM (reason: Interrupted). */
+  signal?: AbortSignal;
 }
 
 export interface Task {
@@ -49,7 +51,7 @@ export interface RunContext {
   plan: Plan;
   handoffs: Handoff[];
   gateCount: number;
-  /** `max_wall_minutes` outer limit (epoch ms). */
+  /** `max_wall_minutes` outer limit (epoch ms), enforced between steps and inside agent calls. */
   deadline: number;
 }
 
@@ -60,8 +62,13 @@ export class WallTimeExceeded extends Error {
   }
 }
 
-export function checkDeadline(ctx: Pick<RunContext, "deadline" | "repo">): void {
+export function checkDeadline(ctx: Pick<RunContext, "deadline" | "repo" | "deps">): void {
+  throwIfInterrupted(ctx.deps);
   if (Date.now() > ctx.deadline) throw new WallTimeExceeded(ctx.repo.limits.max_wall_minutes);
+}
+
+export function throwIfInterrupted(deps: Pick<RunDeps, "signal">): void {
+  if (deps.signal?.aborted) throw deps.signal.reason instanceof Error ? deps.signal.reason : new Error("interrupted");
 }
 
 /** Writes a run artifact, redacted like the event log. */
@@ -83,7 +90,7 @@ export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "ag
 
 /** One supervised agent call: model chain with backoff/fallback, heartbeat events, watchdog. */
 export async function callAgent(
-  ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "events">,
+  ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "deadline">,
   step: string,
   req: AgentCall,
 ): Promise<ModelResponse> {
@@ -91,7 +98,13 @@ export async function callAgent(
   try {
     return await supervise(
       events,
-      { windowMs: ctx.repo.limits.stall_minutes * 60_000, now: deps.now, pollMs: deps.watchdogPollMs },
+      {
+        windowMs: ctx.repo.limits.stall_minutes * 60_000,
+        now: deps.now,
+        pollMs: deps.watchdogPollMs,
+        deadline: { at: ctx.deadline, error: () => new WallTimeExceeded(ctx.repo.limits.max_wall_minutes) },
+        signal: deps.signal,
+      },
       (signal) =>
         callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep }, step, {
           ...req,
@@ -104,6 +117,8 @@ export async function callAgent(
   } catch (e) {
     if (e instanceof WatchdogAbort) {
       events.emit({ step, event: "watchdog_abort", role: req.role, data: { silent_ms: e.silentMs } });
+    } else if (e instanceof WallTimeExceeded) {
+      events.emit({ step, event: "progress", role: req.role, data: { aborted: "max_wall_minutes" } });
     }
     throw e;
   }

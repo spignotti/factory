@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { GhCli } from "./gh.js";
+import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { runFactory } from "./pipeline/run.js";
 import { loadProfile } from "./schemas/profile.js";
 
@@ -15,6 +16,12 @@ const USAGE = `usage:
               [--plan-effort none|medium|high] [--no-pr] [--profile <name>]
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
 `;
+
+function exitCode(result: string, signal: AbortSignal): number {
+  const reason: unknown = signal.reason;
+  if (reason instanceof Interrupted) return reason.signalName === "SIGINT" ? 130 : 143;
+  return result === "failed" ? 1 : 0;
+}
 
 const defaultIo: Io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) };
 
@@ -58,6 +65,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = process.env.FACTORY_HOME ?? join(homedir(), ".factory");
       const runner = new PiRunner(join(factoryHome, "pi"));
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
       try {
         const result = await runFactory(
           {
@@ -69,11 +78,12 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             planEffort: effort as "none" | "medium" | "high" | undefined,
             noPr: values["no-pr"],
           },
-          { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome },
+          { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome, signal: controller.signal },
         );
         io.out(JSON.stringify(result) + "\n");
-        return result.result === "failed" ? 1 : 0;
+        return exitCode(result.result, controller.signal);
       } finally {
+        uninstall();
         await runner.close();
       }
     }

@@ -11,7 +11,8 @@ import { finalize } from "../steps/finalize.js";
 import { runChecks } from "../steps/gates.js";
 import { implementPackages } from "../steps/implement.js";
 import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
-import { agentEnv, type RunContext, type RunDeps, type Task, WallTimeExceeded, writeJson } from "./context.js";
+import { Interrupted } from "../interrupt.js";
+import { agentEnv, checkDeadline, throwIfInterrupted, type RunContext, type RunDeps, type Task, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireTaskLock } from "./lock.js";
 import { reviewLoop } from "./loop.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -76,7 +77,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       return finish();
     }
     const agentHome = prepareAgentHome(runDir);
-    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task };
+    const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
+    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline };
 
     const planned = await obtainPlan(base, resolvePlanEffort(opts.planEffort, task.labels));
     if (planned.kind === "needs_input") {
@@ -93,6 +95,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     events.emit({ step: "intake", event: "step_finished", data: { plan_source: planned.source, packages: plan.packages.length } });
 
     // Base check (SPEC §6.1 step 6) and worktree (step 7).
+    checkDeadline(base);
     const ref = await baseRef(repoDir, repo.base_branch);
     const baseSha = await revParse(repoDir, ref);
     const status = await deps.github.baseStatus(repoDir, baseSha);
@@ -111,12 +114,12 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const worktree = join(runDir, "worktree");
     await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
     out = { ...out, branch, worktree };
-    const deadline = Date.now() - (now() - startedAt) + repo.limits.max_wall_minutes * 60_000;
     const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline };
     const env = agentEnv(ctx);
 
     if (repo.setup) {
       const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline - Date.now()) });
+      checkDeadline(ctx);
       if (setup.code !== 0) {
         out = { ...out, result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` };
         return finish();
@@ -125,6 +128,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     if (status === "none") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
       const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline });
+      throwIfInterrupted(deps);
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
       if (red.length) {
@@ -148,7 +152,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     return finish();
   } catch (e) {
     const reason = (e as Error).message;
-    if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) out = { ...out, result: "needs_human", reason };
+    if (e instanceof Interrupted) out = { ...out, result: "failed", reason };
+    else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) out = { ...out, result: "needs_human", reason };
     else out = { ...out, result: "failed", reason };
     return finish();
   } finally {

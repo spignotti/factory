@@ -7,7 +7,7 @@ import { asData, rolePrompt } from "../prompts.js";
 import { QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import type { PlanOutcome } from "./intake.js";
 
-type PlanContext = Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "task" | "repoDir">;
+type PlanContext = Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "task" | "repoDir" | "deadline">;
 
 const PLAN_SHAPE = `plan.json shape:
 {"version":1,"type":"feature|bug|chore","goal":"","context":"",

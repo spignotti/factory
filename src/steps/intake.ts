@@ -54,7 +54,7 @@ export type PlanOutcome =
   | { kind: "needs_input"; questions: string[] }
   | { kind: "failed"; reason: string };
 
-type IntakeContext = Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "task" | "repoDir">;
+type IntakeContext = Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "task" | "repoDir" | "deadline">;
 
 /** `plan_normalize`: translate the text without adding content. Every quote is checked in code. */
 async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "invalid"; errors: string[] }> {

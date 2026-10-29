@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
+import { Interrupted } from "../../src/interrupt.js";
 import { addOrigin } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
@@ -285,6 +286,35 @@ describe("run guards", () => {
     const r = await runScenario({ script: "base-red.json", patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.00001) });
     expect(r.result).toMatchObject({ result: "needs_human" });
     expect(r.result.reason).toMatch(/max_wall_minutes/);
-    expect(r.resultFile).toMatchObject({ worktree: join(r.runDir, "worktree"), run_dir: r.runDir });
+    expect(r.resultFile).toMatchObject({ worktree: null, run_dir: r.runDir });
+  });
+
+  it("max_wall_minutes also stops an agent session that keeps heartbeating", async () => {
+    const started = Date.now();
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.005), // 300 ms
+      steps: (steps) => steps.map((s) => (s.role === "plan_high" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
+    });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(r.result).toMatchObject({ result: "needs_human" });
+    expect(r.result.reason).toMatch(/max_wall_minutes/);
+    expect(eventsOf(r, "heartbeat").length).toBeGreaterThan(3);
+    expect(r.events.some((e) => e.event === "progress" && e.data.aborted === "max_wall_minutes")).toBe(true);
+  });
+
+  it("an external abort (SIGTERM handler) stops the run as failed and still writes result.json", async () => {
+    const controller = new AbortController();
+    const started = Date.now();
+    const r = await runScenario({
+      script: "clean.json",
+      steps: (steps) => steps.map((s) => (s.role === "plan_high" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
+      deps: { signal: controller.signal },
+      onCall: () => void setTimeout(() => controller.abort(new Interrupted("SIGTERM")), 100),
+    });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(r.resultFile).toMatchObject({ result: "failed", reason: "interrupted by SIGTERM" });
+    expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "failed" } });
+    expect(r.github.prs).toEqual([]);
   });
 });

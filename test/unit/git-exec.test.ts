@@ -1,7 +1,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { sh } from "../../src/exec.js";
+import { killRunningCommands, resetKilledCommands, sh } from "../../src/exec.js";
 import { changedFiles, discardChanges, remoteBranchExists, stageAll } from "../../src/git.js";
 import { addOrigin, createFixtureRepo, gitIn } from "../helpers/repo.js";
 
@@ -43,5 +43,27 @@ describe("sh", () => {
     expect(r.code).not.toBe(0);
     expect(r.output).toContain("timed out");
     expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe("killRunningCommands (signal handler)", () => {
+  it("kills running process groups and refuses to start new commands", async () => {
+    const env = { PATH: process.env.PATH ?? "" };
+    const started = Date.now();
+    const running = sh("sleep 30 & sleep 30", { cwd: "/", env });
+    await new Promise((r) => setTimeout(r, 100));
+    killRunningCommands("SIGTERM");
+    try {
+      const r = await running;
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(r.code).not.toBe(0);
+      expect(r.output).toContain("killed: SIGTERM");
+      const next = await sh("echo ran", { cwd: "/", env });
+      expect(next).toMatchObject({ code: 130 });
+      expect(next.output).not.toContain("ran\n");
+    } finally {
+      resetKilledCommands();
+    }
+    expect((await sh("echo ran", { cwd: "/", env })).output).toBe("ran\n");
   });
 });

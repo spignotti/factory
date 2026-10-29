@@ -6,15 +6,38 @@ export interface ShResult {
   durationMs: number;
 }
 
+/** Process groups of commands still running, so a signal handler can kill them all. */
+const running = new Set<number>();
+let killedBy: string | undefined;
+
+/** Kills every running command's process group; later `sh` calls return at once without running. */
+export function killRunningCommands(reason: string): void {
+  killedBy = reason;
+  for (const pid of running) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/** Test hook: allow commands again after killRunningCommands. */
+export function resetKilledCommands(): void {
+  killedBy = undefined;
+}
+
 /** Runs a shell command, capturing stdout and stderr interleaved. Never throws on non-zero exit. */
 export function sh(
   command: string,
   opts: { cwd: string; env: Record<string, string>; timeoutMs?: number },
 ): Promise<ShResult> {
   const started = Date.now();
+  if (killedBy) return Promise.resolve({ code: 130, output: `[factory] not started: ${killedBy}\n`, durationMs: 0 });
   return new Promise((resolve) => {
     // Own process group, so a timeout kills everything the command started.
     const child = spawn("sh", ["-c", command], { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    if (child.pid !== undefined) running.add(child.pid);
     let output = "";
     const onData = (d: Buffer) => {
       output += d.toString();
@@ -37,7 +60,9 @@ export function sh(
       output += String(e);
     });
     child.on("close", (code) => {
+      if (child.pid !== undefined) running.delete(child.pid);
       if (timer) clearTimeout(timer);
+      if (killedBy) output += `\n[factory] killed: ${killedBy}\n`;
       resolve({ code: code ?? 1, output, durationMs: Date.now() - started });
     });
   });

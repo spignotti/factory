@@ -2,8 +2,10 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeRunner, FakeScriptSchema, type FakeStep } from "../../src/agents/fake-runner.js";
+import type { AgentRequest, AgentRunner } from "../../src/agents/runner.js";
 import type { FactoryEvent, RunResult } from "../../src/events.js";
 import { FakeGitHub } from "../../src/gh.js";
+import type { RunDeps } from "../../src/pipeline/context.js";
 import { type RunOptions, runFactory } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { createFixtureRepo, FIXTURES } from "./repo.js";
@@ -16,6 +18,10 @@ export interface Scenario {
   patch?: (cfg: Record<string, unknown>) => void;
   options?: Partial<RunOptions>;
   github?: (gh: FakeGitHub) => void;
+  /** Extra/overridden run deps (e.g. an abort signal). */
+  deps?: Partial<RunDeps>;
+  /** Called before every agent call (after the fake runner recorded nothing yet). */
+  onCall?: (req: AgentRequest, repo: string) => void;
   /** Prepares the fixture repo before the run (e.g. adds an origin). */
   setup?: (repo: string) => void;
   /** Rewrites the scripted steps before the run (e.g. to inject values). */
@@ -41,18 +47,20 @@ export async function runScenario(s: Scenario): Promise<ScenarioRun> {
   const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
   const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", s.script), "utf8"))).steps;
   const runner = new FakeRunner(s.steps ? s.steps(scripted) : scripted);
+  const agent: AgentRunner = { run: (req) => (s.onCall?.(req, repo), runner.run(req)) };
   const github = new FakeGitHub();
   s.github?.(github);
   const slept: number[] = [];
   const result = await runFactory(
     { repo, textFile: join(FIXTURES, "tasks", s.task ?? "multiply.md"), ...s.options },
     {
-      runner,
+      runner: s.onCall ? agent : runner,
       github,
       profile: loadProfile(join(FIXTURES, "profile.yaml")),
       factoryHome,
       parentEnv: { ...process.env, FOO_TOKEN: SECRET },
       sleep: async (ms) => void slept.push(ms),
+      ...s.deps,
     },
   );
   const [runId] = readdirSync(join(factoryHome, "runs"));

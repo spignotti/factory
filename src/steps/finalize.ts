@@ -1,5 +1,6 @@
 import { baseRef, changedFiles, diffStat, gitOk, revParse } from "../git.js";
-import { callAgent, type RunContext, writeRunFile } from "../pipeline/context.js";
+import { Interrupted } from "../interrupt.js";
+import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
@@ -107,6 +108,7 @@ async function summarize(ctx: RunContext): Promise<string> {
     });
     return res.text.trim() || ctx.plan.goal;
   } catch (e) {
+    if (e instanceof Interrupted || e instanceof WallTimeExceeded) throw e;
     ctx.events.emit({ step: "finalize", event: "progress", data: { pr_writer_failed: (e as Error).message.slice(0, 200) } });
     return ctx.plan.goal;
   }
@@ -145,6 +147,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed }));
   writeRunFile(ctx, "pr.md", body);
 
+  throwIfInterrupted(ctx.deps);
   let pr: string | null = null;
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   if (!input.noPr && hasCommits) {
