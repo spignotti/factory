@@ -150,7 +150,7 @@ base branch; the user's checkout is not touched):
   check covers are deleted in the same PR. Skills with scripts, other assistants' files, uncovered or special
   workflows and AGENTS.md sections about old tools are only listed as proposed removals. Deploy, release and
   scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths, e.g.
-  `--keep CLAUDE.md --keep .claude`. The PR description lists every removed, proposed and kept item.
+  `--keep .cursorrules --keep tools/`. The PR description lists every removed, proposed and kept item.
 - **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
 - **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so

@@ -77,7 +77,7 @@ describe("factory adopt", () => {
     expect(call.prompt).toContain("gitleaks");
   });
 
-  it("--keep spares CLAUDE.md and .claude (a repo that keeps Claude Code)", async () => {
+  it("--keep spares the kept paths (file and directory)", async () => {
     const repo = legacyNodeRepo();
     const { report } = await runAdopt(repo, [], { keep: ["CLAUDE.md", ".claude"], plan: false, pr: false });
     const files = tree(repo, report.branch);
