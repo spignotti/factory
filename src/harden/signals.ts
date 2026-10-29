@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseChecklist, unmarkedItems } from "../checklist.js";
 import { CI_STUB_PATH, pinnedRefs } from "../ci.js";
@@ -17,6 +17,8 @@ export const SLOW_CHECK_SECONDS = 120;
 export const NEVER_FAILED_MIN_RUNS = 5;
 export const STALE_GUIDE_COMMITS = 10;
 export const STALE_GUIDE_LINES = 300;
+/** A page verified by the evaluator in this many runs is a recorded-flow candidate. */
+export const EVALUATOR_REPEAT_RUNS = 2;
 
 export interface FindingSignal {
   key: string;
@@ -198,12 +200,62 @@ export async function reverts(repoDir: string, base: string, sinceIso: string, p
   return out;
 }
 
+/** Pathname of a goto target (relative or absolute). */
+function pagePath(url: unknown): string | undefined {
+  if (typeof url !== "string" || !url) return undefined;
+  try {
+    return new URL(url, "http://app.invalid").pathname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * §8.3 evaluator signal: pages where the evaluator verified met criteria (via its browser tools) in
+ * at least EVALUATOR_REPEAT_RUNS runs and no area with recorded flows lists the page. Reads each
+ * run's last `evaluate-N.json` and its `evaluate-N-tools.json` call log.
+ */
+export function evaluatorSignals(runs: RunRecord[], repo: RepoConfig): string[] {
+  const covered = new Set(repo.verify.areas.filter((a) => a.flows.length).flatMap((a) => a.pages));
+  const byPage = new Map<string, { runs: Set<string>; criteria: string[] }>();
+  for (const run of runs) {
+    let files: string[];
+    try {
+      files = readdirSync(run.dir);
+    } catch {
+      continue;
+    }
+    const round = Math.max(0, ...files.map((f) => Number(/^evaluate-(\d+)\.json$/.exec(f)?.[1] ?? 0)));
+    if (!round) continue;
+    try {
+      const report = JSON.parse(readFileSync(join(run.dir, `evaluate-${round}.json`), "utf8")) as { criteria?: { id: string; met: boolean }[] };
+      const met = (report.criteria ?? []).filter((c) => c.met).map((c) => c.id);
+      if (!met.length) continue;
+      const calls = JSON.parse(readFileSync(join(run.dir, `evaluate-${round}-tools.json`), "utf8")) as { tool: string; args?: Record<string, unknown>; isError?: boolean }[];
+      const pages = new Set(calls.filter((c) => c.tool === "goto" && !c.isError).map((c) => pagePath(c.args?.url)).filter((p): p is string => !!p));
+      for (const page of pages) {
+        if (covered.has(page)) continue;
+        const e = byPage.get(page) ?? { runs: new Set(), criteria: [] };
+        e.runs.add(run.run_id);
+        e.criteria.push(...met.map((id) => `${run.run_id}/${id}`));
+        byPage.set(page, e);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return [...byPage.entries()]
+    .filter(([, e]) => e.runs.size >= EVALUATOR_REPEAT_RUNS)
+    .sort(([a, x], [b, y]) => y.runs.size - x.runs.size || a.localeCompare(b))
+    .map(([page, e]) => `page ${page}: evaluator verified criteria in ${e.runs.size} runs (${e.criteria.slice(0, 5).join(", ")}); no recorded flow covers it`);
+}
+
 export interface Signals {
   findings: FindingSignal[];
   checklist: string[];
   ci: CiAudit | { error: string };
   runs: Pick<StatsPeriod, "runs" | "by_result" | "done_rate" | "rounds" | "gate_failures" | "flaky_checks" | "reasons" | "lane_escalations">;
-  /** Criteria the evaluator verified repeatedly: stubbed until the evaluator exists (M4). */
+  /** Pages the evaluator verified repeatedly without a recorded flow (recorded-flow candidates). */
   evaluator: string[];
   stale_guides: StaleGuide[];
   reverts: Revert[];

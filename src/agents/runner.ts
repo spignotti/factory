@@ -1,3 +1,4 @@
+import type { BrowserTools } from "../evaluate/tools.js";
 import type { Jail } from "../sandbox/sandbox.js";
 /** One interface for every LLM role: plan, implement, reviewers, summarize. */
 
@@ -35,6 +36,8 @@ export interface AgentRequest {
   agentDir?: string;
   /** Sandbox for bash and the path guard for in-process tools (Amendment j); absent = unconfined. */
   jail?: Jail;
+  /** Evaluator browser tools (§6.5), added to the tool set; absent for every other role. */
+  browser?: BrowserTools;
   /** Continue an earlier session with the same key (reviewers in round >= 2). */
   sessionKey?: string;
   signal?: AbortSignal;

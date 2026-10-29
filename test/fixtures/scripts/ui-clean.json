@@ -1,0 +1,115 @@
+{
+  "steps": [
+    {
+      "role": "plan_high",
+      "output": {
+        "version": 1,
+        "type": "feature",
+        "goal": "Add a subtitle to the home page",
+        "context": "",
+        "packages": [
+          {
+            "id": "P1",
+            "title": "Add a subtitle to the home page",
+            "description": "Add a subtitle to the home page",
+            "files": [
+              "web/index.html"
+            ],
+            "depends_on": [],
+            "changes_flows": [],
+            "source_quote": "Add a subtitle to the home page."
+          }
+        ],
+        "acceptance": [
+          {
+            "id": "A1",
+            "package": "P1",
+            "text": "The home page shows the subtitle Guided tours",
+            "verify": "evaluator",
+            "kind": "behavior",
+            "risk": false,
+            "source_quote": "The home page shows the subtitle Guided tours."
+          }
+        ],
+        "out_of_scope": []
+      },
+      "usage": {
+        "tokens_in": 500,
+        "tokens_out": 100,
+        "cost_usd": 0.01
+      }
+    },
+    {
+      "role": "implement",
+      "writes": {
+        "web/index.html": "<!doctype html>\n<html>\n<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Tours</title></head>\n<body style=\"font-family: sans-serif; margin: 24px\">\n  <h1>Tours</h1>\n  <p id=\"subtitle\">Guided tours</p>\n  <a id=\"all\" href=\"/tours\">All tours</a>\n</body>\n</html>\n"
+      },
+      "output": {
+        "package": "P1",
+        "done": [
+          "added the subtitle"
+        ],
+        "decisions": [],
+        "deviations_from_plan": [],
+        "skipped": [],
+        "uncertain": [],
+        "evidence": [],
+        "responses": []
+      }
+    },
+    {
+      "role": "evaluate",
+      "tool_calls": [
+        {
+          "tool": "goto",
+          "args": {
+            "url": "/"
+          }
+        },
+        {
+          "tool": "text",
+          "args": {
+            "selector": "#subtitle"
+          }
+        },
+        {
+          "tool": "screenshot",
+          "args": {
+            "name": "A1"
+          }
+        }
+      ],
+      "output": {
+        "criteria": [
+          {
+            "id": "A1",
+            "met": true,
+            "screenshot": "A1",
+            "note": "opened /, #subtitle reads Guided tours"
+          }
+        ],
+        "findings": []
+      }
+    },
+    {
+      "role": "review_plan",
+      "output": {
+        "reviewer": "plan",
+        "prior": [],
+        "findings": []
+      }
+    },
+    {
+      "role": "review_simplicity",
+      "output": {
+        "reviewer": "simplicity",
+        "prior": [],
+        "findings": []
+      }
+    },
+    {
+      "role": "pr_writer",
+      "raw": "Adds a subtitle to the home page."
+    }
+  ]
+}

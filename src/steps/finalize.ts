@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { publishEvidence, evidenceUrl } from "../evaluate/evidence.js";
+import { criterionEvidence, type EvidenceLink, evaluationMarkdown } from "../evaluate/pr.js";
 import { baseRef, changedFiles, diffStat, isAncestor, mergeRef, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
@@ -7,6 +11,7 @@ import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { type MergePolicy, mergePolicy, riskClass, type RiskAssessment } from "../pipeline/risk.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { type GateReport, runGates } from "./gates.js";
+import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
 
 export interface FinalizeInput {
@@ -69,16 +74,24 @@ export function renderPrBody(ctx: RunContext, v: {
   out: Omit<FinalizeOutput, "pr" | "draft">;
   gates?: GateReport;
   changed: string[];
+  /** Latest evaluate report and links to its published evidence (§6.9.3). */
+  evaluation?: { report?: EvaluateReport; link: EvidenceLink; notes: string[] };
 }): string {
   const { plan, handoffs } = ctx;
   const { input, out } = v;
-  const evidence = (id: string) =>
-    handoffs.flatMap((h) => h.evidence.filter((e) => e.acceptance_id === id).map((e) => `${e.kind}: \`${e.ref}\``));
+  const link = v.evaluation?.link ?? (() => undefined);
+  const evidence = (id: string) => [
+    ...handoffs.flatMap((h) => h.evidence.filter((e) => e.acceptance_id === id).map((e) => `${e.kind}: \`${e.ref}\``)),
+    // An evaluator criterion counts as evidenced only when the evaluator found it met.
+    ...[criterionEvidence(v.evaluation?.report, id, link)].filter((c) => c?.met).map((c) => c!.cell),
+  ];
   const pkgDone = (id: string) => input.packages.get(id) === "done";
   const rows = plan.acceptance.map((a) => {
     const ev = evidence(a.id);
     const verified = pkgDone(a.package) && (ev.length > 0 || a.verify === "review");
-    return `| ${verified ? "[x]" : "[ ]"} | ${a.id} | ${cell(a.text)} | ${a.verify} | ${cell(ev.join(", ") || (a.verify === "review" ? "reviewer verdict" : "—"))} |`;
+    const unmet = criterionEvidence(v.evaluation?.report, a.id, link);
+    const shown = ev.length ? ev : unmet && !unmet.met ? [unmet.cell] : [];
+    return `| ${verified ? "[x]" : "[ ]"} | ${a.id} | ${cell(a.text)} | ${a.verify} | ${cell(shown.join(", ") || (a.verify === "review" ? "reviewer verdict" : "—"))} |`;
   });
   const unverified = plan.acceptance.filter((a) => !pkgDone(a.package) || (evidence(a.id).length === 0 && a.verify !== "review"));
   const list = (items: string[]) => (items.length ? items.map((i) => `- ${i}`).join("\n") : "- none");
@@ -91,6 +104,7 @@ export function renderPrBody(ctx: RunContext, v: {
     revert_notes: migrations.length ? `Migrations changed (${migrations.join(", ")}): roll them back explicitly.` : "",
     packages: plan.packages.map((p) => `- ${p.id} ${p.title}: ${input.packages.get(p.id) ?? "not run"}${input.failures[p.id] ? ` (${input.failures[p.id]})` : ""}`).join("\n"),
     acceptance: rows.join("\n"),
+    evaluation: evaluationMarkdown(v.evaluation?.report, link, v.evaluation?.notes ?? []),
     unverified: unverified.length ? `Unverified criteria: ${unverified.map((a) => a.id).join(", ")}` : "All criteria have evidence.",
     deviations: list(handoffs.flatMap((h) => [
       ...h.deviations_from_plan.map((d) => `deviation (${h.package}): ${d}`),
@@ -137,6 +151,38 @@ async function summarize(ctx: RunContext): Promise<string> {
   }
 }
 
+/**
+ * Publishes the latest evaluate report's evidence on the `factory-evidence` branch (only when a PR
+ * is opened or updated). A failure is a note in the PR, never a run failure.
+ */
+async function publishRunEvidence(ctx: RunContext, publish: boolean): Promise<{ report?: EvaluateReport; link: EvidenceLink; notes: string[] } | undefined> {
+  const report = latestEvaluateReport(ctx.runDir);
+  if (!report) return undefined;
+  const none: EvidenceLink = () => undefined;
+  if (!publish) return { report, link: none, notes: [] };
+  const dir = evidenceDir(ctx.runDir);
+  const files = [...new Set(report.evidence.map((e) => e.file).concat(report.pages.flatMap((p) => (p.base ? [p.base] : []))))].filter((f) => existsSync(join(dir, f)));
+  if (!files.length) return { report, link: none, notes: [] };
+  try {
+    const pub = await publishEvidence(ctx.repoDir, { runId: ctx.runId, dir, files, author: gitAuthor(ctx) });
+    ctx.events.emit({ step: "finalize", event: "progress", data: { evidence: { sha: pub.sha, files: pub.paths.size, skipped: pub.skipped.length } } });
+    const slug = pub.slug;
+    const link: EvidenceLink = (f) => {
+      const path = pub.paths.get(f);
+      return path && slug ? evidenceUrl(slug, pub.sha, path) : undefined;
+    };
+    const notes = [
+      ...(slug ? [] : [`evidence: branch factory-evidence @ ${pub.sha.slice(0, 12)}, folder ${ctx.runId}/`]),
+      ...pub.skipped.map((s) => `evidence not published: ${s}`),
+    ];
+    return { report, link, notes };
+  } catch (e) {
+    const msg = (e as Error).message.slice(0, 200);
+    ctx.events.emit({ step: "finalize", event: "progress", data: { evidence_error: msg } });
+    return { report, link: none, notes: [`evidence not published: ${msg}`] };
+  }
+}
+
 export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<FinalizeOutput> {
   ctx.events.emit({ step: "finalize", event: "step_started", data: { result: input.result } });
   let result = input.result;
@@ -167,13 +213,14 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
   const policy = mergePolicy(risk.risk, result, ctx.repo.merge);
   const out = { result, reason, risk, mergePolicy: policy };
-  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed }));
+  const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
+  const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits);
+  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation }));
   writeRunFile(ctx, "pr.md", body);
 
   throwIfInterrupted(ctx.deps);
   let pr: string | null = input.existingPr?.url ?? null;
   let draft: boolean | null = input.existingPr?.draft ?? null;
-  const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   if (!input.noPr && hasCommits) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);

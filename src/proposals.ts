@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { memoryDir } from "./memory.js";
-import { type Proposal, ProposalSchema } from "./schemas/proposal.js";
+import { type Proposal, type ProposalItem, ProposalSchema } from "./schemas/proposal.js";
 
 export function proposalsDir(factoryHome: string, repoId: string): string {
   return join(memoryDir(factoryHome, repoId), "proposals");
@@ -20,14 +20,16 @@ function writeAtomic(path: string, text: string): void {
   renameSync(tmp, path);
 }
 
-/** Writes `<id>.json` and `<id>.plan.json` (the plan alone, for `factory run --plan`). */
-export function writeProposal(factoryHome: string, p: Omit<Proposal, "plan_path">): Proposal {
-  const dir = proposalsDir(factoryHome, p.repo);
+export type ProposalDraft = Omit<Proposal, "proposals"> & { proposals: Omit<ProposalItem, "plan_path" | "id" | "rank">[] };
+
+/** Writes `<id>.json` and one `<id>.<rank>.plan.json` per proposal (the plan alone, for `factory run --plan`). */
+export function writeProposal(factoryHome: string, t: ProposalDraft): Proposal {
+  const dir = proposalsDir(factoryHome, t.repo);
   mkdirSync(dir, { recursive: true });
-  const planPath = join(dir, `${p.id}.plan.json`);
-  const full = ProposalSchema.parse({ ...p, plan_path: planPath });
-  writeAtomic(planPath, JSON.stringify(full.plan, null, 2) + "\n");
-  writeAtomic(join(dir, `${p.id}.json`), JSON.stringify(full, null, 2) + "\n");
+  const proposals = t.proposals.map((p, i) => ({ ...p, rank: i + 1, id: `${t.id}.${i + 1}`, plan_path: join(dir, `${t.id}.${i + 1}.plan.json`) }));
+  const full = ProposalSchema.parse({ ...t, proposals });
+  for (const p of full.proposals) writeAtomic(p.plan_path, JSON.stringify(p.plan, null, 2) + "\n");
+  writeAtomic(join(dir, `${t.id}.json`), JSON.stringify(full, null, 2) + "\n");
   return full;
 }
 

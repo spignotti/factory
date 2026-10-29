@@ -5,8 +5,8 @@ import { specialJobs } from "./detect.js";
 /**
  * Legacy coding setup (Silas decision for M5): the adopt PR deletes what the factory replaces and lists
  * every deleted file in its description. Anything uncertain is only listed as a proposed removal. Paths
- * matched by `--keep` (glob, exact path or directory) are never touched, e.g. `--keep CLAUDE.md
- * --keep .claude` in a repo whose owner keeps Claude Code.
+ * matched by `--keep` (glob, exact path or directory) are never touched, e.g. `--keep .cursorrules
+ * --keep tools/`.
  */
 
 export interface LegacyItem {

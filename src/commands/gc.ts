@@ -3,7 +3,9 @@ import { join } from "node:path";
 import type { GitHub } from "../gh.js";
 import { git, gitOk, repoLockId } from "../git.js";
 import { acquireRepoLock } from "../pipeline/lock.js";
+import { EVIDENCE_RETENTION_DAYS, pruneEvidence } from "../evaluate/evidence.js";
 import { listRuns, type RunRecord } from "../runs.js";
+import { loadRepoConfig } from "../schemas/repo.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { GcReportSchema } from "../schemas/reports.js";
@@ -35,9 +37,11 @@ function markCollected(run: RunRecord, at: string): void {
  * deletes the local `factory/*` branch and the remote branch when it still points at the commit the
  * factory pushed (someone else's later push is never deleted). Plain `git push --delete`, no force.
  * A dirty worktree is kept unless `force`. Runs of a repository whose lock is held are skipped.
+ * Evidence retention (Amendment x): run folders older than 30 days leave the `factory-evidence`
+ * branch of every repository the factory ran in, with a normal commit and a plain push.
  */
 export async function gc(opts: { factoryHome: string; github: GitHub; dryRun?: boolean; force?: boolean; now?: () => number }): Promise<GcReport> {
-  const report: GcReport = { dry_run: opts.dryRun ?? false, cleaned: [], skipped: [] };
+  const report: GcReport = { dry_run: opts.dryRun ?? false, cleaned: [], skipped: [], evidence: [] };
   const now = () => new Date(opts.now?.() ?? Date.now()).toISOString();
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
@@ -111,7 +115,25 @@ export async function gc(opts: { factoryHome: string; github: GitHub; dryRun?: b
       release();
     }
   }
+  const repos = [...new Set(listRuns(opts.factoryHome).flatMap((r) => (r.state?.repo && existsSync(r.state.repo) ? [r.state.repo] : [])))];
+  for (const repo of repos) report.evidence.push(await evidenceRetention(repo, opts.now?.() ?? Date.now(), opts.dryRun ?? false));
   return report;
+}
+
+async function evidenceRetention(repo: string, now: number, dryRun: boolean): Promise<GcReport["evidence"][number]> {
+  let author = { name: "factory-bot", email: "factory-bot@users.noreply.github.com" };
+  try {
+    const { author: name, email } = loadRepoConfig(repo).git;
+    author = { name, email: email ?? `${name}@users.noreply.github.com` };
+  } catch {
+    // No readable repo.yaml: the default author.
+  }
+  try {
+    if (!(await gitOk(repo, ["remote", "get-url", "origin"]))) return { repo, removed: [], note: "no origin" };
+    return { repo, removed: await pruneEvidence(repo, { now, dryRun, author, days: EVIDENCE_RETENTION_DAYS }) };
+  } catch (e) {
+    return { repo, removed: [], note: `evidence retention failed: ${(e as Error).message.slice(0, 160)}` };
+  }
 }
 
 export async function gcCommand(opts: { factoryHome: string; github: GitHub; dryRun: boolean; force: boolean; json: boolean }, io: Io): Promise<number> {
@@ -121,6 +143,7 @@ export async function gcCommand(opts: { factoryHome: string; github: GitHub; dry
     const verb = r.dry_run ? "would clean" : "cleaned";
     for (const c of r.cleaned) io.out(`${verb} ${c.run_id} (${c.pr}, ${c.pr_state})${c.notes.length ? ` — ${c.notes.join("; ")}` : ""}\n`);
     for (const s of r.skipped) io.out(`skipped ${s.run_id}${s.pr ? ` (${s.pr})` : ""}: ${s.reason}\n`);
+    for (const e of r.evidence) if (e.removed.length) io.out(`${r.dry_run ? "would remove" : "removed"} ${e.removed.length} evidence folder(s) older than ${EVIDENCE_RETENTION_DAYS} days in ${e.repo}\n`);
     if (!r.cleaned.length && !r.skipped.length) io.out("nothing to clean\n");
   }
   return 0;

@@ -154,7 +154,7 @@
       ],
       "additionalProperties": false
     },
-    "proposal": {
+    "ticket": {
       "anyOf": [
         {
           "type": "object",
@@ -180,200 +180,274 @@
             "created_at": {
               "type": "string"
             },
-            "status": {
-              "type": "string",
-              "enum": [
-                "open",
-                "resolved",
-                "dropped"
-              ]
-            },
-            "rationale": {
-              "type": "string"
-            },
-            "plan": {
-              "type": "object",
-              "properties": {
-                "version": {
-                  "type": "number",
-                  "const": 1
-                },
-                "type": {
-                  "type": "string",
-                  "enum": [
-                    "feature",
-                    "bug",
-                    "chore"
-                  ]
-                },
-                "goal": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "context": {
-                  "default": "",
-                  "type": "string"
-                },
-                "packages": {
-                  "minItems": 1,
-                  "type": "array",
-                  "items": {
+            "proposals": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "rank": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "resolved",
+                      "dropped"
+                    ]
+                  },
+                  "rationale": {
+                    "type": "string"
+                  },
+                  "plan": {
                     "type": "object",
                     "properties": {
-                      "id": {
+                      "version": {
+                        "type": "number",
+                        "const": 1
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "feature",
+                          "bug",
+                          "chore"
+                        ]
+                      },
+                      "goal": {
                         "type": "string",
                         "minLength": 1
                       },
-                      "title": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "description": {
+                      "context": {
                         "default": "",
                         "type": "string"
                       },
-                      "files": {
+                      "packages": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "title": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "description": {
+                              "default": "",
+                              "type": "string"
+                            },
+                            "files": {
+                              "default": [],
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "depends_on": {
+                              "default": [],
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "changes_flows": {
+                              "default": [],
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "source_quote": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "title",
+                            "description",
+                            "files",
+                            "depends_on",
+                            "changes_flows"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "acceptance": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "package": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "text": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "verify": {
+                              "type": "string",
+                              "enum": [
+                                "test",
+                                "check",
+                                "evaluator",
+                                "review"
+                              ]
+                            },
+                            "kind": {
+                              "default": "behavior",
+                              "type": "string",
+                              "enum": [
+                                "behavior",
+                                "edge_case",
+                                "repro"
+                              ]
+                            },
+                            "risk": {
+                              "default": false,
+                              "type": "boolean"
+                            },
+                            "source_quote": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "package",
+                            "text",
+                            "verify",
+                            "kind",
+                            "risk"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "out_of_scope": {
                         "default": [],
                         "type": "array",
                         "items": {
                           "type": "string"
                         }
                       },
-                      "depends_on": {
+                      "resolves_findings": {
                         "default": [],
                         "type": "array",
                         "items": {
                           "type": "string"
                         }
-                      },
-                      "changes_flows": {
-                        "default": [],
-                        "type": "array",
-                        "items": {
-                          "type": "string"
-                        }
-                      },
-                      "source_quote": {
-                        "type": "string"
                       }
                     },
                     "required": [
-                      "id",
-                      "title",
-                      "description",
-                      "files",
-                      "depends_on",
-                      "changes_flows"
+                      "version",
+                      "type",
+                      "goal",
+                      "context",
+                      "packages",
+                      "acceptance",
+                      "out_of_scope",
+                      "resolves_findings"
                     ],
                     "additionalProperties": false
-                  }
-                },
-                "acceptance": {
-                  "minItems": 1,
-                  "type": "array",
-                  "items": {
+                  },
+                  "plan_path": {
+                    "type": "string"
+                  },
+                  "references": {
                     "type": "object",
                     "properties": {
-                      "id": {
-                        "type": "string",
-                        "minLength": 1
+                      "findings": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       },
-                      "package": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "text": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "verify": {
-                        "type": "string",
-                        "enum": [
-                          "test",
-                          "check",
-                          "evaluator",
-                          "review"
-                        ]
-                      },
-                      "kind": {
-                        "default": "behavior",
-                        "type": "string",
-                        "enum": [
-                          "behavior",
-                          "edge_case",
-                          "repro"
-                        ]
-                      },
-                      "risk": {
-                        "default": false,
-                        "type": "boolean"
-                      },
-                      "source_quote": {
-                        "type": "string"
+                      "checklist": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     },
                     "required": [
-                      "id",
-                      "package",
-                      "text",
-                      "verify",
-                      "kind",
-                      "risk"
+                      "findings",
+                      "checklist"
                     ],
                     "additionalProperties": false
+                  },
+                  "resolution": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "at": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "resolved",
+                              "dropped"
+                            ]
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "run_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "pr": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "at",
+                          "status",
+                          "reason",
+                          "run_id",
+                          "pr"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
-                "out_of_scope": {
-                  "default": [],
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "resolves_findings": {
-                  "default": [],
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "version",
-                "type",
-                "goal",
-                "context",
-                "packages",
-                "acceptance",
-                "out_of_scope",
-                "resolves_findings"
-              ],
-              "additionalProperties": false
-            },
-            "plan_path": {
-              "type": "string"
-            },
-            "references": {
-              "type": "object",
-              "properties": {
-                "findings": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "checklist": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "findings",
-                "checklist"
-              ],
-              "additionalProperties": false
+                "required": [
+                  "rank",
+                  "id",
+                  "status",
+                  "rationale",
+                  "plan",
+                  "plan_path",
+                  "references",
+                  "resolution"
+                ],
+                "additionalProperties": false
+              }
             },
             "signals": {
               "type": "object",
@@ -395,51 +469,6 @@
                   "type": "null"
                 }
               ]
-            },
-            "resolution": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "properties": {
-                    "at": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "string",
-                      "enum": [
-                        "resolved",
-                        "dropped"
-                      ]
-                    },
-                    "reason": {
-                      "type": "string"
-                    },
-                    "run_id": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "pr": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "at",
-                    "status",
-                    "reason",
-                    "run_id",
-                    "pr"
-                  ],
-                  "additionalProperties": false
-                },
-                {
-                  "type": "null"
-                }
-              ]
             }
           },
           "required": [
@@ -448,14 +477,9 @@
             "id",
             "repo",
             "created_at",
-            "status",
-            "rationale",
-            "plan",
-            "plan_path",
-            "references",
+            "proposals",
             "signals",
-            "metrics",
-            "resolution"
+            "metrics"
           ],
           "additionalProperties": false
         },
@@ -469,6 +493,12 @@
         "string",
         "null"
       ]
+    },
+    "rejected": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "error": {
       "type": [
@@ -484,8 +514,9 @@
     "compaction",
     "signals",
     "metrics",
-    "proposal",
+    "ticket",
     "path",
+    "rejected",
     "error"
   ],
   "additionalProperties": false

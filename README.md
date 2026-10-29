@@ -4,7 +4,7 @@ A deterministic pipeline that turns a task (issue, plan file or plain text) into
 request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. `SPEC.md` is the
 source of truth.
 
-## Status: M5 — adopt, harden
+## Status: M4 + M5 — evaluate, adopt, harden
 
 M1 core loop (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 
@@ -44,7 +44,8 @@ M3 (Amendment u): `factory eval`, `factory experiment`, the `baseline` profile a
 M5 (Amendments v–w): `factory adopt` (onboarding PR, legacy setup removal) and `factory harden` (signals,
 metrics, one proposal with a lifecycle); see the sections below.
 
-Not yet: evaluator (M4; harden's evaluator signals are empty until then).
+M4 (Amendment x): the evaluator (browser checks of web apps and web builds of mobile apps, recorded
+flows, base vs HEAD pixel diffs, evidence on the `factory-evidence` branch and in the PR); see below.
 
 ## Resume
 
@@ -126,6 +127,25 @@ runs never collide: `{port:web}` (a named port), `{port:5432}` (a default port s
 only to the checks that use it. `host: true` runs it outside the sandbox (e.g. Docker); `doctor` warns.
 `factory doctor --repo . --services` starts and stops each service once.
 
+## Evaluate (UI)
+
+With a `ui:` block in `repo.yaml` (start command, URL, `paths`), every round whose change touches `ui.paths`
+first runs the evaluator, before the reviewers:
+
+- the app starts (with its services, in the sandbox); recorded flows of affected `verify.areas` run via
+  `verify.run` (`{files}`, `BASE_URL`); a red flow in an area the plan does not declare in `changes_flows`
+  is a regression bug;
+- `ui.pages` and the affected areas' `pages` are captured on HEAD and on the base commit for each device in
+  `ui.devices` (Playwright names; use a phone such as `iPhone 15` or `Pixel 7` for the web build of an
+  Expo / React Native Web app); new console errors and failed requests are bugs; pixel diffs are evidence;
+- `verify: evaluator` criteria are checked by the `evaluate` role with browser tools (`goto`, `click`,
+  `fill`, `text`, `screenshot`, `console`, `network`), a screenshot per criterion and a recorded video/GIF.
+
+Any evaluator bug skips the reviewers that round and goes to fix. Evidence is pushed to the orphan branch
+`factory-evidence` (one folder per run, pruned after 30 days by `factory gc`) and embedded in the PR.
+Needs the Chromium headless shell (`npx playwright-core install --only-shell chromium`) and `ffmpeg` for
+GIFs; `factory doctor --repo .` checks both.
+
 ## CI
 
 `factory ci-stub --ref <tag> > .github/workflows/factory.yml` writes the CI stub: on every pull request it
@@ -150,8 +170,8 @@ base branch; the user's checkout is not touched):
   check covers are deleted in the same PR. Skills with scripts, other assistants' files, uncovered or special
   workflows and AGENTS.md sections about old tools are only listed as proposed removals. Deploy, release and
   scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths, e.g.
-  `--keep CLAUDE.md --keep .claude`. The PR description lists every removed, proposed and kept item.
-- **Baseline plan** (`plan_medium`): saved as proposal `<date>-adopt` (see Harden); run it after the merge
+  `--keep .cursorrules --keep tools/`. The PR description lists every removed, proposed and kept item.
+- **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
 - **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
@@ -162,20 +182,22 @@ base branch; the user's checkout is not touched):
 `factory harden --repo <path>` (weekly or by hand) turns recurring problems into deterministic checks, one
 proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>/`:
 
-1. **Lifecycle**: an open proposal whose factory run (matched by plan goal or `resolves_findings`) merged is
-   `resolved` (its findings too); all its PRs closed, or no merged/open PR after 28 days, is `dropped` and its
-   findings are reopened.
+1. **Lifecycle** (per proposal): an open proposal whose factory run (matched by its plan file, plan goal or
+   `resolves_findings`) merged is `resolved` (its findings too); all its PRs closed, or no merged/open PR after
+   28 days, is `dropped` and its findings are reopened.
 2. **Compaction** (`plan_medium`, no tools): near-duplicate open findings are merged; counts, runs and dates
    are merged in code (`--no-compact` skips).
 3. **Signals** (code): findings seen twice or checkable, flaky checks, unchecked checklist items, a 30-day
    CI audit via `gh` (failure/flaky rates, median/p90 durations, minutes per week, checks that never fail,
    slow checks without `paths`, CI stub behind the latest factory tag), run stats, stale verify guides,
-   reverted factory PRs. Evaluator signals are empty until M4.
+   reverted factory PRs, pages the evaluator verified repeatedly without a recorded flow.
 4. **Metrics**: one line per call in `metrics.jsonl` (determinism ratio, open findings, CI minutes, flaky,
    done and revert rate, median rounds).
-5. **Proposal** (`harden` role, read-only tools): exactly one, validated as a plan (one retry), written to
-   `proposals/<date>.json` (+ `.plan.json`); its findings become `proposed`. No signals, no LLM call. Run it
-   with `factory run --plan <dir>/<date>.plan.json`.
+5. **Ticket** (`harden` role, read-only tools): ONE file `proposals/<date>.json` with up to 5 ranked proposals
+   (`repo.yaml` `harden.max_proposals`, `--max`), each validated as a plan (one retry; overlapping or invalid
+   ones are dropped and listed), with its own `<date>.<rank>.plan.json`; their findings become `proposed`.
+   No signals, no LLM call. Each proposal is its own run and PR:
+   `factory run --plan <dir>/<date>.<rank>.plan.json`.
 
 ## Evals and experiments
 
@@ -248,7 +270,8 @@ pnpm test
 
 Tests never call an LLM, the network, `gh` or `git push`: agents are the scripted `FakeRunner`
 (`test/fixtures/scripts/*.json`), GitHub is `FakeGitHub`, and E2E tests create a fixture git repo from
-`test/fixtures/repo/` in a temp dir per test.
+`test/fixtures/repo/` (or the web app in `test/fixtures/ui-repo/`) in a temp dir per test. Evaluate tests
+drive a real headless shell against the fixture app (skipped when it is not installed).
 
 ## Unverified
 

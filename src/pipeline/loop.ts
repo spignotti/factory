@@ -1,8 +1,10 @@
 import { commitAll, diffText, headSha, stageAll } from "../git.js";
 import { asData } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
+import type { ReviewOutput } from "../schemas/review.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
 import { gitAuthor, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
+import { evaluateRound } from "../steps/evaluate.js";
 import { reviewRound } from "../steps/review.js";
 import { checkDeadline, type RunContext, writeJson } from "./context.js";
 import { decideExit, isStalemate, mergeRound, openFindings, type TrackedFinding } from "./merge.js";
@@ -92,7 +94,21 @@ export interface ReviewLoopOptions {
   onRound?: (round: number, findings: TrackedFinding[]) => void;
 }
 
-/** loop { fast gates → review → merge → exit? → fix } (SPEC §6, §6.7). */
+/**
+ * Evaluate before the reviewers (§6.5): any evaluator bug skips the reviewers this round and goes
+ * straight to fix, so reviewers never read code that does not work. Without a ui change the
+ * evaluator's still open findings are resolved (the change no longer touches the app).
+ */
+export async function evaluateFirst(ctx: RunContext, round: number, findings: TrackedFinding[]): Promise<{ review?: ReviewOutput; bugs: number }> {
+  const report = await evaluateRound(ctx, round, findings);
+  if (!report) {
+    const prior = findings.filter((f) => f.reviewer === "evaluator" && f.status === "open");
+    return prior.length ? { review: { reviewer: "evaluator", prior: prior.map((f) => ({ finding_id: f.id, verdict: "resolved" })), findings: [] }, bugs: 0 } : { bugs: 0 };
+  }
+  return { review: report.review, bugs: report.review.findings.filter((f) => f.severity === "bug").length };
+}
+
+/** loop { fast gates → evaluate → review → merge → exit? → fix } (SPEC §6, §6.5, §6.7). */
 export async function reviewLoop(
   ctx: RunContext,
   initialGates: GateReport,
@@ -108,8 +124,12 @@ export async function reviewLoop(
   let lastReviewedSha: string | undefined;
   for (let round = firstRound; ; round++) {
     checkDeadline(ctx);
-    const reviews = await reviewRound(ctx, { round, gates, findings, lastReviewedSha });
-    lastReviewedSha = await headSha(ctx.worktree);
+    const evaluation = await evaluateFirst(ctx, round, findings);
+    const skipReview = evaluation.bugs > 0;
+    const reviews = skipReview ? [] : await reviewRound(ctx, { round, gates, findings, lastReviewedSha });
+    if (evaluation.review) reviews.push(evaluation.review);
+    // Reviewers that were skipped have not seen this HEAD: their next diff starts where they stopped.
+    if (!skipReview) lastReviewedSha = await headSha(ctx.worktree);
     const merged = mergeRound(findings, round, reviews, ctx.repo.review.max_nits);
     findings = merged.findings;
     writeJson(ctx, `merged-${round}.json`, { ...merged, findings });
@@ -119,7 +139,7 @@ export async function reviewLoop(
     ctx.events.emit({
       step: "review",
       event: "round_finished",
-      data: { round, head: lastReviewedSha, open: open.length, open_bugs: open.filter((f) => f.severity === "bug").length, added: merged.added.length, dropped: merged.dropped, decision },
+      data: { round, head: lastReviewedSha, review_skipped: skipReview, open: open.length, open_bugs: open.filter((f) => f.severity === "bug").length, added: merged.added.length, dropped: merged.dropped, decision },
     });
     if (decision.action !== "fix") return { result: decision.action, reason: decision.reason, rounds: round, findings, gates };
 

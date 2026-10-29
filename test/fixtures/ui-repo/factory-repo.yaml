@@ -1,0 +1,24 @@
+base_branch: main
+setup: ""
+checks:
+  - { name: syntax, run: "node --check server.mjs", tier: fast }
+tests:
+  globs: ["flows/**"]
+  run: "node {files}"
+human_only_paths: [".factory/repo.yaml", "AGENTS.md"]
+review:
+  max_rounds: 3
+# A default port (shifted by the run's slot) rather than a named one: test files run in parallel with
+# separate factory homes, and the named ports (20000 + slot offset) of other fixtures would collide.
+ui:
+  start: "node server.mjs --port {port:4300}"
+  url: "http://127.0.0.1:{port:4300}"
+  ready_timeout_s: 20
+  paths: ["web/**", "server.mjs"]
+  pages: ["/"]
+verify:
+  run: "for f in {files}; do node \"$f\" || exit 1; done"
+  areas:
+    - { name: tours, paths: ["web/tours*"], flows: ["flows/tours.mjs"], guide: "flows/tours.md", pages: ["/tours"] }
+git:
+  author: factory-bot

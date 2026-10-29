@@ -15,12 +15,12 @@ export function seedMemory(home: string, repoId: string, entries: MemoryEntry[])
 }
 
 /** A finished run directory as `listRuns` reads it (UTC run id from `at`). */
-export function seedRun(home: string, repo: string, at: Date, opts: { pr?: string | null; plan?: Record<string, unknown>; result?: string; rounds?: number }): string {
+export function seedRun(home: string, repo: string, at: Date, opts: { pr?: string | null; plan?: Record<string, unknown>; result?: string; rounds?: number; taskRef?: string }): string {
   const stamp = at.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
   const runId = `${stamp}-${Math.random().toString(16).slice(2, 8)}`;
   const dir = join(home, "runs", runId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, run_id: runId, repo }));
+  writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, run_id: runId, repo, ...(opts.taskRef ? { task: { ref: opts.taskRef, title: "t", text: "", labels: [] } } : {}) }));
   writeFileSync(
     join(dir, "result.json"),
     JSON.stringify({

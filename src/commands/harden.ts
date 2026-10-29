@@ -12,6 +12,7 @@ import {
   ciAudit,
   factoryPrNumbers,
   findingSignals,
+  evaluatorSignals,
   hasSignals,
   reverts,
   type Signals,
@@ -37,6 +38,8 @@ export const CI_RUN_LIMIT = 200;
 export interface HardenOptions {
   repo: string;
   compact: boolean;
+  /** Overrides `repo.yaml` `harden.max_proposals` (1–10). */
+  max?: number;
 }
 
 export type HardenDeps = OneShotDeps & { github: GitHub };
@@ -74,9 +77,66 @@ async function compact(shot: OneShot, factoryHome: string, repoId: string, repoD
   }
 }
 
-const SELECT_SHAPE = `Return a single \`\`\`json block: {"rationale":"<2-4 sentences naming the signals>","checklist":["<checklist item text the plan turns into a check>"],"plan":<plan.json>}.
+const selectShape = (max: number) => `Return a single \`\`\`json block: {"proposals":[{"rationale":"<2-4 sentences naming the signals>","checklist":["<checklist item text the plan turns into a check>"],"plan":<plan.json>}, …]}.
+Up to ${max} proposals, ranked: the most valuable first. Each is its own factory run and PR: distinct goals, and a
+memory key or checklist item belongs to at most one proposal. Fewer is fine when the signals do not justify more.
 ${PLAN_SHAPE.split("\nor ")[0]}
 plan.resolves_findings: memory keys from the findings signal. Do not return questions.`;
+
+export interface Selected {
+  rationale: string;
+  plan: Plan;
+  checklist: string[];
+}
+
+/**
+ * Validates the ranked list in order: an item is accepted when its own plan is valid and it shares no goal,
+ * memory key or checklist item with an accepted one. Returns accepted items and per-item errors.
+ */
+export function validateSelection(
+  json: unknown,
+  ctx: { repo: RepoConfig; keys: Set<string>; items: Set<string>; max: number },
+): { accepted: Selected[]; errors: string[] } {
+  const errors: string[] = [];
+  const list = json && typeof json === "object" && Array.isArray((json as { proposals?: unknown }).proposals) ? ((json as { proposals: unknown[] }).proposals) : undefined;
+  if (!list) return { accepted: [], errors: ["no {\"proposals\": [...]} object in output"] };
+  if (!list.length) return { accepted: [], errors: ["proposals is empty"] };
+  if (list.length > ctx.max) errors.push(`${list.length} proposals, at most ${ctx.max} allowed: the ones after ${ctx.max} were dropped`);
+  const accepted: Selected[] = [];
+  const goals = new Set<string>();
+  const usedKeys = new Set<string>();
+  const usedItems = new Set<string>();
+  list.slice(0, ctx.max).forEach((raw, i) => {
+    const at = `proposal ${i + 1}`;
+    const own: string[] = [];
+    const item = (raw && typeof raw === "object" ? raw : {}) as { rationale?: unknown; plan?: unknown; checklist?: unknown };
+    const rationale = typeof item.rationale === "string" ? item.rationale.trim() : "";
+    if (!rationale) own.push("rationale is missing");
+    const checklist = Array.isArray(item.checklist) ? item.checklist.filter((x): x is string => typeof x === "string") : [];
+    for (const c of checklist) {
+      if (!ctx.items.has(c)) own.push(`checklist item not in the signals: ${c.slice(0, 80)}`);
+      else if (usedItems.has(c)) own.push(`checklist item already in an earlier proposal: ${c.slice(0, 80)}`);
+    }
+    const v = validatePlan(item.plan, { repo: ctx.repo });
+    if (!v.ok) own.push(...v.errors);
+    else {
+      if (goals.has(v.plan.goal)) own.push(`goal repeats an earlier proposal: ${v.plan.goal.slice(0, 80)}`);
+      for (const k of v.plan.resolves_findings ?? []) {
+        if (!ctx.keys.has(k)) own.push(`resolves_findings names ${k}, which is not a signalled memory key`);
+        else if (usedKeys.has(k)) own.push(`resolves_findings names ${k}, already resolved by an earlier proposal`);
+      }
+    }
+    if (own.length || !v.ok) {
+      errors.push(...own.map((e) => `${at}: ${e}`));
+      return;
+    }
+    goals.add(v.plan.goal);
+    for (const k of v.plan.resolves_findings ?? []) usedKeys.add(k);
+    for (const c of checklist) usedItems.add(c);
+    accepted.push({ rationale, plan: v.plan, checklist });
+  });
+  return { accepted, errors };
+}
 
 async function select(
   shot: OneShot,
@@ -85,35 +145,25 @@ async function select(
   signals: Signals,
   metrics: unknown,
   prompts: HardenDeps["prompts"],
-): Promise<{ rationale: string; plan: Plan; checklist: string[] } | { error: string }> {
-  const keys = new Set(signals.findings.map((f) => f.key));
-  const items = new Set(signals.checklist);
+  max: number,
+): Promise<{ accepted: Selected[]; rejected: string[] } | { error: string }> {
+  const ctx = { repo, keys: new Set(signals.findings.map((f) => f.key)), items: new Set(signals.checklist), max };
   const base = [
     asData("signals", JSON.stringify(signals, null, 2)),
     asData("metrics", JSON.stringify(metrics, null, 2)),
     asData("checks", JSON.stringify(repo.checks, null, 2)),
-    SELECT_SHAPE,
+    selectShape(max),
   ].join("\n\n");
-  let errors: string[] = [];
+  let last: { accepted: Selected[]; errors: string[] } = { accepted: [], errors: [] };
   for (let attempt = 0; attempt < 2; attempt++) {
-    const prompt = errors.length ? `${base}\n\nYour previous answer was rejected:\n- ${errors.join("\n- ")}` : base;
+    const prompt = last.errors.length ? `${base}\n\nYour previous answer was rejected:\n- ${last.errors.join("\n- ")}` : base;
     const res = await shot.call("harden", { role: "harden", cwd: repoDir, tools: "read_only", system: rolePrompt("harden", prompts), prompt });
-    const json = extractJson(res.text) as { rationale?: unknown; plan?: unknown; checklist?: unknown } | undefined;
-    errors = [];
-    if (!json || typeof json !== "object") {
-      errors.push("no JSON object in output");
-      continue;
-    }
-    const rationale = typeof json.rationale === "string" ? json.rationale.trim() : "";
-    if (!rationale) errors.push("rationale is missing");
-    const checklist = Array.isArray(json.checklist) ? json.checklist.filter((x): x is string => typeof x === "string") : [];
-    for (const c of checklist) if (!items.has(c)) errors.push(`checklist item not in the signals: ${c.slice(0, 80)}`);
-    const v = validatePlan(json.plan, { repo });
-    if (!v.ok) errors.push(...v.errors);
-    else for (const k of v.plan.resolves_findings ?? []) if (!keys.has(k)) errors.push(`resolves_findings names ${k}, which is not a signalled memory key`);
-    if (!errors.length && v.ok) return { rationale, plan: v.plan, checklist };
+    last = validateSelection(extractJson(res.text), ctx);
+    if (!last.errors.length) return { accepted: last.accepted, rejected: [] };
   }
-  return { error: `harden selection invalid after retry: ${errors.join("; ")}` };
+  // After the retry the valid proposals stand; the rest are reported.
+  if (last.accepted.length) return { accepted: last.accepted, rejected: last.errors };
+  return { error: `harden selection invalid after retry: ${last.errors.join("; ")}` };
 }
 
 /** `factory harden` (SPEC §11): lifecycle, compaction, signals, metrics, at most one proposal. */
@@ -155,42 +205,45 @@ export async function harden(opts: HardenOptions, deps: HardenDeps): Promise<Har
         reasons: period.reasons,
         lane_escalations: period.lane_escalations,
       },
-      evaluator: [],
+      evaluator: evaluatorSignals(windowRuns, repo),
       stale_guides: await staleGuides(repoDir, repo, base),
       reverts: await reverts(repoDir, base, since, prs),
     };
     const metrics = computeMetrics({ ts: now.toISOString(), repoId, repo, mem, signals, factoryPrs: prs.size });
     appendMetrics(deps.factoryHome, repoId, metrics);
 
-    const report: HardenReport = { generated_at: now.toISOString(), repo: repoId, lifecycle, compaction, signals: { ...signals }, metrics, proposal: null, path: null, error: null };
+    const report: HardenReport = { generated_at: now.toISOString(), repo: repoId, lifecycle, compaction, signals: { ...signals }, metrics, ticket: null, path: null, rejected: [], error: null };
     if (!hasSignals(signals)) return HardenReportSchema.parse(report);
-    const chosen = await select(shot, repoDir, repo, signals, metrics, deps.prompts).catch((e: Error) => ({ error: `harden selection failed: ${e.message.slice(0, 200)}` }));
+    const max = opts.max ?? repo.harden.max_proposals;
+    const chosen = await select(shot, repoDir, repo, signals, metrics, deps.prompts, max).catch((e: Error) => ({ error: `harden selection failed: ${e.message.slice(0, 200)}` }));
     if ("error" in chosen) return HardenReportSchema.parse({ ...report, error: chosen.error });
-    const findings = chosen.plan.resolves_findings ?? [];
-    const p = writeProposal(deps.factoryHome, {
+    const t = writeProposal(deps.factoryHome, {
       version: 1,
       kind: "harden",
       id: nextProposalId(proposalsDir(deps.factoryHome, repoId), now.toISOString().slice(0, 10), "harden"),
       repo: repoId,
       created_at: now.toISOString(),
-      status: "open",
-      rationale: chosen.rationale,
-      plan: chosen.plan,
-      references: { findings, checklist: chosen.checklist },
+      proposals: chosen.accepted.map((c) => ({
+        status: "open" as const,
+        rationale: c.rationale,
+        plan: c.plan,
+        references: { findings: c.plan.resolves_findings ?? [], checklist: c.checklist },
+        resolution: null,
+      })),
       signals: { ...signals },
       metrics: { ...metrics },
-      resolution: null,
     });
-    const refs = new Set(findings);
+    const owner = new Map(t.proposals.flatMap((p) => p.references.findings.map((k) => [k, p.id] as const)));
     updateMemory(deps.factoryHome, repoId, (m) => {
       for (const e of m.entries) {
-        if (refs.has(e.key) && e.status === "open") {
+        const id = owner.get(e.key);
+        if (id && e.status === "open") {
           e.status = "proposed";
-          e.ref = p.id;
+          e.ref = id;
         }
       }
     });
-    return HardenReportSchema.parse({ ...report, proposal: p, path: join(proposalsDir(deps.factoryHome, repoId), `${p.id}.json`) });
+    return HardenReportSchema.parse({ ...report, ticket: t, path: join(proposalsDir(deps.factoryHome, repoId), `${t.id}.json`), rejected: chosen.rejected });
   } finally {
     shot.close();
   }
@@ -203,7 +256,11 @@ export async function hardenCommand(opts: HardenOptions & { json: boolean }, dep
     for (const c of r.lifecycle) io.out(`proposal ${c.id}: ${c.status} (${c.reason})\n`);
     if (r.compaction.merged || r.compaction.error) io.out(`compaction: ${r.compaction.merged} merged${r.compaction.error ? `; ${r.compaction.error}` : ""}\n`);
     io.out(`metrics: determinism ${r.metrics.determinism_ratio ?? "–"}, open findings ${r.metrics.open_findings}, CI min/week ${r.metrics.ci_minutes_per_week ?? "–"}\n`);
-    io.out(r.proposal ? `proposal ${r.proposal.id}: ${r.proposal.plan.goal}\n  ${r.path}\n  run: factory run --repo ${opts.repo} --plan ${r.proposal.plan_path}\n` : r.error ? `no proposal: ${r.error}\n` : "no proposal: no signals\n");
+    if (r.ticket) {
+      io.out(`ticket ${r.path}: ${r.ticket.proposals.length} proposal(s)\n`);
+      for (const p of r.ticket.proposals) io.out(`  ${p.rank}. ${p.plan.goal}\n     run: factory run --repo ${opts.repo} --plan ${p.plan_path}\n`);
+      for (const x of r.rejected) io.out(`  rejected: ${x}\n`);
+    } else io.out(r.error ? `no proposal: ${r.error}\n` : "no proposal: no signals\n");
   }
   return r.error ? 1 : 0;
 }
