@@ -12,7 +12,6 @@ import {
   createWriteToolDefinition,
   createExtensionRuntime,
   defineTool,
-  loadProjectContextFiles,
   ModelRuntime,
   type ResourceLoader,
   SessionManager,
@@ -20,6 +19,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { BrowserTools } from "../evaluate/tools.js";
+import { isolatedContextFiles } from "./context-files.js";
 import { endpointViolation } from "./provider-guard.js";
 import { PathGuard } from "../sandbox/guard.js";
 import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
@@ -86,8 +86,11 @@ export class PiRunner implements AgentRunner {
       throw new AgentError(`refused: ${req.model} needs the ChatGPT login (subscription) in the factory's Pi auth.json, not an API key`, undefined, 403);
     }
     const agentDir = req.agentDir ?? this.agentDir;
-    // No user extensions, skills, prompt templates or memory; the repo's AGENTS.md is allowed (SPEC §8.3).
-    const agentsFiles = loadProjectContextFiles({ cwd: req.cwd, agentDir });
+    // No user extensions, skills, prompt templates or memory; only the worktree's own AGENTS.md (no
+    // ancestor or agent-dir context, no AGENTS.override.md).
+    const context = isolatedContextFiles(req.cwd);
+    for (const w of context.warnings) req.onActivity?.({ kind: "progress", detail: `warning: ${w}` });
+    const agentsFiles = context.files;
     const resourceLoader: ResourceLoader = {
       getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
       getSkills: () => ({ skills: [], diagnostics: [] }),

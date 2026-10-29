@@ -20,15 +20,14 @@ or {"version":1,"questions":["..."]}. Return it as a single \`\`\`json block.`;
 async function planInput(ctx: PlanContext): Promise<string> {
   const files = (await git(ctx.repoDir, ["ls-files"])).split("\n").filter(Boolean);
   const tree = files.slice(0, 400).join("\n") + (files.length > 400 ? `\n… ${files.length - 400} more` : "");
-  const agentsPath = join(ctx.repoDir, "AGENTS.md");
-  const agents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : "(none)";
   const checklistPath = join(ctx.repoDir, ".factory", "checklist.md");
   const checklist = ctx.repo.review.checklist && existsSync(checklistPath) ? unmarkedItems(parseChecklist(readFileSync(checklistPath, "utf8"))) : [];
   const areas = ctx.repo.verify.areas.map((a) => `- ${a.name}: ${a.paths.join(", ")}`).join("\n") || "(none)";
   return [
     asData("task", ctx.task.text),
     `Repo tree:\n${tree}`,
-    `AGENTS.md:\n${agents}`,
+    // AGENTS.md is not pasted here: the agent session carries the base worktree's AGENTS.md as context.
+    existsSync(join(ctx.repoDir, "AGENTS.md")) ? "" : "AGENTS.md: (none)",
     `Verify areas:\n${areas}`,
     checklist.length ? `Checklist items (the checklist reviewer checks the diff against them; plan for the relevant ones):\n${asData("checklist_items", checklist.map((i) => `- ${i.text}`).join("\n"))}` : "",
     `sensitive_paths: ${JSON.stringify(ctx.repo.sensitive_paths)}; ui: ${ctx.repo.ui ? "yes" : "no"}`,

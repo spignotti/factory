@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
@@ -30,19 +30,26 @@ function toFastLane(steps: FakeStep[]): FakeStep[] {
 
 describe("E2E with fake-runner on a fixture repo", () => {
   it("planner and plan_normalize read a clean base worktree, never the user's checkout (untracked .env)", async () => {
-    const seen: { role: string; cwd: string; env: boolean; listed: boolean }[] = [];
+    const seen: { role: string; cwd: string; env: boolean; listed: boolean; agents: string; pasted: boolean }[] = [];
     const record = (req: AgentRequest, repo: string) => {
       if (!req.role.startsWith("plan")) return;
       expect(req.cwd).not.toBe(repo);
-      seen.push({ role: req.role, cwd: req.cwd, env: existsSync(join(req.cwd, ".env")), listed: req.prompt.includes(".env") });
+      const agents = readFileSync(join(req.cwd, "AGENTS.md"), "utf8");
+      seen.push({ role: req.role, cwd: req.cwd, env: existsSync(join(req.cwd, ".env")), listed: req.prompt.includes(".env"), agents, pasted: req.prompt.includes("BASE RULE") });
     };
-    const setup = (repo: string) => writeFileSync(join(repo, ".env"), `SECRET=${SECRET}\n`);
+    const setup = (repo: string) => {
+      // AGENTS.md at the base SHA reaches the agent as session context (the worktree's file), not
+      // pasted into the prompt; an uncommitted edit in the checkout does not reach it at all.
+      commitFile(repo, "AGENTS.md", "BASE RULE\n", "agents");
+      writeFileSync(join(repo, "AGENTS.md"), "UNCOMMITTED RULE\n");
+      writeFileSync(join(repo, ".env"), `SECRET=${SECRET}\n`);
+    };
     const std = await runScenario({ script: "clean.json", setup, onCall: record });
     const norm = await runScenario({ script: "normalize-ok.json", options: { planEffort: "none" }, setup, onCall: record });
     expect(std.result.result).toBe("done");
     expect(norm.result.result).toBe("done");
     expect(seen.map((s) => s.role)).toEqual(["plan_high", "plan_normalize"]);
-    for (const s of seen) expect(s).toMatchObject({ env: false, listed: false });
+    for (const s of seen) expect(s).toMatchObject({ env: false, listed: false, agents: "BASE RULE\n", pasted: false });
     // removed again, and not registered as a worktree any more
     expect(existsSync(seen[0]!.cwd)).toBe(false);
     expect(git(std.repo, "worktree", "list")).not.toContain("plan-base");

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ancestorContextFiles, PI_CONTEXT_NAMES } from "../agents/context-files.js";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
 import { ciStubCheck, otherPrWorkflows } from "../ci.js";
 import { GhCli, type GitHub } from "../gh.js";
@@ -282,6 +283,27 @@ export async function liveServiceChecks(repoDir: string, repo: RepoConfig, facto
   return checks;
 }
 
+/**
+ * Context files outside the worktree that plain Pi would load (its agent dir, the ancestors of the
+ * run worktrees) and an `AGENTS.override.md` in the repo. The factory ignores them all; the warning
+ * is so nobody edits one and expects it to reach the agents.
+ */
+export function contextFileChecks(factoryHome: string, repoDir?: string): DoctorCheck[] {
+  const stray = [
+    ...PI_CONTEXT_NAMES.map((n) => join(factoryHome, "pi", n)).filter((p) => existsSync(p)),
+    ...ancestorContextFiles(join(factoryHome, "runs", "_"), {}),
+  ];
+  const checks: DoctorCheck[] = [
+    stray.length
+      ? { name: "agent context", status: "warn", detail: `ignored context file(s) outside the worktree: ${[...new Set(stray)].join(", ")}; agents read only the worktree's AGENTS.md` }
+      : { name: "agent context", status: "ok", detail: "agents read only the worktree's AGENTS.md" },
+  ];
+  if (repoDir && existsSync(join(repoDir, "AGENTS.override.md"))) {
+    checks.push({ name: "agent context", status: "warn", detail: "AGENTS.override.md is ignored; put its rules into AGENTS.md" });
+  }
+  return checks;
+}
+
 /** `factory doctor`: setup checks, the Zen guard and the effective model per role with its layer. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
@@ -308,6 +330,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       }
     }
   }
+  checks.push(...contextFileChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined));
   if (opts.repo) {
     try {
       const repoDir = resolve(opts.repo);
