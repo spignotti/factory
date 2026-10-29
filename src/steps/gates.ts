@@ -10,6 +10,7 @@ import {
   scopeReport,
   testPresence,
 } from "../gates/builtin.js";
+import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { topoOrder } from "../pipeline/dag.js";
@@ -107,6 +108,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     testPresence(plan, packages, handoffs, changed, repo.tests.globs),
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),
+    configGuard({ plan, packages, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
   ];
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];

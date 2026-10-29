@@ -172,6 +172,28 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(eventsOf(r, "gate_result").some((e) => e.data.status === "fail")).toBe(true);
   });
 
+  it("an added lint suppression the plan does not name fails the gates and goes back to the implementer", async () => {
+    let first = true;
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      steps: (s) =>
+        s.map((x) => {
+          if (x.role !== "implement" || !first || !x.writes) return x;
+          first = false;
+          const fixed = s.filter((y) => y.role === "implement")[1]!.writes!["src/math.js"]!;
+          return { ...x, writes: { ...x.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars
+${fixed}` } };
+        }),
+    });
+    expect(r.result.result).toBe("done");
+    const gate1 = JSON.parse(r.file("gates-1.json"));
+    const guard = gate1.checks.find((c: { name: string }) => c.name === "config_guard");
+    expect(guard.status).toBe("fail");
+    expect(guard.output_tail).toContain("src/math.js: adds `eslint-disable`");
+    expect(r.runner.calls.filter((c) => c.role === "implement")[1]!.prompt).toContain("config_guard");
+    expect(JSON.parse(r.file("gates-2.json")).green).toBe(true);
+  });
+
   it("accepted wontfix: done after round 2", async () => {
     const r = await runScenario({ script: "wontfix.json" });
     expect(r.result).toMatchObject({ result: "done", rounds: 2 });
