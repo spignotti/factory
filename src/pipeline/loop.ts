@@ -3,7 +3,7 @@ import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { ReviewOutput } from "../schemas/review.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
-import { dropStrayHandoff, gitAuthor, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
+import { dropStrayHandoff, gitAuthor, handoffShape, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
 import { evaluateRound } from "../steps/evaluate.js";
 import { reviewRound } from "../steps/review.js";
 import { checkDeadline, type RunContext, writeJson } from "./context.js";
@@ -55,7 +55,7 @@ export async function fixStep(
     asData("diff", diff),
     findings.length ? asData("open_findings", JSON.stringify(findings, null, 2)) : "",
     input.gates && !input.gates.green ? asData("gate_failures", failureSummary(input.gates)) : "",
-    'Reply with handoff.json as a ```json block with "package":"fix" (in your reply; never write it to a file).',
+    handoffShape(ctx, "fix"),
   ].filter(Boolean).join("\n\n");
   const sessionKey = `${ctx.runId}-fix-${label}`;
   for (;;) {

@@ -9,7 +9,7 @@ import { validateResponses } from "../../src/pipeline/loop.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
 import { costLines } from "../../src/steps/finalize.js";
-import { parseHandoff } from "../../src/steps/implement.js";
+import { handoffShape, parseHandoff } from "../../src/steps/implement.js";
 import { extractPlanBlock, readTask, resolvePlanEffort } from "../../src/steps/intake.js";
 
 describe("intake helpers", () => {
@@ -125,5 +125,15 @@ describe("PR cost lines", () => {
       "- cost (metered providers): $0.2500",
     ]);
     expect(costLines([])).toEqual(["- cost (metered providers): $0.0000"]);
+  });
+});
+
+describe("handoff shape", () => {
+  it("names the check refs the gates accept", () => {
+    const repo = (names: string[]) => ({ repo: { checks: names.map((name) => ({ name })) } }) as unknown as Parameters<typeof handoffShape>[0];
+    const shape = handoffShape(repo(["typecheck", "lint"]), "P1");
+    expect(shape).toContain('"package":"P1"');
+    expect(shape).toContain("exactly one of these check names: typecheck, lint");
+    expect(handoffShape(repo([]), "fix")).toContain("kind:test evidence only");
   });
 });
