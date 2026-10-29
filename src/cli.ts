@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
+import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
@@ -25,6 +26,8 @@ const USAGE = `usage:
   models: built-in < $FACTORY_HOME/profile.yaml < --profile <file> < repo.yaml models: (see README)
   factory status [--json]
               (running, waiting for a human, interrupted runs; open factory PRs)
+  factory stats [--since 7d] [--repo <path>] [--json]
+              (results, rounds, gates, providers, cost; this period vs the previous one)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
 `;
 
@@ -70,6 +73,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === "status") {
       const { values } = parseArgs({ args: rest, options: { json: { type: "boolean", default: false } } });
       return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), json: values.json }, io);
+    }
+    if (command === "stats") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { since: { type: "string", default: "7d" }, repo: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      return statsCommand({ factoryHome: factoryHomeOf(), since: values.since, repo: values.repo, json: values.json }, io);
     }
     if (command === "run") {
       const { values } = parseArgs({

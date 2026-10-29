@@ -123,10 +123,11 @@ One list item per rule. Mark an item with `<!-- check: <check name> -->` once a 
 
 Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory harden` (M3) turns them into checks. Delete the file to forget.
 
-## Status
+## Status and stats
 
 ```
 factory status [--json]                     # running, waiting for you, interrupted; open factory PRs
+factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
 ```
 
 ## Development

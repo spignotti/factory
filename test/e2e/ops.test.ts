@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
@@ -75,14 +76,80 @@ describe("factory status", () => {
   });
 });
 
+describe("factory stats", () => {
+  it("parses --since", () => {
+    expect(parseSince("24h")).toBe(86_400_000);
+    expect(parseSince("2w")).toBe(14 * 86_400_000);
+    expect(() => parseSince("7")).toThrow(/invalid --since/);
+  });
+
+  it("aggregates results, lanes, rounds, gates, providers, roles, reasons and policies; previous period and delta", () => {
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const ev = (event: string, extra: Record<string, unknown> = {}) => ({ event, ...extra });
+    fakeRun(home, "20261028-100000-000001", {
+      state: { result: "done", lane: "fast" },
+      result: { result: "done", type: "feature", rounds: 1, minutes: 4, merge_policy: "auto", pr: "https://pr/1" },
+      events: [
+        ev("agent_finished", { role: "implement", model: "opencode-go/kimi", tokens_in: 100, tokens_out: 10, cost_usd: 0.01 }),
+        ev("agent_error", { role: "plan_high", model: "openai/sol", data: { class: "capacity" } }),
+        ev("model_fallback", { role: "plan_high", model: "openai/sol", data: { from: "openai/sol", to: "opencode-go/grok" } }),
+        ev("gate_result", { data: { check: "unit", status: "fail" } }),
+        ev("gate_result", { data: { check: "unit", status: "flaky" } }),
+        ev("gate_result", { data: { base: true, check: "lint", status: "fail" } }),
+      ],
+    });
+    fakeRun(home, "20261028-110000-000002", {
+      state: { result: "needs_human", reason: "stalemate: x", lane: "standard" },
+      result: { result: "needs_human", type: "bug", rounds: 3, minutes: 30, merge_policy: "human_review", pr: "https://pr/2" },
+      events: [ev("lane_escalated"), ev("watchdog_abort"), ev("agent_error", { role: "review_plan", model: "openai/sol", data: { class: "limit" } })],
+    });
+    fakeRun(home, "20261028-120000-000003", { state: { result: "locked" }, result: { result: "locked", rounds: 0, minutes: 0 } });
+    fakeRun(home, "20261028-130000-000004", { state: { result: null, step: "review" } });
+    fakeRun(home, "20261021-100000-000005", { state: { result: "failed" }, result: { result: "failed", rounds: 2, minutes: 8, merge_policy: null } });
+    const s = statsReport({ factoryHome: home, since: "7d", now: () => Date.parse("2026-10-29T00:00:00Z") });
+    const c = s.current;
+    expect(c.runs).toBe(4);
+    expect(c.by_result).toEqual({ done: 1, needs_human: 1, locked: 1, running: 1 });
+    expect(c.by_lane).toEqual({ fast: 1, standard: 3 });
+    expect(c.by_type).toEqual({ feature: 1, bug: 1 });
+    expect(c.done_rate).toBe(0.5);
+    expect(c.rounds).toEqual({ median: 1, p90: 3 });
+    expect(c.minutes).toEqual({ median: 4, p90: 30 });
+    expect(c.gate_failures).toEqual({ unit: 1 });
+    expect(c.flaky_checks).toEqual({ unit: 1 });
+    expect(c.reasons).toEqual([{ result: "needs_human", reason: "stalemate: x", count: 1 }]);
+    expect(c.providers.openai).toMatchObject({ calls: 2, errors: 2, fallbacks: 1, capacity_errors: 1, limit_errors: 1 });
+    expect(c.providers["opencode-go"]).toMatchObject({ calls: 1, tokens_in: 100, cost_usd: 0.01 });
+    expect(c.roles.implement).toEqual({ calls: 1, tokens_in: 100, tokens_out: 10, cost_usd: 0.01 });
+    expect(c.cost_usd).toBe(0.01);
+    expect(c).toMatchObject({ lane_escalations: 1, watchdog_aborts: 1, merge_policy: { auto: 1, human_review: 1 }, auto_merged: 1, reverted: null });
+    expect(s.previous).toMatchObject({ runs: 1, by_result: { failed: 1 }, done_rate: 0 });
+    expect(s.delta).toEqual({ runs: 3, done_rate: 0.5, cost_usd: 0.01, median_rounds: -1 });
+  });
+
+  it("--repo filters by resolved path", () => {
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const repo = mkdtempSync(join(tmpdir(), "factory-repo-"));
+    fakeRun(home, "20261028-100000-000001", { state: { repo }, result: { result: "done" } });
+    fakeRun(home, "20261028-100000-000002", { state: { repo: "/elsewhere" }, result: { result: "done" } });
+    const s = statsReport({ factoryHome: home, repo: `${repo}/.`, now: () => Date.parse("2026-10-29T00:00:00Z") });
+    expect(s.repo).toBe(repo);
+    expect(s.current.runs).toBe(1);
+  });
+
+  it("empty periods have null rates and quantiles", () => {
+    expect(aggregate([], new Date(0), new Date(1))).toMatchObject({ runs: 0, done_rate: null, rounds: { median: null, p90: null } });
+  });
+});
+
 describe("CLI wiring", () => {
-  it("status prints JSON from $FACTORY_HOME", async () => {
+  it("status and stats print JSON from $FACTORY_HOME", async () => {
     const { main } = await import("../../src/cli.js");
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));
     const prev = process.env.FACTORY_HOME;
     process.env.FACTORY_HOME = home;
     try {
-      for (const [args, key] of [[["status", "--json"], "running"]] as const) {
+      for (const [args, key] of [[["status", "--json"], "running"], [["stats", "--json", "--since", "1d"], "current"]] as const) {
         let out = "";
         expect(await main([...args], { out: (s) => void (out += s), err: () => {} })).toBe(0);
         expect(JSON.parse(out)).toHaveProperty(key);
