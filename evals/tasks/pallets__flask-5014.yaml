@@ -1,0 +1,35 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: pallets__flask-5014
+repo: https://github.com/pallets/flask.git
+base: 7ee9ceb71e868944a46e1ff00b506772a53a4f1d
+task: |
+  Require a non-empty name for Blueprints
+  Things do not work correctly if a Blueprint is given an empty name (e.g. #4944).
+  It would be helpful if a `ValueError` was raised when trying to do that.
+plan_effort: medium
+hidden:
+  from_commit: 7ed89d3f9d2207c9a607f5dcdce106c0278e1332
+  paths:
+  - tests/test_blueprints.py
+  check: .venv/bin/python -m pytest -q tests/test_blueprints.py
+timeout_min: 45
+repo_config:
+  base_branch: main
+  setup: uv venv -q -p 3.11 .venv && uv pip install -q -p .venv -e . pytest 'pytest<8' werkzeug==2.3.7
+  checks:
+  - name: tests
+    run: .venv/bin/python -m pytest -q tests/test_blueprints.py
+    tier: fast
+  tests:
+    globs:
+    - tests/**
+    run: .venv/bin/python -m pytest -q {files}
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: BSD-3-Clause
+source: 'SWE-bench Verified pallets__flask-5014 (hidden tests: the upstream test file at the merge commit, equal to base + test_patch)'
+notes: 'FAIL_TO_PASS: tests/test_blueprints.py::test_empty_name_not_allowed. Upstream merge 2023-03-11T16:34:56Z. Validated 2026-10-29 with `factory eval --validate` (sandboxed): hidden check red on base,
+  green on the merge commit.'

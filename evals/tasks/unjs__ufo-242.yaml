@@ -1,0 +1,35 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: unjs__ufo-242
+repo: https://github.com/unjs/ufo.git
+base: 1954caebf751d22f04fff059fc09412de3c6b86d
+task: |
+  withProtocol mishandles protocol-relative URLs
+
+  `withProtocol("//example.com", "ftp://")` returns `"ftp:////example.com"`; expected `"ftp://example.com"`.
+  A protocol-relative input (`//host/...`) should get the protocol without doubling the slashes.
+plan_effort: medium
+hidden:
+  from_commit: 62199a0cc84727b7b4666aaca8ff04cca2f68f3a
+  paths:
+  - test/utilities.test.ts
+  check: pnpm exec vitest run test/utilities.test.ts
+timeout_min: 30
+repo_config:
+  base_branch: main
+  setup: pnpm install --frozen-lockfile
+  checks:
+  - name: test
+    run: pnpm exec vitest run
+    tier: fast
+  tests:
+    globs:
+    - test/**
+    run: pnpm exec vitest run {files}
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: MIT
+source: 'https://github.com/unjs/ufo/issues/241 (fix: https://github.com/unjs/ufo/pull/242)'
+notes: 'TypeScript task (unjs/ufo). The hidden test file is taken whole from the fix commit. Validated 2026-10-29 with `factory eval --validate` (sandboxed): hidden check red on base, green on the fix commit.'

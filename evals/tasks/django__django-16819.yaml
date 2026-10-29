@@ -1,0 +1,35 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: django__django-16819
+repo: https://github.com/django/django.git
+base: 0b0998dc151feb77068e2387c34cc50ef6b356ae
+task: |
+  Reduce Add/RemoveIndex migration operations.
+  Description
+
+  We should reduce AddIndex/RemoveIndex operations when optimizing migration operations.
+plan_effort: medium
+hidden:
+  from_commit: 191f6a9a4586b5e5f79f4f42f190e7ad4bbacc84
+  paths:
+  - tests/migrations/test_optimizer.py
+  check: .venv/bin/python tests/runtests.py --parallel 1 migrations.test_optimizer
+timeout_min: 45
+repo_config:
+  base_branch: main
+  setup: uv venv -q -p 3.11 .venv && uv pip install -q -p .venv -e .
+  checks:
+  - name: tests
+    run: .venv/bin/python tests/runtests.py --parallel 1 migrations.test_optimizer migrations.test_operations
+    tier: fast
+  tests:
+    globs:
+    - tests/**
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: BSD-3-Clause
+source: 'SWE-bench Verified django__django-16819 (hidden tests: the upstream test file at the merge commit, equal to base + test_patch)'
+notes: 'FAIL_TO_PASS: test_add_remove_index (migrations.test_optimizer.OptimizerTests.test_add_remove_index). Upstream merge 2023-05-01T16:57:24Z. Validated 2026-10-29 with `factory eval --validate` (sandboxed):
+  hidden check red on base, green on the merge commit.'

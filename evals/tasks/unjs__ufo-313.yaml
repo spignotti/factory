@@ -1,0 +1,37 @@
+# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+id: unjs__ufo-313
+repo: https://github.com/unjs/ufo.git
+base: 5fb179d51384301ffb66b48e213863a27cadd1ff
+task: |
+  withBase / withoutBase match the base as a plain string prefix
+
+  `withoutBase("/admin-dashboard", "/admin/")` returns `"/-dashboard"`: the base `/admin` is stripped although
+  `/admin-dashboard` is not inside it. `withBase("/admin-dashboard", "/admin")` likewise returns the input
+  unchanged instead of prefixing it. A base must only match on a path segment boundary
+  (`/admin` matches `/admin` and `/admin/...`, not `/admin-dashboard`).
+plan_effort: medium
+hidden:
+  from_commit: eb29945470c8629309764f026a36e7f477a9a1ff
+  paths:
+  - test/base.test.ts
+  check: pnpm exec vitest run test/base.test.ts
+timeout_min: 30
+repo_config:
+  base_branch: main
+  setup: pnpm install --frozen-lockfile
+  checks:
+  - name: test
+    run: pnpm exec vitest run
+    tier: fast
+  tests:
+    globs:
+    - test/**
+    run: pnpm exec vitest run {files}
+  human_only_paths:
+  - .factory/repo.yaml
+  limits:
+    forbidden_paths:
+    - .env*
+license: MIT
+source: https://github.com/unjs/ufo/pull/313
+notes: 'TypeScript task (unjs/ufo). The hidden test file is taken whole from the fix commit. Validated 2026-10-29 with `factory eval --validate` (sandboxed): hidden check red on base, green on the fix commit.'
