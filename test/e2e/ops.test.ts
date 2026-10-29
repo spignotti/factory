@@ -1,14 +1,19 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { gc } from "../../src/commands/gc.js";
 import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
 import { listRuns, runStartedAt } from "../../src/runs.js";
+import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario } from "../helpers/scenario.js";
 
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
+const stateOf = (runDir: string) => JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")) as Record<string, unknown>;
 
 /** A synthetic run directory (state/result/events) for status and stats. */
 function fakeRun(home: string, id: string, v: { state?: Record<string, unknown>; result?: Record<string, unknown>; events?: Record<string, unknown>[] }): void {
@@ -142,14 +147,81 @@ describe("factory stats", () => {
   });
 });
 
+describe("factory gc", () => {
+  /** A done run whose branch the "factory" pushed to a real bare origin (FakeGitHub records pushes only). */
+  async function pushedRun() {
+    const r = await runScenario({ script: "clean.json", setup: (repo) => void addOrigin(repo) });
+    const branch = r.result.branch!;
+    git(r.repo, "push", "-q", "origin", branch);
+    return { r, branch, wt: join(r.runDir, "worktree") };
+  }
+  const remoteHas = (repo: string, branch: string) => git(repo, "ls-remote", "--heads", "origin", branch).trim() !== "";
+  const localHas = (repo: string, branch: string) => git(repo, "branch", "--list", branch).trim() !== "";
+
+  it("skips open PRs; a merged PR loses worktree, local and remote branch; gc_at makes it idempotent", async () => {
+    const { r, branch, wt } = await pushedRun();
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github })).skipped).toEqual([expect.objectContaining({ reason: "PR is open" })]);
+    expect(existsSync(wt)).toBe(true);
+
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    const dry = await gc({ factoryHome: r.factoryHome, github: r.github, dryRun: true });
+    expect(dry.cleaned).toEqual([expect.objectContaining({ worktree_removed: true, branch_deleted: true, remote_branch_deleted: true })]);
+    expect(existsSync(wt) && localHas(r.repo, branch) && remoteHas(r.repo, branch)).toBe(true);
+
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github });
+    expect(res.cleaned).toEqual([expect.objectContaining({ run_id: r.runId, pr_state: "merged", worktree_removed: true, branch_deleted: true, remote_branch_deleted: true, notes: [] })]);
+    expect(existsSync(wt)).toBe(false);
+    expect(localHas(r.repo, branch)).toBe(false);
+    expect(remoteHas(r.repo, branch)).toBe(false);
+    expect(stateOf(r.runDir).gc_at).toEqual(expect.any(String));
+    expect(git(r.repo, "branch", "--show-current").trim()).toBe("main");
+    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [] });
+    const s = await statusReport({ factoryHome: r.factoryHome, github: r.github });
+    expect(s.prs).toEqual([]);
+  });
+
+  it("a remote branch moved by someone else is kept; a dirty worktree needs --force", async () => {
+    const { r, branch, wt } = await pushedRun();
+    r.github.prStates.set(r.result.pr!, { state: "closed", draft: false });
+    // Someone pushes on top of the factory's branch.
+    const other = join(mkdtempSync(join(tmpdir(), "factory-clone-")), "c");
+    git(r.repo, "worktree", "add", "-q", other, `origin/${branch}`);
+    commitFile(other, "human.txt", "x");
+    git(other, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    git(r.repo, "worktree", "remove", other);
+    writeFileSync(join(wt, "scratch.txt"), "uncommitted");
+
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github })).skipped).toEqual([expect.objectContaining({ reason: expect.stringMatching(/uncommitted.*--force/) })]);
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, force: true });
+    expect(res.cleaned[0]).toMatchObject({ pr_state: "closed", worktree_removed: true, branch_deleted: true, remote_branch_deleted: false, notes: [expect.stringMatching(/remote branch moved/)] });
+    expect(remoteHas(r.repo, branch)).toBe(true);
+    expect(existsSync(wt)).toBe(false);
+  });
+
+  it("skips a repository whose lock is held; never deletes a branch outside factory/*", async () => {
+    const { r, branch } = await pushedRun();
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-cccccc")!;
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github })).skipped[0]?.reason).toMatch(/locked/);
+    release();
+
+    const st = stateOf(r.runDir);
+    git(r.repo, "branch", "-m", branch, "feature/human");
+    writeFileSync(join(r.runDir, "state.json"), JSON.stringify({ ...st, branch: "feature/human" }));
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github });
+    expect(res.cleaned[0]).toMatchObject({ branch_deleted: false, remote_branch_deleted: false, notes: [expect.stringMatching(/not a factory/)] });
+    expect(localHas(r.repo, "feature/human")).toBe(true);
+  });
+});
+
 describe("CLI wiring", () => {
-  it("status and stats print JSON from $FACTORY_HOME", async () => {
+  it("status, stats and gc print JSON from $FACTORY_HOME", async () => {
     const { main } = await import("../../src/cli.js");
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));
     const prev = process.env.FACTORY_HOME;
     process.env.FACTORY_HOME = home;
     try {
-      for (const [args, key] of [[["status", "--json"], "running"], [["stats", "--json", "--since", "1d"], "current"]] as const) {
+      for (const [args, key] of [[["status", "--json"], "running"], [["stats", "--json", "--since", "1d"], "current"], [["gc", "--json", "--dry-run"], "cleaned"]] as const) {
         let out = "";
         expect(await main([...args], { out: (s) => void (out += s), err: () => {} })).toBe(0);
         expect(JSON.parse(out)).toHaveProperty(key);

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
+import { gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { GhCli } from "./gh.js";
@@ -28,6 +29,8 @@ const USAGE = `usage:
               (running, waiting for a human, interrupted runs; open factory PRs)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one)
+  factory gc [--dry-run] [--force] [--json]
+              (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
 `;
 
@@ -80,6 +83,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         options: { since: { type: "string", default: "7d" }, repo: { type: "string" }, json: { type: "boolean", default: false } },
       });
       return statsCommand({ factoryHome: factoryHomeOf(), since: values.since, repo: values.repo, json: values.json }, io);
+    }
+    if (command === "gc") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { "dry-run": { type: "boolean", default: false }, force: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+      });
+      return await gcCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), dryRun: values["dry-run"], force: values.force, json: values.json }, io);
     }
     if (command === "run") {
       const { values } = parseArgs({
