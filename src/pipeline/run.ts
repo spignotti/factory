@@ -5,7 +5,7 @@ import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
-import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, remoteBranchExists, revParse } from "../git.js";
+import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema } from "../schemas/plan.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
@@ -47,13 +47,6 @@ function slug(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "task";
 }
 
-async function originUrl(repoDir: string): Promise<string> {
-  return (await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "")).trim();
-}
-
-async function repoId(repoDir: string): Promise<string> {
-  return (await originUrl(repoDir)) || repoDir;
-}
 
 /** Findings memory of the repo (§10): where it lives and this run's briefing. Never fails the run. */
 async function openMemory(f: RunFrame, deps: RunDeps, repoDir: string): Promise<string> {
@@ -96,7 +89,7 @@ export async function takeRepoLock(
   events: EventLog,
   wait: boolean,
 ): Promise<{ release?: () => void; reason: string }> {
-  const id = await repoId(repoDir);
+  const id = await repoLockId(repoDir);
   const release = acquireRepoLock(deps.factoryHome, id, runId);
   if (release) return { release, reason: "" };
   const holder = repoLockHolder(deps.factoryHome, id);

@@ -134,3 +134,12 @@ export async function discardChanges(cwd: string): Promise<void> {
 export async function headSha(cwd: string): Promise<string> {
   return revParse(cwd, "HEAD");
 }
+
+export async function originUrl(repoDir: string): Promise<string> {
+  return (await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "")).trim();
+}
+
+/** Repo lock id: the origin URL, else the path (one factory process per repository). */
+export async function repoLockId(repoDir: string): Promise<string> {
+  return (await originUrl(repoDir)) || repoDir;
+}

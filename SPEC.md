@@ -884,3 +884,6 @@ m) **Fast lane (§6.11, M2a).**
    - Every escalation is a `lane_escalated` event `{from, to, reasons}`, is kept in `state.json` (resume keeps the lane), sets `result.lane` to `standard`, adds the risk reason "fast-lane escalation" (so never `low`) and is named in the PR stats (`lane: fast → standard (…)`).
    - `lean` review: `plan` and `simplicity` share one session on the `review_plan` model chain and answer `{"reviews":[…]}` with one review each; `security`/`checklist` still run as their own sessions when active (security cannot be active without escalation; checklist can).
    - At most one fix round: `max_rounds` is capped at 2 and an open `bug` after round 2 is `needs_human` (no extra round).
+
+n) **`status` (§9, M2a).** It reads `$FACTORY_HOME/runs/*` (`src/runs.ts`); the start time of a run comes from its id (UTC). Schemas in `schemas/`.
+   - `status [--json]`: `running` = runs whose id holds a live repo lock (pid alive); `waiting` = latest result `needs_human`/`needs_input`, unless the PR is merged/closed or the run was collected by `gc`; `interrupted` = no result and no live lock holder (killed process: `resume` or start again); `prs` = open PRs of not yet collected runs with `merge_policy`, `risk`, draft flag (one `gh pr view` per PR; a `gh` error gives `state: "unknown"` with the error instead of failing).

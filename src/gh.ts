@@ -33,6 +33,13 @@ export interface GitHub {
   updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void>;
   /** Resume: a draft PR whose run is now done becomes ready for review. */
   markReady(repoDir: string, pr: string): Promise<void>;
+  /** `status` / `gc`: current state of a factory PR. */
+  prStatus(repoDir: string, pr: string): Promise<PrStatus>;
+}
+
+export interface PrStatus {
+  state: "open" | "merged" | "closed";
+  draft: boolean;
 }
 
 async function gh(cwd: string, args: string[]): Promise<string> {
@@ -79,6 +86,12 @@ export class GhCli implements GitHub {
   async markReady(repoDir: string, pr: string): Promise<void> {
     await gh(repoDir, ["pr", "ready", pr]);
   }
+
+  async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft"])) as { state: string; isDraft: boolean };
+    const state = j.state.toLowerCase();
+    return { state: state === "merged" || state === "closed" ? state : "open", draft: j.isDraft };
+  }
 }
 
 /** In-memory GitHub for tests: no network, no `gh`. */
@@ -122,5 +135,16 @@ export class FakeGitHub implements GitHub {
 
   async markReady(_repoDir: string, pr: string): Promise<void> {
     this.readied.push(pr);
+  }
+
+  /** PR states by URL; created PRs are open. */
+  readonly prStates = new Map<string, PrStatus>();
+
+  async prStatus(_repoDir: string, pr: string): Promise<PrStatus> {
+    const s = this.prStates.get(pr);
+    if (s) return s;
+    const created = this.prs.find((p) => p.url === pr);
+    if (!created) throw new Error(`PR ${pr} not found`);
+    return { state: "open", draft: created.draft };
   }
 }

@@ -41,6 +41,8 @@ export interface RunState {
   /** Effective lane; absent in states written before M2a (= standard). */
   lane?: Lane;
   lane_escalation?: string[];
+  /** Set by `factory gc` once the worktree and branches of a merged/closed PR are gone. */
+  gc_at?: string;
   updated_at: string;
 }
 
