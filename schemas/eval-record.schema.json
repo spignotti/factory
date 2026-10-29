@@ -110,6 +110,13 @@
           },
           "cost_usd": {
             "type": "number"
+          },
+          "billing": {
+            "type": "string",
+            "enum": [
+              "subscription",
+              "metered"
+            ]
           }
         },
         "required": [

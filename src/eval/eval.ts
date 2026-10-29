@@ -253,7 +253,8 @@ function metrics(events: FactoryEvent[], runDir: string | undefined) {
     if (e.event === "gate_result" && !e.data.base && e.data.status === "fail") gateFailures++;
     if ((e.event === "agent_finished" || e.event === "agent_error") && e.role && e.model) {
       const key = `${e.role}\0${e.model}`;
-      const u = usage.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+      const billing = e.data.billing === "subscription" ? "subscription" : "metered";
+      const u = usage.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, billing };
       u.calls++;
       if (e.event === "agent_error") u.errors++;
       u.tokens_in += e.tokens_in;

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner } from "../../src/agents/fake-runner.js";
-import { backoffMs, callModel, chainFor, classifyError, InvalidOutputError } from "../../src/agents/models.js";
+import { backoffMs, billedUsage, callModel, chainFor, classifyError, InvalidOutputError } from "../../src/agents/models.js";
 import { AgentError } from "../../src/agents/runner.js";
 import { EventLog } from "../../src/events.js";
 import { loadProfile, parseProfile, PROFILE_ROLES } from "../../src/schemas/profile.js";
@@ -75,7 +75,8 @@ describe("fallback", () => {
       "agent_error", "model_retry", "agent_error", "model_retry", "agent_error", "model_fallback", "agent_finished",
     ]);
     // usage recorded from the error event too
-    expect(ev[0]).toMatchObject({ tokens_in: 10, cost_usd: 0.01, data: { class: "capacity" } });
+    // openai (ChatGPT login) is a subscription: tokens are kept, the catalog price is not
+    expect(ev[0]).toMatchObject({ tokens_in: 10, cost_usd: 0, data: { class: "capacity", billing: "subscription" } });
     expect(ev[5]).toMatchObject({ data: { from: "openai/sol", to: "opencode-go/grok-4.7", class: "capacity" } });
   });
 
@@ -198,5 +199,14 @@ describe("provider allowlist", () => {
   it("every shipped profile passes the allowlist", () => {
     const dir = join(import.meta.dirname, "..", "..", "profiles");
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".yaml"))) expect(() => loadProfile(join(dir, f))).not.toThrow();
+  });
+});
+
+describe("billing", () => {
+  it("metered providers keep their USD cost; subscriptions report tokens only", () => {
+    const profile = { billing: { "opencode-go": "subscription", openai: "subscription" } } as unknown as Parameters<typeof billedUsage>[2];
+    expect(billedUsage("anthropic/x", { tokens_in: 3, tokens_out: 1, cost_usd: 0.2 }, profile)).toEqual({ tokens_in: 3, tokens_out: 1, cost_usd: 0.2, billing: "metered" });
+    expect(billedUsage("opencode-go/m", { tokens_in: 3, tokens_out: 1, cost_usd: 0.2 }, profile)).toEqual({ tokens_in: 3, tokens_out: 1, cost_usd: 0, billing: "subscription" });
+    expect(billedUsage("openai/m", undefined, profile)).toEqual({ cost_usd: 0, billing: "subscription" });
   });
 });

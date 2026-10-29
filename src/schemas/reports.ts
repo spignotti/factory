@@ -49,10 +49,12 @@ export const StatsPeriodSchema = z.strictObject({
   reasons: z.array(z.strictObject({ result: z.string(), reason: z.string(), count: z.number().int() })),
   providers: z.record(
     z.string(),
-    z.strictObject({ ...usage, errors: z.number().int(), fallbacks: z.number().int(), capacity_errors: z.number().int(), limit_errors: z.number().int() }),
+    z.strictObject({ ...usage, billing: z.enum(["subscription", "metered"]), errors: z.number().int(), fallbacks: z.number().int(), capacity_errors: z.number().int(), limit_errors: z.number().int() }),
   ),
   roles: z.record(z.string(), z.strictObject(usage)),
+  /** USD of metered providers only; subscription usage is counted in subscription_tokens. */
   cost_usd: z.number(),
+  subscription_tokens: z.strictObject({ tokens_in: z.number(), tokens_out: z.number() }),
   lane_escalations: z.number().int(),
   watchdog_aborts: z.number().int(),
   merge_policy: counts,
@@ -66,7 +68,7 @@ export const StatsReportSchema = z.strictObject({
   repo: nullableStr,
   current: StatsPeriodSchema,
   previous: StatsPeriodSchema,
-  delta: z.strictObject({ runs: z.number().int(), done_rate: z.number().nullable(), cost_usd: z.number(), median_rounds: z.number().nullable() }),
+  delta: z.strictObject({ runs: z.number().int(), done_rate: z.number().nullable(), cost_usd: z.number(), subscription_tokens: z.number(), median_rounds: z.number().nullable() }),
 });
 
 export const GcReportSchema = z.strictObject({

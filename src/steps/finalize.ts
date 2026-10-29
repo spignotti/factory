@@ -9,6 +9,7 @@ import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { type MergePolicy, mergePolicy, riskClass, type RiskAssessment } from "../pipeline/risk.js";
+import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { type GateReport, runGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
@@ -62,6 +63,23 @@ export async function syncBase(ctx: RunContext, step = "finalize"): Promise<{ ok
   return gates.green
     ? { ok: true, reason: "", gates }
     : { ok: false, reason: `base ${ctx.repo.base_branch} moved: gates red after merging it`, gates };
+}
+
+/**
+ * Cost lines of the PR stats: USD only for metered providers; subscription usage (OpenCode Go,
+ * ChatGPT login) is shown in tokens, since a per-call price does not apply there.
+ */
+export function costLines(usage: RoleUsage[]): string[] {
+  const sub = usage.filter((u) => u.billing === "subscription");
+  const metered = usage.filter((u) => u.billing !== "subscription");
+  const lines: string[] = [];
+  if (sub.length) {
+    const tin = sub.reduce((a, u) => a + u.tokens_in, 0);
+    const tout = sub.reduce((a, u) => a + u.tokens_out, 0);
+    lines.push(`- subscription tokens: ${tin} in / ${tout} out`);
+  }
+  if (metered.length || !sub.length) lines.push(`- cost (metered providers): $${metered.reduce((a, u) => a + u.cost_usd, 0).toFixed(4)}`);
+  return lines;
 }
 
 function cell(s: string): string {
@@ -120,10 +138,10 @@ export function renderPrBody(ctx: RunContext, v: {
       `- rounds: ${input.rounds}`,
       `- duration: ${((Date.now() - input.startedAt) / 60_000).toFixed(1)} min`,
       `- tokens: ${ctx.events.totals.tokens_in} in / ${ctx.events.totals.tokens_out} out`,
-      `- cost: $${ctx.events.totals.cost_usd.toFixed(4)}`,
-      "- models (role: model, calls, tokens in/out, cost):",
+      ...costLines(ctx.events.usage()),
+      "- models (role: model, calls, tokens in/out, cost or subscription):",
       ...ctx.events.usage().map(
-        (u) => `  - ${u.role}: \`${u.model}\` ×${u.calls}${u.errors ? ` (${u.errors} failed)` : ""}, ${u.tokens_in}/${u.tokens_out}, $${u.cost_usd.toFixed(4)}`,
+        (u) => `  - ${u.role}: \`${u.model}\` ×${u.calls}${u.errors ? ` (${u.errors} failed)` : ""}, ${u.tokens_in}/${u.tokens_out}, ${u.billing === "subscription" ? "subscription" : `$${u.cost_usd.toFixed(4)}`}`,
       ),
     ].join("\n"),
     blockers: out.result === "needs_human"

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigError, describeProfile, type Layer, loadLayers, parseLayer, resolveProfile, withRepoModels } from "../../src/config.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
+import { billingOf } from "../../src/schemas/profile.js";
 
 const home = (profile?: string) => {
   const dir = mkdtempSync(join(tmpdir(), "fh-"));
@@ -104,5 +105,22 @@ describe("layered model config (Amendment i)", () => {
       models: ["opencode-go/deepseek-v4.1-flash (high)", "opencode-go/mimo-v2.6-flash [capacity-only]"],
       layer: "built-in",
     });
+  });
+});
+
+describe("billing kinds", () => {
+  it("defaults: opencode-go and openai are subscriptions, anything else metered; the user profile can change it", () => {
+    const p = resolveProfile(loadLayers({ factoryHome: home() }));
+    expect(p.billing).toEqual({ "opencode-go": "subscription", openai: "subscription" });
+    expect(billingOf("opencode-go/deepseek-v4.1-flash", p.billing)).toBe("subscription");
+    expect(billingOf("anthropic/claude", p.billing)).toBe("metered");
+    const u = resolveProfile(loadLayers({ factoryHome: home("billing: { openai: metered, anthropic: subscription }\n") }));
+    expect(u.billing).toEqual({ "opencode-go": "subscription", openai: "metered", anthropic: "subscription" });
+    expect(withRepoModels(u, { pr_writer: [{ model: "opencode-go/grok-4.7" }] }).billing).toEqual(u.billing);
+  });
+
+  it("only the built-in and user profile may set billing", () => {
+    expect(() => parseLayer("cli", "v.yaml", "billing: { openai: metered }\n")).toThrow(/billing can only be set/);
+    expect(() => parseLayer("user", "p.yaml", "billing: { openai: free }\n")).toThrow(ConfigError);
   });
 });

@@ -33,6 +33,21 @@ export function providerOf(model: string): string {
   return model.slice(0, model.indexOf("/"));
 }
 
+/**
+ * How a provider bills: `subscription` (flat plan, e.g. OpenCode Go, OpenAI via the ChatGPT login)
+ * or `metered` (per-use USD). Usage on a subscription is reported in tokens, never in USD: the
+ * catalog price Pi reports would be wrong there. Providers not listed are metered.
+ */
+export const BillingKindSchema = z.enum(["subscription", "metered"]);
+export type BillingKind = z.infer<typeof BillingKindSchema>;
+export const DEFAULT_BILLING: Record<string, BillingKind> = { "opencode-go": "subscription", openai: "subscription" };
+export const BillingSchema = z.record(z.string().min(1), BillingKindSchema);
+export type Billing = z.infer<typeof BillingSchema>;
+
+export function billingOf(model: string, billing: Billing): BillingKind {
+  return billing[providerOf(model)] ?? "metered";
+}
+
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 
 export const ModelEntrySchema = z.object({
@@ -137,6 +152,8 @@ export const ProfileSchema = z
   .object({
     roles: RolesSchema,
     providers: ProvidersSchema.default(DEFAULT_PROVIDERS),
+    /** Billing kind per provider (subscription → tokens in reports, metered → USD). */
+    billing: BillingSchema.default({ ...DEFAULT_BILLING }),
     /** Process sandbox for agents and repo commands (Amendment j). */
     sandbox: SandboxModeSchema.default("preferred"),
     /** Same-model exponential backoff on capacity errors before falling back. */
@@ -182,6 +199,7 @@ export const ProfileLayerSchema = z
     retry: RetrySchema.partial().optional(),
     env: z.record(z.string(), z.array(z.string())).optional(),
     providers: ProvidersSchema.partial().optional(),
+    billing: BillingSchema.optional(),
     sandbox: SandboxModeSchema.optional(),
   })
   .strict();

@@ -406,6 +406,20 @@
         }
       }
     },
+    "billing": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "string",
+        "enum": [
+          "subscription",
+          "metered"
+        ]
+      }
+    },
     "description": {
       "type": "string"
     },

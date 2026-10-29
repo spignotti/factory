@@ -15,9 +15,9 @@ describe("events", () => {
     const again = new EventLog(dir, "run-1");
     again.emit({ step: "review", event: "agent_finished", role: "review_plan", model: "c", tokens_in: 1 });
     expect(again.usage()).toEqual([
-      { role: "implement", model: "a", calls: 1, errors: 1, tokens_in: 5, tokens_out: 0, cost_usd: 0.1 },
-      { role: "implement", model: "b", calls: 2, errors: 0, tokens_in: 20, tokens_out: 4, cost_usd: 0 },
-      { role: "review_plan", model: "c", calls: 1, errors: 0, tokens_in: 1, tokens_out: 0, cost_usd: 0 },
+      { role: "implement", model: "a", calls: 1, errors: 1, tokens_in: 5, tokens_out: 0, cost_usd: 0.1, billing: "metered" },
+      { role: "implement", model: "b", calls: 2, errors: 0, tokens_in: 20, tokens_out: 4, cost_usd: 0, billing: "metered" },
+      { role: "review_plan", model: "c", calls: 1, errors: 0, tokens_in: 1, tokens_out: 0, cost_usd: 0, billing: "metered" },
     ]);
   });
 

@@ -1,7 +1,7 @@
 import type { EventLog } from "../events.js";
-import { familyOf, type ModelEntry, type Profile, profileRoleOf } from "../schemas/profile.js";
+import { billingOf, familyOf, type ModelEntry, type Profile, profileRoleOf } from "../schemas/profile.js";
 import { realSleep, type Sleep } from "./fake-runner.js";
-import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner } from "./runner.js";
+import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage } from "./runner.js";
 
 export type ErrorClass = "capacity" | "limit" | "auth" | "invalid_output" | "other";
 
@@ -75,6 +75,15 @@ function nextEntry(chain: ModelEntry[], i: number, cls: ErrorClass): number {
  * exponential backoff, then fall back; limit/auth/other fall back directly, skipping
  * `capacity_only` entries; invalid output never falls back. Usage is recorded from successful and failed calls.
  */
+/**
+ * Usage as recorded: a subscription provider bills no per-call USD, so its catalog cost is dropped
+ * (reports show its tokens instead); `data.billing` keeps the kind for `stats`.
+ */
+export function billedUsage(model: string, usage: Partial<AgentUsage> | undefined, profile: Profile): Partial<AgentUsage> & { billing: "subscription" | "metered" } {
+  const billing = billingOf(model, profile.billing);
+  return { ...usage, ...(billing === "subscription" ? { cost_usd: 0 } : {}), billing };
+}
+
 export async function callModel(deps: CallDeps, step: string, req: ModelRequest): Promise<ModelResponse> {
   const { profile, events } = deps;
   const sleep = deps.sleep ?? realSleep;
@@ -86,19 +95,20 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
     for (let attempt = 0; ; attempt++) {
       try {
         const res = await deps.runner.run({ ...req, model: entry.model, thinking: entry.thinking });
-        events.emit({ step, event: "agent_finished", role: req.role, model: entry.model, ...res.usage });
+        const { billing, ...usage } = billedUsage(entry.model, res.usage, profile);
+        events.emit({ step, event: "agent_finished", role: req.role, model: entry.model, ...usage, data: { billing } });
         return { ...res, model: entry.model };
       } catch (err) {
         lastError = err;
         const cls = classifyError(err);
-        const usage = err instanceof AgentError ? err.usage : undefined;
+        const { billing, ...usage } = billedUsage(entry.model, err instanceof AgentError ? err.usage : undefined, profile);
         events.emit({
           step,
           event: "agent_error",
           role: req.role,
           model: entry.model,
           ...usage,
-          data: { class: cls, message: (err as Error).message.slice(0, 500) },
+          data: { class: cls, message: (err as Error).message.slice(0, 500), billing },
         });
         if (req.signal?.aborted) throw err;
         if (cls === "invalid_output") throw err;

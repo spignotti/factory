@@ -65,7 +65,9 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(pr.body).toContain("| [x] | A1 | multiply(2, 3) returns 6 | test | test: `test/multiply.test.js::multiply` |");
     expect(pr.body).toContain("merge policy: **human_review**");
     expect(pr.body).toMatch(/✅ unit/);
-    expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, \$\d+\.\d{4}/);
+    expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, subscription/);
+    expect(pr.body).toMatch(/- subscription tokens: \d+ in \/ \d+ out/);
+    expect(pr.body).not.toMatch(/- cost \(metered providers\)/);
     expect(pr.body).toMatch(/- review_plan: `openai\/[\w.-]+` ×1/);
     expect(r.file("pr.md")).toBe(pr.body);
 
@@ -87,7 +89,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
     for (const k of ["step_started", "step_finished", "gate_result", "round_finished", "agent_finished", "run_finished"]) expect(kinds).toContain(k);
     expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "done" } });
     expect(eventsOf(r, "agent_finished").find((e) => e.role === "implement")).toMatchObject({ tokens_in: 1000, tokens_out: 200 });
-    expect(r.result.cost_usd).toBeCloseTo(0.012, 6);
+    // result.json cost_usd counts metered providers only; these fake models are subscriptions
+    expect(r.result.cost_usd).toBe(0);
   });
 
   it("agents get the allowlisted env and an isolated HOME; no env values in events or result", async () => {
@@ -322,7 +325,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.slept).toEqual([1000, 2000]);
     expect(eventsOf(r, "model_retry")).toHaveLength(2);
     expect(eventsOf(r, "model_fallback")[0]).toMatchObject({ data: { from: "openai/sol", to: "opencode-go/grok-4.7", class: "capacity" } });
-    expect(eventsOf(r, "agent_error")[0]).toMatchObject({ tokens_in: 300, cost_usd: 0.003 });
+    expect(eventsOf(r, "agent_error")[0]).toMatchObject({ tokens_in: 300, cost_usd: 0, data: { billing: "subscription" } });
   });
 
   it("invalid handoff: one re-prompt, then the package fails -> needs_human", async () => {

@@ -89,7 +89,7 @@ export const EvalProfileSchema = ProfileLayerSchema.omit({ providers: true, sand
   .strict();
 export type EvalProfile = z.infer<typeof EvalProfileSchema>;
 
-const Usage = z.object({ role: z.string(), model: z.string(), calls: z.number().int(), errors: z.number().int(), tokens_in: z.number(), tokens_out: z.number(), cost_usd: z.number() });
+const Usage = z.object({ role: z.string(), model: z.string(), calls: z.number().int(), errors: z.number().int(), tokens_in: z.number(), tokens_out: z.number(), cost_usd: z.number(), billing: z.enum(["subscription", "metered"]).optional() });
 
 /** One line of `evals/results/<date>.jsonl`: one task × profile × repeat. */
 export const EvalRecordSchema = z

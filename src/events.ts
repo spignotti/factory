@@ -62,6 +62,8 @@ export interface RoleUsage {
   tokens_in: number;
   tokens_out: number;
   cost_usd: number;
+  /** Subscription usage is reported in tokens only (its cost_usd is 0). */
+  billing: "subscription" | "metered";
 }
 
 export class EventLog {
@@ -98,7 +100,8 @@ export class EventLog {
     this.totals.cost_usd += e.cost_usd ?? 0;
     if ((e.event === "agent_finished" || e.event === "agent_error") && e.role && e.model) {
       const key = `${e.role}\0${e.model}`;
-      const u = this.byRole.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+      const billing = e.data?.billing === "subscription" ? "subscription" : "metered";
+      const u = this.byRole.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, billing };
       u.calls += 1;
       if (e.event === "agent_error") u.errors += 1;
       u.tokens_in += e.tokens_in ?? 0;
@@ -180,6 +183,7 @@ export const ResultSchema = z.object({
   pr: z.string().nullable(),
   rounds: z.number().int().min(0),
   minutes: z.number().min(0),
+  /** USD of metered providers only; subscription usage (see profile `billing`) is reported in tokens. */
   cost_usd: z.number().min(0),
   reason: z.string(),
   questions: z.array(z.string()).optional(),

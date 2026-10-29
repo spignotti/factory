@@ -15,6 +15,11 @@ roles:
   evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
   pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
   harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
+# Billing kind per provider: subscription usage is reported in tokens, metered usage in USD.
+# Providers not listed are metered. Only this file and the user profile may set it.
+billing:
+  opencode-go: subscription
+  openai: subscription
 retry:
   base_ms: 2000
   max_ms: 60000

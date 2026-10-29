@@ -199,6 +199,13 @@
               "cost_usd": {
                 "type": "number"
               },
+              "billing": {
+                "type": "string",
+                "enum": [
+                  "subscription",
+                  "metered"
+                ]
+              },
               "errors": {
                 "type": "integer",
                 "minimum": -9007199254740991,
@@ -225,6 +232,7 @@
               "tokens_in",
               "tokens_out",
               "cost_usd",
+              "billing",
               "errors",
               "fallbacks",
               "capacity_errors",
@@ -267,6 +275,22 @@
         },
         "cost_usd": {
           "type": "number"
+        },
+        "subscription_tokens": {
+          "type": "object",
+          "properties": {
+            "tokens_in": {
+              "type": "number"
+            },
+            "tokens_out": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "tokens_in",
+            "tokens_out"
+          ],
+          "additionalProperties": false
         },
         "lane_escalations": {
           "type": "integer",
@@ -315,6 +339,7 @@
         "providers",
         "roles",
         "cost_usd",
+        "subscription_tokens",
         "lane_escalations",
         "watchdog_aborts",
         "merge_policy",
@@ -506,6 +531,13 @@
               "cost_usd": {
                 "type": "number"
               },
+              "billing": {
+                "type": "string",
+                "enum": [
+                  "subscription",
+                  "metered"
+                ]
+              },
               "errors": {
                 "type": "integer",
                 "minimum": -9007199254740991,
@@ -532,6 +564,7 @@
               "tokens_in",
               "tokens_out",
               "cost_usd",
+              "billing",
               "errors",
               "fallbacks",
               "capacity_errors",
@@ -574,6 +607,22 @@
         },
         "cost_usd": {
           "type": "number"
+        },
+        "subscription_tokens": {
+          "type": "object",
+          "properties": {
+            "tokens_in": {
+              "type": "number"
+            },
+            "tokens_out": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "tokens_in",
+            "tokens_out"
+          ],
+          "additionalProperties": false
         },
         "lane_escalations": {
           "type": "integer",
@@ -622,6 +671,7 @@
         "providers",
         "roles",
         "cost_usd",
+        "subscription_tokens",
         "lane_escalations",
         "watchdog_aborts",
         "merge_policy",
@@ -647,6 +697,9 @@
         "cost_usd": {
           "type": "number"
         },
+        "subscription_tokens": {
+          "type": "number"
+        },
         "median_rounds": {
           "type": [
             "number",
@@ -658,6 +711,7 @@
         "runs",
         "done_rate",
         "cost_usd",
+        "subscription_tokens",
         "median_rounds"
       ],
       "additionalProperties": false
