@@ -85,7 +85,7 @@ describe("factory harden", () => {
   it("caps the list at max_proposals (repo.yaml, --max wins) and keeps the valid ones after the retry", async () => {
     const ctx = setup();
     writeFileSync(join(ctx.repo, ".factory/repo.yaml"), REPO_YAML + "harden:\n  max_proposals: 3\n");
-    gitIn(ctx.repo, "commit", "-qam", "max 3");
+    gitIn(ctx.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "max 3");
     seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 }), entry("b", { count: 2 }), entry("c", { count: 2 })]);
     const answer = selection(item("A", ["a"]), item("A again", ["a"]), item("C", ["c"]), item("B", ["b"]));
     const { report, runner } = await run(ctx, [{ role: "harden", output: answer }, { role: "harden", output: answer }], new FakeGitHub(), false, 2);
