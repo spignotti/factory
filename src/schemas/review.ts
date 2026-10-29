@@ -49,5 +49,5 @@ export const ReviewOutputSchema = z.object({
 });
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>;
 
-/** Fast lane `lean` review: plan and simplicity in one session (Amendment m). */
+/** Fast lane `lean` review: plan and simplicity in one session. */
 export const LeanOutputSchema = z.object({ reviews: z.array(ReviewOutputSchema) });

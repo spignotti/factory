@@ -4,7 +4,7 @@ const round = (n: number, d = 4) => Math.round(n * 10 ** d) / 10 ** d;
 const mean = (xs: number[]) => (xs.length ? round(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
 
 /**
- * Determinism ratio (SPEC amendment q): over the tasks a profile ran at least twice, the share whose
+ * Determinism ratio: over the tasks a profile ran at least twice, the share whose
  * repeats all agree on hidden pass and on the run result. Null when no task ran twice.
  */
 export function determinismRatio(records: EvalRecord[]): number | null {
@@ -51,7 +51,7 @@ const costOf = (s: ProfileSummary, m: CostMeasure) => (m === "usd" ? s.mean_cost
 const lower = (b: number, a: number) => a > 0 && b <= a * (1 - MARGIN) + EPS;
 
 /**
- * §13 decision rule: B beats A when B's pass rate is ≥ A's and at least one of: a higher pass rate,
+ * Decision rule: B beats A when B's pass rate is ≥ A's and at least one of: a higher pass rate,
  * ≥ 10 % lower cost, ≥ 10 % lower wall time. Returns the reasons, or null when B does not beat A.
  */
 export function beats(b: ProfileSummary, a: ProfileSummary, measure = costMeasure(a, b)): string[] | null {
@@ -89,6 +89,14 @@ export function decide(base: ProfileSummary, variant: ProfileSummary, repeat: nu
   return { verdict: "tie", keep: "base", reasons: [...reasons, "tie keeps the simpler profile (base)"], cost_measure: measure };
 }
 
+/** True when the records' agent calls all ran on subscriptions (no per-use USD; compare tokens). */
+export function subscriptionOnly(rs: EvalRecord[]): boolean {
+  const usage = rs.flatMap((r) => r.usage);
+  return usage.length > 0 && usage.every((u) => u.billing === "subscription");
+}
+/** USD, or "subscription" where no call was metered (the tokens column is the cost then). */
+const costCell = (rs: EvalRecord[], usd: number | null) => (subscriptionOnly(rs) ? "subscription" : usd);
+
 const cell = (v: unknown) => (v === null || v === undefined ? "–" : String(v)).replace(/\|/g, "\\|");
 const row = (cells: unknown[]) => `| ${cells.map(cell).join(" | ")} |`;
 
@@ -100,7 +108,7 @@ export function markdownTable(records: EvalRecord[], profiles: string[]): string
   ];
   for (const p of profiles) {
     const s = summarize(p, records);
-    lines.push(row([p, s.runs, s.pass_rate, s.passes, s.mean_cost_usd, s.mean_tokens, s.mean_wall_s, s.mean_rounds, s.gate_failures, s.bug_findings, s.real_findings, s.errors, s.determinism_ratio]));
+    lines.push(row([p, s.runs, s.pass_rate, s.passes, costCell(records.filter((r) => r.profile === p), s.mean_cost_usd), s.mean_tokens, s.mean_wall_s, s.mean_rounds, s.gate_failures, s.bug_findings, s.real_findings, s.errors, s.determinism_ratio]));
   }
   lines.push("", row(["task", "profile", "hidden pass", "results", "rounds", "gate failures", "real findings", "cost $", "tokens", "wall s"]), row(Array(10).fill("---")));
   const tasks = [...new Set(records.map((r) => r.task))];
@@ -117,7 +125,7 @@ export function markdownTable(records: EvalRecord[], profiles: string[]): string
           rs.map((r) => r.rounds).join(", "),
           rs.reduce((a, r) => a + r.gate_failures, 0),
           rs.reduce((a, r) => a + r.real_findings, 0),
-          round(rs.reduce((a, r) => a + r.cost_usd, 0)),
+          costCell(rs, round(rs.reduce((a, r) => a + r.cost_usd, 0))),
           rs.reduce((a, r) => a + r.tokens_in + r.tokens_out, 0),
           round(rs.reduce((a, r) => a + r.wall_s, 0), 1),
         ]),

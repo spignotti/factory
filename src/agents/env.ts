@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Variables agent tool processes may inherit from the factory (Amendment b). Everything else is dropped. */
+/** Variables agent tool processes may inherit from the factory. Everything else is dropped. */
 export const BASE_ENV_ALLOWLIST = [
   "PATH",
   "LANG",
@@ -17,7 +17,7 @@ export const BASE_ENV_ALLOWLIST = [
 
 /**
  * Never passed, even when configured (repo.yaml `agent_env`, profile `env`): only the factory process
- * pushes, calls `gh` and talks to model providers (SPEC §8.3).
+ * pushes, calls `gh` and talks to model providers.
  */
 export const NEVER_PASSED = new Set([
   // Model provider credentials of the factory itself (Pi reads them from the factory's env/auth.json).

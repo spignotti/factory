@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { detect, noxSessions } from "../../src/adopt/detect.js";
 import { draftChecks, draftRepoYaml, SLOW_CHECK_SECONDS, testStrategySection, withTestStrategy } from "../../src/adopt/draft.js";
-import { classifyLegacy, keepMatcher, legacyAgentsSections, lineCovered } from "../../src/adopt/legacy.js";
+import { classifyLegacy, keepMatcher, lineCovered } from "../../src/adopt/legacy.js";
 import { measureChecks } from "../../src/adopt/measure.js";
+import { trimAgentsMd } from "../../src/adopt/agents-md.js";
 import { settingsHints } from "../../src/commands/adopt.js";
 import { gitIn } from "../helpers/repo.js";
 import { legacyNodeRepo, makeRepo } from "../helpers/adopt-repo.js";
@@ -79,13 +80,13 @@ describe("adopt legacy", () => {
         ".cursor/config/bugbot.yaml",
         ".github/workflows/ci.yml",
         ".github/workflows/claude.yml",
-        ".grok/commands/maintain.md",
-        ".grok/config.toml",
         "CLAUDE.md",
         "opencode.json",
       ].sort(),
     );
-    expect(r.proposed.map((i) => i.path).sort()).toEqual([".cursor/environment.json", ".github/workflows/security.yml", ".grok/skills/server-ops/SKILL.md", ".opencode/skills/vm/scripts/run.sh"]);
+    // .grok/ holds a skills folder: operator tooling (e.g. a /maintain ops command), so nothing in it is deleted.
+    expect(r.proposed.map((i) => i.path).sort()).toEqual([".cursor/environment.json", ".github/workflows/security.yml", ".grok/commands/maintain.md", ".grok/config.toml", ".grok/skills/server-ops/SKILL.md", ".opencode/skills/vm/scripts/run.sh"]);
+    expect(r.proposed.find((i) => i.path === ".grok/commands/maintain.md")!.reason).toMatch(/operator tooling/);
     expect(r.proposed.find((i) => i.path.endsWith("security.yml"))!.reason).toContain("gitleaks");
     expect(r.kept).toEqual([]);
   });
@@ -109,8 +110,8 @@ describe("adopt legacy", () => {
     expect(r.proposed[0]!.reason).toContain("./scripts/smoke.sh");
   });
 
-  it("AGENTS.md sections about legacy tools are proposed, not edited", () => {
-    expect(legacyAgentsSections("# A\n\n## Rules\n- small\n\n## Workflow\nRun the opencode runner.\n\n## Grok\nx\n")).toEqual(["Workflow", "Grok"]);
+  it("AGENTS.md: workflow and tool sections are proposed, not edited", () => {
+    expect(trimAgentsMd("# A\n\n## Rules\n- small\n\n## Workflow\nRun the opencode runner.\n\n## Grok\nx\n").proposed.map((p) => p.title)).toEqual(["Workflow", "Grok"]);
   });
 });
 

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
@@ -30,19 +30,26 @@ function toFastLane(steps: FakeStep[]): FakeStep[] {
 
 describe("E2E with fake-runner on a fixture repo", () => {
   it("planner and plan_normalize read a clean base worktree, never the user's checkout (untracked .env)", async () => {
-    const seen: { role: string; cwd: string; env: boolean; listed: boolean }[] = [];
+    const seen: { role: string; cwd: string; env: boolean; listed: boolean; agents: string; pasted: boolean }[] = [];
     const record = (req: AgentRequest, repo: string) => {
       if (!req.role.startsWith("plan")) return;
       expect(req.cwd).not.toBe(repo);
-      seen.push({ role: req.role, cwd: req.cwd, env: existsSync(join(req.cwd, ".env")), listed: req.prompt.includes(".env") });
+      const agents = readFileSync(join(req.cwd, "AGENTS.md"), "utf8");
+      seen.push({ role: req.role, cwd: req.cwd, env: existsSync(join(req.cwd, ".env")), listed: req.prompt.includes(".env"), agents, pasted: req.prompt.includes("BASE RULE") });
     };
-    const setup = (repo: string) => writeFileSync(join(repo, ".env"), `SECRET=${SECRET}\n`);
+    const setup = (repo: string) => {
+      // AGENTS.md at the base SHA reaches the agent as session context (the worktree's file), not
+      // pasted into the prompt; an uncommitted edit in the checkout does not reach it at all.
+      commitFile(repo, "AGENTS.md", "BASE RULE\n", "agents");
+      writeFileSync(join(repo, "AGENTS.md"), "UNCOMMITTED RULE\n");
+      writeFileSync(join(repo, ".env"), `SECRET=${SECRET}\n`);
+    };
     const std = await runScenario({ script: "clean.json", setup, onCall: record });
     const norm = await runScenario({ script: "normalize-ok.json", options: { planEffort: "none" }, setup, onCall: record });
     expect(std.result.result).toBe("done");
     expect(norm.result.result).toBe("done");
     expect(seen.map((s) => s.role)).toEqual(["plan_high", "plan_normalize"]);
-    for (const s of seen) expect(s).toMatchObject({ env: false, listed: false });
+    for (const s of seen) expect(s).toMatchObject({ env: false, listed: false, agents: "BASE RULE\n", pasted: false });
     // removed again, and not registered as a worktree any more
     expect(existsSync(seen[0]!.cwd)).toBe(false);
     expect(git(std.repo, "worktree", "list")).not.toContain("plan-base");
@@ -65,7 +72,9 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(pr.body).toContain("| [x] | A1 | multiply(2, 3) returns 6 | test | test: `test/multiply.test.js::multiply` |");
     expect(pr.body).toContain("merge policy: **human_review**");
     expect(pr.body).toMatch(/✅ unit/);
-    expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, \$\d+\.\d{4}/);
+    expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, subscription/);
+    expect(pr.body).toMatch(/- subscription tokens: \d+ in \/ \d+ out/);
+    expect(pr.body).not.toMatch(/- cost \(metered providers\)/);
     expect(pr.body).toMatch(/- review_plan: `openai\/[\w.-]+` ×1/);
     expect(r.file("pr.md")).toBe(pr.body);
 
@@ -78,7 +87,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
       expect(() => r.file(f)).not.toThrow();
     }
 
-    // events: SPEC fields and lifecycle
+    // events: required fields and lifecycle
     for (const e of r.events) {
       expect(Object.keys(e).sort()).toEqual(["cost_usd", "data", "event", "model", "role", "run_id", "step", "tokens_in", "tokens_out", "ts"]);
       expect(e.run_id).toBe(r.result.run_id);
@@ -87,7 +96,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
     for (const k of ["step_started", "step_finished", "gate_result", "round_finished", "agent_finished", "run_finished"]) expect(kinds).toContain(k);
     expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "done" } });
     expect(eventsOf(r, "agent_finished").find((e) => e.role === "implement")).toMatchObject({ tokens_in: 1000, tokens_out: 200 });
-    expect(r.result.cost_usd).toBeCloseTo(0.012, 6);
+    // result.json cost_usd counts metered providers only; these fake models are subscriptions
+    expect(r.result.cost_usd).toBe(0);
   });
 
   it("agents get the allowlisted env and an isolated HOME; no env values in events or result", async () => {
@@ -160,6 +170,28 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(gate1.checks.find((c: { name: string }) => c.name === "syntax").status).toBe("fail");
     expect(JSON.parse(r.file("gates-2.json")).green).toBe(true);
     expect(eventsOf(r, "gate_result").some((e) => e.data.status === "fail")).toBe(true);
+  });
+
+  it("an added lint suppression the plan does not name fails the gates and goes back to the implementer", async () => {
+    let first = true;
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      steps: (s) =>
+        s.map((x) => {
+          if (x.role !== "implement" || !first || !x.writes) return x;
+          first = false;
+          const fixed = s.filter((y) => y.role === "implement")[1]!.writes!["src/math.js"]!;
+          return { ...x, writes: { ...x.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars
+${fixed}` } };
+        }),
+    });
+    expect(r.result.result).toBe("done");
+    const gate1 = JSON.parse(r.file("gates-1.json"));
+    const guard = gate1.checks.find((c: { name: string }) => c.name === "config_guard");
+    expect(guard.status).toBe("fail");
+    expect(guard.output_tail).toContain("src/math.js: adds `eslint-disable`");
+    expect(r.runner.calls.filter((c) => c.role === "implement")[1]!.prompt).toContain("config_guard");
+    expect(JSON.parse(r.file("gates-2.json")).green).toBe(true);
   });
 
   it("accepted wontfix: done after round 2", async () => {
@@ -322,7 +354,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.slept).toEqual([1000, 2000]);
     expect(eventsOf(r, "model_retry")).toHaveLength(2);
     expect(eventsOf(r, "model_fallback")[0]).toMatchObject({ data: { from: "openai/sol", to: "opencode-go/grok-4.7", class: "capacity" } });
-    expect(eventsOf(r, "agent_error")[0]).toMatchObject({ tokens_in: 300, cost_usd: 0.003 });
+    expect(eventsOf(r, "agent_error")[0]).toMatchObject({ tokens_in: 300, cost_usd: 0, data: { billing: "subscription" } });
   });
 
   it("invalid handoff: one re-prompt, then the package fails -> needs_human", async () => {

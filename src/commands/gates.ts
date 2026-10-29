@@ -61,7 +61,7 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
       return 1;
     }
   }
-  // Services (§6.12) for the checks that need them: started here, unsandboxed like the checks, stopped
+  // Services for the checks that need them: started here, unsandboxed like the checks, stopped
   // before returning. Logs go to a temp dir that is printed when a service fails.
   const runId = `gates-${new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${process.pid}`;
   const logDir = join(tmpdir(), `factory-${runId}`, "services");

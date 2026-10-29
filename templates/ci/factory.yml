@@ -1,4 +1,4 @@
-# Generated from spignotti/factory templates/ci/factory.yml (SPEC §5.3). Do not edit by hand:
+# Generated from spignotti/factory templates/ci/factory.yml. Do not edit by hand:
 # `factory doctor --repo .` compares this file's hash with the template for the pinned ref.
 # Render a new one with `factory ci-stub --ref <tag>`; bumping the ref is a deliberate PR.
 name: factory

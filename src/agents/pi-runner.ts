@@ -12,7 +12,6 @@ import {
   createWriteToolDefinition,
   createExtensionRuntime,
   defineTool,
-  loadProjectContextFiles,
   ModelRuntime,
   type ResourceLoader,
   SessionManager,
@@ -20,6 +19,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { BrowserTools } from "../evaluate/tools.js";
+import { isolatedContextFiles } from "./context-files.js";
 import { endpointViolation } from "./provider-guard.js";
 import { PathGuard } from "../sandbox/guard.js";
 import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
@@ -78,7 +78,7 @@ export class PiRunner implements AgentRunner {
     const { provider, model: modelId } = splitModel(req.model);
     const model = runtime.getModel(provider, modelId);
     if (!model) throw new AgentError(`unknown model ${req.model}`);
-    // Zen guard at runtime (Amendment e), the same rules as `doctor`: never the Zen endpoint by a
+    // Zen guard at runtime, the same rules as `doctor`: never the Zen endpoint by a
     // models.json override, never OpenAI on an API key.
     const zen = endpointViolation(req.model, model.baseUrl);
     if (zen) throw new AgentError(`refused: ${zen}`, undefined, 403);
@@ -86,8 +86,11 @@ export class PiRunner implements AgentRunner {
       throw new AgentError(`refused: ${req.model} needs the ChatGPT login (subscription) in the factory's Pi auth.json, not an API key`, undefined, 403);
     }
     const agentDir = req.agentDir ?? this.agentDir;
-    // No user extensions, skills, prompt templates or memory; the repo's AGENTS.md is allowed (SPEC §8.3).
-    const agentsFiles = loadProjectContextFiles({ cwd: req.cwd, agentDir });
+    // No user extensions, skills, prompt templates or memory; only the worktree's own AGENTS.md (no
+    // ancestor or agent-dir context, no AGENTS.override.md).
+    const context = isolatedContextFiles(req.cwd);
+    for (const w of context.warnings) req.onActivity?.({ kind: "progress", detail: `warning: ${w}` });
+    const agentsFiles = context.files;
     const resourceLoader: ResourceLoader = {
       getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
       getSkills: () => ({ skills: [], diagnostics: [] }),
@@ -113,7 +116,7 @@ export class PiRunner implements AgentRunner {
       tools,
       customTools,
       sessionManager: SessionManager.inMemory(req.cwd),
-      // Pi's own retries are off: the factory decides on backoff and fallback (Amendment c).
+      // Pi's own retries are off: the factory decides on backoff and fallback.
       settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true } }),
     });
     return session;
@@ -175,8 +178,8 @@ export class PiRunner implements AgentRunner {
 
 /**
  * Custom tools replace the built-ins of the same name (AgentSession._refreshToolRegistry).
- * bash: exactly the allowlisted env (Amendment b), jailed by bwrap/pasta when a jail is given; the
- * in-process file tools go through a PathGuard confined to the session cwd (Amendment j).
+ * bash: exactly the allowlisted env, jailed by bwrap/pasta when a jail is given; the
+ * in-process file tools go through a PathGuard confined to the session cwd.
  */
 export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail">, tools: string[]): ToolDefinition[] {
   const { cwd, env, jail } = req;

@@ -1,6 +1,7 @@
 import picomatch from "picomatch";
 import type { Candidate, Workflow } from "./detect.js";
 import { specialJobs } from "./detect.js";
+import { trimAgentsMd } from "./agents-md.js";
 
 /**
  * Legacy coding setup (Silas decision for M5): the adopt PR deletes what the factory replaces and lists
@@ -57,8 +58,54 @@ const PROPOSE: [string, string][] = [
   ["**/CLAUDE.md", "nested Claude Code instructions"],
 ];
 
+/** Review-bot rule files: adopt migrates their rules into `.factory/review-rules.md` before deleting them. */
+const REVIEW_FILE = picomatch(["**/BUGBOT.md", ".cursor/config/bugbot.*", ".bugbot/**"], { dot: true });
+/** Keys in a review-bot config that carry rules (not just switches). */
+const REVIEW_RULE_KEYS = /^\s*["']?(instructions|rules|guidelines|path_instructions|custom_instructions|review_instructions|prompt)["']?\s*:/m;
+/** Agent-tool directories that may hold operator tooling (skills with scripts, ops commands). */
+const TOOL_ROOT = /^(\.grok|\.opencode|\.claude|\.cursor|\.agents|\.codex|\.gemini)\//;
+const TOOLING_PART = /^[^/]+\/(command|commands|skill|skills|agent|agents)\//;
+const SCRIPT_FILE = /\.(sh|bash|zsh|py|ts|mts|js|mjs|cjs|rb|pl|ps1)$/;
+
+/**
+ * Tool roots holding operator tooling: a skills folder or scripts (e.g. a `/maintain` command next to
+ * `skills/controlled-server-ops/scripts/`). Their commands, skills and agents are never deleted.
+ */
+export function operatorToolingRoots(files: string[]): Set<string> {
+  const roots = new Set<string>();
+  for (const f of files) {
+    const root = TOOL_ROOT.exec(f)?.[1];
+    if (root && (/^[^/]+\/skills?\//.test(f) || (SCRIPT_FILE.test(f) && TOOLING_PART.test(f)))) roots.add(root);
+  }
+  return roots;
+}
+
+export function isReviewFile(path: string): boolean {
+  return REVIEW_FILE(path);
+}
+
+/**
+ * `.factory/review-rules.md` with the domain rules of the review-bot files this PR deletes appended
+ * (headings demoted, lines the standard rules already have skipped), so no rule is lost.
+ */
+export function withMigratedReviewRules(base: string, sources: { path: string; text: string }[]): string {
+  const known = new Set(base.split("\n").map((l) => l.trim()).filter(Boolean));
+  const parts = [base.trimEnd()];
+  for (const src of sources) {
+    const body = src.text
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .filter((l) => !/^#\s/.test(l) && !known.has(l.trim()))
+      .map((l) => (/^#{2,5}\s/.test(l) ? `#${l}` : l))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (body) parts.push(`## Repo rules (migrated from \`${src.path}\`)\n\n${body}`);
+  }
+  return `${parts.join("\n\n")}\n`;
+}
+
 const LEGACY_ACTION = /(claude-code-action|anthropics\/claude|opencode|sst\/opencode|cursor|bugbot|grok|coderabbit|codex|aider)/i;
-const LEGACY_TEXT = /\b(opencode|grok|bugbot|cursor|claude code|claude|codex|aider|copilot|coding-run|runner script|worker-run)\b/i;
 
 /** `--keep` entries: a glob, an exact path or a directory (prefix). */
 export function keepMatcher(keep: string[]): (path: string) => boolean {
@@ -133,26 +180,33 @@ function classifyWorkflows(workflows: Workflow[], checks: Pick<Candidate, "run">
   }
 }
 
-/** `## ` sections of AGENTS.md that talk about legacy tools: proposed (text edits stay human). */
-export function legacyAgentsSections(text: string): string[] {
-  const out: string[] = [];
-  const parts = text.split(/^(?=##\s)/m);
-  for (const part of parts) {
-    const title = /^##\s+(.+)$/m.exec(part)?.[1]?.trim();
-    if (title && LEGACY_TEXT.test(part)) out.push(title);
-  }
-  return out;
-}
-
-export function classifyLegacy(input: { files: string[]; workflows: Workflow[]; checks: Pick<Candidate, "run">[]; setup: string; agentsMd?: string; keep: string[] }): LegacyReport {
+export function classifyLegacy(input: {
+  files: string[];
+  workflows: Workflow[];
+  checks: Pick<Candidate, "run">[];
+  setup: string;
+  agentsMd?: string;
+  keep: string[];
+  /** File contents at the base (for review-bot configs); absent = treated as plain config. */
+  read?: (path: string) => string | undefined;
+}): LegacyReport {
   const keep = keepMatcher(input.keep);
   const out: LegacyReport = { removed: [], proposed: [], kept: [] };
   const remove = REMOVE.map(([g, r]) => [picomatch(g, { dot: true }), r] as const);
   const propose = PROPOSE.map(([g, r]) => [picomatch(g, { dot: true }), r] as const);
+  const tooling = operatorToolingRoots(input.files);
   for (const f of input.files) {
     if (f.startsWith(".github/workflows/")) continue;
-    const r = remove.find(([m]) => m(f))?.[1];
-    const p = r ? undefined : propose.find(([m]) => m(f))?.[1];
+    let r = remove.find(([m]) => m(f))?.[1];
+    let p = r ? undefined : propose.find(([m]) => m(f))?.[1];
+    const root = TOOL_ROOT.exec(f)?.[1];
+    if (root && tooling.has(root) && (TOOLING_PART.test(f) || r)) {
+      p = `operator tooling (${root}/ has skills or scripts, e.g. ops commands); never deleted, check by hand`;
+      r = undefined;
+    } else if (r && isReviewFile(f) && !f.endsWith(".md") && REVIEW_RULE_KEYS.test(input.read?.(f) ?? "")) {
+      p = `${r}; holds review instructions: move them into .factory/review-rules.md by hand, then delete`;
+      r = undefined;
+    }
     if (!r && !p) continue;
     if (keep(f)) out.kept.push({ path: f, reason: `${r ?? p} (matched --keep)` });
     else if (r) out.removed.push({ path: f, reason: r });
@@ -160,7 +214,7 @@ export function classifyLegacy(input: { files: string[]; workflows: Workflow[]; 
   }
   classifyWorkflows(input.workflows, input.checks, input.setup, out, keep);
   if (input.agentsMd && !keep("AGENTS.md")) {
-    for (const title of legacyAgentsSections(input.agentsMd)) out.proposed.push({ path: `AGENTS.md § ${title}`, reason: "mentions a legacy coding tool or runner; edit by hand" });
+    for (const s of trimAgentsMd(input.agentsMd).proposed) out.proposed.push({ path: `AGENTS.md § ${s.title}`, reason: `${s.reason}; edit by hand` });
   }
   return out;
 }

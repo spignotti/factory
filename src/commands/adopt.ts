@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { OneShot, type OneShotDeps } from "../agents/oneshot.js";
 import { extractJson } from "../agents/runner.js";
-import { classifyLegacy, type LegacyReport } from "../adopt/legacy.js";
+import { staleClaudeMd, trimAgentsMd } from "../adopt/agents-md.js";
+import { classifyLegacy, isReviewFile, type LegacyReport, withMigratedReviewRules } from "../adopt/legacy.js";
 import { type Detection, detect } from "../adopt/detect.js";
-import { type DraftCheck, draftChecks, draftRepoYaml, testStrategySection, withTestStrategy } from "../adopt/draft.js";
+import { agentsTemplate, type DraftCheck, draftChecks, draftRepoYaml, dropMutating, projectPurpose, testStrategySection, withTestStrategy } from "../adopt/draft.js";
 import { type MeasureResult, measureChecks } from "../adopt/measure.js";
 import { CI_STUB_PATH, renderCiStub } from "../ci.js";
 import type { Io } from "./gates.js";
@@ -40,6 +41,13 @@ export interface AdoptReport {
   legacy: LegacyReport;
   detection: { stacks: string[]; setup: string; ui: string[]; db: string[]; cloud: string[]; special_jobs: string[] };
   checks: { name: string; tier: string; seconds: number | null; note: string | null }[];
+  /** Candidates not drafted as checks (they change files, or duplicate another). */
+  skipped_checks: { name: string; run: string; reason: string }[];
+  /** Rules moved out of tool-named AGENTS.md sections. */
+  agents_moved: { from: string; to: string; rule: string }[];
+  /** Review-bot files whose rules were appended to `.factory/review-rules.md`. */
+  review_rules_migrated: string[];
+  warnings: string[];
   setup_seconds: number | null;
   proposal: { id: string; path: string; plan_path: string } | null;
   plan_error: string | null;
@@ -124,7 +132,7 @@ function prBody(r: AdoptReport, d: Detection): string {
   const list = (items: { path: string; reason: string }[]) => (items.length ? items.map((i) => `- \`${i.path}\`: ${i.reason}`).join("\n") : "- none");
   const checks = r.checks.map((c) => `| \`${c.name}\` | ${c.tier} | ${c.seconds ?? "–"} | ${c.note ?? ""} |`).join("\n");
   return [
-    "Factory onboarding (`factory adopt`, SPEC §12). Review every file; nothing here changes repository settings.",
+    "Factory onboarding (`factory adopt`). Review every file; nothing here changes repository settings.",
     "",
     `Detected: ${d.stacks.join(", ") || "no known stack"}. Setup: \`${d.setup || "(none)"}\`${r.setup_seconds != null ? ` (${r.setup_seconds}s)` : ""}.`,
     "",
@@ -135,6 +143,16 @@ function prBody(r: AdoptReport, d: Detection): string {
     "| check | tier | seconds | note |",
     "|---|---|---|---|",
     checks || "| – | | | |",
+    "",
+    "### Not drafted as checks",
+    r.skipped_checks.length ? r.skipped_checks.map((c) => `- \`${c.name}\` (\`${c.run}\`): ${c.reason}`).join("\n") : "- none",
+    "",
+    "### AGENTS.md",
+    r.agents_moved.length ? r.agents_moved.map((m) => `- moved from "${m.from}" to "${m.to}": ${m.rule}`).join("\n") : "- no rules moved",
+    ...r.review_rules_migrated.map((p) => `- review rules from \`${p}\` appended to \`${REVIEW_RULES_PATH}\``),
+    "",
+    "### Warnings",
+    r.warnings.length ? r.warnings.map((w) => `- ${w}`).join("\n") : "- none",
     "",
     "### Removed legacy setup",
     list(r.legacy.removed),
@@ -153,7 +171,7 @@ function prBody(r: AdoptReport, d: Detection): string {
   ].join("\n");
 }
 
-/** `factory adopt` (SPEC §12): detect, measure, draft, remove legacy setup, baseline plan, one PR. */
+/** `factory adopt`: detect, measure, draft, remove legacy setup, baseline plan, one PR. */
 export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptReport> {
   const repoDir = resolve(opts.repo);
   const now = new Date((deps.now ?? Date.now)());
@@ -180,11 +198,27 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
         measureChecks(dir, detection.setup, detection.candidates, { sandbox: deps.sandbox, factoryHome: deps.factoryHome }),
       );
     }
+    dropMutating(detection, measured);
     const checks: DraftCheck[] = draftChecks(detection, measured);
     const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date });
     const agentsPath = join(wt, "AGENTS.md");
     const agentsMd = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : undefined;
-    const legacy = classifyLegacy({ files, workflows: detection.workflows, checks, setup: detection.setup, agentsMd, keep: opts.keep });
+    const read = (rel: string) => {
+      try {
+        return readFileSync(join(wt, rel), "utf8");
+      } catch {
+        return undefined;
+      }
+    };
+    const legacy = classifyLegacy({ files, workflows: detection.workflows, checks, setup: detection.setup, agentsMd, keep: opts.keep, read });
+    const trim = agentsMd !== undefined && !legacy.kept.some((k) => k.path === "AGENTS.md") ? trimAgentsMd(agentsMd) : undefined;
+    const warnings = [...(trim?.warnings ?? [])];
+    // Without AGENTS.md the root CLAUDE.md is carried into the new AGENTS.md, so it cannot go stale.
+    for (const claude of legacy.removed.filter((i) => /(^|\/)CLAUDE\.md$/.test(i.path) && (agentsMd !== undefined || i.path !== "CLAUDE.md"))) {
+      const w = staleClaudeMd(read(claude.path) ?? "", agentsMd);
+      if (w) warnings.push(claude.path === "CLAUDE.md" ? w : w.replace("CLAUDE.md", claude.path));
+    }
+    const reviewSources = legacy.removed.filter((i) => isReviewFile(i.path) && i.path.endsWith(".md")).map((i) => ({ path: i.path, text: read(i.path) ?? "" }));
 
     const written: string[] = [];
     const write = (rel: string, text: string) => {
@@ -193,9 +227,17 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       written.push(rel);
     };
     write(REPO_CONFIG_PATH, repoYaml);
-    write(REVIEW_RULES_PATH, asset("standards/review-rules.md"));
+    write(REVIEW_RULES_PATH, withMigratedReviewRules(asset("standards/review-rules.md"), reviewSources));
     write(CI_STUB_PATH, ciStub);
-    const agentsNext = withTestStrategy(agentsMd, testStrategySection(detection, checks));
+    let agentsNext: string | undefined;
+    if (agentsMd === undefined) {
+      const claude = legacy.removed.some((i) => i.path === "CLAUDE.md") ? read("CLAUDE.md") : undefined;
+      const topDirs = [...new Set(files.filter((f) => f.includes("/") && !f.startsWith(".")).map((f) => f.split("/")[0]!))].sort().slice(0, 15);
+      agentsNext = agentsTemplate({ detection, checks, purpose: projectPurpose(wt), topDirs, extra: claude ? { from: "CLAUDE.md", text: claude } : undefined });
+    } else {
+      const agentsBase = trim?.text ?? agentsMd;
+      agentsNext = withTestStrategy(agentsBase, testStrategySection(detection, checks)) ?? (agentsBase !== agentsMd ? agentsBase : undefined);
+    }
     if (agentsNext !== undefined) write("AGENTS.md", agentsNext);
     for (const item of legacy.removed) await git(wt, ["rm", "-q", "-r", "--", item.path]);
 
@@ -210,6 +252,10 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       legacy,
       detection: detectionSummary(detection),
       checks: checks.map((c) => ({ name: c.name, tier: c.tier, seconds: c.seconds, note: c.note ?? null })),
+      skipped_checks: detection.skipped.map((c) => ({ name: c.name, run: c.run, reason: c.reason })),
+      agents_moved: trim?.moved ?? [],
+      review_rules_migrated: reviewSources.filter((r) => r.text.trim()).map((r) => r.path),
+      warnings,
       setup_seconds: measured?.setup?.seconds ?? null,
       proposal: null,
       plan_error: null,
@@ -225,7 +271,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
           id: nextProposalId(proposalsDir(deps.factoryHome, repoId), date, "adopt"),
           repo: repoId,
           created_at: now.toISOString(),
-          proposals: [{ status: "open", rationale: "Establish factory baseline (SPEC §12 step 3).", plan: res.plan, references: { findings: [], checklist: [] }, resolution: null }],
+          proposals: [{ status: "open", rationale: "Establish factory baseline.", plan: res.plan, references: { findings: [], checklist: [] }, resolution: null }],
           signals: { detection: report.detection, legacy: { removed: legacy.removed.length, proposed: legacy.proposed.length, kept: legacy.kept.length } },
           metrics: null,
         });
@@ -256,6 +302,10 @@ export async function adoptCommand(opts: AdoptOptions & { json: boolean }, deps:
   io.out(`written: ${r.written.join(", ")}\n`);
   io.out(`removed: ${r.legacy.removed.length}, proposed removals: ${r.legacy.proposed.length}, kept: ${r.legacy.kept.length}\n`);
   for (const c of r.checks) io.out(`  ${c.name} [${c.tier}] ${c.seconds ?? "–"}s${c.note ? ` (${c.note})` : ""}\n`);
+  for (const c of r.skipped_checks) io.out(`  not a check: ${c.name} (${c.reason})\n`);
+  for (const m of r.agents_moved) io.out(`AGENTS.md: moved from "${m.from}" to "${m.to}": ${m.rule}\n`);
+  for (const p of r.review_rules_migrated) io.out(`review rules migrated from ${p}\n`);
+  for (const w of r.warnings) io.out(`warning: ${w}\n`);
   io.out(r.proposal ? `baseline plan: ${r.proposal.plan_path}\n` : `baseline plan: ${r.plan_error ?? "skipped"}\n`);
   for (const h of r.hints) io.out(`hint: ${h}\n`);
   return 0;

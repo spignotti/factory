@@ -18,7 +18,7 @@ export type Check = z.infer<typeof CheckSchema>;
 
 const ServiceNameSchema = z.string().regex(/^[A-Za-z0-9_-]+$/, "service names use letters, digits, - and _");
 
-/** A service a check needs (§6.12). Placeholders: `{run_id}`, `{port_offset}`, `{port:<name>}`, `{port:<number>}`. */
+/** A service a check needs. Placeholders: `{run_id}`, `{port_offset}`, `{port:<name>}`, `{port:<number>}`. */
 export const ServiceSchema = z.object({
   name: ServiceNameSchema,
   /** Started in the run worktree; in the sandbox it must stay in the foreground and listen on 0.0.0.0. */
@@ -37,7 +37,7 @@ export type Service = z.infer<typeof ServiceSchema>;
 export const RiskSchema = z.enum(["low", "medium", "high"]);
 export type Risk = z.infer<typeof RiskSchema>;
 
-// Amendment a: `auto` is only reachable through `auto_merge_max_risk`, so the per-risk map holds the
+// `auto` is only reachable through `auto_merge_max_risk`, so the per-risk map holds the
 // non-auto policies only.
 const NonAutoPolicySchema = z.enum(["bot_review", "human_review"]);
 
@@ -50,7 +50,7 @@ const VerifyAreaSchema = z.object({
   pages: z.array(z.string()).default([]),
 });
 
-/** Default and upper bound of proposals per harden ticket (Amendment w). */
+/** Default and upper bound of proposals per harden ticket. */
 export const DEFAULT_MAX_PROPOSALS = 5;
 export const MAX_PROPOSALS_LIMIT = 10;
 
@@ -76,9 +76,8 @@ export const RepoConfigSchema = z
         checklist: z.boolean().default(true),
         skip_paths: z.array(z.string()).default([]),
         max_nits: z.number().int().min(0).default(5),
-        per_package: z.boolean().default(false),
       })
-      .default({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5, per_package: false }),
+      .default({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5 }),
     fast_lane: z.object({ max_diff_lines: z.number().int().min(1).default(150) }).default({ max_diff_lines: 150 }),
     merge: z
       .object({
@@ -113,7 +112,7 @@ export const RepoConfigSchema = z
         ready_timeout_s: z.number().positive().default(120),
         paths: z.array(z.string()).default([]),
         services: z.array(z.string()).default([]),
-        // Amendment x (M4): Playwright device names the evaluator emulates on Chromium; the first one is
+        // Playwright device names the evaluator emulates on Chromium; the first one is
         // the LLM session's device. Mobile apps are evaluated through their web build (Expo / React
         // Native Web) with a phone device: viewport, user agent, touch.
         devices: z.array(z.string().min(1)).min(1).default(["Desktop Chrome"]),
@@ -129,16 +128,16 @@ export const RepoConfigSchema = z
         run: z.string().optional(),
       })
       .default({ areas: [] }),
-    // Amendment w: ranked proposals per harden ticket (`--max` overrides).
+    // Ranked proposals per harden ticket (`--max` overrides).
     harden: z
       .object({ max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS) })
       .default({ max_proposals: DEFAULT_MAX_PROPOSALS }),
     git: z
       .object({ author: z.string().default("factory"), email: z.string().optional() })
       .default({ author: "factory" }),
-    // Names of extra environment variables passed to agent tool processes and checks (Amendment b).
+    // Names of extra environment variables passed to agent tool processes and checks.
     agent_env: z.array(z.string()).default([]),
-    // Per-repo model overrides, role → chain (Amendment i); validated again after the merge.
+    // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
   })
   .loose()
@@ -176,7 +175,7 @@ export function placeholderTexts(cfg: Pick<RepoConfig, "services" | "checks" | "
   return out;
 }
 
-/** Highest per-run port offset (§6.12 port scheme): numeric `{port:N}` must stay below 65536 with it. */
+/** Highest per-run port offset (port scheme): numeric `{port:N}` must stay below 65536 with it. */
 export const MAX_PORT_OFFSET = 9900;
 export const MAX_NAMED_PORTS = 100;
 const PLACEHOLDER = /\{(run_id|port_offset|port:[A-Za-z0-9_-]+)\}/g;

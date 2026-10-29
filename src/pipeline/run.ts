@@ -49,7 +49,7 @@ function slug(text: string): string {
 }
 
 
-/** Findings memory of the repo (§10): where it lives and this run's briefing. Never fails the run. */
+/** Findings memory of the repo: where it lives and this run's briefing. Never fails the run. */
 async function openMemory(f: RunFrame, deps: RunDeps, repoDir: string): Promise<string> {
   const id = canonicalRepoId(await originUrl(repoDir), repoDir);
   f.memory = { factoryHome: deps.factoryHome, repoId: id };
@@ -61,7 +61,7 @@ async function openMemory(f: RunFrame, deps: RunDeps, repoDir: string): Promise<
   }
 }
 
-/** Fast lane → standard lane (§6.11): logged, reported in result.json and the PR. */
+/** Fast lane → standard lane: logged, reported in result.json and the PR. */
 function escalate(f: RunFrame, events: EventLog, step: string, reasons: string[]): void {
   f.lane = "standard";
   if (f.state) f.state.lane = "standard";
@@ -263,7 +263,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     events.emit({ step: "intake", event: "step_finished", data: { plan_source: planned.source, packages: plan.packages.length } });
     f.save();
 
-    // Base check (SPEC §6.1 step 6) and worktree (step 7).
+    // Base check, then the worktree.
     checkDeadline(base);
     const status = await deps.github.baseStatus(repoDir, baseSha);
     if (status === "red" || status === "pending") {

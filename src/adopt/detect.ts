@@ -3,9 +3,10 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { CI_STUB_PATH } from "../ci.js";
 import { matchesAny } from "../schemas/plan.js";
+import { joinArgv, mutatingName, noxSessionBodies, readOnlyCommand, analyzeCommand } from "./mutation.js";
 
 /**
- * `factory adopt` step 1 (SPEC §12): what a repository is made of, read from its files only (no
+ * `factory adopt` step 1: what a repository is made of, read from its files only (no
  * commands; `measure` runs them). Everything here is a proposal a human reviews in the adopt PR.
  */
 
@@ -17,6 +18,16 @@ export interface Candidate {
   kind: CheckKind;
   /** Where it came from, e.g. `package.json script "lint"`, `nox session "tests"`. */
   source: string;
+  /** What it effectively runs, for duplicate detection (defaults to `run`). */
+  effective?: string;
+}
+
+/** A candidate adopt did not draft as a check (it changes files, or duplicates another). */
+export interface SkippedCheck {
+  name: string;
+  run: string;
+  source: string;
+  reason: string;
 }
 
 export interface WorkflowJob {
@@ -51,6 +62,8 @@ export interface Detection {
   python: { runner: "uv" | "poetry" | "pip" | null; nox_sessions: string[]; nox_default: string[] } | null;
   setup: string;
   candidates: Candidate[];
+  /** Not drafted: mutating commands, fix-type sessions, duplicates (listed in the adopt PR). */
+  skipped: SkippedCheck[];
   tests: { globs: string[]; run: string | null };
   ui: { present: boolean; reasons: string[] };
   db: { present: boolean; reasons: string[] };
@@ -80,15 +93,25 @@ const NODE_SCRIPTS: [RegExp, string, CheckKind][] = [
   [/^build$/, "build", "build"],
 ];
 
-function nodeCandidates(dir: string, pm: NonNullable<Detection["package_manager"]>): Candidate[] {
+function nodeCandidates(dir: string, pm: NonNullable<Detection["package_manager"]>, skipped: SkippedCheck[]): Candidate[] {
   const scripts = ((readJson(dir, "package.json")?.scripts ?? {}) as Record<string, string>);
   const out: Candidate[] = [];
   const taken = new Set<string>();
+  const exec = pm === "npm" ? "npx" : `${pm} exec`;
   for (const script of Object.keys(scripts)) {
     for (const [re, name, kind] of NODE_SCRIPTS) {
       if (!re.test(script) || taken.has(name)) continue;
+      const source = `package.json script "${script}"`;
+      const body = String(scripts[script] ?? "");
+      const ro = readOnlyCommand(body);
+      if (!ro) {
+        skipped.push({ name, run: `${pm} run ${script}`, source, reason: "changes files and has no obvious check-only variant" });
+        continue;
+      }
       taken.add(name);
-      out.push({ name, run: `${pm} run ${script}`, kind, source: `package.json script "${script}"` });
+      // A rewritten script runs its tools directly; a chain of several commands is not rewritten (readOnlyCommand).
+      if (ro.changed) out.push({ name, run: `${exec} ${ro.run}`, kind, source: `${source} (check-only variant: ${ro.why.join("; ")})`, effective: ro.run });
+      else out.push({ name, run: `${pm} run ${script}`, kind, source, effective: body.trim() || undefined });
     }
   }
   return out;
@@ -116,12 +139,75 @@ function kindOf(name: string): CheckKind {
   return "other";
 }
 
-function pythonCandidates(dir: string, runner: "uv" | "poetry" | "pip" | null, nox: { sessions: string[] } | null): Candidate[] {
+/** Formatter-like session names: dropped when their body cannot be read (they likely rewrite files). */
+const FORMAT_NAME = /^(?:format|fmt|black|isort|prettier|style)$/i;
+
+function noxCandidates(text: string, sessions: string[], runner: "uv" | "poetry" | "pip" | null, skipped: SkippedCheck[]): Candidate[] {
   const prefix = runner === "uv" ? "uv run --locked " : runner === "poetry" ? "poetry run " : runner === "pip" ? ".venv/bin/" : "";
-  if (nox?.sessions.length) {
-    const noxCmd = runner === "uv" ? "uv run --locked nox" : runner === "poetry" ? "poetry run nox" : "nox";
-    return nox.sessions.map((s) => ({ name: s, run: `${noxCmd} -s ${s}`, kind: kindOf(s), source: `nox session "${s}"` }));
+  const noxCmd = runner === "uv" ? "uv run --locked nox" : runner === "poetry" ? "poetry run nox" : "nox";
+  const bodies = new Map(noxSessionBodies(text).map((b) => [b.name, b]));
+  const out: Candidate[] = [];
+  for (const s of sessions) {
+    const run = `${noxCmd} -s ${s}`;
+    const source = `nox session "${s}"`;
+    if (mutatingName(s)) {
+      skipped.push({ name: s, run, source, reason: "fix/maintenance session (changes files)" });
+      continue;
+    }
+    const body = bodies.get(s);
+    const commands = body?.commands ?? null;
+    if (!commands) {
+      if (FORMAT_NAME.test(s)) skipped.push({ name: s, run, source, reason: "formatter session whose commands could not be read; add a --check variant by hand" });
+      else out.push({ name: s, run, kind: kindOf(s), source });
+      continue;
+    }
+    const verdicts = commands.map(analyzeCommand);
+    if (!verdicts.some((v) => v.mutates)) {
+      out.push({ name: s, run, kind: kindOf(s), source, effective: JSON.stringify(commands) });
+      continue;
+    }
+    if (verdicts.some((v) => v.mutates && !v.check)) {
+      skipped.push({ name: s, run, source, reason: `changes files (${verdicts.flatMap((v) => (v.mutates ? [v.why] : [])).join("; ")}) and has no obvious check-only variant` });
+      continue;
+    }
+    // Run the read-only variant directly; inside a nox-managed venv the tools come from the project runner.
+    const parts = commands.map((c, i) => {
+      const v = verdicts[i]!;
+      const argv = v.mutates && v.check ? v.check : c;
+      return body!.external || /^(?:uv|poetry|pdm|hatch|npx|pnpm|yarn|npm)$/.test(argv[0]!) ? joinArgv(argv) : `${prefix}${joinArgv(argv)}`;
+    });
+    out.push({
+      name: s,
+      run: parts.join(" && "),
+      kind: kindOf(s),
+      source: `${source} (check-only variant: ${verdicts.flatMap((v) => (v.mutates ? [v.why] : [])).join("; ")})`,
+      effective: parts.join(" && "),
+    });
   }
+  return out;
+}
+
+/** Same command under several names (nox `test` and `test_unit`): keep one, the more specific (longer) name. */
+export function dedupeCandidates(candidates: Candidate[], skipped: SkippedCheck[]): Candidate[] {
+  const norm = (c: Candidate) => (c.effective ?? c.run).replace(/\s+/g, " ").trim();
+  const keep = new Map<string, Candidate>();
+  for (const c of candidates) {
+    const key = norm(c);
+    const prev = keep.get(key);
+    if (!prev) keep.set(key, c);
+    else {
+      const [winner, loser] = c.name.length > prev.name.length ? [c, prev] : [prev, c];
+      keep.set(key, winner);
+      skipped.push({ name: loser.name, run: loser.run, source: loser.source, reason: `same command as "${winner.name}"` });
+    }
+  }
+  const kept = new Set(keep.values());
+  return candidates.filter((c) => kept.has(c));
+}
+
+function pythonCandidates(dir: string, runner: "uv" | "poetry" | "pip" | null, nox: { sessions: string[] } | null, noxText: string | undefined, skipped: SkippedCheck[]): Candidate[] {
+  const prefix = runner === "uv" ? "uv run --locked " : runner === "poetry" ? "poetry run " : runner === "pip" ? ".venv/bin/" : "";
+  if (nox?.sessions.length) return noxCandidates(noxText ?? "", nox.sessions, runner, skipped);
   const py = [read(dir, "pyproject.toml") ?? "", read(dir, "requirements-dev.txt") ?? "", read(dir, "requirements.txt") ?? "", read(dir, "setup.cfg") ?? ""].join("\n");
   const has = (re: RegExp) => re.test(py);
   const out: Candidate[] = [];
@@ -219,11 +305,12 @@ export function detect(dir: string, files: string[]): Detection {
   let pm: Detection["package_manager"] = null;
   let setupParts: string[] = [];
   const candidates: Candidate[] = [];
+  const skipped: SkippedCheck[] = [];
   if (pkg) {
     stacks.push("node");
     pm = existsSync(join(dir, "pnpm-lock.yaml")) ? "pnpm" : existsSync(join(dir, "yarn.lock")) ? "yarn" : existsSync(join(dir, "bun.lockb")) || existsSync(join(dir, "bun.lock")) ? "bun" : "npm";
     setupParts.push({ pnpm: "pnpm install --frozen-lockfile", yarn: "yarn install --frozen-lockfile", bun: "bun install --frozen-lockfile", npm: existsSync(join(dir, "package-lock.json")) ? "npm ci" : "npm install" }[pm]);
-    candidates.push(...nodeCandidates(dir, pm));
+    candidates.push(...nodeCandidates(dir, pm, skipped));
   }
   let python: Detection["python"] = null;
   const isPython = ["pyproject.toml", "setup.py", "requirements.txt", "noxfile.py"].some((f) => existsSync(join(dir, f)));
@@ -236,11 +323,12 @@ export function detect(dir: string, files: string[]): Detection {
     if (runner === "uv") setupParts.push("uv sync --locked");
     else if (runner === "poetry") setupParts.push("poetry install");
     else if (runner === "pip") setupParts.push("python3 -m venv .venv && .venv/bin/pip install -r requirements.txt");
-    for (const c of pythonCandidates(dir, runner, nox)) if (!candidates.some((x) => x.name === c.name)) candidates.push(c);
+    for (const c of pythonCandidates(dir, runner, nox, noxText, skipped)) if (!candidates.some((x) => x.name === c.name)) candidates.push(c);
   }
   for (const [f, s] of [["Cargo.toml", "rust"], ["go.mod", "go"]] as const) if (existsSync(join(dir, f))) stacks.push(s);
   for (const c of otherCandidates(dir)) if (!candidates.some((x) => x.name === c.name)) candidates.push(c);
   setupParts = setupParts.filter(Boolean);
+  const checks = dedupeCandidates(candidates, skipped);
 
   const workflows = readWorkflows(dir);
   const manifests = [read(dir, "package.json"), read(dir, "pyproject.toml"), read(dir, "requirements.txt"), read(dir, "docker-compose.yml"), read(dir, "compose.yaml")].join("\n");
@@ -276,7 +364,8 @@ export function detect(dir: string, files: string[]): Detection {
     package_manager: pm,
     python,
     setup: setupParts.join(" && "),
-    candidates,
+    candidates: checks,
+    skipped,
     tests: { globs, run: testRun },
     ui: { present: uiReasons.length > 0, reasons: uiReasons },
     db: { present: dbReasons.length > 0, reasons: dbReasons },

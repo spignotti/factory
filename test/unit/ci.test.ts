@@ -13,7 +13,7 @@ const write = (repo: string, path: string, text: string) => {
   writeFileSync(join(repo, path), text);
 };
 
-describe("CI stub (§5.3)", () => {
+describe("CI stub", () => {
   it("template: every PR, select → check matrix → done; done is red when selection failed", () => {
     const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
     expect(Object.keys(wf.on)).toEqual(["pull_request", "push", "workflow_dispatch"]);

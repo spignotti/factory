@@ -20,7 +20,7 @@ import {
 
 const probe = (p: Partial<SandboxProbe>): SandboxProbe => ({ platform: "linux", bwrap: () => true, pasta: () => true, ...p });
 
-describe("sandbox decision (Amendment j)", () => {
+describe("sandbox decision", () => {
   it("required needs bwrap and pasta", () => {
     expect(createSandbox("required", probe({}))).toEqual({ mode: "required", fs: "bwrap", net: "isolated", warnings: [] });
     expect(() => createSandbox("required", probe({ pasta: () => false }))).toThrow(SandboxUnavailable);

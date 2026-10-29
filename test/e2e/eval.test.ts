@@ -173,7 +173,9 @@ describe("factory eval (fake runner)", () => {
     expect(await experimentCommand({ base: "a.yaml", variant: "b.yaml", tasks: "*-multiply.yaml", repeat: 1, cwd: dir }, d, { out: (s) => void (out += s), err: () => undefined })).toBe(2);
     expect(await experimentCommand({ base: "a.yaml", variant: "b.yaml", tasks: "*-multiply.yaml", repeat: 2, cwd: dir }, d, io)).toBe(0);
     const verdict = VerdictSchema.parse(JSON.parse(out));
-    expect(verdict).toMatchObject({ base: "a", variant: "b", repeat: 2, tasks: ["fixture-multiply"], cost_measure: "usd" });
+    expect(verdict).toMatchObject({ base: "a", variant: "b", repeat: 2, tasks: ["fixture-multiply"], cost_measure: "tokens" });
+    // fake models are opencode-go/openai: subscriptions, so cost cells say so and tokens decide
+    expect(readFileSync(join(dir, "evals", "results", `${day}.md`), "utf8")).toContain("subscription");
     expect(verdict.summaries.base.runs).toBe(2);
     expect(verdict.summaries.variant.determinism_ratio).toBe(1);
     expect(readFileSync(join(dir, "evals", "results", `${day}.jsonl`), "utf8").trim().split("\n")).toHaveLength(5);

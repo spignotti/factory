@@ -100,7 +100,7 @@ export interface ExitDecision {
   reason: string;
 }
 
-/** SPEC §6.7 exit rules, in order. */
+/** Loop exit rules, in order. */
 export function decideExit(input: { round: number; maxRounds: number; stalemate: boolean; open: TrackedFinding[]; extraRound?: boolean }): ExitDecision {
   const { round, maxRounds, stalemate, open } = input;
   const openBugs = open.filter((f) => f.severity === "bug").length;

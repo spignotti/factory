@@ -5,7 +5,7 @@ import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
 
 /**
  * Process sandbox for agent bash and repo commands (setup, checks, tests): bubblewrap for the
- * filesystem, pasta for the network (SPEC Amendment j). Linux only.
+ * filesystem, pasta for the network. Linux only.
  *
  * - Filesystem: system dirs and PATH toolchain prefixes read-only (never a home dir or `/opt` whole); read-write only the run's worktree and agent HOME (bound at the
  *   same paths, so in-process tools and bash agree on paths); the worktree's `.git` file and the main
@@ -13,7 +13,7 @@ import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
  *   `core.fsmonitor` that would run on the host); a private /tmp. Never bound: /run (docker socket),
  *   other homes, `$FACTORY_HOME` (auth.json) except the run's own dirs.
  * - Network: own namespace through pasta without host loopback (`--no-map-gw`, no port forwards in
- *   either direction except a service's explicit ports, §6.12) and
+ *   either direction except a service's explicit ports) and
  *   with blackhole routes for private, link-local and CGNAT ranges, no on-link subnet and IPv6 off, so
  *   internet works (package installs) but host services, the Docker bridge, cloud metadata and the LAN
  *   do not. The DNS servers from
@@ -47,7 +47,7 @@ export interface Jail {
   /** Never bound, not even as part of a PATH prefix (`$FACTORY_HOME`). */
   hide?: string[];
   /**
-   * Explicit TCP forwards through pasta (services, §6.12); nothing else crosses the namespace.
+   * Explicit TCP forwards through pasta (services); nothing else crosses the namespace.
    * `expose`: host 127.0.0.1:p → jail :p (a service listening in this jail).
    * `reach`: jail 127.0.0.1:p → host 127.0.0.1:p (a check talking to a service).
    */

@@ -1,4 +1,4 @@
-# Evals (§13)
+# Evals
 
 `factory eval` measures the pipeline on curated tasks; `factory experiment` compares two profiles and
 returns a verdict. Both spend real model time: nothing here runs in CI or tests (the tests use the

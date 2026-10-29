@@ -9,7 +9,7 @@ import type { RunRecord } from "../runs.js";
 import type { RepoConfig } from "../schemas/repo.js";
 import type { StatsPeriod } from "../commands/stats.js";
 
-/** SPEC §11 step 1: harden signals, all computed in code. */
+/** Harden signals, all computed in code. */
 
 export const WINDOW_DAYS = 30;
 export const SLOW_CHECK_SECONDS = 120;
@@ -211,7 +211,7 @@ function pagePath(url: unknown): string | undefined {
 }
 
 /**
- * §8.3 evaluator signal: pages where the evaluator verified met criteria (via its browser tools) in
+ * Evaluator signal: pages where the evaluator verified met criteria (via its browser tools) in
  * at least EVALUATOR_REPEAT_RUNS runs and no area with recorded flows lists the page. Reads each
  * run's last `evaluate-N.json` and its `evaluate-N-tools.json` call log.
  */

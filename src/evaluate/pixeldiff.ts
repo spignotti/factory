@@ -20,7 +20,7 @@ function padded(img: PNG, width: number, height: number): Buffer {
   return out.data;
 }
 
-/** Pixel diff of two PNG screenshots (base vs HEAD, §6.5 step 4); different sizes are padded. */
+/** Pixel diff of two PNG screenshots (base vs HEAD); different sizes are padded. */
 export function diffPngs(base: Buffer, head: Buffer, threshold = 0.1): PixelDiff {
   const a = PNG.sync.read(base);
   const b = PNG.sync.read(head);

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { normalizeClaim, type TrackedFinding } from "./pipeline/merge.js";
 
 /**
- * Findings memory (SPEC §10): recurring review findings and flaky checks per repository, outside the
+ * Findings memory: recurring review findings and flaky checks per repository, outside the
  * repo in `$FACTORY_HOME/memory/<repo-id>/findings.json`. Fed after every run; the top open entries brief
  * the implementer and the reviewers; `harden` (M5) turns them into checks (`proposed`, `resolved`).
  */

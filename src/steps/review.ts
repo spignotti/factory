@@ -28,7 +28,7 @@ async function baseChecklist(ctx: RunContext): Promise<ChecklistItem[]> {
   return unmarkedItems(parseChecklist(text));
 }
 
-/** Reviewers decided in code (§6.6), on the whole change since base. */
+/** Reviewers decided in code, on the whole change since base. */
 export async function planReviewers(ctx: RunContext, round: number): Promise<ReviewerPlan> {
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const security = changed.filter((f) => matchesAny(f, ctx.repo.sensitive_paths) || matchesAny(f, DEPENDENCY_GLOBS));

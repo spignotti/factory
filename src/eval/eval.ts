@@ -198,7 +198,7 @@ function roundFiles(runDir: string): { round: number; findings: TrackedFinding[]
 }
 
 /**
- * Real findings (SPEC amendment q): a `bug` finding the implementer answered `fixed` in round n's fix
+ * Real findings: a `bug` finding the implementer answered `fixed` in round n's fix
  * session counts when a check that is red on the commit reviewed in round n is green on the commit
  * after that fix. Checks: the hidden check (hidden tests copied in) and the repo's fast and full
  * checks that need no services. Several bugs fixed in one session share the credit.
@@ -253,7 +253,8 @@ function metrics(events: FactoryEvent[], runDir: string | undefined) {
     if (e.event === "gate_result" && !e.data.base && e.data.status === "fail") gateFailures++;
     if ((e.event === "agent_finished" || e.event === "agent_error") && e.role && e.model) {
       const key = `${e.role}\0${e.model}`;
-      const u = usage.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+      const billing = e.data.billing === "subscription" ? "subscription" : "metered";
+      const u = usage.get(key) ?? { role: e.role, model: e.model, calls: 0, errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, billing };
       u.calls++;
       if (e.event === "agent_error") u.errors++;
       u.tokens_in += e.tokens_in;

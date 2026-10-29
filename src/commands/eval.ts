@@ -35,7 +35,7 @@ function persist(outDir: string, records: EvalRecord[], profiles: string[], head
   return { jsonl, md, table };
 }
 
-/** `factory eval --profile a [--profile b] [--tasks <glob>] [--repeat N]` (§13). */
+/** `factory eval --profile a [--profile b] [--tasks <glob>] [--repeat N]`. */
 export async function evalCommand(opts: EvalCommandOptions, deps: Omit<EvalDeps, "now">, io: Io): Promise<number> {
   const cwd = opts.cwd ?? process.cwd();
   try {
@@ -71,7 +71,7 @@ export interface ExperimentOptions {
 }
 
 /**
- * `factory experiment --base <profile> --variant <profile>` (§13): eval of both, the decision rule,
+ * `factory experiment --base <profile> --variant <profile>`: eval of both, the decision rule,
  * a JSON verdict (schemas/verdict.schema.json) on stdout. Exit 0 for every verdict; 2 on bad input.
  */
 export async function experimentCommand(opts: ExperimentOptions, deps: Omit<EvalDeps, "now">, io: Io): Promise<number> {

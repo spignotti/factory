@@ -67,7 +67,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
       system: rolePrompt("plan_normalize", ctx.deps.prompts),
       prompt: [
         asData("task", ctx.task.text),
-        "Return only plan.json (SPEC §7.1 shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",
+        "Return only plan.json (plan schema shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",
         errors.length ? `Your previous output was rejected:\n- ${errors.join("\n- ")}` : "",
       ].filter(Boolean).join("\n\n"),
     };
@@ -84,7 +84,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
 }
 
 /**
- * Fast lane intake (§6.11): plan block, else `plan_normalize` only. `escalate` = no usable plan
+ * Fast lane intake: plan block, else `plan_normalize` only. `escalate` = no usable plan
  * without the plan step; the caller moves the run to the standard lane.
  */
 export async function obtainFastPlan(ctx: IntakeContext): Promise<PlanOutcome | { kind: "escalate"; reason: string }> {

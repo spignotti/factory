@@ -11,7 +11,7 @@ const RelPath = z
   .refine((p) => !p.startsWith("/") && !p.split("/").includes("..") && !p.startsWith("-"), "a relative path inside the repo");
 
 /**
- * Eval task (§13, `evals/tasks/<id>.yaml`). Beyond the §13 format: `repo_config` (the repo.yaml the
+ * Eval task (`evals/tasks/<id>.yaml`). Beyond the basic format: `repo_config` (the repo.yaml the
  * run uses; public repos have none), `exclude` (setup artifacts kept out of diffs), `license` and
  * `source` (provenance; tasks are third-party code).
  */
@@ -89,7 +89,7 @@ export const EvalProfileSchema = ProfileLayerSchema.omit({ providers: true, sand
   .strict();
 export type EvalProfile = z.infer<typeof EvalProfileSchema>;
 
-const Usage = z.object({ role: z.string(), model: z.string(), calls: z.number().int(), errors: z.number().int(), tokens_in: z.number(), tokens_out: z.number(), cost_usd: z.number() });
+const Usage = z.object({ role: z.string(), model: z.string(), calls: z.number().int(), errors: z.number().int(), tokens_in: z.number(), tokens_out: z.number(), cost_usd: z.number(), billing: z.enum(["subscription", "metered"]).optional() });
 
 /** One line of `evals/results/<date>.jsonl`: one task × profile × repeat. */
 export const EvalRecordSchema = z
@@ -110,7 +110,7 @@ export const EvalRecordSchema = z
     gate_failures: z.number().int().min(0),
     /** Findings with severity `bug` raised by any reviewer. */
     bug_findings: z.number().int().min(0),
-    /** See SPEC amendment q: bug findings whose fix turned a check red → green. */
+    /** Real findings: bug findings whose fix turned a check red → green. */
     real_findings: z.number().int().min(0),
     tokens_in: z.number().min(0),
     tokens_out: z.number().min(0),

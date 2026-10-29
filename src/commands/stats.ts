@@ -5,8 +5,9 @@ import { listRuns, readEvents, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatsPeriodSchema, StatsReportSchema } from "../schemas/reports.js";
+import { billingOf, type BillingKind, DEFAULT_BILLING } from "../schemas/profile.js";
 
-/** One period of `factory stats` (SPEC §14; schema `schemas/stats.schema.json`). */
+/** One period of `factory stats` (schema `schemas/stats.schema.json`). */
 export type StatsPeriod = z.infer<typeof StatsPeriodSchema>;
 
 export type StatsReport = z.infer<typeof StatsReportSchema>;
@@ -37,11 +38,19 @@ function canonical(path: string): string {
   }
 }
 
+const emptyProvider = () => ({ calls: 0, errors: 0, fallbacks: 0, capacity_errors: 0, limit_errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 });
+
+/** Billing kind recorded with the call; older events fall back to the built-in defaults. */
+function eventBilling(e: FactoryEvent): BillingKind {
+  const b = e.data.billing;
+  return b === "subscription" || b === "metered" ? b : e.model ? billingOf(e.model, DEFAULT_BILLING) : "metered";
+}
+
 export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: RunRecord) => FactoryEvent[] = readEvents): StatsPeriod {
   const p: StatsPeriod = {
     from: from.toISOString(), to: to.toISOString(), runs: 0, by_result: {}, by_lane: {}, by_type: {}, by_repo: {}, done_rate: null,
     rounds: { median: null, p90: null }, minutes: { median: null, p90: null }, gate_failures: {}, flaky_checks: {}, reasons: [],
-    providers: {}, roles: {}, cost_usd: 0, lane_escalations: 0, watchdog_aborts: 0, merge_policy: {}, auto_merged: 0, reverted: null,
+    providers: {}, roles: {}, cost_usd: 0, subscription_tokens: { tokens_in: 0, tokens_out: 0 }, lane_escalations: 0, watchdog_aborts: 0, merge_policy: {}, auto_merged: 0, reverted: null,
   };
   const rounds: number[] = [];
   const minutes: number[] = [];
@@ -76,22 +85,29 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
         if (e.data.status === "fail") inc(p.gate_failures, check);
         if (e.data.status === "flaky") inc(p.flaky_checks, check);
       } else if (e.event === "agent_finished" || e.event === "agent_error") {
-        const prov = (p.providers[providerOf(e.model)] ??= { calls: 0, errors: 0, fallbacks: 0, capacity_errors: 0, limit_errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 });
+        const billing = eventBilling(e);
+        // Subscriptions are reported in tokens; older logs may still carry a catalog price.
+        const cost = billing === "subscription" ? 0 : e.cost_usd;
+        const prov = (p.providers[providerOf(e.model)] ??= { ...emptyProvider(), billing });
         const role = (p.roles[e.role ?? "unknown"] ??= { calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 });
         for (const t of [prov, role]) {
           t.calls++;
           t.tokens_in += e.tokens_in;
           t.tokens_out += e.tokens_out;
-          t.cost_usd = round4(t.cost_usd + e.cost_usd);
+          t.cost_usd = round4(t.cost_usd + cost);
         }
-        p.cost_usd = round4(p.cost_usd + e.cost_usd);
+        p.cost_usd = round4(p.cost_usd + cost);
+        if (billing === "subscription") {
+          p.subscription_tokens.tokens_in += e.tokens_in;
+          p.subscription_tokens.tokens_out += e.tokens_out;
+        }
         if (e.event === "agent_error") {
           prov.errors++;
           if (e.data.class === "capacity") prov.capacity_errors++;
           if (e.data.class === "limit") prov.limit_errors++;
         }
       } else if (e.event === "model_fallback") {
-        const prov = (p.providers[providerOf(e.model)] ??= { calls: 0, errors: 0, fallbacks: 0, capacity_errors: 0, limit_errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 });
+        const prov = (p.providers[providerOf(e.model)] ??= { ...emptyProvider(), billing: eventBilling(e) });
         prov.fallbacks++;
       } else if (e.event === "lane_escalated") p.lane_escalations++;
       else if (e.event === "watchdog_abort") p.watchdog_aborts++;
@@ -119,6 +135,7 @@ export function statsReport(opts: { factoryHome: string; since?: string; repo?: 
       runs: current.runs - previous.runs,
       done_rate: diff(current.done_rate, previous.done_rate),
       cost_usd: round4(current.cost_usd - previous.cost_usd),
+      subscription_tokens: current.subscription_tokens.tokens_in + current.subscription_tokens.tokens_out - previous.subscription_tokens.tokens_in - previous.subscription_tokens.tokens_out,
       median_rounds: diff(current.rounds.median, previous.rounds.median),
     },
   };
@@ -138,7 +155,8 @@ export function statsCommand(opts: { factoryHome: string; since?: string; repo?:
       `results: ${Object.entries(c.by_result).map(([k, v]) => `${k} ${v}`).join(", ") || "–"}`,
       `done rate: ${pct(c.done_rate)} (previous ${pct(s.previous.done_rate)})`,
       `rounds median/p90: ${c.rounds.median ?? "–"}/${c.rounds.p90 ?? "–"}; minutes median/p90: ${c.minutes.median ?? "–"}/${c.minutes.p90 ?? "–"}`,
-      `cost: $${c.cost_usd.toFixed(4)} (previous $${s.previous.cost_usd.toFixed(4)})`,
+      `subscription tokens: ${c.subscription_tokens.tokens_in} in / ${c.subscription_tokens.tokens_out} out (previous ${s.previous.subscription_tokens.tokens_in} / ${s.previous.subscription_tokens.tokens_out})`,
+      `cost (metered providers): $${c.cost_usd.toFixed(4)} (previous $${s.previous.cost_usd.toFixed(4)})`,
       `lane escalations ${c.lane_escalations}, watchdog aborts ${c.watchdog_aborts}`,
     ].join("\n") + "\n",
   );

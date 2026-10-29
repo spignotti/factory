@@ -53,7 +53,7 @@ export async function remoteBranchExists(repoDir: string, branch: string): Promi
   }
 }
 
-async function mergeBase(cwd: string, base: string): Promise<string> {
+export async function mergeBase(cwd: string, base: string): Promise<string> {
   return (await git(cwd, ["merge-base", base, "HEAD"])).trim();
 }
 

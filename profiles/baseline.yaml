@@ -1,4 +1,4 @@
-# Eval baseline (§13): the default role chains of profiles/default.yaml as of 2026-10-29, pinned so
+# Eval baseline: the default role chains of profiles/default.yaml as of 2026-10-29, pinned so
 # that results stay comparable when the defaults move. Variants for `factory experiment` override
 # roles, retry, env, prompts and flags on top of this (layered: a variant states only its changes).
 description: default role chains as of 2026-10-29, default prompts, standard lane, task plan effort

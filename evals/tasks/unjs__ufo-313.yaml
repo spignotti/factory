@@ -1,4 +1,4 @@
-# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+# Curated eval task. Third-party code: see license and source; evals/README.md.
 id: unjs__ufo-313
 repo: https://github.com/unjs/ufo.git
 base: 5fb179d51384301ffb66b48e213863a27cadd1ff

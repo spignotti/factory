@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
 import {
+  DEFAULT_BILLING,
   DEFAULT_PROVIDERS,
   type Profile,
   type ProfileLayer,
@@ -14,10 +15,11 @@ import {
 } from "./schemas/profile.js";
 
 /**
- * Layered model configuration (Amendment i), most specific wins:
+ * Layered model configuration, most specific wins:
  *   built-in (`profiles/default.yaml`) < user (`$FACTORY_HOME/profile.yaml`) < `--profile <file>`
  *   < repo (`.factory/repo.yaml` `models:`).
- * Layers replace whole role chains. Provider policy comes only from the built-in and user layers.
+ * Layers replace whole role chains. Provider policy, billing kinds and the sandbox mode come only
+ * from the built-in and user layers.
  * Every safety rule (provider policy, reviewer family ≠ implement family, capacity-only backup) is
  * validated on the merged result, so no layer can switch it off.
  */
@@ -54,7 +56,7 @@ function formatZod(e: z.ZodError): string {
 export function parseLayer(name: LayerName, source: string, text: string): Layer {
   const parsed = ProfileLayerSchema.safeParse(parse(text) ?? {});
   if (!parsed.success) throw new ConfigError(`${name} profile ${source} is invalid: ${formatZod(parsed.error)}`);
-  for (const key of ["providers", "sandbox"] as const) {
+  for (const key of ["providers", "billing", "sandbox"] as const) {
     if (parsed.data[key] !== undefined && name !== "built-in" && name !== "user") {
       throw new ConfigError(`${name} profile ${source}: ${key} can only be set in the built-in or user profile (${userProfilePathHint})`);
     }
@@ -103,6 +105,7 @@ export function resolveProfile(layers: Layer[]): Profile {
   let retry: Record<string, unknown> = {};
   const env: Record<string, string[]> = {};
   const providers: Record<string, unknown> = { ...DEFAULT_PROVIDERS };
+  const billing: Record<string, string> = { ...DEFAULT_BILLING };
   let sandbox: string | undefined;
   for (const layer of layers) {
     for (const [role, chain] of Object.entries(layer.data.roles ?? {})) {
@@ -114,10 +117,11 @@ export function resolveProfile(layers: Layer[]): Profile {
     Object.assign(env, layer.data.env ?? {});
     if (layer.name === "built-in" || layer.name === "user") {
       Object.assign(providers, layer.data.providers ?? {});
+      Object.assign(billing, layer.data.billing ?? {});
       sandbox = layer.data.sandbox ?? sandbox;
     }
   }
-  const parsed = ProfileSchema.safeParse({ roles, retry, env, providers, sandbox });
+  const parsed = ProfileSchema.safeParse({ roles, retry, env, providers, billing, sandbox });
   if (!parsed.success) {
     const where = (path: PropertyKey[]) => {
       const role = path[0] === "roles" ? (path[1] as ProfileRole | undefined) : undefined;
@@ -136,7 +140,7 @@ export function withRepoModels(profile: Profile, models: RoleOverrides | undefin
   const base: Layer = {
     name: "built-in",
     source: "(resolved)",
-    data: { roles: profile.roles, retry: profile.retry, env: profile.env, providers: profile.providers, sandbox: profile.sandbox },
+    data: { roles: profile.roles, retry: profile.retry, env: profile.env, providers: profile.providers, billing: profile.billing, sandbox: profile.sandbox },
     roleSources: profile.sources,
   };
   return resolveProfile([base, layer]);

@@ -33,11 +33,11 @@ function markCollected(run: RunRecord, at: string): void {
 }
 
 /**
- * Cleans up after runs whose PR is merged or closed (SPEC §9, Amendment n): removes the worktree,
+ * Cleans up after runs whose PR is merged or closed: removes the worktree,
  * deletes the local `factory/*` branch and the remote branch when it still points at the commit the
  * factory pushed (someone else's later push is never deleted). Plain `git push --delete`, no force.
  * A dirty worktree is kept unless `force`. Runs of a repository whose lock is held are skipped.
- * Evidence retention (Amendment x): run folders older than 30 days leave the `factory-evidence`
+ * Evidence retention: run folders older than 30 days leave the `factory-evidence`
  * branch of every repository the factory ran in, with a normal commit and a plain push.
  */
 export async function gc(opts: { factoryHome: string; github: GitHub; dryRun?: boolean; force?: boolean; now?: () => number }): Promise<GcReport> {

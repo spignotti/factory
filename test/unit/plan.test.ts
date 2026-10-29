@@ -163,3 +163,11 @@ describe("plan validation", () => {
     });
   });
 });
+
+describe("repo config: review", () => {
+  it("has no per-package review option (review runs once over the whole diff)", () => {
+    expect(parseRepoConfig("").review).toEqual({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5 });
+    // An old repo.yaml that still sets it parses; the key is dropped.
+    expect(parseRepoConfig("review:\n  per_package: true\n").review).not.toHaveProperty("per_package");
+  });
+});

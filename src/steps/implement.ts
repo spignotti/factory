@@ -80,7 +80,7 @@ async function packagePrompt(ctx: RunContext, pkg: Package): Promise<string> {
 export interface ImplementOutcome {
   status: Map<string, PackageStatus>;
   failures: Record<string, string>;
-  /** Bug plan whose repro never failed on base: never fix blind (SPEC §6.13). */
+  /** Bug plan whose repro never failed on base: never fix blind. */
   needsInput?: string[];
   lastGates?: GateReport;
 }

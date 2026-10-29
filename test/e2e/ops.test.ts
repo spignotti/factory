@@ -96,7 +96,10 @@ describe("factory stats", () => {
       state: { result: "done", lane: "fast" },
       result: { result: "done", type: "feature", rounds: 1, minutes: 4, merge_policy: "auto", pr: "https://pr/1" },
       events: [
-        ev("agent_finished", { role: "implement", model: "opencode-go/kimi", tokens_in: 100, tokens_out: 10, cost_usd: 0.01 }),
+        ev("agent_finished", { role: "implement", model: "opencode-go/kimi", tokens_in: 100, tokens_out: 10, cost_usd: 0.01, data: { billing: "subscription" } }),
+        ev("agent_finished", { role: "pr_writer", model: "anthropic/x", tokens_in: 7, tokens_out: 3, cost_usd: 0.02, data: { billing: "metered" } }),
+        // an older log line without billing: the built-in default (opencode-go = subscription) applies
+        ev("agent_finished", { role: "pr_writer", model: "opencode-go/kimi", tokens_in: 1, tokens_out: 1, cost_usd: 0.5 }),
         ev("agent_error", { role: "plan_high", model: "openai/sol", data: { class: "capacity" } }),
         ev("model_fallback", { role: "plan_high", model: "openai/sol", data: { from: "openai/sol", to: "opencode-go/grok" } }),
         ev("gate_result", { data: { check: "unit", status: "fail" } }),
@@ -125,12 +128,14 @@ describe("factory stats", () => {
     expect(c.flaky_checks).toEqual({ unit: 1 });
     expect(c.reasons).toEqual([{ result: "needs_human", reason: "stalemate: x", count: 1 }]);
     expect(c.providers.openai).toMatchObject({ calls: 2, errors: 2, fallbacks: 1, capacity_errors: 1, limit_errors: 1 });
-    expect(c.providers["opencode-go"]).toMatchObject({ calls: 1, tokens_in: 100, cost_usd: 0.01 });
-    expect(c.roles.implement).toEqual({ calls: 1, tokens_in: 100, tokens_out: 10, cost_usd: 0.01 });
-    expect(c.cost_usd).toBe(0.01);
+    expect(c.providers["opencode-go"]).toMatchObject({ calls: 2, tokens_in: 101, cost_usd: 0, billing: "subscription" });
+    expect(c.providers.anthropic).toMatchObject({ calls: 1, cost_usd: 0.02, billing: "metered" });
+    expect(c.roles.implement).toEqual({ calls: 1, tokens_in: 100, tokens_out: 10, cost_usd: 0 });
+    expect(c.cost_usd).toBe(0.02);
+    expect(c.subscription_tokens).toEqual({ tokens_in: 101, tokens_out: 11 });
     expect(c).toMatchObject({ lane_escalations: 1, watchdog_aborts: 1, merge_policy: { auto: 1, human_review: 1 }, auto_merged: 1, reverted: null });
     expect(s.previous).toMatchObject({ runs: 1, by_result: { failed: 1 }, done_rate: 0 });
-    expect(s.delta).toEqual({ runs: 3, done_rate: 0.5, cost_usd: 0.01, median_rounds: -1 });
+    expect(s.delta).toEqual({ runs: 3, done_rate: 0.5, cost_usd: 0.02, subscription_tokens: 112, median_rounds: -1 });
   });
 
   it("--repo filters by resolved path", () => {

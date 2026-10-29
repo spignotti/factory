@@ -40,7 +40,7 @@ export function runsFor(p: ProposalItem, createdAt: string, runs: RunRecord[]): 
 }
 
 /**
- * SPEC §11 step 5 for earlier proposals, each on its own: a merged factory PR resolves the proposal and its
+ * Lifecycle of earlier proposals, each on its own: a merged factory PR resolves the proposal and its
  * entries; a PR closed unmerged, or no merged/open PR within `STALE_DAYS`, drops it and reopens its
  * `proposed` entries (only those it still owns: `ref` = its id).
  */

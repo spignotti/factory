@@ -8,6 +8,7 @@ import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "../../src/pipe
 import { validateResponses } from "../../src/pipeline/loop.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
+import { costLines } from "../../src/steps/finalize.js";
 import { parseHandoff } from "../../src/steps/implement.js";
 import { extractPlanBlock, readTask, resolvePlanEffort } from "../../src/steps/intake.js";
 
@@ -111,5 +112,18 @@ describe("repo lock", () => {
     controller.abort(new Error("interrupted by SIGINT"));
     await expect(waiting).rejects.toThrow("interrupted by SIGINT");
     release();
+  });
+});
+
+describe("PR cost lines", () => {
+  const u = (model: string, billing: "subscription" | "metered", cost_usd: number) => ({ role: "implement", model, calls: 1, errors: 0, tokens_in: 10, tokens_out: 2, cost_usd, billing });
+  it("subscriptions show tokens, metered providers USD, both when mixed", () => {
+    expect(costLines([u("opencode-go/a", "subscription", 0)])).toEqual(["- subscription tokens: 10 in / 2 out"]);
+    expect(costLines([u("anthropic/a", "metered", 0.5)])).toEqual(["- cost (metered providers): $0.5000"]);
+    expect(costLines([u("opencode-go/a", "subscription", 0), u("anthropic/a", "metered", 0.25)])).toEqual([
+      "- subscription tokens: 10 in / 2 out",
+      "- cost (metered providers): $0.2500",
+    ]);
+    expect(costLines([])).toEqual(["- cost (metered providers): $0.0000"]);
   });
 });

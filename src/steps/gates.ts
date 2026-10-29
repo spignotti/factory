@@ -10,6 +10,7 @@ import {
   scopeReport,
   testPresence,
 } from "../gates/builtin.js";
+import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { topoOrder } from "../pipeline/dag.js";
@@ -43,7 +44,7 @@ export function withEnvCommand(run: string, envCommand: string): string {
 
 /**
  * Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green.
- * A check with `services` starts them first (§6.12; EnvMissing when one does not come up), gets their
+ * A check with `services` starts them first (EnvMissing when one does not come up), gets their
  * env and, jailed, reaches exactly their ports.
  */
 export async function runChecks(
@@ -107,6 +108,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     testPresence(plan, packages, handoffs, changed, repo.tests.globs),
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),
+    configGuard({ plan, packages, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
   ];
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];

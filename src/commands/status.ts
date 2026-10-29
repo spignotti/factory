@@ -5,7 +5,7 @@ import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatusReportSchema } from "../schemas/reports.js";
 
-/** `factory status --json` (SPEC §9; schema `schemas/status.schema.json`). */
+/** `factory status --json` (schema `schemas/status.schema.json`). */
 export type StatusReport = z.infer<typeof StatusReportSchema>;
 
 const repoOf = (r: RunRecord) => r.state?.repo ?? r.result?.repo ?? "";

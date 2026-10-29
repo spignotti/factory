@@ -1,4 +1,4 @@
-# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+# Curated eval task. Third-party code: see license and source; evals/README.md.
 id: pallets__flask-5014
 repo: https://github.com/pallets/flask.git
 base: 7ee9ceb71e868944a46e1ff00b506772a53a4f1d

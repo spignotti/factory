@@ -3,7 +3,7 @@ import { DEPENDENCY_GLOBS, MIGRATION_GLOBS } from "../paths.js";
 import { matchesAny } from "../schemas/plan.js";
 import type { RunContext } from "./context.js";
 
-/** Fast lane → standard lane triggers after implement (§6.11), on the whole change since base. */
+/** Fast lane → standard lane triggers after implement, on the whole change since base. */
 export async function fastLaneEscalation(ctx: Pick<RunContext, "worktree" | "baseSha" | "repo">): Promise<string[]> {
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const lines = [...(await diffStat(ctx.worktree, ctx.baseSha)).values()].reduce((a, b) => a + b, 0);

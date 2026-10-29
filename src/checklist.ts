@@ -1,5 +1,5 @@
 /**
- * `.factory/checklist.md` (SPEC §5.1, Amendment l): one item per Markdown list item. An item that a
+ * `.factory/checklist.md`: one item per Markdown list item. An item that a
  * deterministic check already enforces carries a marker `<!-- check: <check name> -->`; marked items
  * are skipped by the checklist reviewer and by `harden`. Continuation lines (indented, no bullet)
  * belong to the item above; headings, blank lines and other text are ignored.

@@ -1,4 +1,4 @@
-# Curated eval task (§13). Third-party code: see license and source; evals/README.md.
+# Curated eval task. Third-party code: see license and source; evals/README.md.
 id: sympy__sympy-15809
 repo: https://github.com/sympy/sympy.git
 base: 28d913d3cead6c5646307ffa6540b21d65059dfd

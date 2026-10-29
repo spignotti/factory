@@ -18,7 +18,7 @@ export function criterionEvidence(report: EvaluateReport | undefined, id: string
   return { met: c.met, cell: c.screenshot ? `${verdict}, ${ref(c.screenshot, "screenshot", link)}` : verdict };
 }
 
-/** The PR's evaluation section (§6.9.3): flows, pages with diffs, session GIF, screenshots. */
+/** The PR's evaluation section: flows, pages with diffs, session GIF, screenshots. */
 export function evaluationMarkdown(report: EvaluateReport | undefined, link: EvidenceLink, notes: string[] = []): string {
   if (!report) return "";
   const lines = [`## Evaluation (round ${report.round})`, ""];

@@ -1,85 +1,63 @@
-# To verify (SPEC §18)
+# To verify
 
-Items the build could not verify without real providers, credentials or GitHub. Code marks them with
-`// UNVERIFIED: <what>`.
+What the build could not verify without real providers, credentials or GitHub. Code marks open items with
+`// UNVERIFIED: <what>`. Remove an item here (and its marker) once it is verified.
+
+## Settled
+
+- **Sandbox**: agents, `setup`, checks and red-green runs are jailed with bubblewrap + pasta (Linux);
+  `sandbox: required | preferred | off` in the user profile. Covered by tests on Linux.
+- **Model chains**: the defaults and the cross-family `implement` backup in `profiles/default.yaml` are decided.
+- **Provider policy**: configurable (`providers: { allow, deny }`, user profile or built-in only); the
+  default allows every Pi provider except `opencode` (OpenCode Zen, pay-per-use), which is also refused by
+  the Zen guard in `doctor` and before every agent session.
+- **Billing**: per provider (`billing:`); subscriptions are reported in tokens, metered providers in USD.
+- **Agent context**: Pi loads only the worktree root `AGENTS.md` (no `~/.pi`, ancestor or override files);
+  covered by a loopback Pi request in `test/unit/context-files.test.ts`.
+- **gh field shapes** (checked 2026-10-29 on `spignotti/factory`, public): `gh run list --json
+  databaseId,headSha,workflowName,event,conclusion,createdAt`, `gh run view --json jobs`
+  (`name/conclusion/startedAt/completedAt`), `commits/<sha>/check-runs` (`status/conclusion`), `tags`.
 
 ## Pi SDK (`@earendil-works/pi-coding-agent` 1.4.0)
 
-Verified against the installed type declarations and sources:
-
-- `createAgentSession({ cwd, agentDir, modelRuntime, model, thinkingLevel, resourceLoader, tools, customTools, sessionManager, settingsManager })`.
-- Tool selection by name (`tools` allowlist); a `customTools` entry replaces the built-in tool of the same
-  name, so `createBashToolDefinition(cwd, { spawnHook, exposeSessionEnvironment: false })` controls the
-  environment of every bash process.
-- `ModelRuntime.create({ authPath, modelsPath })` and `getModel(provider, id)`.
-- `SettingsManager.inMemory({ retry: { enabled: false } })` turns Pi's own retries off.
-- Usage and cost: `session.getSessionStats()` (`tokens.input/output/cacheRead`, `cost`).
-- Errors: an assistant message with `stopReason: "error"` and `errorMessage`.
-- Session events used for heartbeats/progress: `tool_execution_start`, `turn_end`, `message_update`, `message_end`.
+Verified against the installed type declarations and sources: `createAgentSession`, tool selection by name
+(a `customTools` entry replaces the built-in tool, so the bash `spawnHook` controls every bash env),
+`ModelRuntime.create({ authPath, modelsPath })`, `SettingsManager.inMemory({ retry: { enabled: false } })`,
+usage via `session.getSessionStats()`, errors as `stopReason: "error"` + `errorMessage`, session events
+for heartbeats.
 
 Unverified (needs a real provider):
 
 - `src/agents/pi-runner.ts` `statusFromMessage`: the HTTP status of a provider error is parsed from
-  `errorMessage` text. Capacity/limit/auth classification relies on the provider wording.
-- `thinkingLevel` values beyond `off|low|medium|high` and their clamping per model.
-- `PI_CODING_AGENT_DIR` layout: `auth.json`/`models.json` inside the factory-owned agent dir.
-- Exact provider names and model ids (`opencode-go/*`, `openai/*`) in `profiles/default.yaml`; the fallback
-  chains are placeholders (TBD by Silas).
+  `errorMessage` text; capacity/limit/auth classification relies on the provider wording.
+- `thinkingLevel` clamping per model beyond `off|low|medium|high`.
+- `doctor --ping` against the live endpoints (`completeSimple` with `maxTokens: 16` and a session id, which
+  OpenCode Go requires). The ping needs the ChatGPT login in `$FACTORY_HOME/pi` first.
+- Whether a provider's OAuth flow can set a different `baseUrl` per request (`ModelAuth.baseUrl`); the Zen
+  guard checks the resolved model, not the per-request auth.
+- Pi's HTTP idle timeout (`httpIdleTimeoutMs`, default 5 min) against long silent reasoning phases; the
+  factory's watchdog and `max_wall_minutes` sit on top.
+- Abort: killing bash children Pi spawned relies on Pi's abort handling with long-running tool calls.
 
-### Providers (checked in the Pi 1.4.0 model registry, not against live endpoints)
+### Providers (Pi 1.4.0 registry, not live endpoints)
 
-- `opencode` is **OpenCode Zen**: pay-per-use, base URL `https://opencode.ai/inference/v1`. Never used;
-  the profile schema rejects every `opencode/*` model.
-- `opencode-go` is the subscription, base URL `https://opencode.ai/inference/go/v1`. It reads the same
-  `OPENCODE_API_KEY` as Zen, so a misconfigured model id (not the key) is what would bill pay-per-use;
-  hence the allowlist (`ALLOWED_PROVIDERS` in `src/schemas/profile.ts`: `opencode-go`, `openai`).
-- `openai` uses `OPENAI_API_KEY` (pay-per-use API) or ChatGPT OAuth in `auth.json` (subscription). Which
-  one applies depends on the factory-owned `auth.json`; only OAuth is intended. `openai-codex` is legacy
-  and not allowed. Checked offline with Pi 1.4.0: a stored OAuth credential wins over `OPENAI_API_KEY`
-  (`isUsingSubscription("openai")` is true), and `doctor`/`PiRunner` refuse OpenAI otherwise.
-- Unverified: whether a provider's OAuth flow can still set a different `baseUrl` per request (Pi's
-  `ModelAuth.baseUrl`); the guard checks the resolved model, not the per-request auth.
-- Unverified: `doctor --ping` against the real endpoints (`completeSimple` with `maxTokens: 16`), and
-  `gh api repos/{owner}/{repo}` / `branches/<b>` fields on private repos without Pro.
-
-### HTTP idle timeout
-
-Pi aborts a provider request after `httpIdleTimeoutMs` without bytes (default `300_000` = 5 min, `0` =
-off). The factory leaves the default (`SettingsManager.inMemory` does not set it). Its own silence
-watchdog (`src/pipeline/watchdog.ts`) and `max_wall_minutes` (enforced inside every agent call) sit on top. Long silent reasoning phases
-may hit the 5 min limit; unverified with real models.
-
-### No filesystem sandbox
-
-Agents run with the bash tool in the worktree, but nothing confines them to it. The env is scrubbed
-(`spawnHook`), but an agent can still read `/proc/<pid>/environ` of the factory process (which holds the
-provider keys), the real `gh` config/token under `$HOME`, and the main repository `.git` (shared object
-store and refs of the worktree). Redaction only covers what the factory writes. Needs a sandbox
-(bubblewrap/container, separate user) before running untrusted tasks; not part of M1.
-
-### Abort
-
-On SIGINT/SIGTERM or `max_wall_minutes` the factory aborts the Pi session and kills the process groups of
-the gate commands it started itself. Killing bash children that Pi spawned relies on Pi's abort handling
-(unverified with long-running tool calls).
+- `opencode` = OpenCode Zen (`https://opencode.ai/inference/v1`), pay-per-use, never used.
+- `opencode-go` = subscription (`https://opencode.ai/inference/go/v1`). It reads the same
+  `OPENCODE_API_KEY` as Zen, so a wrong model id, not the key, would bill per use; hence the guard.
+- `openai`: ChatGPT OAuth in the factory-owned `auth.json` (subscription) wins over `OPENAI_API_KEY`;
+  `doctor` and `PiRunner` refuse OpenAI without the OAuth login. `openai-codex` is not allowed.
 
 ## GitHub (`src/gh.ts`)
 
-- `GhCli.baseStatus` reads check runs via `gh api repos/{owner}/{repo}/commits/<sha>/check-runs`.
-- `GhCli.createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue` (`gh issue view --json`).
-- Resume: `GhCli.updatePr` (`gh pr edit <url> --title --body`) and `markReady` (`gh pr ready <url>`).
-- `GhCli.push` is a plain `git push -u origin <branch>` (never forced); resume relies on the branch only
-  moving forward (merges, no rebase). Verified against a local bare remote in the e2e tests.
-- None of these run in tests; they are exercised only against a real repository.
-- `harden` CI audit: `GhCli.ciRuns` uses `gh run list --created >=<date> --limit 200 --json databaseId,headSha,workflowName,event,conclusion,createdAt` and one `gh run view <id> --json jobs` per run (job durations from `startedAt`/`completedAt`); `GhCli.latestTag` uses `gh api repos/spignotti/factory/tags`. Field names follow the gh docs; not yet run against a real repository.
-- `adopt` push/PR use the same `push`/`createPr` as runs; branch protection and auto-merge are only printed as hints.
+- `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue`, `updatePr`, `markReady` and
+  `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
+  `push` is verified against a local bare remote).
+- Branch protection and auto-merge hints on a private repository without GitHub Pro.
 
-## Evaluate (M4, Amendment x)
+## Evaluate
 
-- The browser tools as Pi custom tools (`PiRunner` `customTools`) are covered by the fake runner only; a real
-  `evaluate` session with `openai/gpt-6-luna` driving them is unverified.
-- Evidence links (`https://github.com/<owner>/<repo>/blob/<sha>/<path>?raw=true`) and the inline GIF are
-  verified as text against a local bare remote; how GitHub renders them (private repos: viewers need
-  access) is unverified. The push retry on a non-fast-forward is not exercised by a test.
-- Mobile web builds (Expo / React Native Web) are covered through Playwright device emulation only; no
-  real Expo app has been evaluated yet.
+- The browser tools as Pi custom tools are covered by the fake runner only; a real `evaluate` session
+  driving them is unverified.
+- Evidence links and the inline GIF are verified as text against a local bare remote; GitHub's rendering
+  (private repos: viewers need access) is unverified. The push retry on a non-fast-forward has no test.
+- Mobile web builds (Expo / React Native Web) are covered through Playwright device emulation only.

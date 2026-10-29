@@ -65,8 +65,7 @@ describe("eval report", () => {
     expect(summarize("none", []).pass_rate).toBeNull();
   });
 
-  // §16 "eval decision rule"
-  describe("decision rule (§13)", () => {
+  describe("decision rule", () => {
     const A = sum({ profile: "a" });
     it("higher pass rate wins", () => expect(beats(sum({ pass_rate: 0.75 }), A)).toEqual(["pass rate 0.75 > 0.5"]));
     it("equal pass rate and ≥ 10 % cheaper wins; 9 % cheaper does not", () => {
