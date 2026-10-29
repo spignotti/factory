@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { createServer } from "node:http";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -48,7 +48,7 @@ describe("jail command line", () => {
 
   it("isolated: pasta without host loopback or port forwards, then bwrap", () => {
     const argv = jailedArgv(jail(), "sh", "make test", wt, { PATH: "/usr/bin" });
-    expect(argv.slice(0, 8)).toEqual(["pasta", "--config-net", "--quiet", "--no-map-gw", "-T", "none", "-U", "none"]);
+    expect(argv.slice(0, 12)).toEqual(["pasta", "--config-net", "--quiet", "--no-map-gw", "-t", "none", "-u", "none", "-T", "none", "-U", "none"]);
     expect(argv.indexOf("bwrap")).toBeGreaterThan(0);
     expect(argv.slice(-3)).toEqual(["sh", "-c", "make test"]);
     const s = argv.join(" ");
@@ -59,6 +59,14 @@ describe("jail command line", () => {
     expect(s).not.toMatch(/--(ro-)?bind(-try)? \/ /);
     expect(s).not.toMatch(/ \/run\b/);
     expect(s).toContain("blackhole");
+  });
+
+  it("service ports: inbound only on host loopback, outbound only to the named ports", () => {
+    const argv = jailedArgv({ ...jail(), ports: { expose: [41001, 41001], reach: [41002, 41003] } }, "sh", "x", wt);
+    expect(argv.slice(0, argv.indexOf("--"))).toEqual([
+      "pasta", "--config-net", "--quiet", "--no-map-gw", "-t", "127.0.0.1/41001", "-u", "none", "-T", "41002", "-T", "41003", "-U", "none",
+    ]);
+    expect(() => jailedArgv({ ...jail(), ports: { reach: [0] } }, "sh", "x", wt)).toThrow(/invalid port/);
   });
 
   it("shared net: bwrap only; sandbox none: plain shell", () => {
@@ -190,6 +198,41 @@ describe.skipIf(!real)("real jail (bwrap + pasta on this host)", () => {
       }
     } finally {
       server.close();
+    }
+  }, 60_000);
+
+  it("network: a listener in the jail is not exposed on the host unless forwarded; forwards reach only that port", async () => {
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const serve = (ports?: Jail["ports"]) => {
+      const argv = jailedArgv({ ...jail, ports }, "sh", `exec node -e "require('http').createServer((q,r)=>r.end('svc')).listen(${port},'0.0.0.0')"`, wt, env);
+      return spawn(argv[0]!, argv.slice(1), { cwd: wt, env, stdio: "ignore", detached: true });
+    };
+    const fromHost = () => fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000) }).then((r) => r.text(), () => "unreachable");
+    const stop = (c: ReturnType<typeof spawn>) => { try { process.kill(-c.pid!, "SIGKILL"); } catch { /* gone */ } };
+    const hidden = serve();
+    try {
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(await fromHost()).toBe("unreachable");
+    } finally {
+      stop(hidden);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    const svc = serve({ expose: [port] });
+    try {
+      let got = "";
+      for (let i = 0; i < 40 && got !== "svc"; i++) {
+        got = await fromHost();
+        if (got !== "svc") await new Promise((r) => setTimeout(r, 250));
+      }
+      expect(got).toBe("svc");
+      const client = (p: number) =>
+        sh(`node -e "fetch('http://127.0.0.1:${p}/').then(r=>r.text()).then(t=>{console.log(t)},()=>{console.log('no');})"`, {
+          cwd: wt, env, timeoutMs: 20_000, jail: { ...jail, ports: { reach: [port] } },
+        });
+      expect((await client(port)).output.trim()).toBe("svc");
+      expect((await client(port + 1)).output.trim()).toBe("no");
+    } finally {
+      stop(svc);
     }
   }, 60_000);
 
