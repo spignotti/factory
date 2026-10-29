@@ -4,7 +4,7 @@ A deterministic pipeline that turns a task (issue, plan file or plain text) into
 request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. `SPEC.md` is the
 source of truth.
 
-## Status: M2a — operations and safety
+## Status: M3 — services, CI stub, evals
 
 M1 core loop (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 
@@ -35,7 +35,13 @@ M2a (Amendments e–p): layered model config and provider allowlist, Linux sandb
 findings memory, `security` and `checklist` reviewers, fast lane, `status`/`stats`/`gc --json`, `doctor` with
 the Zen guard, JSON Schemas; see the sections below.
 
-Not yet: CI stub, services (M2b), eval, evaluator, `adopt`, `harden`.
+M2b (Amendments q–t): per-run services with port slots, explicit sandbox port forwards, the CI stub
+(`factory ci-stub`), `doctor` checks for the stub, services and `ui`.
+
+M3 (Amendment u): `factory eval`, `factory experiment`, the `baseline` profile and ten curated tasks
+(see [`evals/README.md`](evals/README.md)).
+
+Not yet: evaluator, `adopt`, `harden`.
 
 ## Resume
 
@@ -107,6 +113,34 @@ tools are confined to the worktree. Set `sandbox: required | preferred | off` in
 `~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
 (bubblewrap), `pasta` (passt) and `ip` (iproute2); `factory doctor` shows what is in effect.
 
+## Services
+
+Checks that need a database or a dev server name it: `services: [db]` on the check, plus a `services:`
+entry in `repo.yaml` (`start` in the foreground, optional `ready`/`stop`/`env`). The factory starts it once
+before the first check that needs it and stops it at run end. Ports come from a per-run slot, so parallel
+runs never collide: `{port:web}` (a named port), `{port:5432}` (a default port shifted by the slot) and
+`{port_offset}`. In the sandbox a service must listen on `0.0.0.0`; only its own ports are forwarded, and
+only to the checks that use it. `host: true` runs it outside the sandbox (e.g. Docker); `doctor` warns.
+`factory doctor --repo . --services` starts and stops each service once.
+
+## CI
+
+`factory ci-stub --ref <tag> > .github/workflows/factory.yml` writes the CI stub: on every pull request it
+selects the checks with the same code as a local run and runs each one (`factory gates --run`); the single
+required status is `factory / done`. `factory doctor --repo .` checks the file is the unedited template
+for its ref. Bumping the ref is a deliberate PR. The ref must be a published tag of this repo.
+
+## Evals and experiments
+
+```
+factory eval --validate                                   # tasks sane? (no agents)
+factory eval --profile baseline --repeat 2                # pass rate, cost, time, real findings
+factory experiment --base baseline --variant my-variant.yaml --repeat 2   # JSON verdict
+```
+
+Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real model time; see
+[`evals/README.md`](evals/README.md) for the task format, metrics and the decision rule.
+
 ## Fast lane
 
 `factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when the task needs more than one package or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged and listed in the PR.
@@ -152,7 +186,8 @@ factory gc [--dry-run] [--force]            # remove worktree and branches of me
 ## JSON contracts
 
 Machine-readable outputs have JSON Schemas in [`schemas/`](schemas/): `result.json`, `events.jsonl` lines,
-`status`, `stats`, `gc` and `doctor` with `--json`, the findings memory and the reviewer outputs. They are
+`status`, `stats`, `gc` and `doctor` with `--json`, the findings memory, the reviewer outputs, eval tasks,
+eval profiles, eval result lines and the experiment verdict. They are
 generated from the zod schemas in code (`pnpm schemas`); a test keeps them in sync.
 
 ## Development
