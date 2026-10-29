@@ -174,11 +174,12 @@ describe("implement model family (Amendment c, amended)", () => {
 });
 
 describe("provider allowlist", () => {
-  const withImplement = (model: string) => rolesYaml({ implement: `[{ model: ${model} }]` });
+  const PIN = "providers: { allow: [opencode-go, openai] }\n";
+  const withImplement = (model: string) => rolesYaml({ implement: `[{ model: ${model} }]` }) + PIN;
 
   it("accepts opencode-go and openai", () => {
     expect(() => parseProfile(withImplement("opencode-go/deepseek-v4-pro"))).not.toThrow();
-    expect(() => parseProfile(rolesYaml({ review_plan: "[{ model: openai/mid-codex }]" }))).not.toThrow();
+    expect(() => parseProfile(rolesYaml({ review_plan: "[{ model: openai/mid-codex }]" }) + PIN)).not.toThrow();
   });
 
   it("rejects the pay-per-use opencode (Zen) provider with a pointed message", () => {
@@ -189,8 +190,9 @@ describe("provider allowlist", () => {
     expect(() => parseProfile(withImplement(model))).toThrow(/is not allowed/);
   });
 
-  it("checks every role", () => {
+  it("checks every role, and denies Zen even without a pin", () => {
     expect(() => parseProfile(rolesYaml({ evaluate: "[{ model: opencode/x }]" }))).toThrow(/Zen/);
+    expect(() => parseProfile(rolesYaml({ evaluate: "[{ model: anthropic/x }]" }))).not.toThrow();
   });
 
   it("every shipped profile passes the allowlist", () => {

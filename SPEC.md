@@ -841,9 +841,17 @@ c) **Provider capacity errors are their own class.** Errors such as "at capacity
 d) **Heartbeats.** Pi sessions emit heartbeat/progress events into `events.jsonl`, so the watchdog does not kill long but active sessions, and `status` shows live progress.
 
 e) **Zen guard.** `doctor` hard-fails if any configured model resolves to the pay-per-use OpenCode Zen endpoint. Only `opencode-go` and the OpenAI subscription are allowed providers.
+   *Amended 2026-10-29 (Silas, see i):* the provider policy is configurable (`providers: { allow, deny }`). The public default is `allow: ["*"]`, `deny: [opencode]` (Zen is denied unless a user profile removes it explicitly); Silas's user profile pins `allow: [opencode-go, openai]`. The Zen endpoint check in `doctor` stays.
 
 f) **Weekdays only.** Scheduled routines (`harden`, retro, `eval`) run Monday to Friday only.
 
 g) **GitHub Pro is available.** Branch protection and required checks on private repos are OK.
 
 h) **One run per repo, merge not rebase, resume (built in M1).** §4, §6, §6.1, §6.9, §6.10 and §9 describe the per-repo lock with `--wait` queue, merging a moved base before finalize, and `resume` as implemented. Parallel runs per repo and automatic conflict resolution are future work.
+
+i) **Layered model configuration (Silas 2026-10-29).** Most specific wins, whole chains replaced per role:
+   1. built-in `profiles/default.yaml` (Silas's defaults, §8.2);
+   2. user profile `$FACTORY_HOME/profile.yaml` (default `~/.factory/profile.yaml`): `roles` (partial), `retry` (partial), `env`, `providers`;
+   3. `--profile <name|file>` on `run`/`resume`/`doctor`: an extra layer for experiments (`roles`/`retry`/`env` only). It sits below the repo layer, so a repo's choice is never overridden by accident;
+   4. repo `.factory/repo.yaml` `models:` (role → chain, partial), e.g. cheaper models for a less important repo.
+   `providers` (`allow`, `deny`; `*` = any; deny wins) can only be set by the built-in and user layers, so a repo cannot widen it. All safety rules (provider policy, reviewer family ≠ every implement family, `capacity_only` rule for cross-family implement entries) are validated on the merged result; errors name the role and the layer it came from. `doctor` prints the effective chain per role and its layer. Unknown roles or keys in any layer are errors.

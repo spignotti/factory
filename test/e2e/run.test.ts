@@ -67,6 +67,18 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.file("pr.md")).not.toContain(SECRET);
   });
 
+  it("repo.yaml models: override a role for this repo; a merged config that breaks a safety rule fails at intake", async () => {
+    const r = await runScenario({ script: "clean.json", patch: (c) => void (c.models = { pr_writer: [{ model: "opencode-go/grok-4.7" }] }) });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.calls.find((c) => c.role === "pr_writer")?.model).toBe("opencode-go/grok-4.7");
+    expect(r.runner.calls.find((c) => c.role === "implement")?.model).toBe("opencode-go/deepseek-v4.1-flash");
+
+    const bad = await runScenario({ script: "clean.json", patch: (c) => void (c.models = { review_plan: [{ model: "opencode-go/deepseek-v4-pro" }] }) });
+    expect(bad.result.result).toBe("failed");
+    expect(bad.result.reason).toMatch(/review_plan from repo layer/);
+    expect(bad.runner.calls).toEqual([]);
+  });
+
   it("secret values that reach agent output are redacted from artifacts, PR body and result", async () => {
     const r = await runScenario({
       script: "clean.json",

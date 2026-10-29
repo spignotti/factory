@@ -9,6 +9,7 @@ import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, me
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema } from "../schemas/plan.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
+import { withRepoModels } from "../config.js";
 import { finalize, syncBase } from "../steps/finalize.js";
 import { type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
@@ -171,6 +172,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     if (lane === "fast") throw new Error("--lane fast is not available in M1");
     events.emit({ step: "intake", event: "step_started" });
     const repo: RepoConfig = loadRepoConfig(repoDir);
+    deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const task: Task = await readTask(opts, repoDir, deps.github);
     f.taskRef = task.ref;
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
@@ -334,6 +336,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   return f.execute(async () => {
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: st.result } });
     const repo = loadRepoConfig(st.repo);
+    deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
     f.set({ type: plan.type });
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;

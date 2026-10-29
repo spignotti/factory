@@ -59,6 +59,33 @@ node dist/cli.js gates --run unit --json
 Runs live in `~/.factory/runs/<run-id>/` (override with `FACTORY_HOME`). The target repo needs
 `.factory/repo.yaml` (SPEC §5.2; `tests.run` with a `{files}` placeholder enables the red-green proof).
 
+## Model configuration
+
+Layers, most specific wins (SPEC Amendment i), each replacing whole role chains:
+
+1. built-in `profiles/default.yaml`;
+2. your user profile `$FACTORY_HOME/profile.yaml` (default `~/.factory/profile.yaml`);
+3. `--profile <name|file>` for one invocation (experiments);
+4. the repo's `.factory/repo.yaml` `models:`.
+
+```yaml
+# ~/.factory/profile.yaml
+providers: { allow: [opencode-go, openai], deny: [opencode] }   # only here or built-in
+roles:
+  pr_writer: [{ model: opencode-go/mimo-v2.6-flash }]
+```
+
+```yaml
+# .factory/repo.yaml: cheaper models for this repo
+models:
+  plan_high: [{ model: openai/gpt-6.1-sol, thinking: medium }]
+```
+
+The default provider policy allows any Pi provider except `opencode` (OpenCode Zen, pay-per-use). Safety
+rules (provider policy, reviewers in another model family than every `implement` model, a cross-family
+`implement` backup must be `capacity_only`) are checked after the merge. `factory doctor [--repo <path>]`
+shows the effective model per role and the layer it came from.
+
 ## Development
 
 ```
