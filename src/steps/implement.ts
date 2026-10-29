@@ -1,18 +1,33 @@
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
-import { commitAll, diffText, discardChanges, stageAll } from "../git.js";
+import { commitAll, diffText, discardChanges, gitOk, stageAll } from "../git.js";
 import { callAgent, checkDeadline, type RunContext, writeJson } from "../pipeline/context.js";
 import { type PackageStatus, runInDagOrder } from "../pipeline/dag.js";
-import { asData, rolePrompt } from "../prompts.js";
+import { asData, taskBlock, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
 import type { Package } from "../schemas/plan.js";
 import { failureSummary, type GateReport, runGates } from "./gates.js";
 
 export const MAX_GATE_ATTEMPTS = 3;
 
-const HANDOFF_SHAPE = `When done, reply with handoff.json as a single \`\`\`json block:
+const HANDOFF_SHAPE = `When done, reply with handoff.json as a single \`\`\`json block (in your reply; never write it to a file):
 {"package":"<id>","done":[],"decisions":[],"deviations_from_plan":[],"skipped":[],"uncertain":[],
  "evidence":[{"acceptance_id":"A1","kind":"test|check","ref":"<test file>[::<test name>] or <check name>"}],
  "responses":[{"finding_id":"R1-plan-1","status":"fixed|wontfix","response":"reason"}]}`;
+
+/**
+ * Removes a root \`handoff.json\` an agent wrote as a file instead of replying with it, so it never
+ * lands in a factory commit. Kept when the base has it or a package names it.
+ */
+export async function dropStrayHandoff(ctx: Pick<RunContext, "worktree" | "baseSha" | "plan" | "events">, step: string): Promise<void> {
+  const file = join(ctx.worktree, "handoff.json");
+  if (!existsSync(file)) return;
+  if (ctx.plan.packages.some((p) => p.files.includes("handoff.json"))) return;
+  if (await gitOk(ctx.worktree, ["cat-file", "-e", `${ctx.baseSha}:handoff.json`])) return;
+  rmSync(file);
+  ctx.events.emit({ step, event: "progress", data: { detail: "removed stray handoff.json" } });
+}
 
 export function gitAuthor(ctx: Pick<RunContext, "repo">): { name: string; email: string } {
   const { author, email } = ctx.repo.git;
@@ -70,6 +85,7 @@ async function packagePrompt(ctx: RunContext, pkg: Package): Promise<string> {
   return [
     `Implement package ${pkg.id} ("${pkg.title}") of this plan:`,
     asData("plan", JSON.stringify({ ...ctx.plan, current_package: pkg.id }, null, 2)),
+    taskBlock(ctx),
     ctx.handoffs.length ? asData("previous_handoffs", JSON.stringify(ctx.handoffs, null, 2)) : "",
     diff ? asData("diff_since_base", diff) : "",
     ctx.briefing ? `Recurring findings in this repo (avoid them):\n${asData("findings_briefing", ctx.briefing)}` : "",
@@ -129,6 +145,7 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       report = await runGates(ctx, "fast", [...done, pkg.id]);
       lastGates = report;
       if (report.green) {
+        await dropStrayHandoff(ctx, "implement");
         await commitAll(ctx.worktree, `feat(${pkg.id}): ${pkg.title}`, gitAuthor(ctx));
         done.push(pkg.id);
         ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "done", attempts: attempt } });

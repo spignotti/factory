@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
@@ -21,8 +22,10 @@ import { resumeFactory, runFactory } from "./pipeline/run.js";
 import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
+import { asset } from "./prompts.js";
 
 const USAGE = `usage:
+  factory --version
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
               [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
@@ -74,9 +77,26 @@ function sandboxFor(profile: Profile, io: Io): Sandbox {
 
 const defaultIo: Io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) };
 
+/** Package version, plus the commit when run from a git checkout (npm link / checkout installs). */
+function versionString(): string {
+  const { version } = JSON.parse(asset("package.json")) as { version: string };
+  try {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    if (!existsSync(join(root, ".git"))) return version;
+    const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return sha ? `${version} (${sha})` : version;
+  } catch {
+    return version;
+  }
+}
+
 export async function main(argv: string[], io: Io = defaultIo): Promise<number> {
   const [command, ...rest] = argv;
   try {
+    if (command === "--version" || command === "version") {
+      io.out(`factory ${versionString()}\n`);
+      return 0;
+    }
     if (command === "gates") {
       const { values } = parseArgs({
         args: rest,

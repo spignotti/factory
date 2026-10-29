@@ -61,3 +61,11 @@ describe("CI stub", () => {
     expect(await main(["ci-stub"], { out: () => {}, err: () => {} })).toBe(2);
   });
 });
+
+describe("factory --version", () => {
+  it("prints the package version (and the checkout's commit)", async () => {
+    let out = "";
+    expect(await main(["--version"], { out: (s) => void (out += s), err: () => {} })).toBe(0);
+    expect(out).toMatch(/^factory \d+\.\d+\.\d+( \([0-9a-f]{7,}\))?\n$/);
+  });
+});
