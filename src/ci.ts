@@ -25,13 +25,18 @@ export interface CiStubStatus {
   detail: string;
 }
 
+/** Factory refs a CI stub text pins (`github:spignotti/factory#<ref>`), deduplicated. */
+export function pinnedRefs(text: string): string[] {
+  return [...new Set([...text.matchAll(PINNED)].map((m) => m[1]!))];
+}
+
 /** The repo's CI stub equals the template for the ref it pins (hash). */
 export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8")): CiStubStatus {
   const path = join(repoDir, CI_STUB_PATH);
   // Not adopted yet (by hand until `adopt`, M5): a warning, not a failure.
   if (!existsSync(path)) return { status: "warn", detail: `${CI_STUB_PATH} is missing; write it with \`factory ci-stub --ref <tag> > ${CI_STUB_PATH}\`` };
   const actual = readFileSync(path, "utf8");
-  const refs = [...new Set([...actual.matchAll(PINNED)].map((m) => m[1]!))];
+  const refs = pinnedRefs(actual);
   if (refs.length !== 1) {
     return { status: "fail", detail: refs.length ? `pins several factory refs (${refs.join(", ")})` : "pins no github:spignotti/factory#<ref>" };
   }

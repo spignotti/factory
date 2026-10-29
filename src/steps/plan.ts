@@ -10,7 +10,7 @@ import type { PlanOutcome } from "./intake.js";
 
 type PlanContext = Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "task" | "repoDir" | "deadline">;
 
-const PLAN_SHAPE = `plan.json shape:
+export const PLAN_SHAPE = `plan.json shape:
 {"version":1,"type":"feature|bug|chore","goal":"","context":"",
  "packages":[{"id":"P1","title":"","description":"","files":[],"depends_on":[],"changes_flows":[]}],
  "acceptance":[{"id":"A1","package":"P1","text":"","verify":"test|check|evaluator|review","kind":"behavior|edge_case|repro","risk":false}],

@@ -1,0 +1,85 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/metrics.schema.json",
+  "title": "harden metrics line ($FACTORY_HOME/memory/<repo>/metrics.jsonl)",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "ts": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "determinism_ratio": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deterministic_checks": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "llm_verified_items": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "open_findings": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "ci_minutes_per_week": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "flaky_rate": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "done_rate": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "median_rounds": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "revert_rate": {
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ts",
+    "repo",
+    "determinism_ratio",
+    "deterministic_checks",
+    "llm_verified_items",
+    "open_findings",
+    "ci_minutes_per_week",
+    "flaky_rate",
+    "done_rate",
+    "median_rounds",
+    "revert_rate"
+  ],
+  "additionalProperties": false
+}

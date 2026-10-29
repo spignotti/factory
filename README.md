@@ -4,7 +4,7 @@ A deterministic pipeline that turns a task (issue, plan file or plain text) into
 request. LLMs (via Pi) only plan, implement, review and summarize; everything else is code. `SPEC.md` is the
 source of truth.
 
-## Status: M3 — services, CI stub, evals
+## Status: M5 — adopt, harden
 
 M1 core loop (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 
@@ -41,7 +41,10 @@ M2b (Amendments q–t): per-run services with port slots, explicit sandbox port 
 M3 (Amendment u): `factory eval`, `factory experiment`, the `baseline` profile and ten curated tasks
 (see [`evals/README.md`](evals/README.md)).
 
-Not yet: evaluator, `adopt`, `harden`.
+M5 (Amendments v–w): `factory adopt` (onboarding PR, legacy setup removal) and `factory harden` (signals,
+metrics, one proposal with a lifecycle); see the sections below.
+
+Not yet: evaluator (M4; harden's evaluator signals are empty until then).
 
 ## Resume
 
@@ -129,6 +132,50 @@ only to the checks that use it. `host: true` runs it outside the sandbox (e.g. D
 selects the checks with the same code as a local run and runs each one (`factory gates --run`); the single
 required status is `factory / done`. `factory doctor --repo .` checks the file is the unedited template
 for its ref. Bumping the ref is a deliberate PR. The ref must be a published tag of this repo.
+
+## Adopt
+
+`factory adopt --repo <path> --ref <tag>` onboards a repository in one PR (branch `factory/adopt`, from the
+base branch; the user's checkout is not touched):
+
+- **Detect** (code): stack (node: package manager and scripts; python: uv/poetry/pip, nox sessions or
+  ruff/mypy/pytest; rust; go), test files and the command that runs specific ones, UI, database, cloud/secrets,
+  CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …).
+- **Measure**: setup and every check once in a clean base worktree, in the sandbox (`--no-measure` skips).
+- **Draft**: `.factory/repo.yaml` (tiers: e2e/build, CI `services:` or > 120 s → `full`; secrets or failing on
+  the base → `manual`; reasons as comments), `.factory/review-rules.md`, the CI stub for `--ref`, and an
+  AGENTS.md "Test strategy" section when there is none.
+- **Legacy setup**: Claude Code (`CLAUDE.md`, `.claude/`), Cursor rules and Bugbot, opencode and grok
+  configs/agents/commands, workflows running coding bots, and PR/push workflows whose every command a drafted
+  check covers are deleted in the same PR. Skills with scripts, other assistants' files, uncovered or special
+  workflows and AGENTS.md sections about old tools are only listed as proposed removals. Deploy, release and
+  scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths, e.g.
+  `--keep CLAUDE.md --keep .claude`. The PR description lists every removed, proposed and kept item.
+- **Baseline plan** (`plan_medium`): saved as proposal `<date>-adopt` (see Harden); run it after the merge
+  with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
+- **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
+  no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
+  `.factory/repo.yaml`) is refused unless `--force`.
+
+## Harden
+
+`factory harden --repo <path>` (weekly or by hand) turns recurring problems into deterministic checks, one
+proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>/`:
+
+1. **Lifecycle**: an open proposal whose factory run (matched by plan goal or `resolves_findings`) merged is
+   `resolved` (its findings too); all its PRs closed, or no merged/open PR after 28 days, is `dropped` and its
+   findings are reopened.
+2. **Compaction** (`plan_medium`, no tools): near-duplicate open findings are merged; counts, runs and dates
+   are merged in code (`--no-compact` skips).
+3. **Signals** (code): findings seen twice or checkable, flaky checks, unchecked checklist items, a 30-day
+   CI audit via `gh` (failure/flaky rates, median/p90 durations, minutes per week, checks that never fail,
+   slow checks without `paths`, CI stub behind the latest factory tag), run stats, stale verify guides,
+   reverted factory PRs. Evaluator signals are empty until M4.
+4. **Metrics**: one line per call in `metrics.jsonl` (determinism ratio, open findings, CI minutes, flaky,
+   done and revert rate, median rounds).
+5. **Proposal** (`harden` role, read-only tools): exactly one, validated as a plan (one retry), written to
+   `proposals/<date>.json` (+ `.plan.json`); its findings become `proposed`. No signals, no LLM call. Run it
+   with `factory run --plan <dir>/<date>.plan.json`.
 
 ## Evals and experiments
 

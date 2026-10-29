@@ -39,6 +39,39 @@ export interface GitHub {
   authenticated(repoDir: string): Promise<boolean>;
   /** `doctor` hints; readable without admin rights. Unknown values are null. */
   repoSettings(repoDir: string, branch: string): Promise<RepoSettings>;
+  /** `harden` CI audit: workflow runs created since `since` (ISO date), newest first, with their jobs; at most `limit`. */
+  ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]>;
+  /** `harden`: newest release tag of the factory itself (`owner/repo`), null when there is none. */
+  latestTag(repoDir: string, ownerRepo: string): Promise<string | null>;
+}
+
+export interface CiJob {
+  name: string;
+  /** success | failure | cancelled | skipped | … ; null while running. */
+  conclusion: string | null;
+  seconds: number | null;
+}
+
+export interface CiRun {
+  id: number;
+  sha: string;
+  workflow: string;
+  event: string;
+  conclusion: string | null;
+  created_at: string;
+  jobs: CiJob[];
+}
+
+/** Highest `v<semver>`-like tag (numeric compare), else null. */
+export function newestTag(tags: string[]): string | null {
+  const parse = (t: string) => /^v?(\d+)\.(\d+)\.(\d+)$/.exec(t)?.slice(1).map(Number);
+  const valid = tags.filter((t) => parse(t));
+  valid.sort((a, b) => {
+    const x = parse(a)!;
+    const y = parse(b)!;
+    return x[0]! - y[0]! || x[1]! - y[1]! || x[2]! - y[2]!;
+  });
+  return valid.at(-1) ?? null;
 }
 
 export interface RepoSettings {
@@ -125,6 +158,30 @@ export class GhCli implements GitHub {
     await gh(repoDir, ["pr", "ready", pr]);
   }
 
+  async ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]> {
+    // UNVERIFIED: `gh run list/view --json` field names on the user's repos (docs/VERIFY.md).
+    const list = JSON.parse(
+      await gh(repoDir, ["run", "list", "--limit", String(limit), "--created", `>=${since.slice(0, 10)}`, "--json", "databaseId,headSha,workflowName,event,conclusion,createdAt"]),
+    ) as { databaseId: number; headSha: string; workflowName: string; event: string; conclusion: string | null; createdAt: string }[];
+    const out: CiRun[] = [];
+    for (const r of list) {
+      const view = JSON.parse(await gh(repoDir, ["run", "view", String(r.databaseId), "--json", "jobs"])) as {
+        jobs: { name: string; conclusion: string | null; startedAt: string | null; completedAt: string | null }[];
+      };
+      const jobs = view.jobs.map((j) => {
+        const ms = j.startedAt && j.completedAt ? Date.parse(j.completedAt) - Date.parse(j.startedAt) : NaN;
+        return { name: j.name, conclusion: j.conclusion || null, seconds: Number.isFinite(ms) && ms >= 0 ? Math.round(ms / 1000) : null };
+      });
+      out.push({ id: r.databaseId, sha: r.headSha, workflow: r.workflowName, event: r.event, conclusion: r.conclusion || null, created_at: r.createdAt, jobs });
+    }
+    return out;
+  }
+
+  async latestTag(repoDir: string, ownerRepo: string): Promise<string | null> {
+    const tags = (await gh(repoDir, ["api", `repos/${ownerRepo}/tags?per_page=100`, "--jq", ".[].name"])).split("\n").filter(Boolean);
+    return newestTag(tags);
+  }
+
   async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
     const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft"])) as { state: string; isDraft: boolean };
     const state = j.state.toLowerCase();
@@ -187,6 +244,20 @@ export class FakeGitHub implements GitHub {
 
   async repoSettings(): Promise<RepoSettings> {
     return this.settings;
+  }
+
+  /** CI history and the factory's newest tag as `harden` sees them. */
+  runs: CiRun[] = [];
+  factoryTag: string | null = null;
+  readonly ciQueries: { since: string; limit: number }[] = [];
+
+  async ciRuns(_repoDir: string, since: string, limit: number): Promise<CiRun[]> {
+    this.ciQueries.push({ since, limit });
+    return this.runs.filter((r) => r.created_at >= since).slice(0, limit);
+  }
+
+  async latestTag(): Promise<string | null> {
+    return this.factoryTag;
   }
 
   async prStatus(_repoDir: string, pr: string): Promise<PrStatus> {

@@ -1,0 +1,492 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/harden.schema.json",
+  "title": "factory harden --json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "generated_at": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "lifecycle": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "dropped"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "reason",
+          "pr"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "compaction": {
+      "type": "object",
+      "properties": {
+        "merged": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "merged",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "signals": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "determinism_ratio": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deterministic_checks": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "llm_verified_items": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "open_findings": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "ci_minutes_per_week": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "flaky_rate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "done_rate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "median_rounds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "revert_rate": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ts",
+        "repo",
+        "determinism_ratio",
+        "deterministic_checks",
+        "llm_verified_items",
+        "open_findings",
+        "ci_minutes_per_week",
+        "flaky_rate",
+        "done_rate",
+        "median_rounds",
+        "revert_rate"
+      ],
+      "additionalProperties": false
+    },
+    "proposal": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "number",
+              "const": 1
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "harden",
+                "adopt"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "repo": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "open",
+                "resolved",
+                "dropped"
+              ]
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "plan": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "number",
+                  "const": 1
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "feature",
+                    "bug",
+                    "chore"
+                  ]
+                },
+                "goal": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "context": {
+                  "default": "",
+                  "type": "string"
+                },
+                "packages": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "title": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": {
+                        "default": "",
+                        "type": "string"
+                      },
+                      "files": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "depends_on": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "changes_flows": {
+                        "default": [],
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "source_quote": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "title",
+                      "description",
+                      "files",
+                      "depends_on",
+                      "changes_flows"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "acceptance": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "package": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "verify": {
+                        "type": "string",
+                        "enum": [
+                          "test",
+                          "check",
+                          "evaluator",
+                          "review"
+                        ]
+                      },
+                      "kind": {
+                        "default": "behavior",
+                        "type": "string",
+                        "enum": [
+                          "behavior",
+                          "edge_case",
+                          "repro"
+                        ]
+                      },
+                      "risk": {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      "source_quote": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "package",
+                      "text",
+                      "verify",
+                      "kind",
+                      "risk"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "out_of_scope": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "resolves_findings": {
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "version",
+                "type",
+                "goal",
+                "context",
+                "packages",
+                "acceptance",
+                "out_of_scope",
+                "resolves_findings"
+              ],
+              "additionalProperties": false
+            },
+            "plan_path": {
+              "type": "string"
+            },
+            "references": {
+              "type": "object",
+              "properties": {
+                "findings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "checklist": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "findings",
+                "checklist"
+              ],
+              "additionalProperties": false
+            },
+            "signals": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "metrics": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolution": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "at": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "resolved",
+                        "dropped"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "run_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "pr": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "at",
+                    "status",
+                    "reason",
+                    "run_id",
+                    "pr"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "version",
+            "kind",
+            "id",
+            "repo",
+            "created_at",
+            "status",
+            "rationale",
+            "plan",
+            "plan_path",
+            "references",
+            "signals",
+            "metrics",
+            "resolution"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "generated_at",
+    "repo",
+    "lifecycle",
+    "compaction",
+    "signals",
+    "metrics",
+    "proposal",
+    "path",
+    "error"
+  ],
+  "additionalProperties": false
+}

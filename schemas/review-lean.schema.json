@@ -46,7 +46,6 @@
             }
           },
           "findings": {
-            "default": [],
             "type": "array",
             "items": {
               "type": "object",
