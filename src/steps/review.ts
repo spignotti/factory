@@ -29,13 +29,9 @@ export interface ReviewInput {
   lastReviewedSha?: string;
 }
 
-async function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput): Promise<string> {
-  await stageAll(ctx.worktree);
-  const skip = ctx.repo.review.skip_paths;
+function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string): string {
   const shape = REVIEW_SHAPE.replace("<name>", reviewer);
   if (input.round === 1 || !input.lastReviewedSha) {
-    const diff = await diffText(ctx.worktree, ctx.baseSha, skip);
-    writeFileSync(join(ctx.runDir, `diff-${input.round}.patch`), diff);
     return [
       asData("plan", JSON.stringify(ctx.plan, null, 2)),
       asData("diff", diff),
@@ -45,8 +41,6 @@ async function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewIn
       shape,
     ].join("\n\n");
   }
-  const diff = await diffText(ctx.worktree, input.lastReviewedSha, skip);
-  writeFileSync(join(ctx.runDir, `diff-${input.round}.patch`), diff);
   const prior = input.findings
     .filter((f) => f.reviewer === reviewer && f.status === "open")
     .map((f) => ({ id: f.id, severity: f.severity, file: f.file, line: f.line, claim: f.claim, response: f.response ?? null }));
@@ -59,10 +53,10 @@ async function reviewPrompt(ctx: RunContext, reviewer: Reviewer, input: ReviewIn
   ].join("\n\n");
 }
 
-async function runReviewer(ctx: RunContext, reviewer: Reviewer, input: ReviewInput): Promise<ReviewOutput> {
+async function runReviewer(ctx: RunContext, reviewer: Reviewer, input: ReviewInput, diff: string): Promise<ReviewOutput> {
   const role = `review_${reviewer}`;
   const system = `${rolePrompt(`review-${reviewer}`)}\n\n${rolePrompt("review-common")}`;
-  let prompt = await reviewPrompt(ctx, reviewer, input);
+  let prompt = reviewPrompt(ctx, reviewer, input, diff);
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await callAgent(ctx, "review", {
@@ -87,7 +81,12 @@ async function runReviewer(ctx: RunContext, reviewer: Reviewer, input: ReviewInp
 /** One review round: `plan` and `simplicity` in parallel sessions (mode `full`). */
 export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<ReviewOutput[]> {
   ctx.events.emit({ step: "review", event: "step_started", data: { round: input.round, reviewers: M1_REVIEWERS } });
-  const outputs = await Promise.all(M1_REVIEWERS.map((r) => runReviewer(ctx, r, input)));
+  // Stage and diff once: parallel reviewers must not touch the git index concurrently.
+  await stageAll(ctx.worktree);
+  const since = input.round === 1 || !input.lastReviewedSha ? ctx.baseSha : input.lastReviewedSha;
+  const diff = await diffText(ctx.worktree, since, ctx.repo.review.skip_paths);
+  writeFileSync(join(ctx.runDir, `diff-${input.round}.patch`), diff);
+  const outputs = await Promise.all(M1_REVIEWERS.map((r) => runReviewer(ctx, r, input, diff)));
   ctx.events.emit({ step: "review", event: "step_finished", data: { round: input.round } });
   return outputs;
 }

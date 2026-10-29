@@ -53,7 +53,7 @@ function lines(out: string): string[] {
 /** Files changed since the merge base with `base`: commits, working tree and untracked files. */
 export async function changedFiles(cwd: string, base: string): Promise<string[]> {
   const mb = await mergeBase(cwd, base);
-  const tracked = lines(await git(cwd, ["diff", "--name-only", mb]));
+  const tracked = lines(await git(cwd, ["diff", "--no-renames", "--name-only", mb]));
   return [...new Set([...tracked, ...(await untracked(cwd))])].sort();
 }
 
@@ -61,7 +61,7 @@ export async function changedFiles(cwd: string, base: string): Promise<string[]>
 export async function diffStat(cwd: string, base: string): Promise<Map<string, number>> {
   const mb = await mergeBase(cwd, base);
   const stat = new Map<string, number>();
-  for (const line of lines(await git(cwd, ["diff", "--numstat", mb]))) {
+  for (const line of lines(await git(cwd, ["diff", "--no-renames", "--numstat", mb]))) {
     const [a, d, file] = line.split("\t");
     if (file) stat.set(file, (Number(a) || 0) + (Number(d) || 0));
   }
@@ -75,7 +75,7 @@ export async function diffStat(cwd: string, base: string): Promise<Map<string, n
 /** Unified diff since the merge base (stage first so new files are included). */
 export async function diffText(cwd: string, base: string, exclude: string[] = []): Promise<string> {
   const mb = await mergeBase(cwd, base);
-  return git(cwd, ["diff", mb, "--", ".", ...exclude.map((p) => `:(exclude,glob)${p}`)]);
+  return git(cwd, ["diff", "--no-renames", mb, "--", ".", ...exclude.map((p) => `:(exclude,glob)${p}`)]);
 }
 
 export async function stageAll(cwd: string): Promise<void> {
@@ -92,7 +92,7 @@ export async function commitAll(cwd: string, message: string, author: { name: st
 
 /** Discards all uncommitted changes in a factory-owned worktree. */
 export async function discardChanges(cwd: string): Promise<void> {
-  await git(cwd, ["checkout", "-q", "--", "."]).catch(() => "");
+  await git(cwd, ["reset", "-q", "--hard", "HEAD"]);
   await git(cwd, ["clean", "-fdq"]);
 }
 

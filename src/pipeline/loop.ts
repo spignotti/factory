@@ -4,7 +4,7 @@ import type { Handoff } from "../schemas/handoff.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
 import { gitAuthor, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
 import { reviewRound } from "../steps/review.js";
-import { type RunContext, writeJson } from "./context.js";
+import { checkDeadline, type RunContext, writeJson } from "./context.js";
 import { decideExit, isStalemate, mergeRound, openFindings, type TrackedFinding } from "./merge.js";
 
 export interface LoopOutcome {
@@ -38,7 +38,7 @@ interface FixState {
 export async function fixStep(
   ctx: RunContext,
   label: string,
-  input: { open: TrackedFinding[]; gates?: GateReport },
+  input: { open: TrackedFinding[]; gates?: GateReport; tier?: "fast" | "full" },
   state: FixState,
 ): Promise<{ ok: true; gates: GateReport } | { ok: false; reason: string }> {
   await stageAll(ctx.worktree);
@@ -56,6 +56,7 @@ export async function fixStep(
   ].filter(Boolean).join("\n\n");
   const sessionKey = `${ctx.runId}-fix-${label}`;
   for (;;) {
+    checkDeadline(ctx);
     const turn = await implementerTurn(ctx, "fix", {
       sessionKey,
       packageId: "fix",
@@ -65,12 +66,13 @@ export async function fixStep(
     if (!turn.handoff) return { ok: false, reason: `invalid fix handoff: ${turn.errors.join("; ")}` };
     const handoff = turn.handoff;
     writeJson(ctx, `handoff-fix-${label}.json`, handoff);
-    ctx.handoffs.push({ ...handoff, package: `fix-${label}` });
+    const pkg = `fix-${label}`;
+    ctx.handoffs = [...ctx.handoffs.filter((h) => h.package !== pkg), { ...handoff, package: pkg }];
     for (const f of input.open) {
       const r = handoff.responses.find((x) => x.finding_id === f.id);
       if (r) f.response = r;
     }
-    const gates = await runGates(ctx, "fast", ctx.plan.packages.map((p) => p.id));
+    const gates = await runGates(ctx, input.tier ?? "fast", ctx.plan.packages.map((p) => p.id));
     if (gates.green) {
       await commitAll(ctx.worktree, `fix: ${label === "finalize" ? "finalize gates" : `address review round ${label}`}`, gitAuthor(ctx));
       return { ok: true, gates };
@@ -87,6 +89,7 @@ export async function reviewLoop(ctx: RunContext, initialGates: GateReport, stat
   let gates = initialGates;
   let lastReviewedSha: string | undefined;
   for (let round = 1; ; round++) {
+    checkDeadline(ctx);
     const reviews = await reviewRound(ctx, { round, gates, findings, lastReviewedSha });
     lastReviewedSha = await headSha(ctx.worktree);
     const merged = mergeRound(findings, round, reviews, ctx.repo.review.max_nits);

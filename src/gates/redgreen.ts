@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh, tail } from "../exec.js";
@@ -8,6 +8,8 @@ export interface RedGreenResult {
   ok: boolean;
   redOnBase: boolean;
   greenOnHead: boolean;
+  /** The proof could not run (no command, no repro, setup failed); says nothing about the bug. */
+  inconclusive: boolean;
   detail: string;
 }
 
@@ -24,19 +26,28 @@ export async function redGreenProof(opts: {
   baseSha: string;
   files: string[];
   testCommand: string | undefined;
+  /** repo.yaml `setup`, run in the base worktree so a missing environment is not mistaken for the bug. */
+  setup?: string;
   env: Record<string, string>;
 }): Promise<RedGreenResult> {
   const { worktree, baseSha, files, testCommand, env } = opts;
-  if (!testCommand) return { ok: false, redOnBase: false, greenOnHead: false, detail: "repo.yaml tests.run is not set" };
-  if (files.length === 0) return { ok: false, redOnBase: false, greenOnHead: false, detail: "no repro test named in evidence" };
+  const inconclusive = (detail: string): RedGreenResult => ({ ok: false, redOnBase: false, greenOnHead: false, inconclusive: true, detail });
+  if (!testCommand) return inconclusive("repo.yaml tests.run is not set");
+  if (files.length === 0) return inconclusive("no repro test named in evidence");
+  const missing = files.filter((f) => !existsSync(join(worktree, f)));
+  if (missing.length) return inconclusive(`repro file missing: ${missing.join(", ")}`);
   const cmd = testCommand.replace("{files}", files.map(shellQuote).join(" "));
-  const baseDir = join(mkdtempSync(join(tmpdir(), "factory-base-")), "wt");
+  const tmp = mkdtempSync(join(tmpdir(), "factory-base-"));
+  const baseDir = join(tmp, "wt");
   await git(worktree, ["worktree", "add", "-q", "--detach", baseDir, baseSha]);
   try {
     for (const f of files) {
-      if (!existsSync(join(worktree, f))) return { ok: false, redOnBase: false, greenOnHead: false, detail: `repro file missing: ${f}` };
       mkdirSync(dirname(join(baseDir, f)), { recursive: true });
       copyFileSync(join(worktree, f), join(baseDir, f));
+    }
+    if (opts.setup) {
+      const setup = await sh(opts.setup, { cwd: baseDir, env });
+      if (setup.code !== 0) return inconclusive(`setup failed in the base worktree:\n${tail(setup.output, 20)}`);
     }
     const base = await sh(cmd, { cwd: baseDir, env });
     const head = await sh(cmd, { cwd: worktree, env });
@@ -46,8 +57,9 @@ export async function redGreenProof(opts: {
       redOnBase ? "repro fails on base" : `repro passes on base (does not reproduce the bug):\n${tail(base.output, 20)}`,
       greenOnHead ? "repro passes on HEAD" : `repro fails on HEAD:\n${tail(head.output, 20)}`,
     ].join("\n");
-    return { ok: redOnBase && greenOnHead, redOnBase, greenOnHead, detail };
+    return { ok: redOnBase && greenOnHead, redOnBase, greenOnHead, inconclusive: false, detail };
   } finally {
     await git(worktree, ["worktree", "remove", "--force", baseDir]).catch(() => "");
+    rmSync(tmp, { recursive: true, force: true });
   }
 }

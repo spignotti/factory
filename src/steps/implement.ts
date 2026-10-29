@@ -1,6 +1,6 @@
 import { extractJson } from "../agents/runner.js";
 import { commitAll, diffText, discardChanges, stageAll } from "../git.js";
-import { callAgent, type RunContext, writeJson } from "../pipeline/context.js";
+import { callAgent, checkDeadline, type RunContext, writeJson } from "../pipeline/context.js";
 import { type PackageStatus, runInDagOrder } from "../pipeline/dag.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
@@ -102,6 +102,7 @@ export async function implementPackages(ctx: RunContext): Promise<ImplementOutco
     let reason = "";
     let report: GateReport | undefined;
     for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS; attempt++) {
+      checkDeadline(ctx);
       const turn = await implementerTurn(ctx, "implement", { sessionKey, packageId: pkg.id, prompt });
       if (!turn.handoff) {
         reason = `invalid handoff: ${turn.errors.join("; ")}`;

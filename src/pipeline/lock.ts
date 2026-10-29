@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 function alive(pid: number): boolean {
@@ -19,16 +19,29 @@ export function acquireTaskLock(factoryHome: string, repoId: string, task: strin
   mkdirSync(dir, { recursive: true });
   const safe = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120);
   const path = join(dir, `${safe(repoId)}-${safe(task)}.lock`);
-  for (let i = 0; i < 2; i++) {
-    try {
-      writeFileSync(path, String(process.pid), { flag: "wx" });
-      return () => rmSync(path, { force: true });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number(readFileSync(path, "utf8"));
-      if (Number.isInteger(pid) && pid > 0 && alive(pid)) return undefined;
-      rmSync(path, { force: true });
+  // The pid is written before the lock appears (hard link is atomic), so readers never see an empty lock.
+  const tmp = `${path}.${process.pid}.${Date.now()}`;
+  writeFileSync(tmp, String(process.pid));
+  try {
+    for (let i = 0; i < 2; i++) {
+      try {
+        linkSync(tmp, path);
+        return () => rmSync(path, { force: true });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        const pid = Number(readFileSync(path, "utf8"));
+        if (Number.isInteger(pid) && pid > 0 && alive(pid)) return undefined;
+        // Rename is atomic: of two runs taking over the same stale lock, only one moves it away.
+        try {
+          renameSync(path, `${tmp}.stale`);
+          rmSync(`${tmp}.stale`, { force: true });
+        } catch {
+          return undefined;
+        }
+      }
     }
+    return undefined;
+  } finally {
+    rmSync(tmp, { force: true });
   }
-  return undefined;
 }

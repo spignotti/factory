@@ -122,11 +122,11 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   if (result === "done") {
     gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
     if (!gates.green) {
-      const fixed = await fixStep(ctx, "finalize", { open: [], gates }, { gateFailures: 0 });
-      if (fixed.ok) gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
-      if (!fixed.ok || !gates.green) {
+      const fixed = await fixStep(ctx, "finalize", { open: [], gates, tier: "full" }, { gateFailures: 0 });
+      if (fixed.ok) gates = fixed.gates;
+      else {
         result = "needs_human";
-        reason = fixed.ok ? "full gates red in finalize" : fixed.reason;
+        reason = fixed.reason;
       }
     }
   }

@@ -11,7 +11,7 @@ import { finalize } from "../steps/finalize.js";
 import { runChecks } from "../steps/gates.js";
 import { implementPackages } from "../steps/implement.js";
 import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
-import { agentEnv, type RunContext, type RunDeps, type Task, writeJson } from "./context.js";
+import { agentEnv, type RunContext, type RunDeps, type Task, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireTaskLock } from "./lock.js";
 import { reviewLoop } from "./loop.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -98,11 +98,12 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     if (await gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${branch}`])) branch += `-${runId.slice(-6)}`;
     const worktree = join(runDir, "worktree");
     await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
-    const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0 };
+    const deadline = Date.now() - (now() - startedAt) + repo.limits.max_wall_minutes * 60_000;
+    const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline };
     const env = agentEnv(ctx);
 
     if (repo.setup) {
-      const setup = await sh(repo.setup, { cwd: worktree, env });
+      const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline - Date.now()) });
       if (setup.code !== 0) {
         out = { ...out, result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` };
         return finish();
@@ -114,7 +115,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     }
     if (status !== "green") {
       const fast = repo.checks.filter((c) => c.tier === "fast");
-      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command });
+      const results = await runChecks(fast, { cwd: worktree, env, envCommand: repo.env_command, deadline });
       for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
       const red = results.filter((r) => r.status === "fail").map((r) => r.name);
       if (red.length) {
@@ -138,7 +139,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     return finish();
   } catch (e) {
     const reason = (e as Error).message;
-    if (e instanceof WatchdogAbort || e instanceof InvalidOutputError) out = { ...out, result: "needs_human", reason };
+    if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded) out = { ...out, result: "needs_human", reason };
     else out = { ...out, result: "failed", reason };
     return finish();
   } finally {

@@ -42,15 +42,16 @@ export function withEnvCommand(run: string, envCommand: string): string {
 /** Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green. */
 export async function runChecks(
   checks: Check[],
-  opts: { cwd: string; env: Record<string, string>; envCommand: string },
+  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: number },
 ): Promise<CheckResult[]> {
+  const timeout = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline - Date.now()));
   const results: CheckResult[] = [];
   for (const check of checks) {
     const cmd = withEnvCommand(check.run, opts.envCommand);
-    let r = await sh(cmd, { cwd: opts.cwd, env: opts.env });
+    let r = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout() });
     let status: CheckResult["status"] = r.code === 0 ? "pass" : "fail";
     if (status === "fail") {
-      const again = await sh(cmd, { cwd: opts.cwd, env: opts.env });
+      const again = await sh(cmd, { cwd: opts.cwd, env: opts.env, timeoutMs: timeout() });
       if (again.code === 0) status = "flaky";
       else r = again;
     }
@@ -73,7 +74,12 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   await stageAll(worktree);
   const changed = await changedFiles(worktree, ctx.baseSha);
   const env = agentEnv(ctx);
-  const checks = await runChecks(selectChecks(repo.checks, tier, changed), { cwd: worktree, env, envCommand: repo.env_command });
+  const checks = await runChecks(selectChecks(repo.checks, tier, changed), {
+    cwd: worktree,
+    env,
+    envCommand: repo.env_command,
+    deadline: ctx.deadline,
+  });
 
   const builtins: BuiltinResult[] = [
     forbiddenPaths(changed, repo.limits.forbidden_paths),
@@ -90,9 +96,10 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       baseSha: ctx.baseSha,
       files: reproFiles(plan, handoffs),
       testCommand: repo.tests.run,
+      setup: repo.setup,
       env,
     });
-    reproRedOnBase = proof.redOnBase;
+    reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
     builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail });
   }
   const all = [...checks, ...builtins.map(fromBuiltin)];

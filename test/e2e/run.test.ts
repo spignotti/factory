@@ -225,3 +225,11 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.file("pr.md")).toContain("## Summary");
   });
 });
+
+describe("run guards", () => {
+  it("max_wall_minutes is the outer limit -> needs_human", async () => {
+    const r = await runScenario({ script: "base-red.json", patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.00001) });
+    expect(r.result).toMatchObject({ result: "needs_human" });
+    expect(r.result.reason).toMatch(/max_wall_minutes/);
+  });
+});

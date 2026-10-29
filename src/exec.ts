@@ -13,7 +13,8 @@ export function sh(
 ): Promise<ShResult> {
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn("sh", ["-c", command], { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"] });
+    // Own process group, so a timeout kills everything the command started.
+    const child = spawn("sh", ["-c", command], { cwd: opts.cwd, env: opts.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     let output = "";
     const onData = (d: Buffer) => {
       output += d.toString();
@@ -21,7 +22,17 @@ export function sh(
     };
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
-    const timer = opts.timeoutMs ? setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs) : undefined;
+    const timer =
+      opts.timeoutMs !== undefined
+        ? setTimeout(() => {
+            output += `\n[factory] timed out after ${Math.round(opts.timeoutMs! / 1000)}s\n`;
+            try {
+              process.kill(-child.pid!, "SIGKILL");
+            } catch {
+              child.kill("SIGKILL");
+            }
+          }, opts.timeoutMs)
+        : undefined;
     child.on("error", (e) => {
       output += String(e);
     });

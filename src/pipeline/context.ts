@@ -49,6 +49,19 @@ export interface RunContext {
   plan: Plan;
   handoffs: Handoff[];
   gateCount: number;
+  /** `max_wall_minutes` outer limit (epoch ms). */
+  deadline: number;
+}
+
+export class WallTimeExceeded extends Error {
+  constructor(minutes: number) {
+    super(`max_wall_minutes (${minutes}) exceeded`);
+    this.name = "WallTimeExceeded";
+  }
+}
+
+export function checkDeadline(ctx: Pick<RunContext, "deadline" | "repo">): void {
+  if (Date.now() > ctx.deadline) throw new WallTimeExceeded(ctx.repo.limits.max_wall_minutes);
 }
 
 export function writeJson(ctx: Pick<RunContext, "runDir">, name: string, data: unknown): void {

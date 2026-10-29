@@ -44,7 +44,17 @@ describe("red-green proof", () => {
 
   it("rejects missing repro evidence or test command", async () => {
     const { dir, baseSha } = setup();
-    expect((await redGreenProof({ worktree: dir, baseSha, files: [], testCommand: "x", env })).ok).toBe(false);
+    expect(await redGreenProof({ worktree: dir, baseSha, files: [], testCommand: "x", env })).toMatchObject({ ok: false, inconclusive: true });
     expect((await redGreenProof({ worktree: dir, baseSha, files: ["a"], testCommand: undefined, env })).ok).toBe(false);
+  });
+});
+
+describe("red-green proof environment", () => {
+  it("runs setup in the base worktree; a failing setup is inconclusive, not a red base", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "test/max.test.js"), REPRO);
+    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", setup: "exit 3", env });
+    expect(r).toMatchObject({ ok: false, inconclusive: true, redOnBase: false });
+    expect(r.detail).toMatch(/setup failed/);
   });
 });

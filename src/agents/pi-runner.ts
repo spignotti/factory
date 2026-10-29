@@ -109,7 +109,10 @@ export class PiRunner implements AgentRunner {
   }
 
   async run(req: AgentRequest): Promise<AgentResponse> {
-    let kept = req.sessionKey ? this.sessions.get(req.sessionKey) : undefined;
+    // A continued session belongs to one model; a fallback model starts its own session.
+    const key = req.sessionKey ? `${req.sessionKey}|${req.model}` : undefined;
+    let kept = key ? this.sessions.get(key) : undefined;
+    const isNew = !kept;
     if (!kept) {
       const session = await this.createSession(req);
       kept = { session, usageBefore: { tokens_in: 0, tokens_out: 0, cost_usd: 0 } };
@@ -139,13 +142,14 @@ export class PiRunner implements AgentRunner {
       const usage = diffUsage(statsUsage(session), kept.usageBefore);
       if (lastError) throw new AgentError(lastError.message, usage, statusFromMessage(lastError.message));
       if (req.signal?.aborted) throw new AgentError("aborted", usage);
-      if (req.sessionKey) this.sessions.set(req.sessionKey, kept);
+      if (key) this.sessions.set(key, kept);
       else session.dispose();
       return { text: session.getLastAssistantText() ?? "", usage };
     } catch (e) {
-      if (!req.sessionKey) session.dispose();
+      const usage = e instanceof AgentError ? e.usage : diffUsage(statsUsage(session), kept.usageBefore);
+      if (isNew) session.dispose();
       if (e instanceof AgentError) throw e;
-      throw new AgentError((e as Error).message, diffUsage(statsUsage(session), kept.usageBefore));
+      throw new AgentError((e as Error).message, usage);
     } finally {
       unsubscribe();
       req.signal?.removeEventListener("abort", onAbort);
