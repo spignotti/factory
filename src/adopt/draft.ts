@@ -21,9 +21,20 @@ function ciJobsFor(c: Candidate, d: Detection) {
   return d.workflows.flatMap((w) => w.jobs.filter((j) => j.runs.some((r) => lineCovered(r, [c], "") && !lineCovered(r, [], d.setup))));
 }
 
+/**
+ * Candidates that changed tracked files when measured: never drafted as checks (they would slip
+ * edits into every commit). Moved to `d.skipped` so the adopt PR lists them.
+ */
+export function dropMutating(d: Detection, m: MeasureResult | null): void {
+  for (const c of d.candidates) {
+    const files = m?.checks.find((x) => x.name === c.name)?.mutated;
+    if (files?.length) d.skipped.push({ name: c.name, run: c.run, source: c.source, reason: `changed files when measured (${files.slice(0, 5).join(", ")}${files.length > 5 ? ", …" : ""})` });
+  }
+}
+
 /** Proposed tiers (SPEC §12 step 2): DB → full, cloud/secrets → manual, failing → manual, slow → full. */
 export function draftChecks(d: Detection, m: MeasureResult | null): DraftCheck[] {
-  return d.candidates.map((c) => {
+  return d.candidates.filter((c) => !m?.checks.find((x) => x.name === c.name)?.mutated?.length).map((c) => {
     const measured = m?.checks.find((x) => x.name === c.name);
     const jobs = ciJobsFor(c, d);
     const base: DraftCheck = { name: c.name, run: c.run, tier: "fast", seconds: measured?.seconds ?? null };

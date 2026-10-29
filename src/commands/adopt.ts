@@ -4,7 +4,7 @@ import { OneShot, type OneShotDeps } from "../agents/oneshot.js";
 import { extractJson } from "../agents/runner.js";
 import { classifyLegacy, type LegacyReport } from "../adopt/legacy.js";
 import { type Detection, detect } from "../adopt/detect.js";
-import { type DraftCheck, draftChecks, draftRepoYaml, testStrategySection, withTestStrategy } from "../adopt/draft.js";
+import { type DraftCheck, draftChecks, draftRepoYaml, dropMutating, testStrategySection, withTestStrategy } from "../adopt/draft.js";
 import { type MeasureResult, measureChecks } from "../adopt/measure.js";
 import { CI_STUB_PATH, renderCiStub } from "../ci.js";
 import type { Io } from "./gates.js";
@@ -40,6 +40,8 @@ export interface AdoptReport {
   legacy: LegacyReport;
   detection: { stacks: string[]; setup: string; ui: string[]; db: string[]; cloud: string[]; special_jobs: string[] };
   checks: { name: string; tier: string; seconds: number | null; note: string | null }[];
+  /** Candidates not drafted as checks (they change files, or duplicate another). */
+  skipped_checks: { name: string; run: string; reason: string }[];
   setup_seconds: number | null;
   proposal: { id: string; path: string; plan_path: string } | null;
   plan_error: string | null;
@@ -136,6 +138,9 @@ function prBody(r: AdoptReport, d: Detection): string {
     "|---|---|---|---|",
     checks || "| – | | | |",
     "",
+    "### Not drafted as checks",
+    r.skipped_checks.length ? r.skipped_checks.map((c) => `- \`${c.name}\` (\`${c.run}\`): ${c.reason}`).join("\n") : "- none",
+    "",
     "### Removed legacy setup",
     list(r.legacy.removed),
     "",
@@ -180,6 +185,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
         measureChecks(dir, detection.setup, detection.candidates, { sandbox: deps.sandbox, factoryHome: deps.factoryHome }),
       );
     }
+    dropMutating(detection, measured);
     const checks: DraftCheck[] = draftChecks(detection, measured);
     const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date });
     const agentsPath = join(wt, "AGENTS.md");
@@ -210,6 +216,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       legacy,
       detection: detectionSummary(detection),
       checks: checks.map((c) => ({ name: c.name, tier: c.tier, seconds: c.seconds, note: c.note ?? null })),
+      skipped_checks: detection.skipped.map((c) => ({ name: c.name, run: c.run, reason: c.reason })),
       setup_seconds: measured?.setup?.seconds ?? null,
       proposal: null,
       plan_error: null,
@@ -256,6 +263,7 @@ export async function adoptCommand(opts: AdoptOptions & { json: boolean }, deps:
   io.out(`written: ${r.written.join(", ")}\n`);
   io.out(`removed: ${r.legacy.removed.length}, proposed removals: ${r.legacy.proposed.length}, kept: ${r.legacy.kept.length}\n`);
   for (const c of r.checks) io.out(`  ${c.name} [${c.tier}] ${c.seconds ?? "–"}s${c.note ? ` (${c.note})` : ""}\n`);
+  for (const c of r.skipped_checks) io.out(`  not a check: ${c.name} (${c.reason})\n`);
   io.out(r.proposal ? `baseline plan: ${r.proposal.plan_path}\n` : `baseline plan: ${r.plan_error ?? "skipped"}\n`);
   for (const h of r.hints) io.out(`hint: ${h}\n`);
   return 0;
