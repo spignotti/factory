@@ -18,6 +18,7 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { endpointViolation } from "./provider-guard.js";
 import { PathGuard } from "../sandbox/guard.js";
 import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
 import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage } from "./runner.js";
@@ -75,6 +76,13 @@ export class PiRunner implements AgentRunner {
     const { provider, model: modelId } = splitModel(req.model);
     const model = runtime.getModel(provider, modelId);
     if (!model) throw new AgentError(`unknown model ${req.model}`);
+    // Zen guard at runtime (Amendment e), the same rules as `doctor`: never the Zen endpoint by a
+    // models.json override, never OpenAI on an API key.
+    const zen = endpointViolation(req.model, model.baseUrl);
+    if (zen) throw new AgentError(`refused: ${zen}`, undefined, 403);
+    if (provider === "openai" && !runtime.isUsingSubscription("openai")) {
+      throw new AgentError(`refused: ${req.model} needs the ChatGPT login (subscription) in the factory's Pi auth.json, not an API key`, undefined, 403);
+    }
     const agentDir = req.agentDir ?? this.agentDir;
     // No user extensions, skills, prompt templates or memory; the repo's AGENTS.md is allowed (SPEC §8.3).
     const agentsFiles = loadProjectContextFiles({ cwd: req.cwd, agentDir });

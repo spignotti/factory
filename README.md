@@ -123,6 +123,19 @@ One list item per rule. Mark an item with `<!-- check: <check name> -->` once a 
 
 Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory harden` (M3) turns them into checks. Delete the file to forget.
 
+## Doctor and the Zen guard
+
+`factory doctor [--repo <path>] [--ping]` checks the setup before you spend anything: every configured model
+is resolved through the factory's own Pi config (`$FACTORY_HOME/pi`), and it fails if a model would hit the
+pay-per-use OpenCode Zen endpoint (also via a `models.json` override), if OpenAI is not on the ChatGPT login
+(an API key bills per use), or if a provider has no credential. It warns that "Extra Usage" must be off
+(not readable via API). `--ping` sends one tiny request per model. With `--repo` it checks `gh` and gives
+hints on auto-merge and branch protection (neither needs admin rights or GitHub Pro). The run applies the
+same Zen and ChatGPT-login rules before every agent session.
+
+Log in once for the factory: `PI_CODING_AGENT_DIR=~/.factory/pi npx pi`, then `/login` (ChatGPT for OpenAI,
+API key for OpenCode Go).
+
 ## Status, stats, cleanup
 
 ```

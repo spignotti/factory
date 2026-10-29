@@ -22,8 +22,9 @@ const USAGE = `usage:
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
   factory resume <run-id> [--wait] [--no-pr] [--profile <file>]
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
-  factory doctor [--repo <path>] [--profile <file>] [--json]
-              (setup checks; effective model per role and the layer it came from)
+  factory doctor [--repo <path>] [--profile <file>] [--ping] [--json]
+              (setup checks, Zen guard, ChatGPT login; effective model per role and its layer;
+               --ping sends one tiny request per configured model)
   models: built-in < $FACTORY_HOME/profile.yaml < --profile <file> < repo.yaml models: (see README)
   factory status [--json]
               (running, waiting for a human, interrupted runs; open factory PRs)
@@ -69,9 +70,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === "doctor") {
       const { values } = parseArgs({
         args: rest,
-        options: { repo: { type: "string" }, profile: { type: "string" }, json: { type: "boolean", default: false } },
+        options: { repo: { type: "string" }, profile: { type: "string" }, ping: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
       });
-      return await doctorCommand({ factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, json: values.json }, io);
+      return await doctorCommand({ factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, json: values.json }, io);
     }
     if (command === "status") {
       const { values } = parseArgs({ args: rest, options: { json: { type: "boolean", default: false } } });

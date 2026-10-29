@@ -35,7 +35,12 @@ Unverified (needs a real provider):
   hence the allowlist (`ALLOWED_PROVIDERS` in `src/schemas/profile.ts`: `opencode-go`, `openai`).
 - `openai` uses `OPENAI_API_KEY` (pay-per-use API) or ChatGPT OAuth in `auth.json` (subscription). Which
   one applies depends on the factory-owned `auth.json`; only OAuth is intended. `openai-codex` is legacy
-  and not allowed.
+  and not allowed. Checked offline with Pi 1.4.0: a stored OAuth credential wins over `OPENAI_API_KEY`
+  (`isUsingSubscription("openai")` is true), and `doctor`/`PiRunner` refuse OpenAI otherwise.
+- Unverified: whether a provider's OAuth flow can still set a different `baseUrl` per request (Pi's
+  `ModelAuth.baseUrl`); the guard checks the resolved model, not the per-request auth.
+- Unverified: `doctor --ping` against the real endpoints (`completeSimple` with `maxTokens: 16`), and
+  `gh api repos/{owner}/{repo}` / `branches/<b>` fields on private repos without Pro.
 
 ### HTTP idle timeout
 
