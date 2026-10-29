@@ -338,7 +338,8 @@ async function llmSession(
 export async function evaluateRound(ctx: RunContext, round: number, prior: TrackedFinding[]): Promise<EvaluateReport | undefined> {
   const ui = ctx.repo.ui;
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
-  if (!ui || !evaluateApplies(ctx.repo, changed)) return undefined;
+  const criteria = ctx.plan.acceptance.some((a) => a.verify === "evaluator");
+  if (!ui || !(criteria || evaluateApplies(ctx.repo, changed))) return undefined;
   const unknown = ui.devices.filter((d) => !knownDevice(d));
   if (unknown.length) throw new EnvMissing(`ui.devices: unknown Playwright device ${unknown.join(", ")}`);
   if (!findHeadlessShell()) throw new EnvMissing(`no Chromium headless shell under ${browsersPath()} (install: ${INSTALL_HINT})`);

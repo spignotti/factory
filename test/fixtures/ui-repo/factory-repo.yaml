@@ -1,0 +1,22 @@
+base_branch: main
+setup: ""
+checks:
+  - { name: syntax, run: "node --check server.mjs", tier: fast }
+tests:
+  globs: ["flows/**"]
+  run: "node {files}"
+human_only_paths: [".factory/repo.yaml", "AGENTS.md"]
+review:
+  max_rounds: 3
+ui:
+  start: "node server.mjs --port {port:app}"
+  url: "http://127.0.0.1:{port:app}"
+  ready_timeout_s: 20
+  paths: ["web/**", "server.mjs"]
+  pages: ["/"]
+verify:
+  run: "for f in {files}; do node \"$f\" || exit 1; done"
+  areas:
+    - { name: tours, paths: ["web/tours*"], flows: ["flows/tours.mjs"], guide: "flows/tours.md", pages: ["/tours"] }
+git:
+  author: factory-bot

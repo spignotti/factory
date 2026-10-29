@@ -16,6 +16,8 @@ export interface Scenario {
   script: string;
   task?: string;
   patch?: (cfg: Record<string, unknown>) => void;
+  /** Fixture repo under test/fixtures (default `repo`; `ui-repo` has a web app). */
+  fixture?: string;
   options?: Partial<RunOptions>;
   github?: (gh: FakeGitHub) => void;
   /** Extra/overridden run deps (e.g. an abort signal). */
@@ -46,7 +48,7 @@ export interface ScenarioRun {
 }
 
 export async function runScenario(s: Scenario): Promise<ScenarioRun> {
-  const repo = createFixtureRepo(s.patch);
+  const repo = createFixtureRepo(s.patch, s.fixture);
   s.setup?.(repo);
   const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
   s.before?.(repo, factoryHome);

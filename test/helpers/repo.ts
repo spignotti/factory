@@ -10,10 +10,10 @@ export function gitIn(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-/** Copies test/fixtures/repo into a temp dir, writes `.factory/repo.yaml` (optionally patched) and commits on main. */
-export function createFixtureRepo(patch?: (cfg: Record<string, unknown>) => void): string {
+/** Copies test/fixtures/<fixture> into a temp dir, writes `.factory/repo.yaml` (optionally patched) and commits on main. */
+export function createFixtureRepo(patch?: (cfg: Record<string, unknown>) => void, fixture = "repo"): string {
   const dir = join(mkdtempSync(join(tmpdir(), "factory-fixture-")), "repo");
-  cpSync(join(FIXTURES, "repo"), dir, { recursive: true });
+  cpSync(join(FIXTURES, fixture), dir, { recursive: true });
   const cfg = parse(readFileSync(join(dir, "factory-repo.yaml"), "utf8")) as Record<string, unknown>;
   patch?.(cfg);
   mkdirSync(join(dir, ".factory"), { recursive: true });

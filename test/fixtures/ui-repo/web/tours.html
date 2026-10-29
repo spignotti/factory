@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>All tours</title></head>
+<body style="font-family: sans-serif; margin: 24px">
+  <h1>All tours</h1>
+  <ul id="list"></ul>
+  <script>
+    fetch("/api/tours")
+      .then((r) => r.json())
+      .then((tours) => {
+        for (const t of tours) document.getElementById("list").insertAdjacentHTML("beforeend", `<li>${t.name}</li>`);
+      })
+      .catch((e) => console.error("tours failed: " + e.message));
+  </script>
+</body>
+</html>
