@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
+import { acquireRepoLock } from "../../src/pipeline/lock.js";
 import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
@@ -323,6 +324,39 @@ describe("base moved before finalize", () => {
     expect(() => git(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD")).toThrow();
     expect(git(wt, "log", "-1", "--format=%s")).toBe("feat(P1): multiply\n");
     expect(r.events.find((e) => e.data.merge_conflict)?.data.merge_conflict).toEqual(["src/math.js"]);
+  });
+});
+
+describe("one run per repo", () => {
+  it("a second run on the same repo (another task) returns locked, naming the holder", async () => {
+    let release: (() => void) | undefined;
+    const r = await runScenario({
+      script: "clean.json",
+      before: (repo, home) => void (release = acquireRepoLock(home, repo, "20261029-000000-aaaaaa")),
+    });
+    release?.();
+    expect(r.result.result).toBe("locked");
+    expect(r.result.reason).toContain("locked by run 20261029-000000-aaaaaa");
+    expect(r.runner.calls).toEqual([]);
+  });
+
+  it("--wait queues until the repo is free, then runs", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      options: { wait: true },
+      deps: { lockPollMs: 10 },
+      before: (repo, home) => {
+        const release = acquireRepoLock(home, repo, "20261029-000000-bbbbbb")!;
+        setTimeout(release, 150);
+      },
+    });
+    expect(r.result.result).toBe("done");
+    const queued = eventsOf(r, "queued");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.data).toMatchObject({ holder_run_id: "20261029-000000-bbbbbb", holder_pid: process.pid });
+    const firstAgent = r.events.findIndex((e) => e.event === "agent_finished");
+    expect(r.events.findIndex((e) => e.event === "queued")).toBeLessThan(firstAgent);
+    expect(r.events.some((e) => e.data.lock_acquired)).toBe(true);
   });
 });
 

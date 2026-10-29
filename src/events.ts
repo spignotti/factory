@@ -18,6 +18,8 @@ export const EVENT_TYPES = [
   "agent_finished",
   "agent_error",
   "model_retry",
+  // Waiting for the per-repo lock (`--wait`).
+  "queued",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

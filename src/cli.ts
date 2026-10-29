@@ -13,7 +13,8 @@ import { loadProfile } from "./schemas/profile.js";
 
 const USAGE = `usage:
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
-              [--plan-effort none|medium|high] [--no-pr] [--profile <name>]
+              [--plan-effort none|medium|high] [--no-pr] [--profile <name>] [--wait]
+              (one run per repo at a time: busy repo → result "locked", or queue with --wait)
   factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
 `;
 
@@ -53,6 +54,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           lane: { type: "string", default: "standard" },
           "plan-effort": { type: "string" },
           "no-pr": { type: "boolean", default: false },
+          wait: { type: "boolean", default: false },
           profile: { type: "string", default: "default" },
         },
       });
@@ -77,6 +79,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             lane: values.lane as "standard" | "fast",
             planEffort: effort as "none" | "medium" | "high" | undefined,
             noPr: values["no-pr"],
+            wait: values.wait,
           },
           { runner, github: new GhCli(), profile: loadProfile(values.profile), factoryHome, signal: controller.signal },
         );

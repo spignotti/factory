@@ -23,6 +23,8 @@ export interface RunDeps {
   sleep?: Sleep;
   now?: Clock;
   watchdogPollMs?: number;
+  /** Poll interval while queued for the repo lock (default 15 s). */
+  lockPollMs?: number;
   /** Aborted on SIGINT/SIGTERM (reason: Interrupted). */
   signal?: AbortSignal;
 }

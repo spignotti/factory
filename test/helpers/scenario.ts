@@ -22,6 +22,8 @@ export interface Scenario {
   deps?: Partial<RunDeps>;
   /** Called before every agent call (after the fake runner recorded nothing yet). */
   onCall?: (req: AgentRequest, repo: string) => void;
+  /** Called with the fixture repo and factory home right before the run starts. */
+  before?: (repo: string, factoryHome: string) => void;
   /** Prepares the fixture repo before the run (e.g. adds an origin). */
   setup?: (repo: string) => void;
   /** Rewrites the scripted steps before the run (e.g. to inject values). */
@@ -45,6 +47,7 @@ export async function runScenario(s: Scenario): Promise<ScenarioRun> {
   const repo = createFixtureRepo(s.patch);
   s.setup?.(repo);
   const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
+  s.before?.(repo, factoryHome);
   const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", s.script), "utf8"))).steps;
   const runner = new FakeRunner(s.steps ? s.steps(scripted) : scripted);
   const agent: AgentRunner = { run: (req) => (s.onCall?.(req, repo), runner.run(req)) };

@@ -13,7 +13,7 @@ import { implementPackages } from "../steps/implement.js";
 import { obtainPlan, type PlanEffort, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
 import { Interrupted } from "../interrupt.js";
 import { agentEnv, checkDeadline, throwIfInterrupted, type RunContext, type RunDeps, type Task, WallTimeExceeded, writeJson } from "./context.js";
-import { acquireTaskLock } from "./lock.js";
+import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { reviewLoop } from "./loop.js";
 import { WatchdogAbort } from "./watchdog.js";
 
@@ -22,6 +22,8 @@ export interface RunOptions extends TaskInput {
   lane?: "standard" | "fast";
   planEffort?: PlanEffort;
   noPr?: boolean;
+  /** Repo locked by another run: wait in a queue instead of returning `locked`. */
+  wait?: boolean;
 }
 
 function newRunId(now: number): string {
@@ -36,6 +38,27 @@ function slug(text: string): string {
 async function repoId(repoDir: string): Promise<string> {
   const url = await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "");
   return url.trim() || repoDir;
+}
+
+/** One factory process per repository (runs and resumes); `wait` queues instead of `locked`. */
+export async function takeRepoLock(
+  deps: RunDeps,
+  repoDir: string,
+  runId: string,
+  events: EventLog,
+  wait: boolean,
+): Promise<{ release?: () => void; reason: string }> {
+  const id = await repoId(repoDir);
+  const release = acquireRepoLock(deps.factoryHome, id, runId);
+  if (release) return { release, reason: "" };
+  const holder = repoLockHolder(deps.factoryHome, id);
+  const by = holder ? `run ${holder.runId ?? "?"} (pid ${holder.pid})` : "another run";
+  if (!wait) return { reason: `repo ${id} is locked by ${by}` };
+  events.emit({ step: "intake", event: "queued", data: { repo: id, holder_run_id: holder?.runId ?? null, holder_pid: holder?.pid ?? null } });
+  const queuedAt = Date.now();
+  const got = await waitForRepoLock(deps.factoryHome, id, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal });
+  events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
+  return { release: got, reason: "" };
 }
 
 interface Outcome {
@@ -71,11 +94,12 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const repo: RepoConfig = loadRepoConfig(repoDir);
     const task: Task = await readTask(opts, repoDir, deps.github);
     taskRef = task.ref;
-    release = acquireTaskLock(deps.factoryHome, await repoId(repoDir), task.ref);
-    if (!release) {
-      out = { ...out, result: "locked", reason: `task ${task.ref} is locked by another run` };
+    const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
+    if (!lock.release) {
+      out = { ...out, result: "locked", reason: lock.reason };
       return finish();
     }
+    release = lock.release;
     const agentHome = prepareAgentHome(runDir);
     const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline };

@@ -10,7 +10,7 @@ Implemented (SPEC §17 M1 plus Amendments v1.4.1 a–d where they touch M1):
 
 - **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks used as is;
   `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check (one retry,
-  then plan step at `medium`); questions → `needs_input`; per-task lock; base check (`base_red`); worktree
+  then plan step at `medium`); questions → `needs_input`; per-repo lock (one run per repository; `--wait` queues, `queued` event); base check (`base_red`); worktree
   and branch `factory/<task>-<slug>`.
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
   bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity).

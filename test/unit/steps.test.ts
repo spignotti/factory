@@ -1,9 +1,10 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeGitHub } from "../../src/gh.js";
-import { acquireTaskLock } from "../../src/pipeline/lock.js";
+import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "../../src/pipeline/lock.js";
 import { validateResponses } from "../../src/pipeline/loop.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
@@ -56,24 +57,59 @@ describe("handoff validation", () => {
   });
 });
 
-describe("task lock", () => {
-  it("is exclusive, released, and taken over when stale", () => {
+describe("repo lock", () => {
+  const REPO = "git@github.com:o/r.git";
+  const file = (home: string) => join(home, "locks", "git_github.com_o_r.git.lock");
+
+  it("is exclusive per repo (any task), released, and taken over when stale", () => {
     const home = mkdtempSync(join(tmpdir(), "lock-"));
-    const release = acquireTaskLock(home, "git@github.com:o/r.git", "#12");
+    const release = acquireRepoLock(home, REPO, "run-a");
     expect(release).toBeTypeOf("function");
-    expect(acquireTaskLock(home, "git@github.com:o/r.git", "#12")).toBeUndefined();
+    expect(readFileSync(file(home), "utf8")).toBe(`${process.pid}\nrun-a`);
+    expect(acquireRepoLock(home, REPO, "run-b")).toBeUndefined();
+    expect(repoLockHolder(home, REPO)).toEqual({ pid: process.pid, runId: "run-a" });
+    expect(acquireRepoLock(home, "git@github.com:o/other.git", "run-c")).toBeTypeOf("function");
     release!();
-    const again = acquireTaskLock(home, "git@github.com:o/r.git", "#12");
+    expect(repoLockHolder(home, REPO)).toBeUndefined();
+    const again = acquireRepoLock(home, REPO, "run-b");
     expect(again).toBeTypeOf("function");
     again!();
-    writeFileSync(join(home, "locks", "git_github.com_o_r.git-_12.lock"), "999999999");
-    const taken = acquireTaskLock(home, "git@github.com:o/r.git", "#12");
+    writeFileSync(file(home), "999999999\nrun-dead");
+    expect(repoLockHolder(home, REPO)).toBeUndefined();
+    const taken = acquireRepoLock(home, REPO, "run-d");
     expect(taken).toBeTypeOf("function");
-    expect(acquireTaskLock(home, "git@github.com:o/r.git", "#12")).toBeUndefined();
+    expect(acquireRepoLock(home, REPO, "run-e")).toBeUndefined();
     taken!();
     // a takeover in progress (guard held by a live process) blocks a second taker
-    writeFileSync(join(home, "locks", "git_github.com_o_r.git-_12.lock"), "999999999");
-    writeFileSync(join(home, "locks", "git_github.com_o_r.git-_12.lock.takeover"), String(process.pid));
-    expect(acquireTaskLock(home, "git@github.com:o/r.git", "#12")).toBeUndefined();
+    writeFileSync(file(home), "999999999");
+    writeFileSync(`${file(home)}.takeover`, String(process.pid));
+    expect(acquireRepoLock(home, REPO, "run-f")).toBeUndefined();
+  });
+
+  it("is held by another live process until it exits", async () => {
+    const home = mkdtempSync(join(tmpdir(), "lock-"));
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    mkdirSync(join(home, "locks"), { recursive: true });
+    writeFileSync(file(home), `${child.pid}\nrun-other`);
+    expect(acquireRepoLock(home, REPO, "me")).toBeUndefined();
+    const exited = new Promise((r) => child.once("exit", r));
+    child.kill("SIGKILL");
+    await exited;
+    const release = acquireRepoLock(home, REPO, "me");
+    expect(release).toBeTypeOf("function");
+    release!();
+  });
+
+  it("waitForRepoLock queues until released and stops on abort", async () => {
+    const home = mkdtempSync(join(tmpdir(), "lock-"));
+    const held = acquireRepoLock(home, REPO, "run-a")!;
+    setTimeout(held, 80);
+    const release = await waitForRepoLock(home, REPO, "run-b", { pollMs: 10 });
+    expect(repoLockHolder(home, REPO)?.runId).toBe("run-b");
+    const controller = new AbortController();
+    const waiting = waitForRepoLock(home, REPO, "run-c", { pollMs: 10, signal: controller.signal });
+    controller.abort(new Error("interrupted by SIGINT"));
+    await expect(waiting).rejects.toThrow("interrupted by SIGINT");
+    release();
   });
 });
