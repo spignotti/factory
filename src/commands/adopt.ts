@@ -261,6 +261,9 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       plan_error: null,
       hints: settingsHints(settings, baseBranch),
     };
+    if (detection.tests.globs.length && !detection.tests.run) {
+      report.hints.push("Tests were found but no runner for single test files: set tests.run in .factory/repo.yaml (bug plans stop with needs_human without it); the repo's bot can do it in a config PR.");
+    }
     if (measured?.setup && !measured.setup.ok) report.hints.push(`setup failed on the base branch at adopt: ${measured.setup.detail.split("\n").pop()}`);
     if (opts.plan) {
       const res = await baselinePlan(deps, wt, join(tmp, "log"), { detection, repoYaml, config, legacy, files, agentsMd: agentsNext ?? agentsMd ?? "(none)" });
