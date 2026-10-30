@@ -1,5 +1,5 @@
 import { sh, tail } from "../exec.js";
-import { changedFiles, diffStat, stageAll } from "../git.js";
+import { changedFiles, repoDiffStat, stageAll } from "../git.js";
 import {
   type BuiltinResult,
   diffSize,
@@ -107,7 +107,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const builtins: BuiltinResult[] = [
     forbiddenPaths(changed, repo.limits.forbidden_paths),
     protectedPaths(plan, changed, repo.human_only_paths),
-    diffSize(await diffStat(worktree, ctx.baseSha), repo.limits.max_diff_lines),
+    diffSize(await repoDiffStat(worktree, ctx.baseSha, repo), repo.limits.max_diff_lines),
     testPresence(plan, packages, handoffs, changed, repo.tests.globs),
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),

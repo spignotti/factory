@@ -1,3 +1,4 @@
+import { type DiffEntry, diffTotals, formatDiffTotals } from "../git.js";
 import { isProtected, matchesAny, type Plan } from "../schemas/plan.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { RepoConfig } from "../schemas/repo.js";
@@ -34,9 +35,10 @@ export function protectedPaths(plan: Plan, changed: string[], humanOnly: string[
     : ok("protected_paths", declared.size ? `declared: ${[...declared].join(", ")}` : "");
 }
 
-export function diffSize(stat: Map<string, number>, max: number): BuiltinResult {
-  const total = [...stat.values()].reduce((a, b) => a + b, 0);
-  return total > max ? fail("max_diff_lines", `diff has ${total} lines > ${max}`) : ok("max_diff_lines", `${total} lines`);
+/** Counted lines only: lockfiles, binaries and `limits.diff_exclude` are named in the detail, not counted. */
+export function diffSize(stat: Map<string, DiffEntry>, max: number): BuiltinResult {
+  const t = diffTotals(stat);
+  return t.counted > max ? fail("max_diff_lines", `diff has ${formatDiffTotals(t)} > ${max}`) : ok("max_diff_lines", formatDiffTotals(t));
 }
 
 /** Every verify:test criterion of the given packages has evidence naming a changed test file. */

@@ -94,6 +94,10 @@ limits: { forbidden_paths: [".env*"] }
       "agent_env added: API_TOKEN",
     ]);
     expect(repoConfigLoosening(base, `${base}secrets: { provider: env_file, names: [X_TOKEN] }\n`)).toEqual(["secrets changed"]);
+    expect(repoConfigLoosening(base, base.replace('[".env*"] }', '[".env*"], diff_exclude: ["dist/**"] }'))).toEqual(["limits.diff_exclude added: dist/**"]);
+    const withEx = base.replace('[".env*"] }', '[".env*"], diff_exclude: ["dist/**", "gen/**"] }');
+    expect(repoConfigLoosening(withEx, base)).toEqual([]);
+    expect(repoConfigLoosening(withEx, withEx.replace('"gen/**"', '"gen/**", "out/**"'))).toEqual(["limits.diff_exclude added: out/**"]);
     expect(repoConfigLoosening(base, base.replace("npm ci", "npm i"))).toEqual(["setup changed"]);
     expect(repoConfigLoosening(base, undefined)).toEqual(["repo.yaml deleted"]);
     expect(repoConfigLoosening(base, "checks: 3\n")[0]).toMatch(/^repo\.yaml no longer valid/);

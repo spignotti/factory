@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { publishEvidence, evidenceUrl } from "../evaluate/evidence.js";
 import { criterionEvidence, type EvidenceLink, evaluationMarkdown } from "../evaluate/pr.js";
-import { baseRef, changedFiles, diffFiles, diffStat, isAncestor, mergeRef, revParse } from "../git.js";
+import { baseRef, changedFiles, diffFiles, diffTotals, isAncestor, mergeRef, repoDiffStat, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
@@ -264,7 +264,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
 
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
-  const diffLines = [...(await diffStat(ctx.worktree, ctx.baseSha)).values()].reduce((a, b) => a + b, 0);
+  const diffLines = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo)).counted;
   const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
