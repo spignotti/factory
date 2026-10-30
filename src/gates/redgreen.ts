@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh, tail } from "../exec.js";
 import { git } from "../git.js";
+import type { Deadline } from "../pipeline/budget.js";
 import type { Jail } from "../sandbox/sandbox.js";
 
 export interface RedGreenResult {
@@ -30,8 +31,8 @@ export async function redGreenProof(opts: {
   /** repo.yaml `setup`, run in the base worktree so a missing environment is not mistaken for the bug. */
   setup?: string;
   env: Record<string, string>;
-  /** `max_wall_minutes` deadline (epoch ms); commands are killed when it passes. */
-  deadline?: number;
+  /** `max_wall_minutes` deadline; commands are killed when it passes. */
+  deadline?: Deadline;
   /** Sandbox per working dir (base worktree or the run worktree). */
   jail?: (cwd: string) => Jail | undefined;
 }): Promise<RedGreenResult> {
@@ -41,7 +42,7 @@ export async function redGreenProof(opts: {
   if (files.length === 0) return inconclusive("no repro test named in evidence");
   const missing = files.filter((f) => !existsSync(join(worktree, f)));
   if (missing.length) return inconclusive(`repro file missing: ${missing.join(", ")}`);
-  const timeoutMs = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline - Date.now()));
+  const timeoutMs = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline.at - Date.now()));
   const cmd = testCommand.replace("{files}", files.map(shellQuote).join(" "));
   const tmp = mkdtempSync(join(tmpdir(), "factory-base-"));
   const baseDir = join(tmp, "wt");

@@ -15,7 +15,8 @@ import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { topoOrder } from "../pipeline/dag.js";
-import { commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
+import type { Deadline } from "../pipeline/budget.js";
+import { checkDeadline, commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
 import type { Jail } from "../sandbox/sandbox.js";
 import { EnvMissing, type Services } from "../services.js";
 import type { Check, Tier } from "../schemas/repo.js";
@@ -50,9 +51,9 @@ export function withEnvCommand(run: string, envCommand: string): string {
  */
 export async function runChecks(
   checks: Check[],
-  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: number; jail?: Jail; services?: Services },
+  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: Deadline; jail?: Jail; services?: Services },
 ): Promise<CheckResult[]> {
-  const timeout = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline - Date.now()));
+  const timeout = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline.at - Date.now()));
   const results: CheckResult[] = [];
   for (const check of checks) {
     const needs = check.services ?? [];
@@ -95,6 +96,9 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const changed = await changedFiles(worktree, ctx.baseSha);
   // Checks and red-green tests get the repo secrets; agents never do.
   const env = commandEnv(ctx);
+  // Out of time: stop here instead of running every check with a 1 s timeout and reporting the
+  // kills as red checks (run 20261030-164929-9ca1f6, gates-2: shellcheck and run-all "timed out after 1s").
+  checkDeadline(ctx);
   const checks = await runChecks(selectChecks(repo.checks, tier, changed), {
     cwd: worktree,
     env,
@@ -104,6 +108,8 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     services: ctx.services,
   });
 
+  // A check killed at the deadline is not a red check: the run stops on the wall limit instead.
+  checkDeadline(ctx);
   const builtins: BuiltinResult[] = [
     forbiddenPaths(changed, repo.limits.forbidden_paths),
     protectedPaths(plan, changed, repo.human_only_paths),
@@ -126,6 +132,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       deadline: ctx.deadline,
       jail: (cwd) => jailFor(ctx, cwd),
     });
+    checkDeadline(ctx);
     reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
     builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail });
   }

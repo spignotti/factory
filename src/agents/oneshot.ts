@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventLog } from "../events.js";
+import { type Deadline, fixedDeadline } from "../pipeline/budget.js";
 import { callAgent, type AgentCall, type RunDeps } from "../pipeline/context.js";
 import { type RepoConfig, RepoConfigSchema } from "../schemas/repo.js";
 
@@ -15,7 +16,7 @@ export type OneShotDeps = Pick<RunDeps, "runner" | "profile" | "factoryHome" | "
 export class OneShot {
   readonly events: EventLog;
   private readonly agentHome: string;
-  private readonly deadline: number;
+  private readonly deadline: Deadline;
 
   constructor(
     private readonly deps: OneShotDeps,
@@ -28,7 +29,7 @@ export class OneShot {
     this.events = new EventLog(logDir, id, deps.now);
     this.agentHome = mkdtempSync(join(tmpdir(), "factory-agent-home-"));
     // Wall clock, like the run deadline (`deps.now` is a logical clock that tests pin).
-    this.deadline = Date.now() + minutes * 60_000;
+    this.deadline = fixedDeadline(Date.now() + minutes * 60_000);
   }
 
   call(step: string, req: AgentCall) {

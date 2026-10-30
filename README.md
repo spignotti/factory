@@ -179,8 +179,13 @@ merge:
 limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
 # once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
+# max_wall_minutes is active time: time the box was suspended (VM paused, laptop asleep) is credited
+# back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
+# commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
+# factory resume <run-id>"), the worktree keeps the work and resume re-runs the gates over it.
 # Diff line limits (limits.max_diff_lines, fast_lane.max_diff_lines, merge.low_max_diff_lines) count
-# added + removed lines since base, without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
+# added + removed lines since base (renames detected: a moved file counts only its changed lines; a
+# move into or out of an excluded path counts as delete + add), without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
 # not manifests), binary files and limits.diff_exclude (generated paths; test files under tests.globs
 # always count, catch-all globs are rejected). The gate names what it left out:
 # "943 lines (+533 excluded: package-lock.json; 4 binary files)". Lockfiles still are dependency
