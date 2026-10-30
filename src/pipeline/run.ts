@@ -24,6 +24,8 @@ import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
+import { notifyRunFinished } from "../notify.js";
+import { realSleep } from "../agents/fake-runner.js";
 
 export interface RunOptions extends TaskInput {
   repo: string;
@@ -124,6 +126,8 @@ class RunFrame {
   release?: () => void;
   /** Set once the repo lock is held: findings memory to flush at the end. */
   memory?: { factoryHome: string; repoId: string };
+  /** For the run-end notification. */
+  deps?: RunDeps;
 
   constructor(
     readonly runId: string,
@@ -160,11 +164,15 @@ class RunFrame {
     for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
     // Service logs and browser captures are written by child processes: redact them in place.
     if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
+    let result: RunResult;
     try {
-      return this.finish();
+      result = this.finish();
     } finally {
       this.release?.();
     }
+    // After the lock is released: the woken bot may start the next run right away.
+    if (this.deps) await notifyFinished(result, this.deps, this.events);
+    return result;
   }
 
   private flushMemory(): void {
@@ -210,6 +218,38 @@ class RunFrame {
   }
 }
 
+/** Run-end webhook to the repo's bot (notify.yaml). Never throws, never changes the result. */
+async function notifyFinished(result: RunResult, deps: RunDeps, events: EventLog): Promise<void> {
+  try {
+    await notifyRunFinished(result, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, events);
+  } catch {
+    // notifyRunFinished does not throw; this guards the run result against any surprise
+  }
+}
+
+/**
+ * CI status of the base commit; while `pending`, polls until it settles or `base_ci_wait_minutes` pass.
+ * Returns the final status and how long it waited.
+ */
+async function settledBaseStatus(f: RunFrame, deps: RunDeps, repoDir: string, baseSha: string, waitMinutes: number): Promise<{ status: Awaited<ReturnType<RunDeps["github"]["baseStatus"]>>; waitedMs: number }> {
+  const started = Date.now();
+  let status = await deps.github.baseStatus(repoDir, baseSha);
+  if (status !== "pending" || waitMinutes <= 0) return { status, waitedMs: 0 };
+  const poll = deps.baseCiPollMs ?? 30_000;
+  const sleep = deps.sleep ?? realSleep;
+  f.events.emit({ step: "intake", event: "progress", data: { base_ci: { status, sha: baseSha, waiting_up_to_minutes: waitMinutes } } });
+  // Counted in polls, not wall time: deterministic with an injected sleep.
+  const polls = Math.ceil((waitMinutes * 60_000) / poll);
+  for (let i = 0; i < polls && status === "pending"; i++) {
+    await sleep(poll, deps.signal);
+    throwIfInterrupted(deps);
+    status = await deps.github.baseStatus(repoDir, baseSha);
+  }
+  const waitedMs = Date.now() - started;
+  f.events.emit({ step: "intake", event: "progress", data: { base_ci: { status, sha: baseSha, waited_ms: waitedMs } } });
+  return { status, waitedMs };
+}
+
 /**
  * repo.yaml `secrets:` for this run: values are added to the redaction list before anything can
  * print them. Undefined (and the run set to needs_human) when a name does not resolve.
@@ -246,6 +286,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   const lane = opts.lane ?? "standard";
   const ref = opts.issue !== undefined ? `#${opts.issue}` : (opts.planFile ?? opts.textFile ?? "");
   const f = new RunFrame(runId, runDir, repoDir, lane, events, startedAt, now, ref);
+  f.deps = deps;
 
   return f.execute(async () => {
     events.emit({ step: "intake", event: "step_started" });
@@ -268,7 +309,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     f.save();
 
     const agentHome = prepareAgentHome(runDir);
-    const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
+    let deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
 
@@ -296,9 +337,13 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 
     // Base check, then the worktree.
     checkDeadline(base);
-    const status = await deps.github.baseStatus(repoDir, baseSha);
+    const { status, waitedMs } = await settledBaseStatus(f, deps, repoDir, baseSha, repo.limits.base_ci_wait_minutes);
+    // Waiting for the base CI is not work: it does not count against max_wall_minutes.
+    deadline += waitedMs;
+    base.deadline = deadline;
     if (status === "red" || status === "pending") {
-      return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${status}, not green` });
+      const why = status === "pending" ? `still pending after ${repo.limits.base_ci_wait_minutes} min` : "red";
+      return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${why}, not green` });
     }
     if (plan.type === "bug" && !repo.tests.run) {
       return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans" });
@@ -448,15 +493,18 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });
   const f = new RunFrame(runId, runDir, st.repo, st.lane ?? "standard", events, startedAt, now, st.task.ref);
+  f.deps = deps;
   f.set({ branch: st.branch, worktree: st.worktree, pr: st.pr, rounds: st.rounds });
 
   // Locked: report without touching this run's result.json/state.json (they describe the run, not this attempt).
   const lock = await takeRepoLock(deps, st.repo, runId, events, opts.wait ?? false);
   if (!lock.release) {
-    return {
+    const locked: RunResult = {
       run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
       pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: lock.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
     };
+    await notifyFinished(locked, deps, events);
+    return locked;
   }
   f.release = lock.release;
   f.state = st;

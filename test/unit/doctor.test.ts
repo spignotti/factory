@@ -300,7 +300,8 @@ describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", 
     const c2 = capture();
     await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: gh }, c2.io);
     const r2 = JSON.parse(c2.text()) as DoctorReport;
-    expect(r2.checks.filter((x) => x.status === "info")).toEqual([]);
+    // only the notify hint (no ~/.factory/notify.yaml in a fresh factory home) is left
+    expect(r2.checks.filter((x) => x.status === "info").map((x) => x.name)).toEqual(["notify"]);
 
     gh.settings = { private: null, auto_merge_allowed: null, branch_protected: null, required_checks: null, error: "HTTP 404" };
     const c3 = capture();

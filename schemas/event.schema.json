@@ -32,7 +32,8 @@
         "queued",
         "sandbox",
         "service",
-        "docs_lookup"
+        "docs_lookup",
+        "notify"
       ]
     },
     "role": {

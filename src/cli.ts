@@ -23,6 +23,7 @@ import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 import { asset } from "./prompts.js";
+import { notifyTest } from "./notify.js";
 
 const USAGE = `usage:
   factory --version
@@ -58,6 +59,8 @@ const USAGE = `usage:
               (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
                $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
+  factory notify test <owner/name>
+              (one test POST to the repo's webhook from $FACTORY_HOME/notify.yaml; doctor lists the configured repos)
   factory ci-stub [--ref <tag>]
               (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; doctor checks its hash)
 `;
@@ -258,6 +261,16 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         { factoryHome: factoryHomeOf(), repo: values.repo, profile: values.profile, ping: values.ping, services: values.services, json: values.json, context7: Context7Client.fromEnv(process.env) },
         io,
       );
+    }
+    if (command === "notify") {
+      const [sub, repo, ...extra] = rest;
+      if (sub !== "test" || !repo || extra.length) {
+        io.err(USAGE);
+        return 2;
+      }
+      const r = await notifyTest(repo, { factoryHome: factoryHomeOf() });
+      (r.ok ? io.out : io.err)(`${r.ok ? "" : "factory: "}${r.message}\n`);
+      return r.ok ? 0 : 1;
     }
     if (command === "status") {
       const { values } = parseArgs({ args: rest, options: { json: { type: "boolean", default: false } } });

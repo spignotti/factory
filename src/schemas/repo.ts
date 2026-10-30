@@ -127,6 +127,9 @@ export const RepoConfigSchema = z
         // Per agent bash command: killed after this, the model gets "Command timed out" and goes on.
         // Below stall_minutes, so a hung command (dev server, watch mode) ends before the watchdog.
         command_timeout_minutes: z.number().positive().default(10),
+        // CI on the base commit still running at the base check: wait up to this long for it to settle
+        // (0 = no wait). Only red, or still pending after the wait, ends the run as base_red.
+        base_ci_wait_minutes: z.number().min(0).max(120).default(20),
         forbidden_paths: z.array(z.string()).default([]),
         // Generated paths left out of the diff line limits (lockfiles and binaries already are).
         // Test files (`tests.globs`) always count; adding an entry is a loosening (config_guard).
@@ -134,7 +137,7 @@ export const RepoConfigSchema = z
           .array(z.string().min(1).refine((g) => !CATCH_ALL.has(g.replace(/^\.\//, "")), "diff_exclude must not match every file"))
           .default([]),
       })
-      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [], diff_exclude: [] }),
+      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, base_ci_wait_minutes: 20, forbidden_paths: [], diff_exclude: [] }),
     services: z.array(ServiceSchema).default([]),
     ui: z
       .object({

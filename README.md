@@ -26,7 +26,7 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
 
 - **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks are used as
   is; `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check; questions
-  → `needs_input`; per-repo lock (`--wait` queues); base check (`base_red`); worktree and branch
+  → `needs_input`; per-repo lock (`--wait` queues); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`); worktree and branch
   `factory/<task>-<slug>`.
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
   bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity). The planner
@@ -75,6 +75,7 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
 | `factory harden --repo <p>` | signals → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
+| `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
 | `factory --version` | package version (plus the commit for a checkout install) |
 
 `factory` without arguments prints every flag. All commands take `--json` where the output is machine-readable.
@@ -89,6 +90,14 @@ re-runs the gates (red → one fixer round) and continues from the saved step. I
 existing PR is updated and marked ready when the run ends `done`. After an interrupted/failed run,
 uncommitted leftovers are discarded instead and the step re-runs. A resumed review starts with a fresh round
 budget; a resume at `finalize` only re-runs the gates (no new review of the human change).
+
+## Notify (bots)
+
+On every `run_finished` (also after `resume`) the factory POSTs `{run_id, repo, result, reason, pr,
+finished_at}` to the webhook routine of the bot that owns the repo, configured in `~/.factory/notify.yaml`
+(`0600`, hidden from agents). Retries with backoff; a failed notification is logged and never fails the run.
+A background shell that ends does not wake a bot; this hook does. Setup, payload, routine prompt and the
+onboarding checklist: [docs/BOTS.md](docs/BOTS.md).
 
 ## Usage
 
@@ -159,6 +168,8 @@ merge:
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
 limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+# limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
+# once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
 # Diff line limits (limits.max_diff_lines, fast_lane.max_diff_lines, merge.low_max_diff_lines) count
 # added + removed lines since base, without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
 # not manifests), binary files and limits.diff_exclude (generated paths; test files under tests.globs
@@ -400,6 +411,8 @@ base branch; the user's checkout is not touched):
 - **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
+- **After the merge**: set up the repo bot's webhook routine and `notify.yaml` entry, then
+  `factory notify test <owner/name>` (checklist in [docs/BOTS.md](docs/BOTS.md#onboarding-checklist-new-repo--new-bot)).
 
 ## Harden
 
@@ -462,7 +475,9 @@ pay-per-use OpenCode Zen endpoint (also via a `models.json` override), if OpenAI
 (an API key bills per use), or if a provider has no credential. It warns that "Extra Usage" must be off
 (not readable via API). `--ping` sends one tiny request per model. With `--repo` it checks repo `secrets:` (see Secrets), `gh` and gives
 hints on auto-merge and branch protection (neither needs admin rights or GitHub Pro). The run applies the
-same Zen and ChatGPT-login rules before every agent session.
+same Zen and ChatGPT-login rules before every agent session. It also checks `~/.factory/notify.yaml`
+(`0600`, valid, key files readable) and lists the repos with a hook, never the URLs; with `--repo`, it warns
+when that repo has none.
 
 Log in once for the factory: `PI_CODING_AGENT_DIR=~/.factory/pi npx pi`, then `/login` (ChatGPT for OpenAI,
 API key for OpenCode Go).

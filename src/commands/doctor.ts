@@ -20,6 +20,7 @@ import type { z } from "zod";
 import type { DoctorReportSchema } from "../schemas/reports.js";
 import { type Context7Client, context7Probe } from "../docs/context7.js";
 import { redact } from "../events.js";
+import { notifyChecks } from "../notify.js";
 import { isInside, looseMode, MIN_REDACT_LENGTH, type ResolvedSecrets, resolveSecrets, SecretsError, secretsFile } from "../secrets.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
@@ -384,6 +385,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
   }
   checks.push(...contextFileChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined));
   if (opts.context7 && profile) checks.push(await docsLookupCheck(opts.context7, profile.docs_lookup.roles));
+  checks.push(...(await notifyChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined)));
   if (opts.repo) {
     try {
       const repoDir = resolve(opts.repo);

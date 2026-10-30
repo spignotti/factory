@@ -26,6 +26,8 @@ export const EVENT_TYPES = [
   "service",
   // One `docs_lookup` tool call (Context7): library, topic, estimated tokens, status.
   "docs_lookup",
+  // Run-end webhook to the repo's bot: status sent | failed | skipped | error (never the URL or key).
+  "notify",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
