@@ -91,7 +91,9 @@ existing PR is updated and marked ready when the run ends `done`. After an inter
 uncommitted leftovers are discarded instead and the step re-runs. A resumed review starts with a fresh round
 budget; a resume at `finalize` only re-runs the gates (no new review of the human change).
 `result.json` always describes the latest finished attempt: a resume removes it when it starts and writes
-its own outcome at the end.
+its own outcome at the end. The PR step is idempotent: a push that errors but landed (origin's branch at
+HEAD) counts as pushed, and an open PR on the run's branch at HEAD is adopted and updated instead of a second
+`gh pr create`.
 
 ## Notify (bots)
 

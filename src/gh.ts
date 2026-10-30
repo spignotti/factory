@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { git } from "./git.js";
 
@@ -30,6 +30,10 @@ export interface GitHub {
   getIssue(repoDir: string, n: number): Promise<Issue>;
   push(repoDir: string, branch: string): Promise<void>;
   createPr(req: PrRequest): Promise<string>;
+  /** Sha of `branch` on origin, null when it does not exist there. Throws when origin cannot be asked. */
+  remoteBranchSha(repoDir: string, branch: string): Promise<string | null>;
+  /** The open PR whose head is `branch` (same repo), null when there is none. */
+  findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null>;
   enableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
@@ -84,6 +88,13 @@ export interface RepoSettings {
   branch_protected: boolean | null;
   required_checks: string[] | null;
   error?: string;
+}
+
+export interface OpenPr {
+  url: string;
+  draft: boolean;
+  /** Head commit as GitHub sees it. */
+  headSha: string | null;
 }
 
 export interface PrStatus {
@@ -141,6 +152,22 @@ export class GhCli implements GitHub {
 
   async push(repoDir: string, branch: string): Promise<void> {
     await git(repoDir, ["push", "-q", "-u", "origin", branch]);
+  }
+
+  async remoteBranchSha(repoDir: string, branch: string): Promise<string | null> {
+    const { stdout } = await execFileP("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`], { cwd: repoDir, timeout: 60_000 });
+    return /^([0-9a-f]{40,64})\s/m.exec(stdout)?.[1] ?? null;
+  }
+
+  async findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null> {
+    const list = JSON.parse(await gh(repoDir, ["pr", "list", "--head", branch, "--state", "open", "--limit", "5", "--json", "url,isDraft,headRefOid,headRefName"]) || "[]") as {
+      url: string;
+      isDraft: boolean;
+      headRefOid?: string;
+      headRefName?: string;
+    }[];
+    const pr = list.find((p) => (p.headRefName ?? branch) === branch);
+    return pr ? { url: pr.url, draft: pr.isDraft, headSha: pr.headRefOid ?? null } : null;
   }
 
   async createPr(req: PrRequest): Promise<string> {
@@ -217,8 +244,25 @@ export class FakeGitHub implements GitHub {
     return issue;
   }
 
-  async push(_repoDir: string, branch: string): Promise<void> {
+  /** Branch → sha on the fake origin; a push records the worktree's HEAD. */
+  readonly remoteShas = new Map<string, string>();
+
+  async push(repoDir: string, branch: string): Promise<void> {
     this.pushes.push(branch);
+    try {
+      this.remoteShas.set(branch, execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+    } catch {
+      // not a git dir (unit tests): nothing to record
+    }
+  }
+
+  async remoteBranchSha(_repoDir: string, branch: string): Promise<string | null> {
+    return this.remoteShas.get(branch) ?? null;
+  }
+
+  async findOpenPr(_repoDir: string, branch: string): Promise<OpenPr | null> {
+    const pr = this.prs.find((p) => p.head === branch && (this.prStates.get(p.url)?.state ?? "open") === "open");
+    return pr ? { url: pr.url, draft: this.prStates.get(pr.url)?.draft ?? pr.draft, headSha: this.remoteShas.get(branch) ?? null } : null;
   }
 
   async createPr(req: PrRequest): Promise<string> {

@@ -238,6 +238,29 @@ async function publishRunEvidence(ctx: RunContext, publish: boolean): Promise<{ 
   }
 }
 
+/**
+ * Plain push (the branch only ever gains commits: merges, never rebases, so no force-push). A push that
+ * errors (e.g. a network timeout after the server already took it) counts as done when origin's branch is
+ * at `head`.
+ */
+async function pushIdempotent(ctx: RunContext, head: string): Promise<void> {
+  try {
+    await ctx.deps.github.push(ctx.worktree, ctx.branch);
+  } catch (e) {
+    const remote = await ctx.deps.github.remoteBranchSha(ctx.worktree, ctx.branch).catch(() => null);
+    if (remote !== head) throw e;
+    ctx.events.emit({ step: "finalize", event: "progress", data: { push_error_ignored: { reason: (e as Error).message.slice(0, 200), remote_sha: remote } } });
+  }
+}
+
+/** The open PR for the run's branch when its head is exactly `head`; undefined otherwise or when GitHub cannot be asked. */
+async function adoptablePr(ctx: RunContext, head: string): Promise<{ url: string; draft: boolean } | undefined> {
+  const open = await ctx.deps.github.findOpenPr(ctx.worktree, ctx.branch).catch(() => null);
+  if (!open || open.headSha !== head) return undefined;
+  ctx.events.emit({ step: "finalize", event: "progress", data: { pr_adopted: { pr: open.url, head } } });
+  return { url: open.url, draft: open.draft };
+}
+
 export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<FinalizeOutput> {
   ctx.events.emit({ step: "finalize", event: "step_started", data: { result: input.result } });
   let result = input.result;
@@ -284,18 +307,29 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
     try {
-      // Plain push: the branch only ever gains commits (merges, never rebases), so no force-push.
-      await ctx.deps.github.push(ctx.worktree, ctx.branch);
-      if (input.existingPr) {
-        await ctx.deps.github.updatePr(ctx.worktree, input.existingPr.url, { title, body });
-        if (guarded.length) await ctx.deps.github.addLabel(ctx.worktree, input.existingPr.url, PROTECTED_LABEL);
-        if (result === "done" && input.existingPr.draft) {
-          await ctx.deps.github.markReady(ctx.worktree, input.existingPr.url);
+      const head = await revParse(ctx.worktree, "HEAD");
+      await pushIdempotent(ctx, head);
+      // An open PR on this branch (an earlier attempt's create that looked failed, or one opened by hand)
+      // is adopted, never duplicated.
+      let target = input.existingPr ?? (await adoptablePr(ctx, head));
+      if (!target) {
+        try {
+          pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: result !== "done", labels: guarded.length ? [PROTECTED_LABEL] : [] });
+          draft = result !== "done";
+        } catch (e) {
+          target = await adoptablePr(ctx, head);
+          if (!target) throw e;
+        }
+      }
+      if (target) {
+        pr = target.url;
+        draft = target.draft;
+        await ctx.deps.github.updatePr(ctx.worktree, target.url, { title, body });
+        if (guarded.length) await ctx.deps.github.addLabel(ctx.worktree, target.url, PROTECTED_LABEL);
+        if (result === "done" && target.draft) {
+          await ctx.deps.github.markReady(ctx.worktree, target.url);
           draft = false;
         }
-      } else {
-        pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: result !== "done", labels: guarded.length ? [PROTECTED_LABEL] : [] });
-        draft = result !== "done";
       }
       if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
     } catch (e) {
