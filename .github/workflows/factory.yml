@@ -1,0 +1,69 @@
+# Generated from spignotti/factory templates/ci/factory.yml. Do not edit by hand:
+# `factory doctor --repo .` compares this file's hash with the template for the pinned ref.
+# Render a new one with `factory ci-stub --ref <tag>`; bumping the ref is a deliberate PR.
+name: factory
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Gate tier (fast | full | manual)"
+        default: manual
+permissions:
+  contents: read
+concurrency:
+  group: factory-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  FACTORY: "npx -y github:spignotti/factory#v0.2.0"
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      checks: ${{ steps.s.outputs.checks }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: s
+        env:
+          TIER: ${{ inputs.tier || 'full' }}
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'origin/main' }}
+        run: |
+          checks=$($FACTORY gates --select --tier "$TIER" --base "$BASE" --json)
+          echo "selected: $checks"
+          echo "checks=$checks" >> "$GITHUB_OUTPUT"
+  check:
+    needs: select
+    if: ${{ needs.select.outputs.checks != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJson(needs.select.outputs.checks) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - env:
+          CHECK: ${{ matrix.check }}
+        run: $FACTORY gates --run "$CHECK"
+  # The single required status `factory / done`: red when selection failed, any check failed or was cancelled.
+  done:
+    needs: [select, check]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SELECT: ${{ needs.select.result }}
+          CHECK: ${{ needs.check.result }}
+        run: |
+          echo "select: $SELECT, check: $CHECK"
+          test "$SELECT" = success
+          test "$CHECK" = success || test "$CHECK" = skipped

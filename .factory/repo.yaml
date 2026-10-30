@@ -1,0 +1,49 @@
+# Drafted by `factory adopt` on 2026-10-30 (checks measured once on main 7ac0156), then edited by hand:
+# adopt's draft was dropped because .gitignore ignored .factory/ (fixed in this PR). See the README for every field.
+# Detected: node; UI (dependency: playwright, used by the evaluator itself, not an app UI).
+# Runs on this repo use the installed factory CLI (~/.local/bin/factory -> factory-releases/current),
+# never the run worktree's build; the checks below only build and test the worktree.
+base_branch: main
+# The CI stub sets up node only; install the pinned pnpm when it is missing (GitHub runners).
+setup: command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@10.34.6; pnpm install --frozen-lockfile
+checks:
+  # measured: lint 3.2 s, typecheck 5.7 s, test 31.3 s, build 5.7 s
+  - name: lint
+    run: pnpm lint
+    tier: fast
+  - name: typecheck
+    run: pnpm typecheck
+    tier: fast
+  - name: test
+    run: pnpm test
+    tier: fast
+  - name: build
+    run: pnpm build
+    tier: full
+tests:
+  globs: ["test/**/*.test.ts"]
+# The factory's own guard rails: security reviewer, at least medium risk.
+sensitive_paths:
+  - src/agents/env.ts
+  - src/agents/provider-guard.ts
+  - src/agents/context-files.ts
+  - src/sandbox/**
+  - src/gates/config-guard.ts
+  - src/secrets.ts
+  - src/paths.ts
+  - src/pipeline/merge.ts
+  - src/pipeline/risk.ts
+  - src/pipeline/lock.ts
+  - src/config.ts
+  - src/schemas/repo.ts
+  - src/schemas/profile.ts
+  - templates/ci/**
+  - profiles/default.yaml
+  - scripts/deploy-self.sh
+# Changed only as a declared protected change in the plan.
+human_only_paths:
+  - .factory/**
+  - .github/**
+  - AGENTS.md
+merge:
+  auto_merge_max_risk: none
