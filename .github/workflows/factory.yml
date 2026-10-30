@@ -17,12 +17,13 @@ concurrency:
   group: factory-${{ github.ref }}
   cancel-in-progress: true
 env:
-  FACTORY: "npx -y github:spignotti/factory#v0.2.0"
+  FACTORY: "npx -y github:spignotti/factory#v0.3.0"
 jobs:
   select:
     runs-on: ubuntu-latest
     outputs:
       checks: ${{ steps.s.outputs.checks }}
+      toolchains: ${{ steps.s.outputs.toolchains }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,6 +39,9 @@ jobs:
           checks=$($FACTORY gates --select --tier "$TIER" --base "$BASE" --json)
           echo "selected: $checks"
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
+          toolchains=$($FACTORY gates --toolchains --json)
+          echo "toolchains: $toolchains"
+          echo "toolchains=$toolchains" >> "$GITHUB_OUTPUT"
   check:
     needs: select
     if: ${{ needs.select.outputs.checks != '[]' }}
@@ -48,13 +52,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Toolchains from `factory gates --toolchains`: repo.yaml ci.toolchains, else detected from the repo's files.
+      - if: fromJson(needs.select.outputs.toolchains).pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ fromJson(needs.select.outputs.toolchains).pnpm_version }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ fromJson(needs.select.outputs.toolchains).node }}
+      - if: fromJson(needs.select.outputs.toolchains).python != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ fromJson(needs.select.outputs.toolchains).python }}
+      - if: fromJson(needs.select.outputs.toolchains).uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ fromJson(needs.select.outputs.toolchains).uv_version }}
       - env:
           CHECK: ${{ matrix.check }}
         run: $FACTORY gates --run "$CHECK"
-  # The single required status `factory / done`: red when selection failed, any check failed or was cancelled.
+  # The single required status check, named `done` (the job name; GitHub Actions reports no workflow prefix): red when selection failed, any check failed or was cancelled.
   done:
     needs: [select, check]
     if: always()
