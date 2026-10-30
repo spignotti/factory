@@ -90,6 +90,8 @@ re-runs the gates (red → one fixer round) and continues from the saved step. I
 existing PR is updated and marked ready when the run ends `done`. After an interrupted/failed run,
 uncommitted leftovers are discarded instead and the step re-runs. A resumed review starts with a fresh round
 budget; a resume at `finalize` only re-runs the gates (no new review of the human change).
+`result.json` always describes the latest finished attempt: a resume removes it when it starts and writes
+its own outcome at the end.
 
 ## Notify (bots)
 

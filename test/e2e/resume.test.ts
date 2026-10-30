@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -186,5 +186,36 @@ describe("notify hook on resume", () => {
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer"), deps });
     expect(r2.result.result).toBe("done");
     expect(sent.map((p) => [p.run_id, p.result])).toEqual([[r.runId, "needs_human"], [r.runId, "locked"], [r.runId, "done"]]);
+  });
+});
+
+describe("result.json across resumes", () => {
+  it("is removed while a resume runs and rewritten with that attempt's outcome", async () => {
+    const ac = new AbortController();
+    const r = await runScenario({
+      script: "clean.json",
+      deps: { signal: ac.signal },
+      onCall: (req) => void (req.role === "implement" && ac.abort(new Interrupted("SIGTERM"))),
+    });
+    expect(r.resultFile.result).toBe("failed");
+    let duringPush: boolean | undefined;
+    const push = r.github.push.bind(r.github);
+    r.github.push = async (dir, branch) => {
+      duringPush = existsSync(join(r.runDir, "result.json"));
+      return push(dir, branch);
+    };
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer") });
+    expect(duringPush).toBe(false);
+    expect(r2.result.result).toBe("done");
+    expect(r2.resultFile).toMatchObject({ result: "done", pr: r2.result.pr, run_id: r.runId });
+    expect(readState(r.runDir)).toMatchObject({ step: "finished", result: "done" });
+  });
+
+  it("a resume that ends needs_human rewrites it too", async () => {
+    const r = await runScenario({ script: "invalid-handoff.json" });
+    expect(r.resultFile.result).toBe("needs_human");
+    const r2 = await resumeScenario(r, { script: "invalid-handoff.json", steps: roles("implement") });
+    expect(r2.result.result).toBe("needs_human");
+    expect(r2.resultFile).toEqual(r2.result);
   });
 });
