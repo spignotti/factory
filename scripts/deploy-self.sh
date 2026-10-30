@@ -201,7 +201,8 @@ ensure() {
   if ! flock -n "$REL/.daemon.lock" true 2>/dev/null; then echo "deploy daemon running (pid $(cat "$REL/daemon.pid" 2>/dev/null))"; return 0; fi
   local self=$REL/deploy-self.sh
   [ -x "$self" ] || self=$(realpath "$0")
-  nohup setsid bash "$self" daemon >>"$LOG" 2>&1 </dev/null &
+  # log() already writes deploy.log; stray output (bash errors) goes to daemon.out
+  nohup setsid bash "$self" daemon >>"$REL/daemon.out" 2>&1 </dev/null &
   sleep 1
   echo "deploy daemon started (pid $(cat "$REL/daemon.pid" 2>/dev/null))"
 }
