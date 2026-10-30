@@ -24,6 +24,7 @@ import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 import { asset } from "./prompts.js";
 import { notifyTest } from "./notify.js";
+import { notifyList, notifyRemove, notifySet, ttyPrompter } from "./commands/notify.js";
 
 const USAGE = `usage:
   factory --version
@@ -59,6 +60,11 @@ const USAGE = `usage:
               (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
                $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
+  factory notify set <owner/name> [--key-file] [--header <name>] [--scheme <word>] [--test | --no-test]
+              (asks for the routine's webhook URL and key on the terminal, input hidden; writes
+               $FACTORY_HOME/notify.yaml 0600, with --key-file the key to $FACTORY_HOME/keys/<owner>__<name>)
+  factory notify list [--json]      (repos with a hook; never URLs or keys)
+  factory notify remove <owner/name>
   factory notify test <owner/name>
               (one test POST to the repo's webhook from $FACTORY_HOME/notify.yaml; doctor lists the configured repos)
   factory ci-stub [--ref <tag>]
@@ -263,7 +269,37 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       );
     }
     if (command === "notify") {
-      const [sub, repo, ...extra] = rest;
+      const [sub, ...args] = rest;
+      if (sub === "list") {
+        const { values } = parseArgs({ args, options: { json: { type: "boolean", default: false } } });
+        return notifyList(factoryHomeOf(), io, values.json);
+      }
+      if (sub === "set") {
+        const { values, positionals } = parseArgs({
+          args,
+          allowPositionals: true,
+          allowNegative: true,
+          options: { "key-file": { type: "boolean", default: false }, header: { type: "string" }, scheme: { type: "string" }, test: { type: "boolean" } },
+        });
+        if (positionals.length !== 1) {
+          io.err(USAGE);
+          return 2;
+        }
+        let prompter;
+        try {
+          prompter = ttyPrompter();
+        } catch (e) {
+          io.err(`factory: ${(e as Error).message}\n`);
+          return 1;
+        }
+        return await notifySet(
+          { factoryHome: factoryHomeOf(), repo: positionals[0]!, keyFile: values["key-file"], header: values.header, scheme: values.scheme, test: values.test },
+          prompter,
+          io,
+        );
+      }
+      const [repo, ...extra] = args;
+      if (sub === "remove" && repo && !extra.length) return notifyRemove(factoryHomeOf(), repo, io);
       if (sub !== "test" || !repo || extra.length) {
         io.err(USAGE);
         return 2;

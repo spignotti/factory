@@ -75,6 +75,7 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
 | `factory harden --repo <p>` | signals → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
+| `factory notify set <owner/name>` / `list` / `remove <owner/name>` | manage bot webhooks in `notify.yaml` (URL and key typed hidden on the TTY, never printed) |
 | `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
 | `factory --version` | package version (plus the commit for a checkout install) |
 

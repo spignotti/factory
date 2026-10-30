@@ -19,7 +19,7 @@ import { expandHome, looseMode } from "./secrets.js";
 export const NOTIFY_FILE = "notify.yaml";
 export const notifyPath = (factoryHome: string) => join(factoryHome, NOTIFY_FILE);
 
-const REPO_KEY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+export const REPO_KEY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const HEADER = /^[A-Za-z0-9-]+$/;
 
 export const NotifyHookSchema = z

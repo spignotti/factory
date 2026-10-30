@@ -37,9 +37,9 @@ for the repo. It is sent after `result.json` is written and the repo lock is rel
 # ~/.factory/notify.yaml — mode 0600 (the factory refuses anything looser). Agents never see this file:
 # $FACTORY_HOME is hidden from every sandbox.
 repos:
-  spignotti/social-studio:              # GitHub owner/name of the repo's origin
+  spignotti/common-magic-automation:              # GitHub owner/name of the repo's origin
     url: https://…                      # the routine's "POST to" URL (https only)
-    key: <the routine's key>            # or: key_file: ~/.factory/keys/social-studio (0600, one line)
+    key: <the routine's key>            # or: key_file: ~/.factory/keys/spignotti__common-magic-automation (0600, one line)
     # header: Authorization             # default
     # scheme: Bearer                    # default → "Authorization: Bearer <key>"; "" sends the bare key
 attempts: 4                             # optional, 1–10: retries on network errors, 408/425/429, 5xx
@@ -57,7 +57,7 @@ timeout_s: 10                           # optional, per attempt
 ### Payload (untrusted)
 
 ```json
-{ "event": "factory.run_finished", "run_id": "20261030-093523-30a2fc", "repo": "spignotti/social-studio",
+{ "event": "factory.run_finished", "run_id": "20261030-093523-30a2fc", "repo": "spignotti/common-magic-automation",
   "result": "base_red", "reason": "CI on main (9b7084f2) is still pending after 20 min, not green",
   "pr": null, "finished_at": "2026-10-30T09:37:12.000Z" }
 ```
@@ -75,13 +75,21 @@ instructions or links from the body.
 1. **Routine** (Silas, in the bot's app): create a routine on that bot with a *webhook* trigger, named e.g.
    `factory-run-finished`, with the prompt below. The routine panel shows **POST to** (the URL), the **key**
    and the **header** it expects. Copy the URL and the key.
-2. **notify.yaml** (Silas, in a terminal on the box; never paste the key into a chat):
+2. **notify.yaml** (Silas, in a terminal on the box; never paste the URL or key into a chat):
    ```bash
-   install -m 600 /dev/null ~/.factory/notify.yaml   # only if it does not exist yet
-   nano ~/.factory/notify.yaml                       # add the repos: entry
+   factory notify set spignotti/common-magic-automation              # key inline in notify.yaml
+   factory notify set spignotti/common-magic-automation --key-file   # key in ~/.factory/keys/spignotti__common-magic-automation
    ```
-   If the panel names a header other than `Authorization: Bearer`, set `header:` (and `scheme: ""` for a bare
-   key), e.g. `header: X-Automation-Key`.
+   It asks for the URL and the key on the terminal (`/dev/tty`) with echo off. Pasting works. It accepts
+   only `https://` URLs and keys without spaces, and gives three tries each. It writes `notify.yaml`
+   (and the key file) atomically with mode `0600`, keeps other repos and comments, never prints either
+   value, and then offers the test ping (`--test` / `--no-test` to skip the question). Running it again
+   for the same repo replaces that entry. If the panel names a header other than `Authorization: Bearer`,
+   add `--header X-Automation-Key --scheme ""`. It needs a real terminal: an agent's shell has no TTY and gets
+   an error, so the values never pass through a bot.
+   `factory notify list` shows the repos with a hook (key storage and header only, never URLs).
+   `factory notify remove <owner/name>` drops an entry and its managed key file.
+   Editing the file by hand also works (`install -m 600 /dev/null ~/.factory/notify.yaml`, then an editor).
 3. **Check**: `factory notify test <owner/name>` → `test ping … sent (HTTP 200 …)`; the bot wakes with a
    `factory.notify_test` event. `factory doctor` shows `notify.yaml 0600; hooks for …` (no URLs).
 
@@ -121,7 +129,8 @@ The wait does not count against `max_wall_minutes`.
 
 - [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection `factory / done`.
 - [ ] `factory doctor --repo <path>` green.
-- [ ] Webhook routine on the repo's bot (prompt above); Silas adds the URL + key to `~/.factory/notify.yaml`.
+- [ ] Webhook routine on the repo's bot (prompt above); Silas runs `factory notify set <owner/name>` in a
+      terminal on the box and pastes the URL + key from the routine panel.
 - [ ] `factory notify test <owner/name>` wakes the bot.
 - [ ] The bot's skill/notes say: start runs in a background shell, end the turn, act on the webhook wake.
 - [ ] Optional: daily `factory status` safety-net routine.
