@@ -4,7 +4,8 @@
 # Runs on this repo use the installed factory CLI (~/.local/bin/factory -> factory-releases/current),
 # never the run worktree's build; the checks below only build and test the worktree.
 base_branch: main
-setup: pnpm install --frozen-lockfile
+# The CI stub sets up node only; install the pinned pnpm when it is missing (GitHub runners).
+setup: command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@10.34.6; pnpm install --frozen-lockfile
 checks:
   # measured: lint 3.2 s, typecheck 5.7 s, test 31.3 s, build 5.7 s
   - name: lint
