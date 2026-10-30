@@ -16,6 +16,7 @@ import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
 import { Services } from "../services.js";
 import type { ResolvedSecrets } from "../secrets.js";
 import type { FactoryTools } from "../agents/runner.js";
+import type { Fetch } from "../notify.js";
 
 export interface RunDeps {
   runner: AgentRunner;
@@ -38,6 +39,12 @@ export interface RunDeps {
   prompts?: Partial<Record<string, string>>;
   /** Context7 client behind the `docs_lookup` tool; absent = no docs tool (tests). */
   docs?: Context7Client;
+  /** Run-end webhook transport (tests inject one); the hooks come from `$FACTORY_HOME/notify.yaml`. */
+  notifyFetch?: Fetch;
+  /** Backoff between notification attempts (tests: short). */
+  notifyBackoffMs?: number[];
+  /** Poll interval while CI on the base commit is pending (default 30 s). */
+  baseCiPollMs?: number;
 }
 
 export interface Task {

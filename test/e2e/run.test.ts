@@ -28,6 +28,80 @@ function toFastLane(steps: FakeStep[]): FakeStep[] {
   return out;
 }
 
+const HOOK_URL = "https://hooks.example.test/automations/webhook/e2e-secret-id";
+const HOOK_KEY = "crsr_e2e-sender-key-0123456789abcdef";
+
+/** notify.yaml for acme/widgets in the scenario's factory home, a GitHub-like origin URL, and a fetch spy. */
+function withHook(status = 200) {
+  const sent: { headers: Record<string, string>; body: Record<string, unknown> }[] = [];
+  return {
+    sent,
+    setup: (repo: string) => void git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git"),
+    before: (_repo: string, home: string) => {
+      writeFileSync(join(home, "notify.yaml"), `repos:\n  acme/widgets:\n    url: ${HOOK_URL}\n    key: ${HOOK_KEY}\n`, { mode: 0o600 });
+    },
+    deps: {
+      notifyBackoffMs: [0],
+      notifyFetch: async (_url: string, init: { headers: Record<string, string>; body: string }) => {
+        sent.push({ headers: init.headers, body: JSON.parse(init.body) as Record<string, unknown> });
+        return { status };
+      },
+    },
+  };
+}
+
+describe("notify hook on run_finished", () => {
+  it.each([
+    ["done", "clean.json", {}],
+    ["base_red", "base-red.json", { github: (gh: { status: string }) => void (gh.status = "red") }],
+    ["needs_human", "invalid-handoff.json", {}],
+  ] as const)("%s: POSTs the minimal payload once, after result.json; events never hold the URL or key", async (expected, script, extra) => {
+    const h = withHook();
+    const r = await runScenario({ script, setup: h.setup, before: h.before, deps: h.deps, ...(extra as object) });
+    expect(r.result.result).toBe(expected);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]!.headers.Authorization).toBe(`Bearer ${HOOK_KEY}`);
+    expect(h.sent[0]!.body).toEqual({
+      event: "factory.run_finished", run_id: r.runId, repo: "acme/widgets", result: expected,
+      reason: r.result.reason.slice(0, 500), pr: r.result.pr, finished_at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+    });
+    expect(eventsOf(r, "notify")).toEqual([expect.objectContaining({ data: expect.objectContaining({ repo: "acme/widgets", status: "sent", http_status: 200 }) })]);
+    const all = readdirSync(r.runDir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => readFileSync(join(r.runDir, d.name), "utf8")).join("\n");
+    expect(all).not.toContain(HOOK_KEY);
+    expect(all).not.toContain("e2e-secret-id");
+  });
+
+  it("a failing webhook is logged and never changes the result", async () => {
+    const h = withHook(503);
+    const r = await runScenario({ script: "clean.json", setup: h.setup, before: h.before, deps: h.deps });
+    expect(r.result.result).toBe("done");
+    expect(h.sent.length).toBeGreaterThan(1);
+    expect(eventsOf(r, "notify")[0]!.data).toMatchObject({ status: "failed", http_status: 503 });
+  });
+
+  it("locked runs notify too", async () => {
+    const h = withHook();
+    let release: (() => void) | undefined;
+    const r = await runScenario({
+      script: "clean.json",
+      setup: h.setup,
+      before: (repo, home) => (h.before(repo, home), void (release = acquireRepoLock(home, "https://github.com/acme/widgets.git", "20261029-000000-aaaaaa"))),
+      deps: h.deps,
+    });
+    release?.();
+    expect(r.result.result).toBe("locked");
+    expect(h.sent.map((s) => s.body.result)).toEqual(["locked"]);
+  });
+
+  it("no notify.yaml: nothing is sent and no notify event is logged", async () => {
+    const h = withHook();
+    const r = await runScenario({ script: "clean.json", setup: h.setup, deps: h.deps });
+    expect(r.result.result).toBe("done");
+    expect(h.sent).toEqual([]);
+    expect(eventsOf(r, "notify")).toEqual([]);
+  });
+});
+
 describe("E2E with fake-runner on a fixture repo", () => {
   it("planner and plan_normalize read a clean base worktree, never the user's checkout (untracked .env)", async () => {
     const seen: { role: string; cwd: string; env: boolean; listed: boolean; agents: string; pasted: boolean }[] = [];
@@ -401,6 +475,49 @@ ${fixed}` } };
     const r = await runScenario({ script: "base-red.json", github: (gh) => void (gh.status = status) });
     expect(r.result.result).toBe("base_red");
     expect(eventsOf(r, "gate_result")).toEqual([]);
+  });
+
+  it("red CI on base ends the run at once, without waiting", async () => {
+    const r = await runScenario({ script: "base-red.json", github: (gh) => void (gh.status = "red"), deps: { baseCiPollMs: 1000 } });
+    expect(r.result.reason).toMatch(/is red, not green/);
+    expect(r.slept).toEqual([]);
+  });
+
+  it("pending CI on base is polled up to limits.base_ci_wait_minutes, then base_red", async () => {
+    const r = await runScenario({
+      script: "base-red.json",
+      github: (gh) => void (gh.status = "pending"),
+      patch: (c) => void ((c.limits as Record<string, unknown>).base_ci_wait_minutes = 2),
+      deps: { baseCiPollMs: 30_000 },
+    });
+    expect(r.result.result).toBe("base_red");
+    expect(r.result.reason).toMatch(/is still pending after 2 min, not green/);
+    expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
+  });
+
+  it("pending CI on base that turns green continues the run", async () => {
+    const seq = ["pending", "pending", "green"] as const;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        let i = 0;
+        gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
+      },
+      deps: { baseCiPollMs: 30_000 },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.slept.slice(0, 2)).toEqual([30_000, 30_000]);
+    expect(r.events.some((e) => e.event === "progress" && (e.data.base_ci as { status?: string } | undefined)?.status === "green")).toBe(true);
+  });
+
+  it("base_ci_wait_minutes: 0 keeps the old behaviour (pending is base_red at once)", async () => {
+    const r = await runScenario({
+      script: "base-red.json",
+      github: (gh) => void (gh.status = "pending"),
+      patch: (c) => void ((c.limits as Record<string, unknown>).base_ci_wait_minutes = 0),
+    });
+    expect(r.result.result).toBe("base_red");
+    expect(r.slept).toEqual([]);
   });
 
   it("green CI status on base skips the local base check", async () => {

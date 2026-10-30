@@ -157,3 +157,34 @@ describe("factory resume", () => {
     expect(r3.events.some((e) => e.step === "resume" && e.data.remote_branch_merged)).toBe(true);
   });
 });
+
+describe("notify hook on resume", () => {
+  it("a resumed run notifies again when it finishes, and a locked resume notifies too", async () => {
+    const sent: Record<string, unknown>[] = [];
+    const deps = {
+      notifyBackoffMs: [0],
+      notifyFetch: async (_url: string, init: { body: string }) => (sent.push(JSON.parse(init.body) as Record<string, unknown>), { status: 200 }),
+    };
+    const r = await runScenario({
+      script: "invalid-handoff.json",
+      setup: (repo) => void git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git"),
+      before: (_repo, home) => writeFileSync(join(home, "notify.yaml"), "repos:\n  acme/widgets:\n    url: https://hooks.example.test/x\n    key: k-resume-0123456789\n", { mode: 0o600 }),
+      deps,
+    });
+    expect(sent.map((p) => p.result)).toEqual(["needs_human"]);
+
+    const release = acquireRepoLock(r.factoryHome, "https://github.com/acme/widgets.git", "20261029-000000-dddddd")!;
+    try {
+      expect((await resumeScenario(r, { script: "clean.json", deps })).result.result).toBe("locked");
+    } finally {
+      release();
+    }
+    expect(sent.map((p) => p.result)).toEqual(["needs_human", "locked"]);
+
+    const wt = r.result.worktree!;
+    writeFileSync(join(wt, "src/math.js"), MULTIPLY);
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer"), deps });
+    expect(r2.result.result).toBe("done");
+    expect(sent.map((p) => [p.run_id, p.result])).toEqual([[r.runId, "needs_human"], [r.runId, "locked"], [r.runId, "done"]]);
+  });
+});
