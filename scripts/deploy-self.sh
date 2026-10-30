@@ -14,7 +14,7 @@
 #   ~/.local/share/factory-releases/{deploy.log,state.json,deploy-self.sh}
 #
 # A release is built (pnpm install --frozen-lockfile, pnpm build) and smoke-tested
-# (node dist/cli.js --version) in its own directory; a failed build changes nothing. The switch
+# (./dist/cli.js --version, run through its shebang) in its own directory; a failed build changes nothing. The switch
 # (rename of the `current` and bin symlinks) only happens when no factory run holds a live lock
 # and no factory process runs; otherwise the next tick retries. Running processes are unaffected
 # either way: node resolves the entry symlink to its real path, so a run started from release A
@@ -114,8 +114,10 @@ build_release() {
   log "building $sha in $dir"
   git -C "$SRC" worktree add --detach "$dir" "$sha" >>"$LOG" 2>&1 || return 1
   (cd "$dir" && bash -c "$BUILD") >>"$LOG" 2>&1 || { log "build failed for $sha (see above)"; return 1; }
+  # tsc does not set the exec bit that npm/pnpm bin links would; the bin link runs the file directly.
+  chmod +x "$dir/dist/cli.js" 2>/dev/null || true
   local v
-  v=$(cd "$dir" && node dist/cli.js --version 2>>"$LOG") || { log "smoke test failed for $sha: node dist/cli.js --version"; return 1; }
+  v=$(cd "$dir" && ./dist/cli.js --version 2>>"$LOG") || { log "smoke test failed for $sha: ./dist/cli.js --version"; return 1; }
   log "smoke ok: $v"
   printf '%s\n' "$v" >"$dir/.deploy-ok"
 }

@@ -101,7 +101,7 @@ npx github:spignotti/factory#<tag> run --repo <path> --issue 12
 
 On a long-lived box, `scripts/deploy-self.sh` keeps an installed CLI on the newest `main` commit:
 each new commit is built in its own release directory (`~/.local/share/factory-releases/<sha>`,
-`pnpm install --frozen-lockfile`, `pnpm build`, smoke test `node dist/cli.js --version`), then the
+`pnpm install --frozen-lockfile`, `pnpm build`, smoke test `./dist/cli.js --version`), then the
 `current` and `~/.local/bin/factory` links are renamed over atomically. A failed build changes nothing;
 the switch waits while a factory run holds a live lock or a factory process runs; running processes keep
 their release (node runs the entry's real path); the newest 3 releases are kept. `deploy-self.sh once` checks

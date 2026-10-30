@@ -8,7 +8,8 @@ const SCRIPT = join(__dirname, "..", "..", "scripts", "deploy-self.sh");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 // A fake factory: `dist/cli.js` is copied from `cli.js` by the build; `lib.txt` is read lazily.
-const CLI = `const fs = require("fs"), path = require("path");
+const CLI = `#!/usr/bin/env node
+const fs = require("fs"), path = require("path");
 if (process.argv[2] === "--version") { console.log(fs.readFileSync(path.join(__dirname, "..", "VERSION"), "utf8").trim()); process.exit(0); }
 if (process.argv[2] === "where") { console.log(__filename); process.exit(0); }
 if (process.argv[2] === "late") { setTimeout(() => console.log(fs.readFileSync(path.join(__dirname, "..", "VERSION"), "utf8").trim()), Number(process.argv[3])); }
@@ -36,7 +37,8 @@ function deploy(cmd = "once", extraEnv: NodeJS.ProcessEnv = {}) {
 }
 
 const state = () => JSON.parse(readFileSync(join(rel, "state.json"), "utf8")) as Record<string, string>;
-const runBin = (...args: string[]) => execFileSync("node", [bin, ...args], { encoding: "utf8" }).trim();
+// runs the bin link itself (shebang + exec bit), like a shell does
+const runBin = (...args: string[]) => execFileSync(bin, args, { encoding: "utf8" }).trim();
 const releases = () => readdirSync(rel).filter((n) => /^[0-9a-f]{12}$/.test(n));
 
 beforeEach(() => {
@@ -111,7 +113,7 @@ describe("scripts/deploy-self.sh", () => {
   it("defers the switch while a factory process runs", async () => {
     deploy();
     commit("1.0.0-b");
-    const p = spawn("node", [bin, "late", "1500"]);
+    const p = spawn(bin, ["late", "1500"]);
     await new Promise((r) => setTimeout(r, 200));
     expect(deploy().status).toBe(0);
     expect(state().last_result).toBe("deferred");
@@ -121,7 +123,7 @@ describe("scripts/deploy-self.sh", () => {
   it("leaves a process started on the old release on its files after the switch", async () => {
     deploy();
     commit("1.0.0-b");
-    const p = spawn("node", [bin, "late", "1500"], { stdio: ["ignore", "pipe", "inherit"] });
+    const p = spawn(bin, ["late", "1500"], { stdio: ["ignore", "pipe", "inherit"] });
     let out = "";
     p.stdout.on("data", (d) => (out += d));
     await new Promise((r) => setTimeout(r, 300));
