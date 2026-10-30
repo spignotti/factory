@@ -19,6 +19,7 @@ import { planStep } from "../steps/plan.js";
 import { fastLaneEscalation } from "./lane.js";
 import { EnvMissing } from "../services.js";
 import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "../secrets.js";
+import { WallBudget } from "./budget.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
@@ -162,7 +163,10 @@ class RunFrame {
         // the uncommitted leftovers are the agent's (not a human fix), so resume discards them.
         if (this.state) this.state.transient = true;
         this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}` });
-      } else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded || e instanceof EnvMissing) {
+      } else if (e instanceof WallTimeExceeded) {
+        // The work so far stays in the worktree; resume re-runs the gates over it and continues.
+        this.set({ result: "needs_human", reason: this.state?.worktree ? `${reason}; factory resume ${this.runId}` : reason });
+      } else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof EnvMissing) {
         this.set({ result: "needs_human", reason });
       } else this.set({ result: "failed", reason });
     }
@@ -221,6 +225,18 @@ class RunFrame {
     }
     return writeResult(join(this.runDir, "result.json"), result, this.events.secrets);
   }
+}
+
+/**
+ * The run's `max_wall_minutes` budget (active time: box suspends are credited back), ticking from
+ * now until the run ends. Each suspend it credits is logged as `wall_suspended_ms`.
+ */
+function wallBudget(f: RunFrame, events: EventLog, repo: RepoConfig): WallBudget {
+  const budget = new WallBudget(repo.limits.max_wall_minutes * 60_000, {
+    onSuspend: (ms) => void events.emit({ step: "run", event: "progress", data: { wall_suspended_ms: ms } }),
+  }).start();
+  f.cleanups.push(async () => budget.stop());
+  return budget;
 }
 
 /** Run-end webhook to the repo's bot (notify.yaml). Never throws, never changes the result. */
@@ -314,7 +330,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     f.save();
 
     const agentHome = prepareAgentHome(runDir);
-    let deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
+    const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
 
@@ -342,10 +358,11 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
 
     // Base check, then the worktree.
     checkDeadline(base);
+    const suspendedBefore = deadline.suspendedMs;
     const { status, waitedMs } = await settledBaseStatus(f, deps, repoDir, baseSha, repo.limits.base_ci_wait_minutes);
-    // Waiting for the base CI is not work: it does not count against max_wall_minutes.
-    deadline += waitedMs;
-    base.deadline = deadline;
+    // Waiting for the base CI is not work: it does not count against max_wall_minutes (a suspend
+    // during the wait is already credited by the budget, so it is not added twice).
+    deadline.extend(waitedMs - (deadline.suspendedMs - suspendedBefore));
     if (status === "red" || status === "pending") {
       const why = status === "pending" ? `still pending after ${repo.limits.base_ci_wait_minutes} min` : "red";
       return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${why}, not green` });
@@ -368,7 +385,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const env = agentEnv(ctx);
 
     if (repo.setup) {
-      const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline - Date.now()), jail: jailFor(ctx, worktree) });
+      const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline.at - Date.now()), jail: jailFor(ctx, worktree) });
       checkDeadline(ctx);
       if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` });
     }
@@ -526,7 +543,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     if (!secrets) return;
     const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
     f.set({ type: plan.type });
-    const deadline = Date.now() + repo.limits.max_wall_minutes * 60_000;
+    const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
     const ctx: RunContext = {
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,

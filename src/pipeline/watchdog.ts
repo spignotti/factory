@@ -15,8 +15,12 @@ export interface WatchdogOptions {
   windowMs: number;
   pollMs?: number;
   now?: Clock;
-  /** Hard limit (epoch ms, real clock): abort with `error()` when reached, events or not. */
-  deadline?: { at: number; error: () => Error };
+  /**
+   * Hard limit (epoch ms, real clock): abort with `error()` when reached, events or not. A function
+   * is re-read when its timer fires and on every poll tick, so a deadline that moves later
+   * (WallBudget crediting a box suspend) is honoured.
+   */
+  deadline?: { at: number | (() => number); error: () => Error };
   /** External abort (signal handler); rejects with the signal's reason. */
   signal?: AbortSignal;
   /**
@@ -65,7 +69,8 @@ export function supervise<T>(source: EventSource, opts: WatchdogOptions, fn: (si
       reject(err);
     };
     if (opts.signal?.aborted) return fail(asError(opts.signal.reason));
-    if (opts.deadline && opts.deadline.at <= Date.now()) return fail(opts.deadline.error());
+    const deadlineAt = () => (opts.deadline ? (typeof opts.deadline.at === "function" ? opts.deadline.at() : opts.deadline.at) : Infinity);
+    if (opts.deadline && deadlineAt() <= Date.now()) return fail(opts.deadline.error());
     timers.push(
       setInterval(() => {
         const t = now();
@@ -76,13 +81,21 @@ export function supervise<T>(source: EventSource, opts: WatchdogOptions, fn: (si
           last = Math.min(t, last + frozen);
           opts.onSuspend?.(frozen);
         }
+        // Real clock, read after the suspend credit (a moving deadline has already moved).
+        if (opts.deadline && Date.now() > deadlineAt()) return fail(opts.deadline.error());
         const silent = t - last;
         if (silent > opts.windowMs) fail(new WatchdogAbort(silent));
       }, pollMs),
     );
     if (opts.deadline) {
-      const { at, error } = opts.deadline;
-      timers.push(setTimeout(() => fail(error()), at - Date.now()));
+      // Precise timer too; on firing it re-reads the deadline and re-arms when it moved later.
+      const { error } = opts.deadline;
+      const arm = (): void => {
+        const ms = deadlineAt() - Date.now();
+        if (ms <= 0) return fail(error());
+        timers.push(setTimeout(arm, Math.min(ms, 2 ** 31 - 1)));
+      };
+      arm();
     }
     if (opts.signal) {
       const signal = opts.signal;

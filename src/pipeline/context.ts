@@ -11,6 +11,7 @@ import type { Handoff } from "../schemas/handoff.js";
 import type { Plan } from "../schemas/plan.js";
 import { type DocsStep, type Profile, profileRoleOf } from "../schemas/profile.js";
 import type { RepoConfig } from "../schemas/repo.js";
+import type { Deadline } from "./budget.js";
 import { supervise, WatchdogAbort } from "./watchdog.js";
 import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
 import { Services } from "../services.js";
@@ -71,8 +72,11 @@ export interface RunContext {
   plan: Plan;
   handoffs: Handoff[];
   gateCount: number;
-  /** `max_wall_minutes` outer limit (epoch ms), enforced between steps and inside agent calls. */
-  deadline: number;
+  /**
+   * `max_wall_minutes` outer limit, enforced between steps, inside agent calls and around gate
+   * commands. Active time: a run's WallBudget moves it later by box-suspend time.
+   */
+  deadline: Deadline;
   /** Findings memory briefing: top open recurring findings, or "". */
   briefing: string;
   /** Effective lane: `fast` until escalated. */
@@ -88,15 +92,19 @@ export interface RunContext {
 export type Lane = "standard" | "fast";
 
 export class WallTimeExceeded extends Error {
-  constructor(minutes: number) {
-    super(`max_wall_minutes (${minutes}) exceeded`);
+  constructor(minutes: number, detail?: string) {
+    super(`max_wall_minutes (${minutes}) exceeded${detail ? ` (${detail})` : ""}`);
     this.name = "WallTimeExceeded";
   }
 }
 
 export function checkDeadline(ctx: Pick<RunContext, "deadline" | "repo" | "deps">): void {
   throwIfInterrupted(ctx.deps);
-  if (Date.now() > ctx.deadline) throw new WallTimeExceeded(ctx.repo.limits.max_wall_minutes);
+  if (Date.now() > ctx.deadline.at) throw wallTimeExceeded(ctx);
+}
+
+export function wallTimeExceeded(ctx: Pick<RunContext, "deadline" | "repo">): WallTimeExceeded {
+  return new WallTimeExceeded(ctx.repo.limits.max_wall_minutes, ctx.deadline.describe?.());
 }
 
 export function throwIfInterrupted(deps: Pick<RunDeps, "signal">): void {
@@ -173,7 +181,7 @@ export async function callAgent(
         windowMs: ctx.repo.limits.stall_minutes * 60_000,
         now: deps.now,
         pollMs: deps.watchdogPollMs,
-        deadline: { at: ctx.deadline, error: () => new WallTimeExceeded(ctx.repo.limits.max_wall_minutes) },
+        deadline: { at: () => ctx.deadline.at, error: () => wallTimeExceeded(ctx) },
         signal: deps.signal,
         onSuspend: (frozenMs) => {
           suspends++;

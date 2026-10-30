@@ -723,6 +723,19 @@ describe("run guards", () => {
     expect(r.events.some((e) => e.event === "progress" && e.data.aborted === "max_wall_minutes")).toBe(true);
   });
 
+  it("max_wall_minutes mid-implement: needs_human with active minutes and the resume command, no 1 s gate run", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.01), // 600 ms
+      steps: (steps) => steps.map((s) => (s.role === "implement" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
+    });
+    expect(r.result).toMatchObject({ result: "needs_human" });
+    expect(r.result.reason).toMatch(/^max_wall_minutes \(0\.01\) exceeded \(\d+ active min\); factory resume \d{8}-\d{6}-[0-9a-f]{6}$/);
+    expect(r.events.some((e) => e.event === "progress" && e.data.aborted === "max_wall_minutes")).toBe(true);
+    const abort = r.events.findIndex((e) => e.data.aborted === "max_wall_minutes");
+    expect(r.events.slice(abort).some((e) => e.event === "gate_result")).toBe(false);
+  });
+
   it("an external abort (SIGTERM handler) stops the run as failed and still writes result.json", async () => {
     const controller = new AbortController();
     const started = Date.now();
