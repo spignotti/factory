@@ -1,6 +1,6 @@
 # Factory runs from Grok Bot bots
 
-How a bot (one per repository, e.g. Iris for social-studio) starts factory runs and learns that a run ended.
+How a bot (one per repository, e.g. Iris for common-magic-automation, Atlas for tourenpilot-ops) starts factory runs and learns that a run ended.
 The short version: **the factory wakes the bot through the bot's own webhook routine**. Nothing else does.
 
 ## Starting a run
