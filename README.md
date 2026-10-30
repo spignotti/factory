@@ -54,7 +54,10 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
   policy; PR body from `standards/pr-template.md`; push/PR through `src/gh.ts`.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/limit/auth/invalid_output classification with same-model
-  backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog.
+  backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
+  (a frozen box/VM is not counted as silence, `progress` event `suspended_ms`); every agent bash command
+  is killed after `limits.command_timeout_minutes` (default 10, also the maximum the model can ask for)
+  and the model gets "Command timed out" back.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
 - **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
@@ -144,7 +147,7 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, forbidden_paths: [".env*"] }
+limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"] }
 ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: ["src/app/**"], pages: ["/"], devices: ["Desktop Chrome"] }
 verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]

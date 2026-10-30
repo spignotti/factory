@@ -60,6 +60,65 @@ describe("watchdog", () => {
   });
 });
 
+describe("watchdog: frozen process (box/VM paused)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const log = () => new EventLog(mkdtempSync(join(tmpdir(), "wd-")), "r");
+  // Wall clock that can jump while timers stand still: what a resumed VM sees.
+  const pausable = () => {
+    let jump = 0;
+    return { now: () => Date.now() + jump, pause: (ms: number) => void (jump += ms) };
+  };
+  const silent = (events: EventLog, ms: number) => (signal: AbortSignal) =>
+    new FakeRunner([{ role: "implement", silent_ms: ms, raw: "ok" }], realSleep).run({
+      role: "implement", model: "a/b", cwd: tmpdir(), system: "", prompt: "", tools: "none", env: {}, signal,
+      onActivity: (a) => void events.emit({ step: "implement", event: a.kind }),
+    });
+
+  it("does not count a 25 min pause as silence (20261029 incident)", async () => {
+    const events = log();
+    const clock = pausable();
+    const frozen: number[] = [];
+    const p = supervise(events, { windowMs: 15 * MIN, pollMs: 30_000, now: clock.now, onSuspend: (ms) => frozen.push(ms) }, silent(events, 2 * MIN));
+    await vi.advanceTimersByTimeAsync(10_000);
+    clock.pause(25 * MIN);
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    await expect(p).resolves.toMatchObject({ text: "ok" });
+    expect(frozen).toHaveLength(1);
+    expect(frozen[0]).toBe(25 * MIN);
+  });
+
+  it("still aborts real silence after a pause", async () => {
+    const events = log();
+    const clock = pausable();
+    const p = supervise(events, { windowMs: 15 * MIN, pollMs: 30_000, now: clock.now }, silent(events, 60 * MIN));
+    const outcome = p.catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+    clock.pause(25 * MIN);
+    await vi.advanceTimersByTimeAsync(4 * MIN);
+    expect(await Promise.race([outcome, Promise.resolve("pending")])).toBe("pending");
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    const e = await outcome;
+    expect(e).toBeInstanceOf(WatchdogAbort);
+    expect((e as WatchdogAbort).silentMs).toBeLessThan(16 * MIN);
+  });
+
+  it("ordinary timer jitter is not a pause", async () => {
+    const events = log();
+    const clock = pausable();
+    const frozen: number[] = [];
+    const p = supervise(events, { windowMs: 15 * MIN, pollMs: 30_000, now: clock.now, onSuspend: (ms) => frozen.push(ms) }, silent(events, 60 * MIN));
+    const outcome = p.catch((e: unknown) => e);
+    for (let i = 0; i < 40; i++) {
+      clock.pause(5_000);
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    expect(frozen).toEqual([]);
+    expect(await outcome).toBeInstanceOf(WatchdogAbort);
+  });
+});
+
 describe("supervise: deadline and external abort", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

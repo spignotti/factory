@@ -54,6 +54,8 @@ export interface AgentRequest {
   env: Record<string, string>;
   /** Factory-owned Pi config dir (`PI_CODING_AGENT_DIR`). */
   agentDir?: string;
+  /** Limit per bash command (ms): the default when the model sets no timeout, and the maximum. Absent = Pi's default (none). */
+  commandTimeoutMs?: number;
   /** Sandbox for bash and the path guard for in-process tools; absent = unconfined. */
   jail?: Jail;
   /** Evaluator browser tools, added to the tool set; absent for every other role. */

@@ -181,10 +181,13 @@ export class PiRunner implements AgentRunner {
  * bash: exactly the allowlisted env, jailed by bwrap/pasta when a jail is given; the
  * in-process file tools go through a PathGuard confined to the session cwd.
  */
-export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail">, tools: string[]): ToolDefinition[] {
+export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail" | "commandTimeoutMs">, tools: string[]): ToolDefinition[] {
   const { cwd, env, jail } = req;
   const defs: unknown[] = [];
-  if (tools.includes("bash")) defs.push(createBashToolDefinition(cwd, { exposeSessionEnvironment: false, spawnHook: bashSpawnHook(env, jail) }));
+  if (tools.includes("bash")) {
+    const bash = createBashToolDefinition(cwd, { exposeSessionEnvironment: false, spawnHook: bashSpawnHook(env, jail) });
+    defs.push(req.commandTimeoutMs ? withCommandTimeout(bash, req.commandTimeoutMs) : bash);
+  }
   if (jail) {
     const guard = new PathGuard([cwd]);
     const make: Record<string, () => unknown> = {
@@ -221,6 +224,28 @@ export function factoryToolDefinitions(browser: FactoryTools): ToolDefinition[] 
       },
     }),
   );
+}
+
+/**
+ * Pi's bash has no default timeout: a command that never exits (dev server, watch mode) would keep
+ * the session silent until the watchdog kills the whole run. Every command gets `limitMs` unless
+ * the model asks for less; Pi kills the process tree and returns "Command timed out after N
+ * seconds" to the model as a tool error.
+ */
+export function withCommandTimeout<T extends { description: string; execute: (...args: never[]) => unknown }>(def: T, limitMs: number): T {
+  const limitS = Math.max(1, Math.round(limitMs / 1000));
+  const execute = def.execute as (id: string, params: { command: string; timeout?: number }, ...rest: unknown[]) => unknown;
+  return {
+    ...def,
+    description: `${def.description} Commands are killed after ${limitS} seconds at most (default and maximum); run servers or watchers in the background (\`&\`, with output to a file) or with their own timeout.`,
+    execute: ((id: string, params: { command: string; timeout?: number }, ...rest: unknown[]) =>
+      execute(id, { ...params, timeout: effectiveTimeoutS(params.timeout, limitS) }, ...rest)) as unknown as T["execute"],
+  };
+}
+
+/** Seconds for one command: the model's timeout if it is valid and below the limit, else the limit. */
+export function effectiveTimeoutS(requested: number | undefined, limitS: number): number {
+  return typeof requested === "number" && Number.isFinite(requested) && requested > 0 ? Math.min(requested, limitS) : limitS;
 }
 
 /** Pi bash spawn hook: fixed env, and the command wrapped into the jail. */
