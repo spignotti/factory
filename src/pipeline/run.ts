@@ -346,7 +346,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${why}, not green` });
     }
     if (plan.type === "bug" && !repo.tests.run) {
-      return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans" });
+      return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR for human review, then re-runs after the merge" });
     }
     let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
     const taken = (b: string) =>

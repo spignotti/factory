@@ -34,17 +34,20 @@ for the repo. It is sent after `result.json` is written and the repo lock is rel
 ### `~/.factory/notify.yaml`
 
 ```yaml
-# ~/.factory/notify.yaml — mode 0600 (the factory refuses anything looser). Agents never see this file:
-# $FACTORY_HOME is hidden from every sandbox.
+# ~/.factory/notify.yaml — mode 0600 (the factory refuses anything looser). Agents inside a run never see
+# this file: $FACTORY_HOME is hidden from every sandbox.
 repos:
   spignotti/social-studio:              # GitHub owner/name of the repo's origin
     url: https://…                      # the routine's "POST to" URL (https only)
-    key: <the routine's key>            # or: key_file: ~/.factory/keys/social-studio (0600, one line)
+    key_file: ~/.factory/keys/spignotti__social-studio   # 0600, one line; or inline: key: <the routine's key>
     # header: Authorization             # default
     # scheme: Bearer                    # default → "Authorization: Bearer <key>"; "" sends the bare key
 attempts: 4                             # optional, 1–10: retries on network errors, 408/425/429, 5xx
 timeout_s: 10                           # optional, per attempt
 ```
+
+The parser reads YAML 1.2, so plain JSON is valid too. The file on the box is kept as JSON so that a bot can
+add its entry with `json` from the Python standard library (see Setup).
 
 - Exactly one of `key` / `key_file` per repo. Retries back off 2 s, 10 s, 30 s; a 4xx other than
   408/425/429 is not retried.
@@ -72,17 +75,53 @@ instructions or links from the body.
 
 ### Setup per bot (once)
 
+The repo's bot does the whole setup itself. Silas never opens a terminal on the box; he only creates the
+routine and pastes its URL and key into secret cards in that bot's chat.
+
 1. **Routine** (Silas, in the bot's app): create a routine on that bot with a *webhook* trigger, named e.g.
-   `factory-run-finished`, with the prompt below. The routine panel shows **POST to** (the URL), the **key**
-   and the **header** it expects. Copy the URL and the key.
-2. **notify.yaml** (Silas, in a terminal on the box; never paste the key into a chat):
+   `Factory-Lauf beendet (<repo>)`, with the prompt below. The routine panel shows **POST to** (the URL), the
+   **key** and the **header** it expects.
+2. **Secrets** (the bot asks, Silas pastes): the bot sends two in-chat secret cards, e.g.
+   `FACTORY_NOTIFY_URL_<SHORT>` (the URL) and `FACTORY_NOTIFY_KEY_<SHORT>` (the key). The values arrive as
+   environment variables of the bot's shell. The bot never echoes, logs or pastes them anywhere.
+3. **Entry** (the bot, on the box): write the key file and the `notify.yaml` entry from the env vars, both
+   `0600` (umask 077), without printing a value. It replaces an existing entry for the same repo and leaves the
+   others untouched:
    ```bash
-   install -m 600 /dev/null ~/.factory/notify.yaml   # only if it does not exist yet
-   nano ~/.factory/notify.yaml                       # add the repos: entry
+   REPO=spignotti/social-studio URL_VAR=FACTORY_NOTIFY_URL_CM KEY_VAR=FACTORY_NOTIFY_KEY_CM python3 - <<'PY'
+   import json, os, sys
+   from pathlib import Path
+   os.umask(0o077)
+   repo = os.environ["REPO"]
+   url, key = os.environ[os.environ["URL_VAR"]].strip(), os.environ[os.environ["KEY_VAR"]].strip()
+   if not url.startswith("https://") or not key:
+       sys.exit("URL must be https and the key non-empty; nothing written")
+   home = Path(os.environ.get("FACTORY_HOME") or Path.home() / ".factory")
+   keys = home / "keys"
+   keys.mkdir(mode=0o700, parents=True, exist_ok=True)
+   key_file = keys / repo.replace("/", "__")
+   key_file.write_text(key + "\n")
+   key_file.chmod(0o600)
+   nf = home / "notify.yaml"
+   text = nf.read_text() if nf.exists() else ""
+   try:
+       cfg = json.loads(text) if text.strip() else {}
+   except json.JSONDecodeError:
+       sys.exit("notify.yaml is not JSON; nothing written (do not print it, ask Schmiede)")
+   entry = {"url": url, "key_file": str(key_file)}
+   # Only if the routine panel names another header, e.g. X-Automation-Key with a bare key:
+   # entry.update(header="X-Automation-Key", scheme="")
+   cfg.setdefault("repos", {})[repo] = entry
+   tmp = nf.with_name(nf.name + ".tmp")
+   tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+   tmp.chmod(0o600)
+   os.replace(tmp, nf)
+   print(f"hook for {repo} written")
+   PY
    ```
-   If the panel names a header other than `Authorization: Bearer`, set `header:` (and `scheme: ""` for a bare
-   key), e.g. `header: X-Automation-Key`.
-3. **Check**: `factory notify test <owner/name>` → `test ping … sent (HTTP 200 …)`; the bot wakes with a
+   Never `cat` the file or the key file, and never pass a value on the command line (it would land in the
+   process list and shell history); the snippet only reads the env vars by name.
+4. **Check**: `factory notify test <owner/name>` → `test ping … sent (HTTP 200 …)`; the bot wakes with a
    `factory.notify_test` event. `factory doctor` shows `notify.yaml 0600; hooks for …` (no URLs).
 
 A cheap safety net for a factory process that dies (box reboot, OOM; then no `run_finished` is emitted): a
@@ -97,7 +136,8 @@ daily cron routine on the bot that runs `factory status` and reports runs that a
 > - `done`: check the PR (CI, merge policy), update your notes, start the next planned run if there is one,
 >   and tell Silas briefly (PR link).
 > - `needs_human`: read `reason` and the last events; fix what you may fix in the run's worktree and run
->   `factory resume <run_id>`, else tell Silas what is needed.
+>   `factory resume <run_id>`. If the repo's factory config lacks something (e.g. `tests.run`), open a config
+>   PR yourself and ask Silas to merge it, then re-run. Else tell Silas what is needed.
 > - `base_red`: main is red (or CI stayed pending). Find out why; fix main or tell Silas; then re-run the task.
 > - `locked`: another run holds the repo; re-run with `--wait`.
 > - `failed` / watchdog abort: read the error, tell Silas, resume when it is safe.
@@ -105,10 +145,24 @@ daily cron routine on the bot that runs `factory status` and reports runs that a
 
 ## Resume
 
-After a `needs_human` stop the bot (or Silas) fixes things in the run's worktree
+After a `needs_human` stop the bot fixes things in the run's worktree
 (`~/.factory/runs/<run-id>/worktree`) or pushes to the PR branch, then runs `factory resume <run-id>` in a
 background shell and ends its turn. The resumed run ends with another `run_finished` → another webhook call
 with the same `run_id`. A resume refused because another run holds the lock notifies `locked`.
+
+## Who changes what
+
+| What | Who | How |
+|---|---|---|
+| The repo's factory config: `.factory/repo.yaml`, `.factory/review-rules.md`, `.factory/verify/**`, `AGENTS.md` | the repo's bot | a normal PR from its own clone (no factory run, no Schmiede); Silas reviews and merges |
+| The bot's own `notify.yaml` entry and key file | the repo's bot | Setup above, from secret cards |
+| Factory code, global config (`~/.factory/config`, `profile.yaml`, Pi login), model choice | Schmiede | PRs on spignotti/factory |
+| `.factory/**` *inside a factory run* | nobody, unless declared | `human_only_paths` and the config guard stay: a run never weakens its own gates; a declared `protected_changes` entry still needs Silas's OK at merge |
+
+So when a run stops with `needs_human` because the repo config is missing something (e.g. `tests.run` for a
+bug plan, a check, a `paths` filter), the bot fixes it itself: edit `.factory/repo.yaml` in its clone, push a
+branch, open a PR (`chore(factory): …`) and ask Silas to merge it. Runs read `repo.yaml` from the base commit,
+so the change takes effect for runs started (or re-run) after the merge.
 
 ## Base CI
 
@@ -120,8 +174,12 @@ The wait does not count against `max_wall_minutes`.
 ## Onboarding checklist (new repo / new bot)
 
 - [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection `factory / done`.
+- [ ] If the repo has tests: `.factory/repo.yaml` has `tests.globs` and `tests.run` (bug plans stop with
+      `needs_human` without `tests.run`). Missing → the bot opens a config PR for Silas.
 - [ ] `factory doctor --repo <path>` green.
-- [ ] Webhook routine on the repo's bot (prompt above); Silas adds the URL + key to `~/.factory/notify.yaml`.
+- [ ] Webhook routine on the repo's bot (prompt above); the bot gets URL + key via secret cards and writes its
+      own `notify.yaml` entry (Setup, step 3).
 - [ ] `factory notify test <owner/name>` wakes the bot.
-- [ ] The bot's skill/notes say: start runs in a background shell, end the turn, act on the webhook wake.
+- [ ] The bot's skill/notes say: start runs in a background shell, end the turn, act on the webhook wake; the
+      repo's factory config is the bot's to change via PR.
 - [ ] Optional: daily `factory status` safety-net routine.

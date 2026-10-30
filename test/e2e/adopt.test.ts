@@ -133,6 +133,17 @@ describe("factory adopt", () => {
     expect(report.branch).toBe("factory/adopt-2");
   });
 
+  it("hints at a missing tests.run when tests exist but no single-file runner was found", async () => {
+    const pkg = { scripts: { test: "mocha" } };
+    const repo = makeRepo({ "package.json": JSON.stringify(pkg), "src/a.test.js": "// test\n" });
+    const { report } = await runAdopt(repo, [], { plan: false, pr: false });
+    expect(parseRepoConfig(show(repo, "factory/adopt", ".factory/repo.yaml")).tests.run).toBeUndefined();
+    expect(report.hints.some((h) => /set tests\.run in \.factory\/repo\.yaml/.test(h))).toBe(true);
+    const withRunner = makeRepo({ "package.json": JSON.stringify({ scripts: { test: "vitest run" } }), "src/a.test.js": "// test\n" });
+    const r2 = (await runAdopt(withRunner, [], { plan: false, pr: false })).report;
+    expect(r2.hints.some((h) => /tests\.run/.test(h))).toBe(false);
+  });
+
   it("measures setup and checks once in a clean base worktree", async () => {
     const pkg = { scripts: { lint: "node -e 0", test: "node -e \"process.exit(1)\"" } };
     const repo = makeRepo({ "package.json": JSON.stringify(pkg), "package-lock.json": JSON.stringify({ name: "a", lockfileVersion: 3, requires: true, packages: { "": { name: "a" } } }) });

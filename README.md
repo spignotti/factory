@@ -95,7 +95,7 @@ budget; a resume at `finalize` only re-runs the gates (no new review of the huma
 
 On every `run_finished` (also after `resume`) the factory POSTs `{run_id, repo, result, reason, pr,
 finished_at}` to the webhook routine of the bot that owns the repo, configured in `~/.factory/notify.yaml`
-(`0600`, hidden from agents). Retries with backoff; a failed notification is logged and never fails the run.
+(`0600`, hidden from agents inside a run; each bot writes its own entry). Retries with backoff; a failed notification is logged and never fails the run.
 A background shell that ends does not wake a bot; this hook does. Setup, payload, routine prompt and the
 onboarding checklist: [docs/BOTS.md](docs/BOTS.md).
 
@@ -209,6 +209,11 @@ protected) are the CI and factory config. A run may change them, the sanctioned 
    runs the changed workflow files, so read that diff before approving.
 
 Agents still never get secret values; a protected change does not change what agents see.
+
+These rules bind agents *inside a run*. Outside a run, the repo's own bot maintains its factory config
+(`.factory/repo.yaml`, `.factory/review-rules.md`, `AGENTS.md`) through normal PRs from its clone; a human
+still reviews and merges them (see [docs/BOTS.md](docs/BOTS.md#who-changes-what)). Factory code, the global
+config and model choice are changed only in this repository.
 
 ## Model configuration
 
@@ -411,7 +416,9 @@ base branch; the user's checkout is not touched):
 - **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
-- **After the merge**: set up the repo bot's webhook routine and `notify.yaml` entry, then
+- **After the merge**: if the repo has tests, check that `tests.globs` and `tests.run` are set (bug plans
+  stop with `needs_human` without `tests.run`; adopt prints a hint when it found tests but no runner). The
+  repo bot sets up its webhook routine and writes its own `notify.yaml` entry, then runs
   `factory notify test <owner/name>` (checklist in [docs/BOTS.md](docs/BOTS.md#onboarding-checklist-new-repo--new-bot)).
 
 ## Harden
