@@ -42,7 +42,10 @@ mkdir -p "$REL"
 
 log() {
   if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 1048576 ]; then mv -f "$LOG" "$LOG.1"; fi
-  printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG" >&2
+  local line
+  line="$(date -Iseconds) $*"
+  printf '%s\n' "$line" >>"$LOG"
+  [ -n "${FACTORY_DEPLOY_QUIET:-}" ] || printf '%s\n' "$line" >&2
 }
 
 # state KEY=VALUE... : merge string fields into state.json (atomic rename).
@@ -187,13 +190,14 @@ daemon() {
   exec 8>"$REL/.daemon.lock"
   flock -n 8 || { echo "deploy daemon already running" >&2; return 0; }
   echo $$ >"$REL/daemon.pid"
+  export FACTORY_DEPLOY_QUIET=1
   log "daemon started (pid $$, every ${INTERVAL}s)"
   while true; do
     # Each tick runs the installed copy (fresh read), falling back to this file.
     local self=$REL/deploy-self.sh
     [ -x "$self" ] || self=$0
     bash "$self" once 9>&- 8>&- || true
-    sleep "$INTERVAL"
+    sleep "$INTERVAL" 8>&-
   done
 }
 
