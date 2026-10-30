@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # deploy-self.sh: versioned self-deploy of the factory CLI on a box (no cron/systemd needed).
 #
-#   deploy-self.sh once     check origin/main once; build + switch when it moved (default)
+#   deploy-self.sh once     check origin/main once; build + switch when it moved (default).
+#                           Prints one `deploy: <result> …` line; exit 0 deployed/up_to_date,
+#                           1 error/build_failed, 3 deferred (a run is active) or busy
 #   deploy-self.sh daemon   loop: `once` every FACTORY_DEPLOY_INTERVAL seconds (singleton)
 #   deploy-self.sh ensure   start the daemon in the background unless it already runs
 #   deploy-self.sh status   print the state JSON
@@ -59,8 +61,12 @@ state() {
   printf '%s' "$json" | jq "${args[@]}" "$filter" >"$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"
 }
 
+# One summary line on stdout per `once`; exit codes: 0 deployed/up_to_date, 1 error/build_failed, 3 deferred/busy.
+result() { printf 'deploy: %s\n' "$*"; }
+
 die() {
   log "ERROR: $*"
+  result "error: $*"
   state "last_result=error" "last_error=$*" "last_check=$(date -Iseconds)"
   exit 1
 }
@@ -146,7 +152,7 @@ prune() {
 once() {
   need_tools
   exec 9>"$REL/.deploy.lock"
-  flock -n 9 || { log "another deploy is running; skipping"; return 0; }
+  flock -n 9 || { log "another deploy is running; skipping"; result "busy: another deploy is running"; return 3; }
   [ -d "$SRC/.git" ] || die "source clone $SRC missing (git clone https://github.com/spignotti/factory.git $SRC)"
 
   local remote_sha cur reason
@@ -158,12 +164,14 @@ once() {
 
   if [ "$cur" = "$remote_sha" ] && [ "$(readlink "$BIN" 2>/dev/null)" = "$REL/current/dist/cli.js" ]; then
     state "last_result=up_to_date"
+    result "up_to_date $cur ($(cat "$REL/$cur/.deploy-ok" 2>/dev/null))"
     return 0
   fi
 
   git -C "$SRC" fetch --quiet "$REMOTE" "$BRANCH" >>"$LOG" 2>&1 || die "git fetch $REMOTE $BRANCH failed"
   if ! build_release "$remote_sha"; then
     state "last_result=build_failed" "last_error=build of $remote_sha failed; current stays ${cur:-none}" "failed_sha=$remote_sha"
+    result "build_failed $remote_sha (current stays ${cur:-none}; see $LOG)"
     return 1
   fi
 
@@ -171,7 +179,8 @@ once() {
   if [ -n "$reason" ]; then
     log "release $remote_sha ready, switch deferred ($reason)"
     state "last_result=deferred" "pending=$remote_sha" "deferred_reason=$reason"
-    return 0
+    result "deferred $remote_sha built, not switched ($reason); current stays ${cur:-none}"
+    return 3
   fi
 
   swap_link "$remote_sha" "$REL/current"
@@ -183,6 +192,7 @@ once() {
   fi
   log "switched current ${cur:-none} -> $remote_sha ($(cat "$REL/$remote_sha/.deploy-ok"))"
   state "last_result=deployed" "previous=$cur" "current=$remote_sha" "deployed_at=$(date -Iseconds)" "version=$(cat "$REL/$remote_sha/.deploy-ok")" "pending=" "last_error="
+  result "deployed ${cur:-none} -> $remote_sha ($(cat "$REL/$remote_sha/.deploy-ok"))"
   prune
 }
 

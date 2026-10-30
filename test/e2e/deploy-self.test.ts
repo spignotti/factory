@@ -79,7 +79,9 @@ describe("scripts/deploy-self.sh", () => {
     // node resolves the bin link to the release's real path
     expect(runBin("where")).toBe(join(realpathSync(rel), a, "dist", "cli.js"));
     expect(state()).toMatchObject({ last_result: "deployed", current: a });
-    expect(deploy().status).toBe(0);
+    const u = deploy();
+    expect(u.status).toBe(0);
+    expect(u.stdout).toMatch(/^deploy: up_to_date /);
     expect(state().last_result).toBe("up_to_date");
   });
 
@@ -89,6 +91,7 @@ describe("scripts/deploy-self.sh", () => {
     const b = commit("1.0.0-b", { FAIL_BUILD: "1" });
     const r = deploy();
     expect(r.status).toBe(1);
+    expect(r.stdout).toMatch(/^deploy: build_failed /);
     expect(readlinkSync(join(rel, "current"))).toBe(a);
     expect(runBin("--version")).toBe("1.0.0-a");
     expect(state()).toMatchObject({ last_result: "build_failed", failed_sha: b, current: a });
@@ -100,7 +103,9 @@ describe("scripts/deploy-self.sh", () => {
     const b = commit("1.0.0-b");
     mkdirSync(join(fhome, "locks"), { recursive: true });
     writeFileSync(join(fhome, "locks", "repo.lock"), `${process.pid}\nrun-1`);
-    expect(deploy().status).toBe(0);
+    const d = deploy();
+    expect(d.status).toBe(3);
+    expect(d.stdout).toMatch(/^deploy: deferred /);
     expect(state()).toMatchObject({ last_result: "deferred", pending: b });
     expect(readlinkSync(join(rel, "current"))).toBe(a);
     // a stale lock (dead pid) does not block
@@ -115,7 +120,7 @@ describe("scripts/deploy-self.sh", () => {
     commit("1.0.0-b");
     const p = spawn(bin, ["late", "1500"]);
     await new Promise((r) => setTimeout(r, 200));
-    expect(deploy().status).toBe(0);
+    expect(deploy().status).toBe(3);
     expect(state().last_result).toBe("deferred");
     await new Promise((r) => p.on("exit", r));
   });
