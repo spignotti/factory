@@ -197,7 +197,7 @@ daemon() {
     local self=$REL/deploy-self.sh
     [ -x "$self" ] || self=$0
     bash "$self" once 9>&- 8>&- || true
-    sleep "$INTERVAL" 8>&-
+    sleep "$INTERVAL" 8>&- || true
   done
 }
 
