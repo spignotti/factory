@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { diffExclusion, diffStat, diffTotals, formatDiffTotals, looksBinary, repoDiffStat } from "../../src/git.js";
+import { diffExclusion, diffStat, diffTotals, formatDiffTotals, looksBinary, parseNumstatZ, repoDiffStat } from "../../src/git.js";
 import { diffSize } from "../../src/gates/builtin.js";
 import { fastLaneEscalation } from "../../src/pipeline/lane.js";
 import { DEPENDENCY_GLOBS, LOCK_FILES } from "../../src/paths.js";
@@ -103,5 +103,76 @@ describe("diff line count: exclusions", () => {
     expect(RepoConfigSchema.parse({}).limits.diff_exclude).toEqual([]);
     for (const g of ["**", "**/*", "*", "./**"]) expect(RepoConfigSchema.safeParse({ limits: { diff_exclude: [g] } }).success).toBe(false);
     expect(RepoConfigSchema.safeParse({ limits: { diff_exclude: ["dist/**"] } }).success).toBe(true);
+  });
+});
+
+describe("diff line count: renames (tourenpilot-ops #82)", () => {
+  it("a moved file counts its changed lines under the new path, not its content twice", async () => {
+    const dir = repo();
+    write(dir, ".grok/scripts/deploy.sh", text(1400));
+    write(dir, ".grok/scripts/lib/ssh.sh", text(300));
+    commit(dir);
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    mkdirSync(join(dir, "server/lib"), { recursive: true });
+    gitIn(dir, "mv", ".grok/scripts/deploy.sh", "server/deploy.sh");
+    gitIn(dir, "mv", ".grok/scripts/lib/ssh.sh", "server/lib/ssh.sh");
+    // A path line changed in the moved file.
+    write(dir, "server/deploy.sh", text(1400).replace("line 3\n", "line three\n"));
+    gitIn(dir, "add", "-A");
+    const stat = await diffStat(dir, base);
+    expect(stat.get("server/deploy.sh")).toEqual({ lines: 2 });
+    expect(stat.get("server/lib/ssh.sh")).toEqual({ lines: 0 });
+    expect(stat.has(".grok/scripts/deploy.sh")).toBe(false);
+    expect(diffTotals(stat).counted).toBe(2);
+    expect(diffSize(stat, 1500).ok).toBe(true);
+  });
+
+  it("a committed rename is detected as well", async () => {
+    const dir = repo();
+    write(dir, "old/a.sh", text(500));
+    commit(dir);
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    gitIn(dir, "mv", "old/a.sh", "a.sh");
+    commit(dir);
+    expect(diffTotals(await diffStat(dir, base)).counted).toBe(0);
+  });
+
+  it("a rename into or out of an excluded path counts as delete + add, so it cannot hide lines", async () => {
+    const dir = repo();
+    write(dir, "src/big.ts", text(800));
+    write(dir, "gen/client.ts", text(600));
+    commit(dir);
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    mkdirSync(join(dir, "gen/moved"), { recursive: true });
+    gitIn(dir, "mv", "src/big.ts", "gen/moved/big.ts");
+    gitIn(dir, "mv", "gen/client.ts", "src/client.ts");
+    const stat = await diffStat(dir, base, { exclude: ["gen/**"], testGlobs: [] });
+    expect(stat.get("src/big.ts")).toEqual({ lines: 800 });
+    expect(stat.get("gen/moved/big.ts")).toEqual({ lines: 800, excluded: "diff_exclude" });
+    expect(stat.get("src/client.ts")).toEqual({ lines: 600 });
+    expect(stat.get("gen/client.ts")).toEqual({ lines: 600, excluded: "diff_exclude" });
+    expect(diffTotals(stat).counted).toBe(1400);
+  });
+
+  it("a rename inside an excluded path stays excluded, matched on the new path", async () => {
+    const dir = repo();
+    write(dir, "gen/a.ts", text(300));
+    commit(dir);
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    gitIn(dir, "mv", "gen/a.ts", "gen/b.ts");
+    write(dir, "gen/b.ts", text(300) + "extra\n");
+    gitIn(dir, "add", "-A");
+    const stat = await diffStat(dir, base, { exclude: ["gen/**"], testGlobs: [] });
+    expect([...stat.entries()]).toEqual([["gen/b.ts", { lines: 1, excluded: "diff_exclude" }]]);
+  });
+
+  it("parses -z numstat: renames, odd file names, binaries", () => {
+    const out = ["3\t1\tsrc/a b.ts", "0\t0\t", "{x}/old => y.sh", "y/{new}.sh", "-\t-\timg.png", "2\t0\t", "a\tb.txt", "c.txt", ""].join("\0");
+    expect(parseNumstatZ(out)).toEqual([
+      { path: "src/a b.ts", added: 3, removed: 1, binary: false },
+      { path: "y/{new}.sh", from: "{x}/old => y.sh", added: 0, removed: 0, binary: false },
+      { path: "img.png", added: 0, removed: 0, binary: true },
+      { path: "c.txt", from: "a\tb.txt", added: 2, removed: 0, binary: false },
+    ]);
   });
 });

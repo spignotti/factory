@@ -103,7 +103,49 @@ export function diffExclusion(file: string, binary: boolean, opts: DiffStatOptio
   return undefined;
 }
 
-/** Added + removed lines since the merge base, per file, with the files the line limits leave out. */
+export interface NumstatEntry {
+  path: string;
+  /** Source path when git paired this file as a rename. */
+  from?: string;
+  added: number;
+  removed: number;
+  binary: boolean;
+}
+
+/**
+ * Parses `git diff --numstat -z`: `A\tD\tpath\0`, or for a rename `A\tD\t\0old\0new\0`
+ * (no `{old => new}` path to split, no quoting of unusual file names).
+ */
+export function parseNumstatZ(out: string): NumstatEntry[] {
+  const parts = out.split("\0");
+  const entries: NumstatEntry[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const head = parts[i]!;
+    if (!head) continue;
+    const m = /^(-|\d+)\t(-|\d+)\t(.*)$/s.exec(head);
+    if (!m) continue;
+    const [, a, d, inline] = m as unknown as [string, string, string, string];
+    // numstat prints `-\t-` for binary files.
+    const base = { added: Number(a) || 0, removed: Number(d) || 0, binary: a === "-" && d === "-" };
+    if (inline) entries.push({ path: inline, ...base });
+    else {
+      const from = parts[++i];
+      const path = parts[++i];
+      if (from && path) entries.push({ path, from, ...base });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Added + removed lines since the merge base, per file, with the files the line limits leave out.
+ *
+ * Renames are detected (`-M`, git's default 50% similarity): a moved file counts its changed lines
+ * under the new path, not its whole content twice (tourenpilot-ops #82: 5 scripts moved, 4262 lines
+ * without rename detection, 66 with). A rename across an exclusion boundary (e.g. a generated file
+ * moved into the source tree, or source moved into a `diff_exclude` path) is counted as delete +
+ * add, like before, so moving code in or out of an excluded path cannot hide lines.
+ */
 export async function diffStat(cwd: string, base: string, opts: DiffStatOptions = {}): Promise<Map<string, DiffEntry>> {
   const mb = await mergeBase(cwd, base);
   const stat = new Map<string, DiffEntry>();
@@ -111,10 +153,23 @@ export async function diffStat(cwd: string, base: string, opts: DiffStatOptions 
     const excluded = diffExclusion(file, binary, opts);
     stat.set(file, excluded ? { lines, excluded } : { lines });
   };
-  for (const line of lines(await git(cwd, ["diff", "--no-renames", "--numstat", mb]))) {
-    const [a, d, file] = line.split("\t");
-    // numstat prints `-\t-` for binary files.
-    if (file) put(file, (Number(a) || 0) + (Number(d) || 0), a === "-" && d === "-");
+  const putEntry = (e: NumstatEntry) => put(e.path, e.added + e.removed, e.binary);
+  const renamed = parseNumstatZ(await git(cwd, ["diff", "-M", "--numstat", "-z", mb]));
+  let plain: Map<string, NumstatEntry> | undefined;
+  for (const e of renamed) {
+    if (!e.from) {
+      putEntry(e);
+      continue;
+    }
+    if (diffExclusion(e.from, e.binary, opts) === diffExclusion(e.path, e.binary, opts)) {
+      putEntry(e);
+      continue;
+    }
+    plain ??= new Map(parseNumstatZ(await git(cwd, ["diff", "--no-renames", "--numstat", "-z", mb])).map((x) => [x.path, x]));
+    for (const p of [e.from, e.path]) {
+      const x = plain.get(p);
+      if (x) putEntry(x);
+    }
   }
   for (const file of await untracked(cwd)) {
     const buf = await readFile(join(cwd, file)).catch(() => Buffer.alloc(0));
