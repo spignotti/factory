@@ -87,7 +87,7 @@ describe("CI stub", () => {
     expect(await main(["ci-stub"], { out: (s) => void (pinned += s), err: () => {} })).toBe(0);
     const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
     expect(pinned).toBe(renderCiStub(`v${version}`)); // default pin: this factory's release tag
-    expect(defaultRef()).toBe("v0.2.0");
+    expect(defaultRef()).toBe("v0.3.0");
   });
 });
 
