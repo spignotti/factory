@@ -19,17 +19,34 @@ export interface WatchdogOptions {
   deadline?: { at: number; error: () => Error };
   /** External abort (signal handler); rejects with the signal's reason. */
   signal?: AbortSignal;
+  /**
+   * Called when the process was frozen (box/VM paused, laptop asleep): a poll tick arrived far
+   * later than scheduled. The frozen time is not counted as silence.
+   */
+  onSuspend?: (frozenMs: number) => void;
+}
+
+/** Extra lateness of a poll tick, beyond `pollMs`, that counts as a frozen process. */
+export function suspendSlackMs(pollMs: number): number {
+  return Math.max(pollMs, 30_000);
 }
 
 /**
  * Runs `fn` and aborts it when no event at all (heartbeat and progress included) arrived for
  * `windowMs`. Long but active sessions survive the watchdog, but not the `deadline` or an external
  * `signal`.
+ *
+ * Silence is wall-clock time, so a paused box would look like a silent agent once it resumes
+ * (the 20261029 incident: VM paused 25 min mid `npm run typecheck`, watchdog fired 4 s after
+ * resume). A poll tick that arrives much later than `pollMs` means the whole process was frozen;
+ * that gap is credited back instead of being counted as agent silence.
  */
 export function supervise<T>(source: EventSource, opts: WatchdogOptions, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const now = opts.now ?? Date.now;
   const pollMs = opts.pollMs ?? Math.max(1000, Math.min(30_000, opts.windowMs / 10));
   let last = now();
+  let lastTick = last;
+  const slack = suspendSlackMs(pollMs);
   const off = source.onEvent(() => {
     last = now();
   });
@@ -51,7 +68,15 @@ export function supervise<T>(source: EventSource, opts: WatchdogOptions, fn: (si
     if (opts.deadline && opts.deadline.at <= Date.now()) return fail(opts.deadline.error());
     timers.push(
       setInterval(() => {
-        const silent = now() - last;
+        const t = now();
+        const gap = t - lastTick;
+        lastTick = t;
+        if (gap > pollMs + slack) {
+          const frozen = gap - pollMs;
+          last = Math.min(t, last + frozen);
+          opts.onSuspend?.(frozen);
+        }
+        const silent = t - last;
         if (silent > opts.windowMs) fail(new WatchdogAbort(silent));
       }, pollMs),
     );

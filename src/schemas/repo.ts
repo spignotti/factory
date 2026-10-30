@@ -121,9 +121,12 @@ export const RepoConfigSchema = z
         max_diff_lines: z.number().int().min(1).default(1500),
         max_wall_minutes: z.number().positive().default(90),
         stall_minutes: z.number().positive().default(15),
+        // Per agent bash command: killed after this, the model gets "Command timed out" and goes on.
+        // Below stall_minutes, so a hung command (dev server, watch mode) ends before the watchdog.
+        command_timeout_minutes: z.number().positive().default(10),
         forbidden_paths: z.array(z.string()).default([]),
       })
-      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, forbidden_paths: [] }),
+      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [] }),
     services: z.array(ServiceSchema).default([]),
     ui: z
       .object({

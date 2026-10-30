@@ -38,6 +38,9 @@ Unverified (needs a real provider):
 - Pi's HTTP idle timeout (`httpIdleTimeoutMs`, default 5 min) against long silent reasoning phases; the
   factory's watchdog and `max_wall_minutes` sit on top.
 - Abort: killing bash children Pi spawned relies on Pi's abort handling with long-running tool calls.
+- Bash timeout: Pi's bash has no default timeout; the factory sets `timeout` per call
+  (`withCommandTimeout`), and Pi kills the process tree and throws "Command timed out after N seconds"
+  (verified in `test/unit/bash-timeout.test.ts` against Pi 1.4.0). Stdin is `ignore` in Pi's local shell.
 
 ### Providers (Pi 1.4.0 registry, not live endpoints)
 

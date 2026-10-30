@@ -167,6 +167,7 @@ export async function callAgent(
         pollMs: deps.watchdogPollMs,
         deadline: { at: ctx.deadline, error: () => new WallTimeExceeded(ctx.repo.limits.max_wall_minutes) },
         signal: deps.signal,
+        onSuspend: (frozenMs) => void events.emit({ step, event: "progress", role: req.role, data: { suspended_ms: frozenMs } }),
       },
       (signal) =>
         callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep }, step, {
@@ -177,6 +178,7 @@ export async function callAgent(
           ...(req.browser ? { browser: redactedTools(req.browser, (t) => events.redact(t)) } : {}),
           env: agentEnv(ctx, req.role),
           jail: jailFor(ctx, req.cwd),
+          commandTimeoutMs: ctx.repo.limits.command_timeout_minutes * 60_000,
           agentDir: join(deps.factoryHome, "pi"),
           ...(docs ? { docs: redactedTools(docs, (t) => events.redact(t)) } : {}),
           signal,
