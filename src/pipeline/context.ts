@@ -165,6 +165,7 @@ export async function callAgent(
   const docs = deps.docs && docsEnabled(ctx, step)
     ? docsTools(deps.docs, (call) => void events.emit({ step, event: "docs_lookup", role: req.role, data: { ...call } }))
     : undefined;
+  let suspends = 0;
   try {
     return await supervise(
       events,
@@ -174,10 +175,13 @@ export async function callAgent(
         pollMs: deps.watchdogPollMs,
         deadline: { at: ctx.deadline, error: () => new WallTimeExceeded(ctx.repo.limits.max_wall_minutes) },
         signal: deps.signal,
-        onSuspend: (frozenMs) => void events.emit({ step, event: "progress", role: req.role, data: { suspended_ms: frozenMs } }),
+        onSuspend: (frozenMs) => {
+          suspends++;
+          events.emit({ step, event: "progress", role: req.role, data: { suspended_ms: frozenMs } });
+        },
       },
       (signal) =>
-        callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep }, step, {
+        callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep, suspends: () => suspends }, step, {
           ...req,
           // Prompts carry gate output and app text: exact-match redaction of every secret value.
           system: events.redact(req.system),

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner } from "../../src/agents/fake-runner.js";
-import { backoffMs, billedUsage, callModel, chainFor, classifyError, InvalidOutputError } from "../../src/agents/models.js";
+import { backoffMs, billedUsage, callModel, chainFor, classifyError, InvalidOutputError, TransientAgentError } from "../../src/agents/models.js";
 import { AgentError } from "../../src/agents/runner.js";
 import { EventLog } from "../../src/events.js";
 import { loadProfile, parseProfile, PROFILE_ROLES } from "../../src/schemas/profile.js";
@@ -53,6 +53,11 @@ describe("error classification", () => {
     [new Error("socket hang up"), "network"],
     [new Error("terminated"), "network"],
     [new Error("read ECONNRESET"), "network"],
+    [new AgentError("Request timed out."), "network"],
+    [new AgentError("request timed out"), "network"],
+    [new AgentError("Connection error."), "network"],
+    [new AgentError("APIConnectionTimeoutError: Request timed out."), "network"],
+    [new AgentError("Command timed out after 600 seconds"), "other"],
     [new AgentError("fetch failed", undefined, 502), "other"],
     [new AgentError("tool terminated the process"), "other"],
   ])("%s -> %s", (err, cls) => {
@@ -115,6 +120,60 @@ describe("fallback", () => {
   it("throws the last error when the chain is exhausted", async () => {
     const { deps } = setup([{ role: "plan_medium", error: { message: "boom" } }]);
     await expect(callModel(deps, "plan", req("plan_medium"))).rejects.toThrow("boom");
+  });
+
+  it("retries a provider request timeout on the same model (20261030-125347-5b7ada)", async () => {
+    const { deps, slept, runner } = setup([
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "Request timed out." } },
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", raw: "ok" },
+    ]);
+    const res = await callModel(deps, "implement", req("implement"));
+    expect(res).toMatchObject({ text: "ok", model: "opencode-go/deepseek-v4.1-flash" });
+    expect(slept).toEqual([100]);
+    expect(runner.calls).toHaveLength(2);
+  });
+
+  it("throws TransientAgentError when the chain gives up on a network error", async () => {
+    const t = { role: "plan_medium", error: { message: "Request timed out." } };
+    const { deps } = setup([t, t, t]);
+    const err = await callModel(deps, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransientAgentError);
+    expect(err).toMatchObject({ errorClass: "network", message: "transient network error after retries: Request timed out." });
+    expect((err as Error).cause).toBeInstanceOf(AgentError);
+  });
+
+  it("does not wrap a non-transient final error", async () => {
+    const { deps } = setup([{ role: "plan_medium", error: { message: "boom" } }]);
+    const err = await callModel(deps, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(TransientAgentError);
+  });
+
+  it("retries an attempt that spanned a box freeze without counting it, even for an unclassified error", async () => {
+    let suspends = 0;
+    const { deps, slept, runner, read } = setup([
+      { role: "plan_medium", error: { message: "weird provider hiccup" } },
+      { role: "plan_medium", error: { message: "Request timed out." } },
+      { role: "plan_medium", raw: "ok" },
+    ]);
+    const freezing = { run: async (r: Parameters<typeof runner.run>[0]) => (suspends++, runner.run(r)) };
+    const res = await callModel({ ...deps, runner: freezing, suspends: () => suspends }, "plan", req("plan_medium"));
+    expect(res.text).toBe("ok");
+    // both failures were during a freeze: free retries, no backoff
+    expect(slept).toEqual([]);
+    expect(read().filter((e) => e.event === "model_retry").map((e) => e.data)).toEqual([
+      { after_suspend: true, suspend_retry: 1 },
+      { after_suspend: true, suspend_retry: 2 },
+    ]);
+  });
+
+  it("caps the free suspend retries, then falls back to the normal budget", async () => {
+    let suspends = 0;
+    const other = { role: "plan_medium", error: { message: "weird provider hiccup" } };
+    const { deps, runner } = setup([other, other, other, other]);
+    const freezing = { run: async (r: Parameters<typeof runner.run>[0]) => (suspends++, runner.run(r)) };
+    await expect(callModel({ ...deps, runner: freezing, suspends: () => suspends }, "plan", req("plan_medium"))).rejects.toThrow("weird provider hiccup");
+    // 1 + 2 free retries; "other" has no same-model retry budget and plan_medium has no fallback
+    expect(runner.calls).toHaveLength(3);
   });
 
   it("caps the backoff at max_ms", () => {

@@ -41,6 +41,11 @@ export interface RunState {
   /** Effective lane; absent in states written before M2a (= standard). */
   lane?: Lane;
   lane_escalation?: string[];
+  /**
+   * The run stopped (`needs_human`) on a transient provider error (timeout, dropped stream, capacity) after
+   * retries: `factory resume` discards the uncommitted agent leftovers instead of committing them as a human fix.
+   */
+  transient?: boolean;
   /** Set by `factory gc` once the worktree and branches of a merged/closed PR are gone. */
   gc_at?: string;
   updated_at: string;
