@@ -297,6 +297,12 @@ describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", 
     expect(check(r, "branch protection")).toMatchObject({ status: "info", detail: expect.stringMatching(/GitHub Pro/) });
 
     gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] };
+    const legacy = capture();
+    await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: gh }, legacy.io);
+    // the context GitHub never reports: every PR would stay blocked
+    expect(check(JSON.parse(legacy.text()) as DoctorReport, "branch protection")).toMatchObject({ status: "warn", detail: expect.stringMatching(/requires "factory \/ done".*require "done"/) });
+
+    gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["done"] };
     const c2 = capture();
     await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: gh }, c2.io);
     const r2 = JSON.parse(c2.text()) as DoctorReport;

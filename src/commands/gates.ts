@@ -9,10 +9,13 @@ import { redact } from "../events.js";
 import { resolveSecrets, SecretsError } from "../secrets.js";
 import { EnvMissing, Services } from "../services.js";
 import { type CheckResult, runChecks } from "../steps/gates.js";
+import { describeToolchains, resolveToolchains } from "../toolchains.js";
 
 export interface GatesOptions {
   repo: string;
   select: boolean;
+  /** Print the toolchains the CI stub installs (repo.yaml `ci.toolchains`, else detected). */
+  toolchains?: boolean;
   run?: string;
   tier: string;
   base?: string;
@@ -43,13 +46,19 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
     return selectChecks(repo.checks, tier, await changedFiles(repoDir, base));
   };
 
+  if (opts.toolchains) {
+    const { toolchains, notes } = resolveToolchains(repoDir, repo);
+    for (const n of notes) io.err(`gates: toolchains: ${n}\n`);
+    io.out(opts.json ? JSON.stringify(toolchains) + "\n" : describeToolchains(toolchains) + "\n");
+    return 0;
+  }
   if (opts.select) {
     const names = (await selected()).map((c) => c.name);
     io.out(opts.json ? JSON.stringify(names) + "\n" : names.map((n) => n + "\n").join(""));
     return 0;
   }
   if (!opts.run) {
-    io.err("gates: one of --select or --run <check|selected> is required\n");
+    io.err("gates: one of --select, --toolchains or --run <check|selected> is required\n");
     return 2;
   }
   const checks = opts.run === "selected" ? await selected() : repo.checks.filter((c) => c.name === opts.run);

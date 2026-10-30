@@ -56,6 +56,8 @@ export interface DraftInput {
   date: string;
   /** Repo directory name, for the default secrets file `~/.factory/secrets/<name>.env`. */
   repoName?: string;
+  /** CI stub toolchains as detected (`describeToolchains`), for a header comment. */
+  toolchains?: string;
 }
 
 
@@ -116,6 +118,7 @@ export function draftRepoYaml(input: DraftInput): { text: string; config: RepoCo
     `# Drafted by \`factory adopt\` on ${input.date}. Review before merging; the factory README documents every field.`,
     `# Detected: ${d.stacks.join(", ") || "no known stack"}${d.ui.present ? `; UI (${d.ui.reasons.join(", ")})` : ""}${d.db.present ? `; DB (${d.db.reasons.join(", ")})` : ""}.`,
     "# paths: per check, services and ui are left to the baseline plan (proposals/<date>-adopt.plan.json).",
+    ...(input.toolchains ? [`# CI toolchains (detected on every CI run; pin with ci.toolchains): ${input.toolchains}.`] : []),
     "",
   ].join("\n");
   const text = header + body;

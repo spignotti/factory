@@ -77,6 +77,21 @@ export type SecretsConfig = z.infer<typeof SecretsSchema>;
 export const DEFAULT_MAX_PROPOSALS = 5;
 export const MAX_PROPOSALS_LIMIT = 10;
 
+const ToolchainVersionSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._*/+-]{0,39}$/, "toolchain versions use letters, digits and . _ * / + -");
+
+/**
+ * Toolchains the CI stub installs before the checks (`factory gates --toolchains`). Unset: detected from
+ * the repo's files. `true` = install (default version), `false` = never, a string = that version.
+ */
+export const CiToolchainsSchema = z
+  .object({
+    node: ToolchainVersionSchema.optional(),
+    python: z.union([ToolchainVersionSchema, z.literal(false)]).optional(),
+    pnpm: z.union([ToolchainVersionSchema, z.boolean()]).optional(),
+    uv: z.union([ToolchainVersionSchema, z.boolean()]).optional(),
+  })
+  .strict();
+
 export const RepoConfigSchema = z
   .object({
     base_branch: z.string().default("main"),
@@ -175,6 +190,8 @@ export const RepoConfigSchema = z
     secrets: SecretsSchema.optional(),
     // Agent steps with the `docs_lookup` tool for this repo; replaces the profile's list.
     docs_lookup: DocsLookupSchema.optional(),
+    // CI stub toolchains (node, pnpm, python, uv); unset fields are detected from the repo's files.
+    ci: z.object({ toolchains: CiToolchainsSchema.optional() }).strict().optional(),
     // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
   })

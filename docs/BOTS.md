@@ -173,7 +173,10 @@ The wait does not count against `max_wall_minutes`.
 
 ## Onboarding checklist (new repo / new bot)
 
-- [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection `factory / done`.
+- [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection with the required status check `done`
+      (GitHub Actions; not `factory / done`, which never reports and blocks every PR).
+- [ ] CI toolchains: the adopt PR and `factory doctor --repo <path>` list what the stub installs (node, pnpm,
+      python, uv). Wrong or missing → `ci.toolchains` in `.factory/repo.yaml` (config PR), no install steps in `setup`.
 - [ ] If the repo has tests: `.factory/repo.yaml` has `tests.globs` and `tests.run` (bug plans stop with
       `needs_human` without `tests.run`). Missing → the bot opens a config PR for Silas.
 - [ ] `factory doctor --repo <path>` green.
