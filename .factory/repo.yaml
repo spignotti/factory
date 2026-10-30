@@ -30,6 +30,13 @@ sensitive_paths:
   - src/gates/config-guard.ts
   - src/secrets.ts
   - src/paths.ts
+  - src/pipeline/merge.ts
+  - src/pipeline/risk.ts
+  - src/pipeline/lock.ts
+  - src/config.ts
+  - src/schemas/repo.ts
+  - src/schemas/profile.ts
+  - templates/ci/**
   - profiles/default.yaml
   - scripts/deploy-self.sh
 # Changed only as a declared protected change in the plan.
