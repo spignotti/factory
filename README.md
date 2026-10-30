@@ -55,7 +55,11 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
-  (a frozen box/VM is not counted as silence, `progress` event `suspended_ms`); every agent bash command
+  (a frozen box/VM is not counted as silence, `progress` event `suspended_ms`). Provider timeouts and dropped
+  streams (`Request timed out.`, `Connection error.`, `terminated`, `ECONNRESET`, …) are `network` errors and
+  retried on the same model; a call that failed while the box was frozen gets up to two extra retries that do
+  not count as attempts (`model_retry` with `after_suspend`). When the chain gives up on a capacity/network
+  error the run ends `needs_human` (reason `transient …; factory resume <id>`), not `failed`. Every agent bash command
   is killed after `limits.command_timeout_minutes` (default 10, also the maximum the model can ask for)
   and the model gets "Command timed out" back.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
@@ -87,8 +91,9 @@ Every run keeps `state.json` (current step, package status, rounds, PR) next to 
 PR branch), then `factory resume <run-id>`: it commits the uncommitted fix as `fix: human changes before
 resume`, merges new commits from `origin/<branch>` and the moved base (conflict → `needs_human` again),
 re-runs the gates (red → one fixer round) and continues from the saved step. It never force-pushes; an
-existing PR is updated and marked ready when the run ends `done`. After an interrupted/failed run,
-uncommitted leftovers are discarded instead and the step re-runs. A resumed review starts with a fresh round
+existing PR is updated and marked ready when the run ends `done`. After an interrupted/failed run, or a
+`needs_human` stop on a transient provider error, uncommitted agent leftovers are discarded instead and the
+step re-runs. A resumed review starts with a fresh round
 budget; a resume at `finalize` only re-runs the gates (no new review of the human change).
 
 ## Notify (bots)
