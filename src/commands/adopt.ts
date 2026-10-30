@@ -7,7 +7,8 @@ import { classifyLegacy, isReviewFile, type LegacyReport, withMigratedReviewRule
 import { type Detection, detect } from "../adopt/detect.js";
 import { agentsTemplate, type DraftCheck, draftChecks, draftRepoYaml, dropMutating, projectPurpose, testStrategySection, withTestStrategy } from "../adopt/draft.js";
 import { type MeasureResult, measureChecks } from "../adopt/measure.js";
-import { CI_STUB_PATH, renderCiStub } from "../ci.js";
+import { CI_STUB_PATH, renderCiStub, REQUIRED_CHECK } from "../ci.js";
+import { describeToolchains, detectToolchains } from "../toolchains.js";
 import type { Io } from "./gates.js";
 import type { GitHub, RepoSettings } from "../gh.js";
 import { baseRef, commitAll, git, gitOk, originUrl, remoteBranchExists, revParse, withBaseWorktree } from "../git.js";
@@ -52,6 +53,8 @@ export interface AdoptReport {
   proposal: { id: string; path: string; plan_path: string } | null;
   plan_error: string | null;
   hints: string[];
+  /** What the CI stub installs for this repo (detected at CI time; `ci.toolchains` pins it). */
+  ci_toolchains: string;
 }
 
 export const REVIEW_RULES_PATH = ".factory/review-rules.md";
@@ -72,9 +75,9 @@ async function freeBranch(repoDir: string, stem: string): Promise<string> {
 export function settingsHints(s: RepoSettings, base: string): string[] {
   const hints: string[] = [];
   const required = s.required_checks ?? [];
-  if (s.branch_protected === false || (s.branch_protected && !required.includes("factory / done"))) {
+  if (s.branch_protected === false || (s.branch_protected && !required.includes(REQUIRED_CHECK))) {
     hints.push(
-      `Protect ${base}: require the status check "factory / done" and dismiss stale approvals on new commits (Settings → Branches or Rulesets).` +
+      `Protect ${base}: require the status check "${REQUIRED_CHECK}" (the CI stub's job name, as GitHub Actions reports it) and dismiss stale approvals on new commits (Settings → Branches or Rulesets).` +
         (s.private ? " Private repos need GitHub Pro/Team for this; without it the factory's merge policy (human review) still applies." : ""),
     );
   }
@@ -135,6 +138,8 @@ function prBody(r: AdoptReport, d: Detection): string {
     "Factory onboarding (`factory adopt`). Review every file; nothing here changes repository settings.",
     "",
     `Detected: ${d.stacks.join(", ") || "no known stack"}. Setup: \`${d.setup || "(none)"}\`${r.setup_seconds != null ? ` (${r.setup_seconds}s)` : ""}.`,
+    "",
+    `CI toolchains (the stub installs them before the checks; detected on every CI run, \`ci.toolchains\` in repo.yaml overrides): ${r.ci_toolchains}.`,
     "",
     "### Written",
     r.written.map((f) => `- \`${f}\``).join("\n"),
@@ -200,7 +205,9 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     }
     dropMutating(detection, measured);
     const checks: DraftCheck[] = draftChecks(detection, measured);
-    const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: basename(resolve(repoDir)) });
+    const toolchainNotes: string[] = [];
+    const ciToolchains = describeToolchains(detectToolchains(wt, toolchainNotes));
+    const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: basename(resolve(repoDir)), toolchains: ciToolchains });
     const agentsPath = join(wt, "AGENTS.md");
     const agentsMd = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : undefined;
     const read = (rel: string) => {
@@ -212,7 +219,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     };
     const legacy = classifyLegacy({ files, workflows: detection.workflows, checks, setup: detection.setup, agentsMd, keep: opts.keep, read });
     const trim = agentsMd !== undefined && !legacy.kept.some((k) => k.path === "AGENTS.md") ? trimAgentsMd(agentsMd) : undefined;
-    const warnings = [...(trim?.warnings ?? [])];
+    const warnings = [...(trim?.warnings ?? []), ...toolchainNotes.map((n) => `CI toolchains: ${n}`)];
     // Without AGENTS.md the root CLAUDE.md is carried into the new AGENTS.md, so it cannot go stale.
     for (const claude of legacy.removed.filter((i) => /(^|\/)CLAUDE\.md$/.test(i.path) && (agentsMd !== undefined || i.path !== "CLAUDE.md"))) {
       const w = staleClaudeMd(read(claude.path) ?? "", agentsMd);
@@ -260,6 +267,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       proposal: null,
       plan_error: null,
       hints: settingsHints(settings, baseBranch),
+      ci_toolchains: ciToolchains,
     };
     if (detection.tests.globs.length && !detection.tests.run) {
       report.hints.push("Tests were found but no runner for single test files: set tests.run in .factory/repo.yaml (bug plans stop with needs_human without it); the repo's bot can do it in a config PR.");

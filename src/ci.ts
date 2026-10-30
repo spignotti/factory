@@ -2,16 +2,29 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import { asset } from "./prompts.js";
 
 /**
  * CI stub: `.github/workflows/factory.yml` is `templates/ci/factory.yml` with the pinned factory
  * ref filled in, identical in every repo. `doctor` compares hashes.
  */
 export const CI_STUB_PATH = ".github/workflows/factory.yml";
+/**
+ * The stub's single required status check: GitHub Actions reports a job's check run under its job name
+ * (`done`), without the workflow name, so branch protection must require `done`.
+ */
+export const REQUIRED_CHECK = "done";
+/** What earlier docs told people to require; it never reports, so it blocks every PR. */
+export const LEGACY_REQUIRED_CHECK = "factory / done";
 export const CI_TEMPLATE = new URL("../templates/ci/factory.yml", import.meta.url);
 const REF_MARK = "@FACTORY_REF@";
 const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const PINNED = /github:spignotti\/factory#([^\s"']+)/g;
+
+/** Default CI-stub pin: the release tag of this factory version (`v<package.json version>`). */
+export function defaultRef(): string {
+  return `v${(JSON.parse(asset("package.json")) as { version: string }).version}`;
+}
 
 export function renderCiStub(ref: string, template = readFileSync(CI_TEMPLATE, "utf8")): string {
   if (!REF.test(ref) || ref.includes("..")) throw new Error(`invalid factory ref: ${ref}`);
@@ -31,7 +44,7 @@ export function pinnedRefs(text: string): string[] {
 }
 
 /** The repo's CI stub equals the template for the ref it pins (hash). */
-export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8")): CiStubStatus {
+export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8"), currentRef?: string): CiStubStatus {
   const path = join(repoDir, CI_STUB_PATH);
   // Not adopted yet (by hand until `adopt`, M5): a warning, not a failure.
   if (!existsSync(path)) return { status: "warn", detail: `${CI_STUB_PATH} is missing; write it with \`factory ci-stub --ref <tag> > ${CI_STUB_PATH}\`` };
@@ -51,7 +64,10 @@ export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE
   const x = sha256(expected);
   return a === x
     ? { status: "ok", detail: `equals the template for ${ref} (sha256 ${x.slice(0, 12)})` }
-    : { status: "fail", detail: `differs from the template for ${ref} (sha256 ${a.slice(0, 12)}, expected ${x.slice(0, 12)}); re-render with \`factory ci-stub --ref ${ref}\`` };
+    : currentRef && currentRef !== ref
+      ? // The template belongs to this factory, not to the pinned (older or newer) ref: bump the pin deliberately.
+        { status: "fail", detail: `differs from this factory's template (pins ${ref}, this factory is ${currentRef}; sha256 ${a.slice(0, 12)}, expected ${x.slice(0, 12)}); bump the pin in a PR with \`factory ci-stub --ref ${currentRef} > ${CI_STUB_PATH}\`` }
+      : { status: "fail", detail: `differs from the template for ${ref} (sha256 ${a.slice(0, 12)}, expected ${x.slice(0, 12)}); re-render with \`factory ci-stub --ref ${ref}\`` };
 }
 
 /**

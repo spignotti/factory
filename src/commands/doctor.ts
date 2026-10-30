@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ancestorContextFiles, PI_CONTEXT_NAMES } from "../agents/context-files.js";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
-import { ciStubCheck, otherPrWorkflows } from "../ci.js";
+import { ciStubCheck, defaultRef, LEGACY_REQUIRED_CHECK, otherPrWorkflows, REQUIRED_CHECK } from "../ci.js";
+import { describeToolchains, resolveToolchains } from "../toolchains.js";
 import { GhCli, type GitHub } from "../gh.js";
 import { baseRef, remotesWithCredentials, revParse, withBaseWorktree } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
@@ -191,22 +192,31 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   if (wantsAuto && s.auto_merge_allowed === false) {
     checks.push({ name: "auto-merge", status: "info", detail: `merge.auto_merge_max_risk is ${repo.merge.auto_merge_max_risk} but the repo does not allow auto-merge (Settings → General → Allow auto-merge); auto PRs will wait for a manual merge` });
   }
+  const required = s.required_checks ?? [];
   if (s.branch_protected === false) {
     checks.push({
       name: "branch protection",
       status: "info",
-      detail: `${repo.base_branch} is not protected${s.private ? " (private repos need GitHub Pro for it)" : ""}; optional: require "factory / done" once the CI stub exists`,
+      detail: `${repo.base_branch} is not protected${s.private ? " (private repos need GitHub Pro for it)" : ""}; optional: require the status check "${REQUIRED_CHECK}" once the CI stub exists`,
     });
-  } else if (s.branch_protected && !(s.required_checks ?? []).includes("factory / done")) {
-    checks.push({ name: "branch protection", status: "info", detail: `${repo.base_branch} is protected; "factory / done" is not a required check yet` });
+  } else if (s.branch_protected && required.includes(LEGACY_REQUIRED_CHECK) && !required.includes(REQUIRED_CHECK)) {
+    checks.push({
+      name: "branch protection",
+      status: "warn",
+      detail: `${repo.base_branch} requires "${LEGACY_REQUIRED_CHECK}", which no check run reports, so every PR stays blocked; require "${REQUIRED_CHECK}" (the stub's job name) instead`,
+    });
+  } else if (s.branch_protected && !required.includes(REQUIRED_CHECK)) {
+    checks.push({ name: "branch protection", status: "info", detail: `${repo.base_branch} is protected; "${REQUIRED_CHECK}" is not a required check yet` });
   }
   return checks;
 }
 
 /** CI stub hash and other workflows gating pull requests (hint). */
-export function ciChecks(repoDir: string, repo: RepoConfig): DoctorCheck[] {
-  const stub = ciStubCheck(repoDir);
+export function ciChecks(repoDir: string, repo: RepoConfig, currentRef = defaultRef()): DoctorCheck[] {
+  const stub = ciStubCheck(repoDir, undefined, currentRef);
   const checks: DoctorCheck[] = [{ name: "ci stub", ...stub }];
+  const { toolchains, notes } = resolveToolchains(repoDir, repo);
+  checks.push({ name: "ci toolchains", status: notes.length ? "warn" : "ok", detail: `${describeToolchains(toolchains)} (${repo.ci?.toolchains ? "repo.yaml ci.toolchains + detected" : "detected"})${notes.length ? `; ${notes.join("; ")}` : ""}` });
   if (repo.base_branch !== "main") {
     checks.push({ name: "ci stub", status: "warn", detail: `base_branch is ${repo.base_branch}; the stub's push trigger and default base are main` });
   }

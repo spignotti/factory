@@ -159,8 +159,11 @@ describe("adopt draft", () => {
   });
 
   it("settings are only hints, Pro caveat for private repos", () => {
-    expect(settingsHints({ private: true, auto_merge_allowed: false, branch_protected: false, required_checks: [] }, "main").join("\n")).toMatch(/factory \/ done.*GitHub Pro[\s\S]*Allow auto-merge/);
-    expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main")).toEqual([]);
+    expect(settingsHints({ private: true, auto_merge_allowed: false, branch_protected: false, required_checks: [] }, "main").join("\n")).toMatch(/status check "done".*GitHub Pro[\s\S]*Allow auto-merge/);
+    expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["done"] }, "main")).toEqual([]);
+    // the old, never-reporting context still gets the hint to require "done"
+    expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main")[0]).toMatch(/require the status check "done"/);
+    for (const h of settingsHints({ private: false, auto_merge_allowed: true, branch_protected: false, required_checks: [] }, "main")) expect(h).not.toContain("factory / done");
   });
 });
 

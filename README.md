@@ -184,6 +184,7 @@ harden: { max_proposals: 5 }
 git: { author: factory, email: "…" }
 agent_env: []                        # extra env var names for agent tools and checks
 docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
+ci: { toolchains: { uv: true, python: "3.12" } }  # what the CI stub installs [detected], see CI
 models: {}                           # per-repo role chains, see Model configuration
 ```
 
@@ -383,9 +384,26 @@ GIFs; `factory doctor --repo .` checks both.
 ## CI
 
 `factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
-selects the checks with the same code as a local run and runs each one (`factory gates --run`); the single
-required status is `factory / done`. `factory doctor --repo .` checks the file is the unedited template
-for its ref. Bumping the ref is a deliberate PR. The ref must be a published tag of this repo.
+selects the checks with the same code as a local run and runs each one (`factory gates --run`).
+
+**Required status check:** `done`, the stub's last job. GitHub Actions reports a check run under its job
+name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub
+Actions; requiring `factory / done` blocks every PR, because nothing ever reports that context
+(`factory doctor --repo .` warns about it).
+
+**Toolchains:** GitHub runners (`ubuntu-latest`) have node and python3 but no pnpm or uv. Before the
+checks, the stub installs what `factory gates --toolchains` resolves for the repo: `pnpm/action-setup`
+(pnpm lockfile or `packageManager: pnpm@…`; the `packageManager` version, else pnpm 10), `actions/setup-node`
+(`.nvmrc` / `.node-version`, never below 22, the factory runs on it; default 22), `actions/setup-python`
+(`.python-version`; otherwise the runner's python3 or the one uv picks) and `astral-sh/setup-uv` (`uv.lock` or
+`[tool.uv]` in `pyproject.toml`). `ci.toolchains` in repo.yaml overrides field by field: a version string,
+`true` (install, default version) or `false` (never), e.g. `ci: { toolchains: { uv: "0.9.5", python: "3.12" } }`.
+`factory doctor --repo .` and the adopt PR show the result; `repo.yaml setup` no longer has to install tools.
+
+`factory doctor --repo .` checks the file is the unedited template of the installed factory for its ref.
+The template belongs to the factory version, so after a factory upgrade with a template change the stub
+differs until its pin is bumped (`factory ci-stub --ref <new tag>`); bumping the ref is a deliberate PR.
+The ref must be a published tag of this repo (CI runs `npx github:spignotti/factory#<ref>`).
 
 ## Adopt
 
@@ -398,7 +416,7 @@ base branch; the user's checkout is not touched):
   (`--fix`, `--write`, `format` without `--check`, …) become their read-only variant or are skipped, never a
   check that rewrites files; identical commands are drafted once.
 - **Measure**: setup and every check once in a clean base worktree, in the sandbox (`--no-measure` skips).
-- **Draft**: `.factory/repo.yaml` (tiers: e2e/build, CI `services:` or > 120 s → `full`; secrets or failing on
+- **Draft**: `.factory/repo.yaml` (the CI toolchains detected for the stub as a header comment; tiers: e2e/build, CI `services:` or > 120 s → `full`; secrets or failing on
   the base → `manual`; reasons as comments), `.factory/review-rules.md`, the CI stub for `--ref`, and
   `AGENTS.md`: a full template (purpose, stack & commands, test strategy, architecture, conventions, domain,
   data & secrets, do not, verify) when there is none, else a "Test strategy" section when missing.
@@ -413,7 +431,7 @@ base branch; the user's checkout is not touched):
   description lists every removed, proposed, kept and moved item and every warning.
 - **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
-- **Settings** are never changed: branch protection (`factory / done`) and auto-merge are printed hints, so
+- **Settings** are never changed: branch protection (required check `done`) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
 - **After the merge**: if the repo has tests, check that `tests.globs` and `tests.run` are set (bug plans

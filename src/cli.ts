@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
-import { renderCiStub } from "./ci.js";
+import { defaultRef, renderCiStub } from "./ci.js";
+
+export { defaultRef };
 import { doctorCommand } from "./commands/doctor.js";
 import { Context7Client } from "./docs/context7.js";
 import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
@@ -43,8 +45,8 @@ const USAGE = `usage:
               (results, rounds, gates, providers, cost; this period vs the previous one)
   factory gc [--dry-run] [--force] [--json]
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
-  factory gates (--select | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
-              (--run starts the services its checks need)
+  factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
+              (--run starts the services its checks need; --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
   factory eval --profile <name|file> [--profile …] [--tasks <glob>] [--repeat N] [--out <dir>] [--json]
               (fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
   factory eval --validate [--tasks <glob>] [--json]
@@ -85,10 +87,6 @@ function packageVersion(): string {
   return (JSON.parse(asset("package.json")) as { version: string }).version;
 }
 
-/** Default CI-stub pin: the release tag of this factory version (`v<package.json version>`). */
-export function defaultRef(): string {
-  return `v${packageVersion()}`;
-}
 
 function versionString(): string {
   const version = packageVersion();
@@ -114,6 +112,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         args: rest,
         options: {
           select: { type: "boolean", default: false },
+          toolchains: { type: "boolean", default: false },
           run: { type: "string" },
           tier: { type: "string", default: "fast" },
           base: { type: "string" },
@@ -121,7 +120,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           json: { type: "boolean", default: false },
         },
       });
-      return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, json: values.json }, io);
+      return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, toolchains: values.toolchains, json: values.json }, io);
     }
     if (command === "eval" || command === "experiment") {
       const { values } = parseArgs({

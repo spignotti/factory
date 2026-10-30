@@ -64,7 +64,9 @@ describe("factory adopt", () => {
     expect(body).toMatch(/### Proposed removals[\s\S]*security\.yml[\s\S]*gitleaks/);
     expect(body).toContain("AGENTS.md § Coding workflow");
     expect(body).toContain("factory run --repo <path> --plan ");
-    expect(body).toContain("factory / done");
+    expect(body).toContain('status check "done"');
+    expect(body).not.toContain("factory / done");
+    expect(body).toMatch(/CI toolchains \(.*\): node 22/);
     expect(gh.prs[0]).toMatchObject({ base: "main", head: "factory/adopt", draft: false });
 
     const [t] = listProposals(factoryHome, report.repo);

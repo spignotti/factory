@@ -29,6 +29,23 @@ describe("CI stub", () => {
     expect(renderCiStub("main")).not.toContain("@FACTORY_REF@");
   });
 
+  it("template: the check job installs the toolchains select resolved (pnpm, node, python, uv) before the check", () => {
+    const wf = parse(renderCiStub("v1.2.3")) as { jobs: Record<string, { outputs?: Record<string, string>; steps: { uses?: string; if?: string; run?: string; with?: Record<string, string> }[] }> };
+    expect(wf.jobs.select!.outputs!.toolchains).toBe("${{ steps.s.outputs.toolchains }}");
+    expect(wf.jobs.select!.steps.at(-1)!.run).toContain("$FACTORY gates --toolchains --json");
+    const steps = wf.jobs.check!.steps;
+    const tc = (k: string) => `fromJson(needs.select.outputs.toolchains).${k}`;
+    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v4", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "run"]);
+    expect(steps[1]).toMatchObject({ if: tc("pnpm"), with: { version: `\${{ ${tc("pnpm_version")} }}` } });
+    expect(steps[2]).toMatchObject({ with: { "node-version": `\${{ ${tc("node")} }}` } });
+    expect(steps[3]).toMatchObject({ if: `${tc("python")} != ''`, with: { "python-version": `\${{ ${tc("python")} }}` } });
+    expect(steps[4]).toMatchObject({ if: tc("uv"), with: { version: `\${{ ${tc("uv_version")} }}` } });
+    expect(steps[5]!.run).toBe('$FACTORY gates --run "$CHECK"');
+    // the required status is the job name GitHub Actions reports
+    expect(Object.keys(wf.jobs)).toContain("done");
+    expect(renderCiStub("v1.2.3")).not.toContain("factory / done");
+  });
+
   it("refs are validated", () => {
     for (const bad of ["", "v1; rm -rf /", "a b", "../x", "-x"]) expect(() => renderCiStub(bad)).toThrow(/invalid factory ref/);
   });
@@ -44,6 +61,14 @@ describe("CI stub", () => {
     expect(ciStubCheck(repo)).toMatchObject({ status: "fail", detail: expect.stringMatching(/several factory refs/) });
   });
 
+  it("hash check: a stub of an older template under a different pin points at bumping the pin, not at re-rendering the old ref", () => {
+    const repo = createFixtureRepo();
+    write(repo, CI_STUB_PATH, renderCiStub("v0.2.0").replace("fail-fast: false", "fail-fast: true"));
+    expect(ciStubCheck(repo, undefined, "v0.3.0")).toMatchObject({ status: "fail", detail: expect.stringMatching(/pins v0\.2\.0, this factory is v0\.3\.0.*factory ci-stub --ref v0\.3\.0/) });
+    write(repo, CI_STUB_PATH, renderCiStub("v0.3.0"));
+    expect(ciStubCheck(repo, undefined, "v0.3.0")).toMatchObject({ status: "ok" });
+  });
+
   it("doctor hints at other workflows on pull requests and a non-main base branch", () => {
     const repo = createFixtureRepo();
     write(repo, CI_STUB_PATH, renderCiStub("v0.2.0"));
@@ -51,7 +76,7 @@ describe("CI stub", () => {
     write(repo, ".github/workflows/nightly.yml", "on: { schedule: [{ cron: '0 0 * * *' }] }\njobs: {}\n");
     expect(otherPrWorkflows(repo)).toEqual(["lint.yml"]);
     const checks = ciChecks(repo, parseRepoConfig("base_branch: develop"));
-    expect(checks.map((c) => [c.name, c.status])).toEqual([["ci stub", "ok"], ["ci stub", "warn"], ["other workflows", "info"]]);
+    expect(checks.map((c) => [c.name, c.status])).toEqual([["ci stub", "ok"], ["ci toolchains", "ok"], ["ci stub", "warn"], ["other workflows", "info"]]);
   });
 
   it("factory ci-stub --ref prints the rendered stub", async () => {
