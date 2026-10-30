@@ -56,7 +56,7 @@ export interface Jail {
 
 export const NO_SANDBOX: Sandbox = { mode: "off", fs: "none", net: "shared", warnings: [] };
 
-/** Runs inside pasta's namespace (root there), before bwrap: routes, then exec bwrap. */
+/** Runs inside pasta's namespace (root there, needed for `ip route`), before bwrap: routes, then exec bwrap (which drops to the host uid). */
 export const NET_SETUP = [
   "set -e",
   `gw=$(ip -4 route | awk '/^default/{print $3; exit}')`,
@@ -115,7 +115,7 @@ export interface SandboxProbe {
 
 export const hostProbe: SandboxProbe = {
   platform: process.platform,
-  bwrap: () => ok("bwrap", ["--unshare-user", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "true"]),
+  bwrap: () => ok("bwrap", ["--unshare-user", "--unshare-pid", "--die-with-parent", "--cap-drop", "ALL", "--ro-bind", "/", "/", "true"]),
   pasta: () => ok("pasta", [...PASTA_ARGS, "--", "sh", "-c", NET_SETUP, "factory-net", "true"]),
 };
 
@@ -173,9 +173,31 @@ export function pathBinds(path: string, never: string[], home = homedir()): stri
   return [...out];
 }
 
-/** bwrap argv (without the command) for a jail. */
-export function bwrapArgs(jail: Jail, cwd: string, env: { PATH?: string } = process.env): string[] {
+/** uid/gid a jailed command runs as. */
+export interface JailIds {
+  uid: number;
+  gid: number;
+}
+
+/** The factory process's own uid/gid (undefined off POSIX). */
+export function hostIds(): JailIds | undefined {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  return uid === undefined || gid === undefined ? undefined : { uid, gid };
+}
+
+/**
+ * bwrap argv (without the command) for a jail.
+ *
+ * The command runs as the factory's own uid/gid with every capability dropped. Without `--uid`/`--gid`,
+ * bwrap keeps the caller's uid in the new user namespace: inside pasta's namespace that is 0, so repo
+ * checks ran as root with CAP_DAC_OVERRIDE (a `chmod 000` file stayed readable, tests that expect a
+ * permission error failed in the gate only). `ids` is injectable for tests.
+ */
+export function bwrapArgs(jail: Jail, cwd: string, env: { PATH?: string } = process.env, ids: JailIds | undefined = hostIds()): string[] {
   const a = ["--new-session", "--die-with-parent", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"];
+  if (ids) a.push("--uid", String(ids.uid), "--gid", String(ids.gid));
+  a.push("--cap-drop", "ALL");
   a.push("--ro-bind", "/usr", "/usr");
   for (const d of ["/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"]) {
     let st;
@@ -210,10 +232,10 @@ export function bwrapArgs(jail: Jail, cwd: string, env: { PATH?: string } = proc
 }
 
 /** The argv that runs `shell -c command` in the jail (or unjailed when the sandbox is off). */
-export function jailedArgv(jail: Jail | undefined, shell: string, command: string, cwd: string, env?: { PATH?: string }): string[] {
+export function jailedArgv(jail: Jail | undefined, shell: string, command: string, cwd: string, env?: { PATH?: string }, ids?: JailIds): string[] {
   const inner = [shell, "-c", command];
   if (!jail || jail.sandbox.fs === "none") return inner;
-  const bw = ["bwrap", ...bwrapArgs(jail, cwd, env), "--", ...inner];
+  const bw = ["bwrap", ...bwrapArgs(jail, cwd, env, ids ?? hostIds()), "--", ...inner];
   if (jail.sandbox.net === "shared") return bw;
   return ["pasta", ...pastaArgs(jail.ports), "--", "sh", "-c", NET_SETUP, "factory-net", ...bw];
 }

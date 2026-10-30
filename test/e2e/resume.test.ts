@@ -61,6 +61,30 @@ describe("factory resume", () => {
     expect(r2.eventsText.startsWith(r.eventsText)).toBe(true);
   });
 
+  it("after a provider timeout that outlasted the retries: needs_human, resumable, leftovers discarded (not a human fix)", async () => {
+    const timeout = { role: "implement", error: { message: "Request timed out." } } as FakeStep;
+    const r = await runScenario({
+      script: "clean.json",
+      steps: (s) => [...Array.from({ length: 6 }, () => timeout), ...s.filter((x) => x.role !== "implement")],
+      onCall: (req) => void (req.role === "implement" && writeFileSync(join(req.cwd, "leftover.txt"), "partial agent work\n")),
+    });
+    expect(r.result.result).toBe("needs_human");
+    expect(r.result.reason).toMatch(/^transient network error after retries: Request timed out\.; factory resume /);
+    expect(r.events.filter((e) => e.event === "model_retry")).toHaveLength(4);
+    const st = readState(r.runDir);
+    expect(st).toMatchObject({ step: "implement", result: "needs_human", transient: true });
+    const wt = join(r.runDir, "worktree");
+    expect(git(wt, "status", "--porcelain")).toContain("leftover.txt");
+
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer") });
+    expect(r2.result.result).toBe("done");
+    expect(r2.runner.calls.some((c) => c.role === "plan_high")).toBe(false);
+    expect(r2.events.some((e) => e.step === "resume" && e.data.discarded_uncommitted)).toBe(true);
+    expect(r2.events.some((e) => e.step === "resume" && e.data.human_changes_committed)).toBe(false);
+    expect(git(wt, "log", "--format=%s", "main..HEAD")).not.toContain("human changes");
+    expect(readState(r.runDir).transient).toBeUndefined();
+  });
+
   it("after an interrupt: re-runs the unfinished package without re-planning", async () => {
     const ac = new AbortController();
     const r = await runScenario({

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { prepareAgentHome } from "../agents/env.js";
-import { InvalidOutputError } from "../agents/models.js";
+import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
@@ -157,7 +157,12 @@ class RunFrame {
     } catch (e) {
       const reason = (e as Error).message;
       if (e instanceof Interrupted) this.set({ result: "failed", reason });
-      else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded || e instanceof EnvMissing) {
+      else if (e instanceof TransientAgentError) {
+        // Provider timeout/drop/capacity, retries used up: the run is fine, the provider was not. Resumable;
+        // the uncommitted leftovers are the agent's (not a human fix), so resume discards them.
+        if (this.state) this.state.transient = true;
+        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}` });
+      } else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof WallTimeExceeded || e instanceof EnvMissing) {
         this.set({ result: "needs_human", reason });
       } else this.set({ result: "failed", reason });
     }
@@ -535,6 +540,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       st.failures = {};
     }
     const ready = await prepareResume(ctx, st, previous);
+    delete st.transient;
     // Human changes are committed now: the previous outcome no longer describes the run.
     st.result = null;
     st.reason = "";
@@ -565,13 +571,13 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
   for (const [ref, what] of [["MERGE_HEAD", "merge"], ["REBASE_HEAD", "rebase"], ["CHERRY_PICK_HEAD", "cherry-pick"]] as const) {
     if (await gitOk(wt, ["rev-parse", "-q", "--verify", ref])) return fail(`a ${what} is in progress in the worktree; finish or abort it first`);
   }
-  if (previous === "needs_human") {
+  if (previous === "needs_human" && !st.transient) {
     // The run stopped for a human: whatever is uncommitted now is their fix.
     if (await commitAll(wt, "fix: human changes before resume", gitAuthor(ctx))) {
       ctx.events.emit({ step: "resume", event: "progress", data: { human_changes_committed: await headSha(wt) } });
     }
   } else if ((await git(wt, ["status", "--porcelain"])).trim() !== "") {
-    // Interrupted/crashed: uncommitted changes are unvalidated agent leftovers; the step re-runs anyway.
+    // Interrupted/crashed/transient provider error: uncommitted changes are unvalidated agent leftovers; the step re-runs anyway.
     await discardChanges(wt);
     ctx.events.emit({ step: "resume", event: "progress", data: { discarded_uncommitted: true } });
   }
