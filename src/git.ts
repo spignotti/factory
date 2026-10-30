@@ -3,6 +3,8 @@ import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { LOCK_GLOBS } from "./paths.js";
+import { matchesAny } from "./schemas/plan.js";
 
 const execFileP = promisify(execFile);
 
@@ -72,19 +74,92 @@ export async function changedFiles(cwd: string, base: string): Promise<string[]>
   return [...new Set([...tracked, ...(await untracked(cwd))])].sort();
 }
 
-/** Added + removed lines since the merge base, per file. */
-export async function diffStat(cwd: string, base: string): Promise<Map<string, number>> {
+/** Why a changed file does not count toward the diff line limits. */
+export type DiffExclusion = "lockfile" | "binary" | "diff_exclude";
+
+export interface DiffEntry {
+  /** Added + removed lines (0 for binary files). */
+  lines: number;
+  /** Set when the file is left out of the counted lines. */
+  excluded?: DiffExclusion;
+}
+
+export interface DiffStatOptions {
+  /** `limits.diff_exclude`: generated paths left out of the count. */
+  exclude?: string[];
+  /** `tests.globs`: a test file is always counted, whatever `exclude` says. */
+  testGlobs?: string[];
+}
+
+/** First 8 KB contain a NUL byte: binary, as git decides it. */
+export function looksBinary(buf: Buffer): boolean {
+  return buf.subarray(0, 8192).includes(0);
+}
+
+export function diffExclusion(file: string, binary: boolean, opts: DiffStatOptions = {}): DiffExclusion | undefined {
+  if (binary) return "binary";
+  if (matchesAny(file, LOCK_GLOBS)) return "lockfile";
+  if (matchesAny(file, opts.exclude ?? []) && !matchesAny(file, opts.testGlobs ?? [])) return "diff_exclude";
+  return undefined;
+}
+
+/** Added + removed lines since the merge base, per file, with the files the line limits leave out. */
+export async function diffStat(cwd: string, base: string, opts: DiffStatOptions = {}): Promise<Map<string, DiffEntry>> {
   const mb = await mergeBase(cwd, base);
-  const stat = new Map<string, number>();
+  const stat = new Map<string, DiffEntry>();
+  const put = (file: string, lines: number, binary: boolean) => {
+    const excluded = diffExclusion(file, binary, opts);
+    stat.set(file, excluded ? { lines, excluded } : { lines });
+  };
   for (const line of lines(await git(cwd, ["diff", "--no-renames", "--numstat", mb]))) {
     const [a, d, file] = line.split("\t");
-    if (file) stat.set(file, (Number(a) || 0) + (Number(d) || 0));
+    // numstat prints `-\t-` for binary files.
+    if (file) put(file, (Number(a) || 0) + (Number(d) || 0), a === "-" && d === "-");
   }
   for (const file of await untracked(cwd)) {
-    const content = await readFile(join(cwd, file), "utf8").catch(() => "");
-    stat.set(file, content ? content.split("\n").length : 0);
+    const buf = await readFile(join(cwd, file)).catch(() => Buffer.alloc(0));
+    const binary = looksBinary(buf);
+    const text = binary ? "" : buf.toString("utf8");
+    // As git counts them: a trailing newline does not start another line.
+    put(file, text ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0, binary);
   }
   return stat;
+}
+
+export interface DiffTotals {
+  /** Lines that count toward max_diff_lines, fast_lane.max_diff_lines and merge.low_max_diff_lines. */
+  counted: number;
+  excluded: number;
+  /** Excluded text files with lines (lockfiles, diff_exclude). */
+  excludedFiles: string[];
+  binaryFiles: number;
+}
+
+export function diffTotals(stat: Map<string, DiffEntry>): DiffTotals {
+  const t: DiffTotals = { counted: 0, excluded: 0, excludedFiles: [], binaryFiles: 0 };
+  for (const [file, e] of [...stat.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (!e.excluded) t.counted += e.lines;
+    else if (e.excluded === "binary") t.binaryFiles++;
+    else {
+      t.excluded += e.lines;
+      if (e.lines > 0) t.excludedFiles.push(file);
+    }
+  }
+  return t;
+}
+
+/** `943 lines (+533 excluded: package-lock.json; 4 binary files)`. */
+export function formatDiffTotals(t: DiffTotals): string {
+  const extra = [
+    ...(t.excluded > 0 ? [`+${t.excluded} excluded: ${t.excludedFiles.join(", ")}`] : []),
+    ...(t.binaryFiles > 0 ? [`${t.binaryFiles} binary file${t.binaryFiles === 1 ? "" : "s"}`] : []),
+  ];
+  return `${t.counted} lines${extra.length ? ` (${extra.join("; ")})` : ""}`;
+}
+
+/** Diff stat with the repo's exclusions (`limits.diff_exclude`, test files always counted). */
+export async function repoDiffStat(cwd: string, base: string, repo: { limits: { diff_exclude: string[] }; tests: { globs: string[] } }): Promise<Map<string, DiffEntry>> {
+  return diffStat(cwd, base, { exclude: repo.limits.diff_exclude, testGlobs: repo.tests.globs });
 }
 
 /** Unified diff since the merge base (stage first so new files are included). */

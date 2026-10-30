@@ -150,6 +150,8 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   }
   if (a.merge.low_max_diff_lines > b.merge.low_max_diff_lines) out.push("merge.low_max_diff_lines raised");
   if (a.limits.max_diff_lines > b.limits.max_diff_lines) out.push("limits.max_diff_lines raised");
+  const excl = a.limits.diff_exclude.filter((x) => !b.limits.diff_exclude.includes(x));
+  if (excl.length) out.push(`limits.diff_exclude added: ${excl.join(", ")}`);
   removed("tests.globs", b.tests.globs, a.tests.globs);
   if (b.tests.run && a.tests.run !== b.tests.run) out.push("tests.run changed");
   const env = a.agent_env.filter((x) => !b.agent_env.includes(x));

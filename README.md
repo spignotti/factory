@@ -147,7 +147,13 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"] }
+limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+# Diff line limits (limits.max_diff_lines, fast_lane.max_diff_lines, merge.low_max_diff_lines) count
+# added + removed lines since base, without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
+# not manifests), binary files and limits.diff_exclude (generated paths; test files under tests.globs
+# always count, catch-all globs are rejected). The gate names what it left out:
+# "943 lines (+533 excluded: package-lock.json; 4 binary files)". Lockfiles still are dependency
+# changes for lane escalation and risk. Adding a diff_exclude entry is a loosening (config_guard).
 ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: ["src/app/**"], pages: ["/"], devices: ["Desktop Chrome"] }
 verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]

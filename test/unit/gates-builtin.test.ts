@@ -25,8 +25,8 @@ describe("built-in gates", () => {
   });
 
   it("diff size", () => {
-    expect(diffSize(new Map([["a", 10], ["b", 5]]), 15).ok).toBe(true);
-    expect(diffSize(new Map([["a", 16]]), 15).ok).toBe(false);
+    expect(diffSize(new Map([["a", { lines: 10 }], ["b", { lines: 5 }]]), 15).ok).toBe(true);
+    expect(diffSize(new Map([["a", { lines: 16 }]]), 15).ok).toBe(false);
   });
 
   it("test presence requires a changed test file as evidence per verify:test criterion", () => {

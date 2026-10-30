@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { z } from "zod";
+
+/** `diff_exclude` globs that would switch the diff limits off entirely. */
+const CATCH_ALL = new Set(["*", "**", "**/*", "**/**", "*/**"]);
 import { DocsLookupSchema, RoleOverridesSchema } from "./profile.js";
 
 export const TierSchema = z.enum(["fast", "full", "manual"]);
@@ -125,8 +128,13 @@ export const RepoConfigSchema = z
         // Below stall_minutes, so a hung command (dev server, watch mode) ends before the watchdog.
         command_timeout_minutes: z.number().positive().default(10),
         forbidden_paths: z.array(z.string()).default([]),
+        // Generated paths left out of the diff line limits (lockfiles and binaries already are).
+        // Test files (`tests.globs`) always count; adding an entry is a loosening (config_guard).
+        diff_exclude: z
+          .array(z.string().min(1).refine((g) => !CATCH_ALL.has(g.replace(/^\.\//, "")), "diff_exclude must not match every file"))
+          .default([]),
       })
-      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [] }),
+      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [], diff_exclude: [] }),
     services: z.array(ServiceSchema).default([]),
     ui: z
       .object({
