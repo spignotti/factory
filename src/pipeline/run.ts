@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
@@ -513,9 +513,13 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   }
   f.release = lock.release;
   f.state = st;
+  // This attempt now owns the outcome: the previous attempt's result.json (e.g. `failed`) must not be read
+  // as current while it runs; finish() writes the new one (every exit path, errors included).
+  const previous = st.result;
+  rmSync(join(runDir, "result.json"), { force: true });
 
   return f.execute(async () => {
-    events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: st.result } });
+    events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: previous } });
     const repo = st.base_sha ? await baseRepoConfig(st.repo, st.base_sha, loadRepoConfig(st.repo), events, "resume") : loadRepoConfig(st.repo);
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
@@ -535,8 +539,11 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       for (const id of Object.keys(st.packages)) if (st.packages[id] !== "done") delete st.packages[id];
       st.failures = {};
     }
-    const ready = await prepareResume(ctx, st);
+    const ready = await prepareResume(ctx, st, previous);
     delete st.transient;
+    // Human changes are committed now: the previous outcome no longer describes the run.
+    st.result = null;
+    st.reason = "";
     st.base_sha = ctx.baseSha;
     st.gate_count = ctx.gateCount;
     f.save();
@@ -555,7 +562,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
 type Ready = { ok: true; gates?: GateReport } | { ok: false; reason: string };
 
 /** Re-validation before a resumed run continues. */
-async function prepareResume(ctx: RunContext, st: RunState): Promise<Ready> {
+async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["result"]): Promise<Ready> {
   const { worktree: wt, branch } = ctx;
   const fail = (reason: string): Ready => ({ ok: false, reason: `resume: ${reason}` });
   if (!existsSync(wt)) return fail(`worktree ${wt} is missing`);
@@ -564,7 +571,7 @@ async function prepareResume(ctx: RunContext, st: RunState): Promise<Ready> {
   for (const [ref, what] of [["MERGE_HEAD", "merge"], ["REBASE_HEAD", "rebase"], ["CHERRY_PICK_HEAD", "cherry-pick"]] as const) {
     if (await gitOk(wt, ["rev-parse", "-q", "--verify", ref])) return fail(`a ${what} is in progress in the worktree; finish or abort it first`);
   }
-  if (st.result === "needs_human" && !st.transient) {
+  if (previous === "needs_human" && !st.transient) {
     // The run stopped for a human: whatever is uncommitted now is their fix.
     if (await commitAll(wt, "fix: human changes before resume", gitAuthor(ctx))) {
       ctx.events.emit({ step: "resume", event: "progress", data: { human_changes_committed: await headSha(wt) } });

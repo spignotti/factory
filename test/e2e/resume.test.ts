@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -210,5 +210,150 @@ describe("notify hook on resume", () => {
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer"), deps });
     expect(r2.result.result).toBe("done");
     expect(sent.map((p) => [p.run_id, p.result])).toEqual([[r.runId, "needs_human"], [r.runId, "locked"], [r.runId, "done"]]);
+  });
+});
+
+describe("result.json across resumes", () => {
+  it("is removed while a resume runs and rewritten with that attempt's outcome", async () => {
+    const ac = new AbortController();
+    const r = await runScenario({
+      script: "clean.json",
+      deps: { signal: ac.signal },
+      onCall: (req) => void (req.role === "implement" && ac.abort(new Interrupted("SIGTERM"))),
+    });
+    expect(r.resultFile.result).toBe("failed");
+    let duringPush: boolean | undefined;
+    const push = r.github.push.bind(r.github);
+    r.github.push = async (dir, branch) => {
+      duringPush = existsSync(join(r.runDir, "result.json"));
+      return push(dir, branch);
+    };
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer") });
+    expect(duringPush).toBe(false);
+    expect(r2.result.result).toBe("done");
+    expect(r2.resultFile).toMatchObject({ result: "done", pr: r2.result.pr, run_id: r.runId });
+    expect(readState(r.runDir)).toMatchObject({ step: "finished", result: "done" });
+  });
+
+  it("a resume that ends needs_human rewrites it too", async () => {
+    const r = await runScenario({ script: "invalid-handoff.json" });
+    expect(r.resultFile.result).toBe("needs_human");
+    const r2 = await resumeScenario(r, { script: "invalid-handoff.json", steps: roles("implement") });
+    expect(r2.result.result).toBe("needs_human");
+    expect(r2.resultFile).toEqual(r2.result);
+  });
+});
+
+describe("idempotent PR step", () => {
+  it("a push that errors after origin took it counts as pushed", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        const push = gh.push.bind(gh);
+        gh.push = async (dir, branch) => {
+          await push(dir, branch); // the server got it…
+          throw new Error("fatal: unable to access 'https://github.com/x/y.git/': Connection timed out after 332242 milliseconds");
+        };
+      },
+    });
+    expect(r.result).toMatchObject({ result: "done" });
+    expect(r.github.prs).toHaveLength(1);
+    expect(r.events.some((e) => e.step === "finalize" && (e.data.push_error_ignored as { remote_sha?: string })?.remote_sha)).toBe(true);
+  });
+
+  it("a push that errors and did not land stays needs_human", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.push = async () => Promise.reject(new Error("Connection timed out"));
+        gh.remoteShas.set("unrelated", "0".repeat(40));
+      },
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", pr: null });
+    expect(r.result.reason).toMatch(/PR step failed: Connection timed out/);
+  });
+
+  it("an open PR on the branch at HEAD is adopted (updated, marked ready), not created twice", async () => {
+    // Iris's run 20261030-125347-5b7ada: attempt 2's push timed out although it landed, the PR got opened
+    // meanwhile; attempt 3's `gh pr create` then failed with "already exists".
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        const push = gh.push.bind(gh);
+        gh.push = async (dir, branch) => {
+          await push(dir, branch);
+          gh.prs.push({ repoDir: dir, head: branch, base: "main", title: "opened elsewhere", body: "", draft: true, url: "https://github.test/pr/15" });
+          throw new Error("Connection timed out");
+        };
+        gh.createPr = async () => Promise.reject(new Error("a pull request for branch already exists"));
+      },
+    });
+    expect(r.result).toMatchObject({ result: "done", pr: "https://github.test/pr/15" });
+    expect(r.resultFile.pr).toBe("https://github.test/pr/15");
+    expect(r.github.prs).toHaveLength(1);
+    expect(r.github.updates.map((u) => u.pr)).toEqual(["https://github.test/pr/15"]);
+    expect(r.github.readied).toEqual(["https://github.test/pr/15"]);
+    expect(readState(r.runDir)).toMatchObject({ step: "finished", pr: "https://github.test/pr/15", pr_draft: false });
+    expect(r.events.some((e) => e.step === "finalize" && e.data.pr_adopted)).toBe(true);
+  });
+
+  it("a create that fails although the PR was opened adopts it", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        const create = gh.createPr.bind(gh);
+        gh.createPr = async (req) => {
+          await create(req);
+          throw new Error("gh: timeout");
+        };
+      },
+    });
+    expect(r.result).toMatchObject({ result: "done", pr: "https://github.test/pr/1" });
+    expect(r.github.prs).toHaveLength(1);
+  });
+
+  it("an open PR whose head is not the run's HEAD is not adopted", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.findOpenPr = async () => ({ url: "https://github.test/pr/99", draft: false, headSha: "f".repeat(40) });
+      },
+    });
+    expect(r.result).toMatchObject({ result: "done", pr: "https://github.test/pr/1" });
+    expect(r.github.updates).toEqual([]);
+  });
+
+  it("resume after a PR step failure adopts the PR instead of a second needs_human", async () => {
+    const sent: Record<string, unknown>[] = [];
+    const deps = {
+      notifyBackoffMs: [0],
+      notifyFetch: async (_url: string, init: { body: string }) => (sent.push(JSON.parse(init.body) as Record<string, unknown>), { status: 200 }),
+    };
+    let fail = true;
+    const r = await runScenario({
+      script: "clean.json",
+      setup: (repo) => void git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git"),
+      before: (_repo, home) => writeFileSync(join(home, "notify.yaml"), "repos:\n  acme/widgets:\n    url: https://hooks.example.test/x\n    key: k-resume-0123456789\n", { mode: 0o600 }),
+      deps,
+      github: (gh) => {
+        const create = gh.createPr.bind(gh);
+        gh.createPr = async (req) => {
+          const url = await create(req);
+          if (fail) {
+            // created, but the PR's head is not visible yet: the run cannot tell and stops
+            gh.remoteShas.delete(req.head);
+            throw new Error("gh: timeout");
+          }
+          return url;
+        };
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    fail = false;
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer"), deps });
+    expect(r2.result).toMatchObject({ result: "done", pr: "https://github.test/pr/1" });
+    expect(r2.github.prs).toHaveLength(1);
+    expect(r2.resultFile.result).toBe("done");
+    expect(sent.map((p) => p.result)).toEqual(["needs_human", "done"]);
   });
 });
