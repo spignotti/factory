@@ -99,6 +99,16 @@ npx github:spignotti/factory#<tag> doctor
 npx github:spignotti/factory#<tag> run --repo <path> --issue 12
 ```
 
+On a long-lived box, `scripts/deploy-self.sh` keeps an installed CLI on the newest `main` commit:
+each new commit is built in its own release directory (`~/.local/share/factory-releases/<sha>`,
+`pnpm install --frozen-lockfile`, `pnpm build`, smoke test `node dist/cli.js --version`), then the
+`current` and `~/.local/bin/factory` links are renamed over atomically. A failed build changes nothing;
+the switch waits while a factory run holds a live lock or a factory process runs; running processes keep
+their release (node runs the entry's real path); the newest 3 releases are kept. `deploy-self.sh once` checks
+once (`git ls-remote`), `ensure` starts a background loop (every 5 min) unless one runs, `status` prints
+`state.json`; the log is `deploy.log` next to it. It needs `node`, `git`, `jq`, `flock` and a source clone in
+`~/.local/share/factory` (paths and the interval via `FACTORY_DEPLOY_*` / `FACTORY_RELEASES`).
+
 From a checkout:
 
 ```
