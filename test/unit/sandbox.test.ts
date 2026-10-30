@@ -8,6 +8,7 @@ import { bashSpawnHook } from "../../src/agents/pi-runner.js";
 import { sh } from "../../src/exec.js";
 import { PathDenied, PathGuard } from "../../src/sandbox/guard.js";
 import {
+  bwrapArgs,
   createSandbox,
   hostProbe,
   type Jail,
@@ -59,6 +60,21 @@ describe("jail command line", () => {
     expect(s).not.toMatch(/--(ro-)?bind(-try)? \/ /);
     expect(s).not.toMatch(/ \/run\b/);
     expect(s).toContain("blackhole");
+  });
+
+  it("runs as the host uid/gid with all capabilities dropped, in both net modes", () => {
+    for (const net of ["isolated", "shared"] as const) {
+      const argv = jailedArgv(jail({ net }), "sh", "x", wt, { PATH: "/usr/bin" }, { uid: 1234, gid: 5678 });
+      const bw = argv.slice(argv.indexOf("bwrap"));
+      const s = bw.join(" ");
+      expect(s).toContain("--unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --uid 1234 --gid 5678 --cap-drop ALL");
+      // Before the command, never after it.
+      expect(bw.indexOf("--uid")).toBeLessThan(bw.indexOf("--"));
+    }
+    // Default: the factory process's own ids (never root unless the factory itself runs as root).
+    const def = jailedArgv(jail(), "sh", "x", wt).join(" ");
+    if (process.getuid) expect(def).toContain(`--uid ${process.getuid()} --gid ${process.getgid!()}`);
+    expect(bwrapArgs(jail(), wt, { PATH: "/usr/bin" }, { uid: 1, gid: 2 }).slice(7, 13)).toEqual(["--uid", "1", "--gid", "2", "--cap-drop", "ALL"]);
   });
 
   it("service ports: inbound only on host loopback, outbound only to the named ports", () => {
@@ -235,6 +251,18 @@ describe.skipIf(!real)("real jail (bwrap + pasta on this host)", () => {
       stop(svc);
     }
   }, 60_000);
+
+  it("runs as the host user, not root: chmod 000 files are unreadable (no CAP_DAC_OVERRIDE)", async () => {
+    const uid = process.getuid!();
+    expect((await run("id -u")).output.trim()).toBe(String(uid));
+    expect((await run("id -g")).output.trim()).toBe(String(process.getgid!()));
+    expect((await run("stat -c %u out-owner.txt 2>/dev/null || (touch out-owner.txt && stat -c %u out-owner.txt)")).output.trim()).toBe(String(uid));
+    if (uid === 0) return; // the factory itself runs as root: nothing to drop to
+    const r = await run("echo secret > locked.txt && chmod 000 locked.txt && cat locked.txt");
+    expect(r.code).not.toBe(0);
+    expect(r.output).not.toContain("secret");
+    expect((await run("grep -i '^CapEff' /proc/self/status")).output).toMatch(/CapEff:\s*0+\s*$/);
+  });
 
   it("own pid namespace: host processes are invisible", async () => {
     expect((await run(`kill -0 ${process.pid}`)).code).not.toBe(0);
