@@ -164,6 +164,20 @@ bug plan, a check, a `paths` filter), the bot fixes it itself: edit `.factory/re
 branch, open a PR (`chore(factory): …`) and ask Silas to merge it. Runs read `repo.yaml` from the base commit,
 so the change takes effect for runs started (or re-run) after the merge.
 
+## Choosing the path for a code change
+
+| Change | Path |
+|---|---|
+| Normal work (features, bugs, refactors) | `factory run` (standard lane) |
+| Small, single-package change | `factory run … --lane fast` (see the README's Fast lane section) |
+| Emergency (e.g. a server hotfix) or Silas explicitly says so | direct work, below |
+
+**Direct work** skips the factory: the repo's bot edits its own clone itself. It is only for emergencies or
+when Silas explicitly asks for it; "the factory is slower" is not a reason. The rest stays: a branch, a PR,
+the repo's CI, no force-push, and a merge only after Silas's explicit OK. The PR body says why the factory
+was skipped (`Direct change: emergency …` / `Direct change: requested by Silas`). If a direct change shows
+the factory could not have handled it, the bot tells Schmiede so the factory gets fixed.
+
 ## Base CI
 
 Before planning, the factory checks CI on the base commit. Red ends the run as `base_red` at once. Pending is
