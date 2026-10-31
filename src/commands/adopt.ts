@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { OneShot, type OneShotDeps } from "../agents/oneshot.js";
 import { extractJson } from "../agents/runner.js";
 import { staleClaudeMd, trimAgentsMd } from "../adopt/agents-md.js";
@@ -17,6 +17,7 @@ import { asData, asset, rolePrompt } from "../prompts.js";
 import { nextProposalId, proposalsDir, writeProposal } from "../proposals.js";
 import { type Plan, validatePlan } from "../schemas/plan.js";
 import { REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
+import { repoName } from "../secrets.js";
 import { PLAN_SHAPE } from "../steps/plan.js";
 
 export interface AdoptOptions {
@@ -207,7 +208,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     const checks: DraftCheck[] = draftChecks(detection, measured);
     const toolchainNotes: string[] = [];
     const ciToolchains = describeToolchains(detectToolchains(wt, toolchainNotes));
-    const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: basename(resolve(repoDir)), toolchains: ciToolchains });
+    const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: repoName(repoDir), toolchains: ciToolchains });
     const agentsPath = join(wt, "AGENTS.md");
     const agentsMd = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : undefined;
     const read = (rel: string) => {

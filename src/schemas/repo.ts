@@ -63,7 +63,7 @@ const SecretNamesSchema = z
 
 /**
  * Per-repo secrets for checks, services and the evaluated app (never agents). `env_file`: a dotenv file
- * outside the repo [`$FACTORY_HOME/secrets/<repo dir name>.env`]. `command`: a wrapper prefix that runs a
+ * outside the repo [`$FACTORY_HOME/secrets/<repo name>.env`, the repo name from the origin URL]. `command`: a wrapper prefix that runs a
  * command with the secrets in its env (e.g. a secrets manager CLI); `credentials` is a dotenv file with the
  * wrapper's own auth variables, passed only to the wrapper.
  */
