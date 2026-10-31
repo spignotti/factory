@@ -11,7 +11,7 @@ import { loadRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/re
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
 import { createSandbox, gitCommonDir, type Sandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statfsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
 import { sh, tail } from "../exec.js";
@@ -52,6 +52,55 @@ export interface DoctorOptions {
   services?: boolean;
   /** Context7 client of `docs_lookup` (the CLI passes one; absent = not checked). */
   context7?: Context7Client;
+  /** Filesystem usage (tests inject one). */
+  statfs?: (p: string) => FsUsage;
+}
+
+/** Filesystem numbers `diskChecks` needs (a subset of `fs.statfsSync`). */
+export interface FsUsage {
+  blocks: number;
+  bfree: number;
+  bavail: number;
+  files: number;
+  ffree: number;
+}
+
+export const DISK_WARN_PCT = 85;
+export const DISK_FAIL_PCT = 95;
+
+/**
+ * Space and inode usage of the filesystem(s) holding `$FACTORY_HOME` and the temp dir: warn at 85 %, fail at
+ * 95 % (worktrees, dependency folders and test fixtures are inode-heavy; on 31.10 the box ran out of inodes).
+ * Space is computed like `df` (used / (used + available to unprivileged users)).
+ */
+export function diskChecks(paths: string[], statfs: (p: string) => FsUsage = statfsSync, devOf: (p: string) => number | bigint = (p) => statSync(p).dev): DoctorCheck[] {
+  const seen = new Map<string, string[]>();
+  for (const p of paths) {
+    let key: string;
+    try {
+      key = String(devOf(p));
+    } catch {
+      continue;
+    }
+    seen.set(key, [...(seen.get(key) ?? []), p]);
+  }
+  const checks: DoctorCheck[] = [];
+  for (const group of seen.values()) {
+    const where = group.join(", ");
+    try {
+      const s = statfs(group[0]!);
+      const used = s.blocks - s.bfree;
+      const spacePct = used + s.bavail > 0 ? Math.round((used / (used + s.bavail)) * 100) : 0;
+      const inodePct = s.files > 0 ? Math.round(((s.files - s.ffree) / s.files) * 100) : null; // 0 = no fixed inode table
+      const worst = Math.max(spacePct, inodePct ?? 0);
+      const status = worst >= DISK_FAIL_PCT ? "fail" : worst >= DISK_WARN_PCT ? "warn" : "ok";
+      const detail = `${where}: space ${spacePct}%, inodes ${inodePct === null ? "n/a" : `${inodePct}% (${s.files - s.ffree}/${s.files})`}`;
+      checks.push({ name: "disk", status, detail: status === "ok" ? detail : `${detail}; free up space (factory gc, old worktrees, package caches)` });
+    } catch (e) {
+      checks.push({ name: "disk", status: "warn", detail: `${where}: usage unknown (${(e as Error).message.slice(0, 120)})` });
+    }
+  }
+  return checks;
 }
 
 /** Resolves the layered model config (with the repo layer if `--repo`), reporting errors as a failed check. */
@@ -393,6 +442,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       }
     }
   }
+  checks.push(...diskChecks([opts.factoryHome, tmpdir()], opts.statfs));
   checks.push(...contextFileChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined));
   if (opts.context7 && profile) checks.push(await docsLookupCheck(opts.context7, profile.docs_lookup.roles));
   checks.push(...(await notifyChecks(opts.factoryHome, opts.repo ? resolve(opts.repo) : undefined)));

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { gc } from "../../src/commands/gc.js";
+import { autoGc, gc } from "../../src/commands/gc.js";
 import { publishEvidence } from "../../src/evaluate/evidence.js";
 import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
@@ -181,7 +181,7 @@ describe("factory gc", () => {
     expect(remoteHas(r.repo, branch)).toBe(false);
     expect(stateOf(r.runDir).gc_at).toEqual(expect.any(String));
     expect(git(r.repo, "branch", "--show-current").trim()).toBe("main");
-    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [], evidence: [{ repo: r.repo, removed: [] }] });
+    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [], stripped: [], evidence: [{ repo: r.repo, removed: [] }] });
     const s = await statusReport({ factoryHome: r.factoryHome, github: r.github });
     expect(s.prs).toEqual([]);
   });
@@ -234,6 +234,96 @@ describe("factory gc", () => {
     const res = await gc({ factoryHome: r.factoryHome, github: r.github });
     expect(res.cleaned[0]).toMatchObject({ branch_deleted: false, remote_branch_deleted: false, notes: [expect.stringMatching(/not a factory/)] });
     expect(localHas(r.repo, "feature/human")).toBe(true);
+  });
+});
+
+describe("factory gc: runs without PR, open PRs, automatic gc", () => {
+  const DAY = 86_400_000;
+  async function doneRun() {
+    const r = await runScenario({ script: "clean.json", setup: (repo) => void addOrigin(repo) });
+    return { r, wt: join(r.runDir, "worktree"), branch: r.result.branch! };
+  }
+  const rewrite = (runDir: string, patch: Record<string, unknown>) => writeFileSync(join(runDir, "state.json"), JSON.stringify({ ...stateOf(runDir), ...patch }));
+
+  it("a run without PR keeps its worktree inside the retention; afterwards only the worktree goes, the branch stays", async () => {
+    const { r, wt, branch } = await doneRun();
+    rewrite(r.runDir, { pr: null, result: "needs_human", step: "implement" });
+    expect(await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).toEqual({ dry_run: false, cleaned: [], skipped: [], stripped: [], evidence: [] });
+    expect(existsSync(wt)).toBe(true);
+
+    const later = () => Date.now() + 8 * DAY;
+    const dry = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true, evidence: false });
+    expect(dry.cleaned).toEqual([expect.objectContaining({ run_id: r.runId, pr: null, pr_state: "none", worktree_removed: true, branch_deleted: false })]);
+    expect(existsSync(wt)).toBe(true);
+    // Custom retention: 10 days is not over yet.
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github, now: later, retentionDays: 10, evidence: false })).cleaned).toEqual([]);
+
+    writeFileSync(join(wt, "wip.txt"), "uncommitted");
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false })).skipped).toEqual([expect.objectContaining({ reason: expect.stringMatching(/uncommitted/) })]);
+    git(wt, "clean", "-fdq");
+
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
+    expect(res.cleaned).toEqual([expect.objectContaining({ pr_state: "none", notes: [expect.stringMatching(/branch .* kept; resume is no longer possible/)] })]);
+    expect(existsSync(wt)).toBe(false);
+    expect(git(r.repo, "branch", "--list", branch).trim()).not.toBe("");
+    expect(stateOf(r.runDir).gc_at).toEqual(expect.any(String));
+    const { resumeFactory } = await import("../../src/pipeline/run.js");
+    await expect(resumeFactory(r.runId, {}, { factoryHome: r.factoryHome } as never)).rejects.toThrow(/cleaned up by factory gc/);
+  });
+
+  it("a finished run with an open PR loses only node_modules/.venv/.nox after 12 h; a locked repo is left alone", async () => {
+    const { r, wt } = await doneRun();
+    for (const d of ["node_modules/pkg", ".venv/lib", "src-keep"]) mkdirSync(join(wt, d), { recursive: true });
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).stripped).toEqual([]);
+
+    const later = () => Date.now() + 13 * 3_600_000;
+    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
+    const locked = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
+    release();
+    expect(locked).toMatchObject({ stripped: [], skipped: [expect.objectContaining({ reason: expect.stringMatching(/locked/) })] });
+    expect(existsSync(join(wt, "node_modules"))).toBe(true);
+
+    const dry = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true, evidence: false });
+    expect(dry.stripped).toEqual([{ run_id: r.runId, repo: r.repo, pr: r.result.pr, removed: ["node_modules", ".venv"] }]);
+    expect(existsSync(join(wt, "node_modules"))).toBe(true);
+
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
+    expect(res).toMatchObject({ cleaned: [], skipped: [expect.objectContaining({ reason: "PR is open" })], stripped: [expect.objectContaining({ removed: ["node_modules", ".venv"] })] });
+    expect(existsSync(join(wt, "node_modules")) || existsSync(join(wt, ".venv"))).toBe(false);
+    expect(existsSync(join(wt, "src-keep"))).toBe(true);
+    expect(stateOf(r.runDir).gc_at).toBeUndefined();
+  });
+
+  it("a run that is not finished (open PR, needs_human) keeps its dependency folders: resume needs them", async () => {
+    const { r, wt } = await doneRun();
+    rewrite(r.runDir, { result: "needs_human", step: "review" });
+    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, now: () => Date.now() + 30 * DAY, evidence: false });
+    expect(res.stripped).toEqual([]);
+    expect(existsSync(join(wt, "node_modules"))).toBe(true);
+  });
+
+  it("autoGc never throws, logs what it cleaned, and gives up after its timeout", async () => {
+    const { r } = await doneRun();
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    const log: string[] = [];
+    const rep = await autoGc({ factoryHome: r.factoryHome, github: r.github, log: (s) => void log.push(s) });
+    expect(rep?.cleaned).toHaveLength(1);
+    expect(rep?.evidence).toEqual([]);
+    expect(log.join("")).toMatch(/gc cleaned 1 worktree/);
+
+    // An unreadable runs folder (a file): the error is logged, the run goes on.
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    writeFileSync(join(home, "runs"), "not a directory");
+    const failed: string[] = [];
+    expect(await autoGc({ factoryHome: home, github: r.github, log: (s) => void failed.push(s) })).toBeUndefined();
+    expect(failed.join("")).toMatch(/automatic gc failed \(the run continues\)/);
+
+    const hanging = { prStatus: () => new Promise(() => {}) } as unknown as FakeGitHub;
+    const { r: r2 } = await doneRun();
+    const slow: string[] = [];
+    expect(await autoGc({ factoryHome: r2.factoryHome, github: hanging, timeoutMs: 50, log: (s) => void slow.push(s) })).toBeUndefined();
+    expect(slow.join("")).toMatch(/timed out/);
   });
 });
 

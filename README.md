@@ -72,7 +72,7 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
 | --- | --- |
 | `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
 | `factory resume <run-id>` | continue after a human fix |
-| `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub |
+| `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub, disk/inodes |
 | `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
@@ -528,10 +528,18 @@ API key for OpenCode Go).
 ```
 factory status [--json]                     # running, waiting for you, interrupted; open factory PRs
 factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
-factory gc [--dry-run] [--force]            # remove worktree and branches of merged/closed factory PRs
+factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12]  # clean up finished runs
 ```
 
-`gc` deletes only `factory/*` branches, and the remote branch only if nobody pushed to it after the factory; a worktree with uncommitted changes needs `--force`.
+What `gc` cleans:
+- **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
+- **No PR** (failed, needs_input, needs_human, interrupted) and idle for `--retention-days` (default 7): the worktree only; the branch and its commits stay, the run can no longer be resumed.
+- **PR open, run finished,** idle for `--strip-after-hours` (default 12): only `node_modules`, `.venv` and `.nox` at the worktree root.
+
+Runs of a locked repository (a run or resume in progress) are skipped, and a worktree with uncommitted changes needs `--force`.
+`factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off).
+Evidence pruning (30 days) runs only with an explicit `factory gc`; for a daily cleanup add e.g. `0 4 * * * factory gc` to cron.
+`factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.
 
 ## JSON contracts
 
