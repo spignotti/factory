@@ -16,6 +16,11 @@ export const CheckSchema = z.object({
   tier: TierSchema,
   paths: z.array(z.string()).optional(),
   services: z.array(z.string()).optional(),
+  /**
+   * Runs only in factory runs and local `factory gates`, never in CI (`gates --select` drops it when `CI`
+   * is set): for checks that need a host-side stack CI does not have. Setting it is a loosening (config_guard).
+   */
+  local_only: z.boolean().optional(),
 });
 export type Check = z.infer<typeof CheckSchema>;
 
@@ -34,6 +39,24 @@ export const ServiceSchema = z.object({
   ready_timeout_s: z.number().positive().default(120),
   /** Run on the host, outside the sandbox (e.g. Docker-based like `supabase start`). Residual risk, doctor warns. */
   host: z.boolean().default(false),
+  /**
+   * `host: true` only: fixed host loopback ports the service listens on (e.g. a Docker stack with ports from
+   * its own config). Checks that need the service reach exactly these ports through the sandbox; the ready
+   * probe waits on them. Not shifted per run: one instance per box (a claim under `$FACTORY_HOME/ports/`).
+   */
+  ports: z.array(z.number().int().min(1).max(65535)).optional(),
+  /**
+   * `host: true` only: after the service is ready, `command` runs on the host and prints `KEY=VALUE` lines
+   * (dotenv); `map` is target env name → printed key. The values go only to the checks (and recorded flows)
+   * that need the service, never to agents, and are redacted like secrets.
+   */
+  env_from: z
+    .object({
+      command: z.string().min(1),
+      map: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "environment variable names use letters, digits and _"), z.string().min(1)).refine((m) => Object.keys(m).length > 0, "env_from.map needs at least one entry"),
+    })
+    .strict()
+    .optional(),
 });
 export type Service = z.infer<typeof ServiceSchema>;
 
@@ -207,6 +230,12 @@ export const RepoConfigSchema = z
       if (svc.name === "ui") ctx.addIssue({ code: "custom", message: "service name ui is reserved for the ui app" });
       if (services.has(svc.name)) ctx.addIssue({ code: "custom", message: `duplicate service name: ${svc.name}` });
       services.add(svc.name);
+      if (!svc.host && svc.ports) ctx.addIssue({ code: "custom", message: `service ${svc.name}: ports needs host: true (sandboxed services use {port:…} placeholders)` });
+      if (!svc.host && svc.env_from) ctx.addIssue({ code: "custom", message: `service ${svc.name}: env_from needs host: true` });
+      for (const name of Object.keys(svc.env_from?.map ?? {})) {
+        if (RESERVED_SECRET_NAMES.includes(name)) ctx.addIssue({ code: "custom", message: `service ${svc.name}: env_from.map may not set ${name}` });
+        if (cfg.agent_env.includes(name)) ctx.addIssue({ code: "custom", message: `service ${svc.name}: env_from.map sets ${name}, which agent_env passes to agents` });
+      }
     }
     const unknown = (where: string, list: string[] | undefined) => {
       for (const n of list ?? []) if (!services.has(n)) ctx.addIssue({ code: "custom", message: `${where}: unknown service ${n}` });

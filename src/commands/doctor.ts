@@ -297,6 +297,22 @@ export function serviceConfigChecks(repo: RepoConfig): DoctorCheck[] {
   for (const svc of repo.services) {
     if (svc.host) checks.push({ name: `service ${svc.name}`, status: "warn", detail: "host: true: starts outside the sandbox, in the run worktree the agents write (residual risk)" });
     if (!used.has(svc.name)) checks.push({ name: `service ${svc.name}`, status: "info", detail: "no check or ui needs it; it never starts" });
+    if (svc.ports?.length) {
+      checks.push({ name: `service ${svc.name}`, status: "info", detail: `fixed host ports ${svc.ports.join(", ")}: forwarded only to the checks that need it, one instance per box` });
+    }
+    if (svc.env_from) {
+      checks.push({ name: `service ${svc.name}`, status: "info", detail: `env_from sets ${Object.keys(svc.env_from.map).join(", ")} for its checks (values redacted, never agents)` });
+    }
+  }
+  for (const c of repo.checks) {
+    if (c.local_only) {
+      checks.push({ name: `check ${c.name}`, status: "info", detail: "local_only: runs in factory runs and local factory gates, never in CI" });
+      continue;
+    }
+    const fixed = (c.services ?? []).filter((n) => repo.services.find((s) => s.name === n)?.ports?.length);
+    if (fixed.length) {
+      checks.push({ name: `check ${c.name}`, status: "warn", detail: `needs ${fixed.join(", ")} (fixed host ports) but is not local_only: CI must provide that stack itself` });
+    }
   }
   return checks;
 }
@@ -333,10 +349,13 @@ export async function liveServiceChecks(repoDir: string, repo: RepoConfig, facto
         const t0 = Date.now();
         try {
           await services.ensure(name === "ui" ? [...(repo.ui?.services ?? []), "ui"] : [name]);
-          const what = name === "ui" ? `reachable at ${await services.expand(repo.ui!.url)}` : "started";
+          const from = name === "ui" ? undefined : repo.services.find((s) => s.name === name)?.env_from;
+          const mapped = from ? `, env_from resolved ${Object.keys(from.map).join(", ")} (values not shown)` : "";
+          const what = (name === "ui" ? `reachable at ${await services.expand(repo.ui!.url)}` : "started") + mapped;
           checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "ok", detail: `${what} in ${Math.round((Date.now() - t0) / 100) / 10}s and stopped` });
         } catch (e) {
-          checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "fail", detail: redact((e as Error).message, secrets?.redact ?? []).slice(0, 600) });
+          const hide = [...(secrets?.redact ?? []), ...services.redactValues].sort((a, b) => b.length - a.length);
+          checks.push({ name: name === "ui" ? "ui" : `service ${name}`, status: "fail", detail: redact((e as Error).message, hide).slice(0, 600) });
         } finally {
           await services.stopAll();
         }

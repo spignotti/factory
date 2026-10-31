@@ -228,6 +228,7 @@ async function baseCaptures(ctx: RunContext, devices: string[], pages: string[],
       factoryHome: ctx.deps.factoryHome,
       jail,
       onEvent: (action, data) => void ctx.events.emit({ step: "evaluate", event: "service", data: { action, base: true, ...data } }),
+      onSecrets: (values) => ctx.events.addSecrets(values),
     });
     try {
       const names = [...ui.services, "ui"];

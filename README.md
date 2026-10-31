@@ -41,7 +41,7 @@ All models run through Pi; no Claude/Codex CLI, no production data, one run per 
   coverage thresholds) or adds inline suppressions (`noqa`, `type: ignore`, `eslint-disable`, `@ts-ignore`,
   `biome-ignore`, …), unless the plan lists that config file in a package's `files` or names the suppression.
   A `.factory/repo.yaml` change that weakens the factory's own checks (removing or changing a check,
-  dropping `human_only_paths`/`sensitive_paths`/`forbidden_paths` entries, raising merge or diff limits,
+  making one `local_only`, adding a `host: true` service, dropping `human_only_paths`/`sensitive_paths`/`forbidden_paths` entries, raising merge or diff limits,
   changing secrets, `setup`, `env_command`, services, models, adding `agent_env`) fails it even when declared.
   The `protected_paths` gate fails on any changed `human_only_paths` file the plan does not declare (see
   [Protected config](#protected-config)).
@@ -163,8 +163,10 @@ checks:                              # tier: fast = every package and fix round,
   - { name: lint, run: "nox -s lint", tier: fast }
   - { name: unit, run: "nox -s test_unit", tier: fast, paths: ["src/**", "tests/unit/**"] }   # paths: run only if touched
   - { name: db,   run: "nox -s test_db", tier: full, services: [db] }
+  - { name: stack, run: "nox -s test_stack", tier: full, services: [stack], local_only: true }   # never in CI
 services:                            # one instance per run; see Services
   - { name: db, start: "…", stop: "…", env: { DATABASE_URL: "postgresql://…:{port:db}/postgres" } }
+  - { name: stack, host: true, start: "…", stop: "…", ports: [5432], env_from: { command: "…", map: { DB_URL: DB_URL } } }
 env_command: ""                      # prefix for every check command (prefer secrets: below for secrets)
 secrets: { provider: env_file, names: [DATABASE_URL] }   # checks, services, ui only, never agents; see Secrets
 tests: { globs: ["tests/**"], run: "uv run pytest {files}" }   # run enables the red-green proof of bug plans
@@ -378,7 +380,53 @@ before the first check that needs it and stops it at run end. Ports come from a 
 runs never collide: `{port:web}` (a named port), `{port:5432}` (a default port shifted by the slot) and
 `{port_offset}`. In the sandbox a service must listen on `0.0.0.0`; only its own ports are forwarded, and
 only to the checks that use it. `host: true` runs it outside the sandbox (e.g. Docker); `doctor` warns.
-`factory doctor --repo . --services` starts and stops each service once.
+`factory doctor --repo . --services` starts and stops each service once (and resolves `env_from`).
+`stop` runs at run end whatever the result (done, red gates, needs_human, max_wall_minutes, SIGINT/SIGTERM),
+and when the service fails to come up; a second signal exits at once and skips it.
+
+**Host stacks with fixed ports.** A tool that runs its own containers (a local database stack via Docker)
+cannot run in the sandbox (no Docker socket) and usually listens on ports from its own config. For it:
+
+- `host: true` plus `ports: [...]`: the fixed host loopback ports. Checks that name the service reach exactly
+  these ports from the sandbox (pasta forwards); the default ready probe waits until all of them accept and
+  hold a connection. Agents get no forwards. The ports are not shifted, so there is one instance per box:
+  the service claims `$FACTORY_HOME/ports/host-<port>.json` while it runs, and another run, a manual
+  `factory gates` or `doctor --services` that needs it ends with env_missing instead of restarting the stack
+  under a running check. Inside one run, the evaluator's base capture shares the running instance.
+- `env_from: { command, map }`: after the service is ready, `command` runs on the host (worktree, the
+  service's env) and prints `KEY=VALUE` lines (dotenv: quotes and `export` allowed, other lines ignored);
+  `map` is target name → printed key. The targets go only to the checks (and recorded flows) that need the
+  service, never to agents (repo.yaml rejects a target listed in `agent_env`). Every value it prints is
+  redacted like a secret (events, run files, gate output in prompts, the PR). A missing key or a non-zero
+  exit is env_missing.
+- `local_only: true` on the check: CI (`CI` set, as on GitHub Actions) does not select it, so the CI stub
+  never needs the stack; factory runs and local `factory gates` run it. `doctor` warns about a CI check that
+  needs a fixed-port service.
+
+The repo owns every step: what `start` does (start the stack, restore a data snapshot, apply new
+migrations), what `stop` does (restore the snapshot) and what the status command prints. Example for a
+Docker-based database stack whose CLI prints its connection settings as `KEY=VALUE`:
+
+```yaml
+services:
+  - name: dbstack
+    host: true
+    start: "dbstack start && scripts/db-snapshot.sh restore && dbstack migrate --pending"
+    stop: "scripts/db-snapshot.sh restore"
+    ports: [55431, 55432]            # from the stack's own config
+    ready_timeout_s: 300
+    env_from:
+      command: "dbstack status --format env"
+      map: { APP_DB_URL: DB_URL, APP_API_URL: API_URL, APP_API_KEY: SERVICE_KEY }
+checks:
+  - { name: test_db, run: "uv run pytest tests/db", tier: full, services: [dbstack], local_only: true }
+```
+
+Runs of one repo are serialized by its lock; a manual `factory gates` takes no lock (it only meets a run on
+the fixed-port claim above). Residual risk as for secrets: checks run agent-written code with these
+values and reach the stack's ports (for a local database usually as its superuser, inside its containers);
+use a dev-only stack with demo data. A `start` that prints keys puts them in the service log, which is
+redacted at run end once `env_from` resolved them.
 
 ## Evaluate (UI)
 
@@ -408,6 +456,10 @@ selects the checks with the same code as a local run and runs each one (`factory
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub
 Actions; requiring `factory / done` blocks every PR, because nothing ever reports that context
 (`factory doctor --repo .` warns about it).
+
+**Local-only checks:** `local_only: true` checks (a host stack CI does not have, see Services) are left out
+of the selection when `CI` is set, so the stub neither lists nor runs them; the factory runs them locally
+before the PR.
 
 **Toolchains:** GitHub runners (`ubuntu-latest`) have node and python3 but no pnpm or uv. Before the
 checks, the stub installs what `factory gates --toolchains` resolves for the repo: `pnpm/action-setup`
