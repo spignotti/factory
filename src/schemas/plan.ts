@@ -36,6 +36,28 @@ export const ProtectedChangeSchema = z.object({
 });
 export type ProtectedChange = z.infer<typeof ProtectedChangeSchema>;
 
+/**
+ * One `out_of_scope` item: a string. Models often write the `protected_changes` shape instead
+ * (`{"file", "change", "reason"?}`, e.g. adopt's "put such changes in out_of_scope with the exact
+ * change"); such an object is folded into `"<file>: <change> (<reason>)"` rather than rejecting the plan.
+ */
+export const OutOfScopeItemSchema = z.preprocess((v) => {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return v;
+  const o = v as Record<string, unknown>;
+  const str = (...keys: string[]) => {
+    for (const k of keys) {
+      const x = o[k];
+      if (typeof x === "string" && x.trim()) return x.trim();
+    }
+    return undefined;
+  };
+  const change = str("change", "description", "text", "item");
+  if (!change) return v; // nothing to fold: still rejected as "expected string"
+  const file = str("file", "path");
+  const reason = str("reason");
+  return `${file ? `${file}: ` : ""}${change}${reason ? ` (${reason})` : ""}`;
+}, z.string());
+
 export const PlanSchema = z.object({
   version: z.literal(1),
   type: z.enum(["feature", "bug", "chore"]),
@@ -43,7 +65,7 @@ export const PlanSchema = z.object({
   context: z.string().default(""),
   packages: z.array(PackageSchema).min(1),
   acceptance: z.array(AcceptanceSchema).min(1),
-  out_of_scope: z.array(z.string()).default([]),
+  out_of_scope: z.array(OutOfScopeItemSchema).default([]),
   resolves_findings: z.array(z.string()).default([]),
   protected_changes: z.array(ProtectedChangeSchema).default([]),
 });
