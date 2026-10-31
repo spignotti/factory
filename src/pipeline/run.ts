@@ -506,6 +506,7 @@ export async function baseRepoConfig(repoDir: string, sha: string, checkout: Rep
 export async function resumeFactory(runId: string, opts: ResumeOptions, deps: RunDeps): Promise<RunResult> {
   const runDir = join(deps.factoryHome, "runs", runId);
   const st = readState(runDir);
+  if (st.gc_at) throw new Error(`run ${runId} was cleaned up by factory gc at ${st.gc_at} (worktree removed); start a new run`);
   if (st.step === "intake" || !st.worktree || !st.branch || !st.base_sha) {
     throw new Error(`run ${runId} stopped before its worktree existed (${st.result ?? "running"}: ${st.reason}); start a new run`);
   }

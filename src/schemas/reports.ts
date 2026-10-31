@@ -75,11 +75,14 @@ export const GcReportSchema = z.strictObject({
   dry_run: z.boolean(),
   cleaned: z.array(
     z.strictObject({
-      run_id: z.string(), repo: z.string(), pr: z.string(), pr_state: z.enum(["merged", "closed"]),
+      // pr_state "none": a run without a PR whose worktree went after the retention.
+      run_id: z.string(), repo: z.string(), pr: nullableStr, pr_state: z.enum(["merged", "closed", "none"]),
       worktree_removed: z.boolean(), branch_deleted: z.boolean(), remote_branch_deleted: z.boolean(), notes: z.array(z.string()),
     }),
   ),
   skipped: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, reason: z.string() })),
+  // Finished runs with an open PR: dependency folders removed at the worktree root.
+  stripped: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, removed: z.array(z.string()) })).default([]),
   // Evidence-branch retention per repository (folders removed, or why not).
   evidence: z.array(z.strictObject({ repo: z.string(), removed: z.array(z.string()), note: z.string().optional() })).default([]),
 });

@@ -19,13 +19,17 @@
             "type": "string"
           },
           "pr": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "pr_state": {
             "type": "string",
             "enum": [
               "merged",
-              "closed"
+              "closed",
+              "none"
             ]
           },
           "worktree_removed": {
@@ -87,6 +91,40 @@
         "additionalProperties": false
       }
     },
+    "stripped": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "pr",
+          "removed"
+        ],
+        "additionalProperties": false
+      }
+    },
     "evidence": {
       "default": [],
       "type": "array",
@@ -118,6 +156,7 @@
     "dry_run",
     "cleaned",
     "skipped",
+    "stripped",
     "evidence"
   ],
   "additionalProperties": false

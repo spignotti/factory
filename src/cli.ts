@@ -12,7 +12,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { Context7Client } from "./docs/context7.js";
 import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
-import { gcCommand } from "./commands/gc.js";
+import { autoGc, gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
@@ -43,7 +43,7 @@ const USAGE = `usage:
               (running, waiting for a human, interrupted runs; open factory PRs)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one)
-  factory gc [--dry-run] [--force] [--json]
+  factory gc [--dry-run] [--force] [--retention-days N] [--strip-after-hours N] [--json]
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
               (--run starts the services its checks need; --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
@@ -285,9 +285,32 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === "gc") {
       const { values } = parseArgs({
         args: rest,
-        options: { "dry-run": { type: "boolean", default: false }, force: { type: "boolean", default: false }, json: { type: "boolean", default: false } },
+        options: {
+          "dry-run": { type: "boolean", default: false },
+          force: { type: "boolean", default: false },
+          "retention-days": { type: "string" },
+          "strip-after-hours": { type: "string" },
+          json: { type: "boolean", default: false },
+        },
       });
-      return await gcCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), dryRun: values["dry-run"], force: values.force, json: values.json }, io);
+      const num = (flag: string, v: string | undefined) => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0) throw new Error(`invalid --${flag} ${v}`);
+        return n;
+      };
+      return await gcCommand(
+        {
+          factoryHome: factoryHomeOf(),
+          github: new GhCli(),
+          dryRun: values["dry-run"],
+          force: values.force,
+          retentionDays: num("retention-days", values["retention-days"]),
+          stripAfterHours: num("strip-after-hours", values["strip-after-hours"]),
+          json: values.json,
+        },
+        io,
+      );
     }
     if (command === "run") {
       const { values } = parseArgs({
@@ -312,6 +335,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
       if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = factoryHomeOf();
+      // Best effort, bounded, never fails the run; FACTORY_NO_AUTO_GC=1 turns it off.
+      if (process.env.FACTORY_NO_AUTO_GC !== "1") await autoGc({ factoryHome, github: new GhCli(), log: io.err });
       const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PiRunner } from "../../src/agents/pi-runner.js";
 import { isZenEndpoint, pingRequestOptions, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
-import { doctorCommand, type DoctorReport, evaluatorChecks } from "../../src/commands/doctor.js";
+import { diskChecks, doctorCommand, type DoctorReport, evaluatorChecks } from "../../src/commands/doctor.js";
 import { loadRepoConfig } from "../../src/schemas/repo.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { createSandbox, hostProbe } from "../../src/sandbox/sandbox.js";
@@ -379,5 +379,34 @@ describe("evaluator checks", () => {
     const checks = evaluatorChecks(ui(["Desktop Chrome", "iPhone 15"]), { shell: "/x/chrome-headless-shell", browsers: "/x", ffmpeg: true });
     expect(checks.map((c) => c.status)).toEqual(["ok", "ok", "ok"]);
     expect(evaluatorChecks(loadRepoConfig(createFixtureRepo()), { shell: undefined, browsers: "/x", ffmpeg: false })).toEqual([]);
+  });
+});
+
+describe("doctor: disk and inode usage", () => {
+  const fs = (usedPct: number, inodePct: number) => ({ blocks: 1000, bfree: 1000 - usedPct * 10, bavail: 1000 - usedPct * 10, files: 1000, ffree: 1000 - inodePct * 10 });
+  const one = () => 1;
+
+  it("ok below 85 %, warn from 85 %, fail from 95 % (space or inodes, whichever is worse)", () => {
+    expect(diskChecks(["/h"], () => fs(40, 38), one)).toEqual([{ name: "disk", status: "ok", detail: "/h: space 40%, inodes 38% (380/1000)" }]);
+    expect(diskChecks(["/h"], () => fs(40, 85), one)[0]).toMatchObject({ status: "warn", detail: expect.stringMatching(/inodes 85%.*factory gc/) });
+    expect(diskChecks(["/h"], () => fs(96, 10), one)[0]).toMatchObject({ status: "fail", detail: expect.stringMatching(/space 96%/) });
+    expect(diskChecks(["/h"], () => fs(10, 95), one)[0]?.status).toBe("fail");
+  });
+
+  it("one check per filesystem; no inode table (files 0) is not a failure; unreadable paths are skipped", () => {
+    const dev = (p: string) => (p === "/tmp" ? 2 : 1);
+    expect(diskChecks(["/h", "/h2", "/tmp"], () => fs(10, 10), dev).map((c) => c.detail)).toEqual([expect.stringMatching(/^\/h, \/h2:/), expect.stringMatching(/^\/tmp:/)]);
+    expect(diskChecks(["/h"], () => ({ ...fs(10, 0), files: 0, ffree: 0 }), one)[0]).toMatchObject({ status: "ok", detail: expect.stringMatching(/inodes n\/a/) });
+    const missing = () => {
+      throw new Error("ENOENT");
+    };
+    expect(diskChecks(["/nope"], () => fs(1, 1), missing)).toEqual([]);
+    expect(diskChecks(["/h"], missing, one)[0]).toMatchObject({ status: "warn", detail: expect.stringMatching(/usage unknown/) });
+  });
+
+  it("the real filesystem of the temp dir is measured", () => {
+    const [c] = diskChecks([tmpdir()]);
+    expect(c?.name).toBe("disk");
+    expect(c?.detail).toMatch(/space \d+%, inodes/);
   });
 });
