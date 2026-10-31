@@ -22,7 +22,7 @@ import type { DoctorReportSchema } from "../schemas/reports.js";
 import { type Context7Client, context7Probe } from "../docs/context7.js";
 import { redact } from "../events.js";
 import { notifyChecks } from "../notify.js";
-import { isInside, looseMode, MIN_REDACT_LENGTH, type ResolvedSecrets, resolveSecrets, SecretsError, secretsFile } from "../secrets.js";
+import { defaultSecretsFile, isInside, looseMode, MIN_REDACT_LENGTH, type ResolvedSecrets, resolveSecrets, SecretsError, secretsFile } from "../secrets.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -407,6 +407,10 @@ export async function secretsChecks(repoDir: string, repo: RepoConfig, factoryHo
     else checks.push({ name: what, status: "ok", detail: `${file} (0600, outside the repo)` });
   } else if (cfg.provider === "command") {
     checks.push({ name: what, status: "info", detail: "none: the wrapper uses its own login (credentials: <file> for a per-repo machine identity)" });
+  }
+  if (cfg.provider === "env_file" && !cfg.path) {
+    const d = defaultSecretsFile(repoDir, factoryHome);
+    if (d.legacy) checks.push({ name: "secrets file name", status: "warn", detail: `${d.legacy} is named after the checkout directory; rename it to ${d.preferred} (the default now follows the repo name from the origin URL)` });
   }
   const both = cfg.names.filter((n) => repo.agent_env.includes(n));
   if (both.length) checks.push({ name: "secrets", status: "warn", detail: `${both.join(", ")} also in agent_env: never passed to agents (secrets win)` });

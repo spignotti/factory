@@ -9,7 +9,7 @@ import { EventLog } from "../../src/events.js";
 import { agentEnv, commandEnv } from "../../src/pipeline/context.js";
 import { parseRepoConfig, type RepoConfig } from "../../src/schemas/repo.js";
 import { jailedArgv } from "../../src/sandbox/sandbox.js";
-import { parseDotenv, redactTree, resolveSecrets, SecretsError, wrapperEnv } from "../../src/secrets.js";
+import { defaultSecretsFile, parseDotenv, redactTree, repoName, repoNameFromUrl, resolveSecrets, SecretsError, wrapperEnv } from "../../src/secrets.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { FIXTURES } from "../helpers/repo.js";
 import { gitIn } from "../helpers/repo.js";
@@ -270,5 +270,54 @@ describe("adopt drafts a secrets block (names only)", () => {
     expect(config.secrets).toEqual({ provider: "env_file", names: ["DATABASE_URL", "STRIPE_KEY"] });
     const bare = makeRepo({ "package.json": "{}" });
     expect(draftRepoYaml({ detection: detect(bare, files(bare)), checks: [], baseBranch: "main", date: "2026-10-29" }).config.secrets).toBeUndefined();
+  });
+});
+
+describe("default secrets file name", () => {
+  const clone = (dirName: string, url?: string) => {
+    const dir = join(tmp(), dirName);
+    mkdirSync(dir);
+    gitIn(dir, "init", "-q");
+    if (url) gitIn(dir, "remote", "add", "origin", url);
+    return dir;
+  };
+
+  it("takes the repo name from the origin URL, not the checkout directory", () => {
+    expect(repoNameFromUrl("git@github.com:spignotti/tourenpilot.git")).toBe("tourenpilot");
+    expect(repoNameFromUrl("https://github.com/spignotti/tourenpilot.git\n")).toBe("tourenpilot");
+    expect(repoNameFromUrl("https://x-access-token:t@github.com/spignotti/tourenpilot/")).toBe("tourenpilot");
+    expect(repoNameFromUrl("ssh://git@host:22/a/b c.git")).toBe("b_c");
+    expect(repoNameFromUrl("")).toBeUndefined();
+    expect(repoName(clone("tp-adopt", "git@github.com:spignotti/tourenpilot.git"))).toBe("tourenpilot");
+    expect(repoName(clone("no-origin"))).toBe("no-origin");
+  });
+
+  it("env_file default: <repo name>.env; a legacy directory-named file is used until the new one exists, doctor warns", async () => {
+    const home = tmp();
+    const repoDir = clone("tp-adopt", "https://github.com/spignotti/tourenpilot.git");
+    const dir = join(home, "secrets");
+    expect(defaultSecretsFile(repoDir, home)).toEqual({ file: join(dir, "tourenpilot.env"), preferred: join(dir, "tourenpilot.env") });
+
+    secretFile(dir, "tp-adopt.env", `DB_PASSWORD=${DB}\n`);
+    expect(defaultSecretsFile(repoDir, home)).toMatchObject({ file: join(dir, "tp-adopt.env"), legacy: join(dir, "tp-adopt.env") });
+    const r = await resolveSecrets({ provider: "env_file", names: ["DB_PASSWORD"] }, { repoDir, factoryHome: home });
+    expect(r.env).toEqual({ DB_PASSWORD: DB });
+    const repo = parseRepoConfig("secrets: { provider: env_file, names: [DB_PASSWORD] }");
+    const doc = await secretsChecks(repoDir, repo, home);
+    expect(doc.checks.find((c) => c.name === "secrets file name")).toMatchObject({ status: "warn", detail: expect.stringContaining("tourenpilot.env") });
+    expect(JSON.stringify(doc.checks)).not.toContain(DB);
+
+    secretFile(dir, "tourenpilot.env", `DB_PASSWORD=${DB}x\n`);
+    expect(defaultSecretsFile(repoDir, home)).toEqual({ file: join(dir, "tourenpilot.env"), preferred: join(dir, "tourenpilot.env") });
+    expect((await resolveSecrets({ provider: "env_file", names: ["DB_PASSWORD"] }, { repoDir, factoryHome: home })).env).toEqual({ DB_PASSWORD: `${DB}x` });
+    expect((await secretsChecks(repoDir, repo, home)).checks.some((c) => c.name === "secrets file name")).toBe(false);
+  });
+
+  it("adopt drafts the credentials file after the repo name", () => {
+    const dir = makeRepo({ ".env.example": "API_KEY=x\n", ".infisical.json": '{"workspaceId":"ea0bcc30-2303-4ec2-87f7-cdabc870ff29"}', "package.json": "{}" });
+    gitIn(dir, "remote", "add", "origin", "git@github.com:spignotti/tourenpilot.git");
+    const files = gitIn(dir, "ls-files").split("\n").filter(Boolean);
+    const { config } = draftRepoYaml({ detection: detect(dir, files), checks: [], baseBranch: "main", date: "2026-10-31", repoName: repoName(dir) });
+    expect(config.secrets).toMatchObject({ credentials: "~/.factory/secrets/tourenpilot.env" });
   });
 });

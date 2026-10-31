@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { type Dirent, existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -43,9 +43,36 @@ export function expandHome(p: string, home = homedir()): string {
   return p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p;
 }
 
+/** Repo name from a remote URL (`git@host:owner/tourenpilot.git`, `https://host/owner/tourenpilot`); undefined when none. */
+export function repoNameFromUrl(url: string): string | undefined {
+  const last = url.trim().replace(/[/\\]+$/, "").split(/[/:\\]/).pop() ?? "";
+  const name = last.replace(/\.git$/i, "").replace(/[^A-Za-z0-9._-]/g, "_");
+  return name && name !== "." && name !== ".." ? name : undefined;
+}
+
+/**
+ * Stable per-repo name for files outside the repo (`~/.factory/secrets/<name>.env`): the repository name
+ * from `remote.origin.url`, so every clone or worktree of a repo shares it; the directory name without an origin.
+ */
+export function repoName(repoDir: string): string {
+  const r = spawnSync("git", ["-C", repoDir, "remote", "get-url", "origin"], { encoding: "utf8", timeout: 10_000 });
+  return (r.status === 0 && repoNameFromUrl(r.stdout)) || basename(resolve(repoDir));
+}
+
+/**
+ * Default `env_file` path: `$FACTORY_HOME/secrets/<repo name>.env`. A file named after the checkout
+ * directory (the earlier default) is still used while the new one does not exist; `legacy` is then set.
+ */
+export function defaultSecretsFile(repoDir: string, factoryHome: string): { file: string; legacy?: string; preferred: string } {
+  const preferred = join(factoryHome, "secrets", `${repoName(repoDir)}.env`);
+  const old = join(factoryHome, "secrets", `${basename(resolve(repoDir))}.env`);
+  if (old !== preferred && !existsSync(preferred) && existsSync(old)) return { file: old, legacy: old, preferred };
+  return { file: preferred, preferred };
+}
+
 /** The dotenv file a config reads: `env_file` path (default per repo) or the wrapper's credentials. */
 export function secretsFile(cfg: SecretsConfig, repoDir: string, factoryHome: string): string | undefined {
-  if (cfg.provider === "env_file") return resolve(expandHome(cfg.path ?? join(factoryHome, "secrets", `${basename(resolve(repoDir))}.env`)));
+  if (cfg.provider === "env_file") return resolve(cfg.path ? expandHome(cfg.path) : defaultSecretsFile(repoDir, factoryHome).file);
   return cfg.credentials ? resolve(expandHome(cfg.credentials)) : undefined;
 }
 

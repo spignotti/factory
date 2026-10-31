@@ -54,7 +54,7 @@ export interface DraftInput {
   checks: DraftCheck[];
   baseBranch: string;
   date: string;
-  /** Repo directory name, for the default secrets file `~/.factory/secrets/<name>.env`. */
+  /** Repo name (from the origin URL, see `repoName`), for the default secrets file `~/.factory/secrets/<name>.env`. */
   repoName?: string;
   /** CI stub toolchains as detected (`describeToolchains`), for a header comment. */
   toolchains?: string;

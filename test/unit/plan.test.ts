@@ -171,3 +171,25 @@ describe("repo config: review", () => {
     expect(parseRepoConfig("review:\n  per_package: true\n").review).not.toHaveProperty("per_package");
   });
 });
+
+describe("out_of_scope items", () => {
+  const scope = (items: unknown[]) => {
+    const r = validatePlan(plan({ out_of_scope: items }), { repo });
+    return r.ok ? r.plan.out_of_scope : r.errors;
+  };
+
+  it("keeps strings and folds {file, change, reason} objects into one string", () => {
+    expect(scope(["plain", { file: ".github/workflows/ci.yml", change: "drop the lint job" }, { file: ".factory/repo.yaml", change: "add gitleaks", reason: "human-only" }, { change: "no file" }])).toEqual([
+      "plain",
+      ".github/workflows/ci.yml: drop the lint job",
+      ".factory/repo.yaml: add gitleaks (human-only)",
+      "no file",
+    ]);
+  });
+
+  it("still rejects objects without a change text and other types", () => {
+    const errors = scope([{ file: "x" }, 3]) as string[];
+    expect(errors.join("; ")).toMatch(/out_of_scope\.0/);
+    expect(errors.join("; ")).toMatch(/out_of_scope\.1/);
+  });
+});

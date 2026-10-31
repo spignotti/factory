@@ -126,6 +126,23 @@ describe("factory adopt", () => {
     expect(listProposals(factoryHome, report.repo)).toEqual([]);
   });
 
+  it("saves the baseline plan when out_of_scope items come as {file, change} objects", async () => {
+    const repo = legacyNodeRepo();
+    const objects = {
+      ...BASELINE,
+      out_of_scope: [
+        { file: ".factory/repo.yaml", change: "add check gitleaks: `gitleaks detect`, tier fast", reason: "human-only path" },
+        "README: badge",
+      ],
+    };
+    const { report, runner, factoryHome } = await runAdopt(repo, [{ role: "plan_medium", output: objects }]);
+    expect(runner.remaining()).toEqual({});
+    expect(report.plan_error).toBeNull();
+    expect(report.proposal).not.toBeNull();
+    const [p] = listProposals(factoryHome, report.repo);
+    expect(p!.proposals[0]!.plan.out_of_scope).toEqual([".factory/repo.yaml: add check gitleaks: `gitleaks detect`, tier fast (human-only path)", "README: badge"]);
+  });
+
   it("refuses an adopted repo unless --force, and picks a free branch name", async () => {
     const repo = legacyNodeRepo();
     commitFile(repo, ".factory/repo.yaml", "checks: []\n");

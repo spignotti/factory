@@ -303,8 +303,10 @@ secrets:
 
 - The factory resolves the names once per run (and on `resume`), in the user's checkout, outside the
   sandbox; a name that does not resolve stops the run with `needs_human` before any agent call. Files
-  (`path`, default `~/.factory/secrets/<repo dir name>.env`, and `credentials`) must lie outside the
-  repo with mode `0600`.
+  (`path`, default `~/.factory/secrets/<repo name>.env`, and `credentials`) must lie outside the
+  repo with mode `0600`. `<repo name>` comes from the origin URL (`git@github.com:me/shop.git` → `shop.env`),
+  so every clone shares it; without an origin it is the checkout directory's name. A file still named after
+  the checkout directory is used while `<repo name>.env` does not exist; `doctor` warns to rename it.
 - Values go only to checks, red-green runs, services, the ui and recorded flows, through the process env
   (jailed commands too: never on a command line). Agent tool processes never get them, even when a name
   is also in `agent_env`; the secret files are hidden from the jail.
