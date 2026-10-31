@@ -22,6 +22,14 @@ export interface GatesOptions {
   json: boolean;
   /** Port slots live under `<factoryHome>/ports` (default `factoryHomeOf()`). */
   factoryHome?: string;
+  /** In CI: `local_only` checks are not selected. Default: the `CI` environment variable is set (GitHub Actions sets `CI=true`). */
+  ci?: boolean;
+}
+
+/** Whether this process runs in CI (`CI` set to anything but empty, `0` or `false`). */
+export function inCi(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = (env.CI ?? "").trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false";
 }
 
 export interface Io {
@@ -32,7 +40,11 @@ export interface Io {
 /**
  * `factory gates --select | --run <check|selected>`: the same selection as the pipeline, for local use and CI.
  * Checks run with the caller's environment (CI or the user), not the agent allowlist, and unsandboxed;
- * so do the services they need.
+ * so do the services they need. In CI the selection leaves out `local_only` checks.
+ *
+ * Not serialized with runs: a manual `factory gates` takes no repo lock and works in the checkout it
+ * is given. Services with fixed host ports are the exception: their claim (see services.ts) makes a
+ * second instance fail with env_missing instead of restarting a stack a run is using.
  */
 export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> {
   const repoDir = resolve(opts.repo);
@@ -40,10 +52,12 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   const tier: Tier = TierSchema.parse(opts.tier);
   let env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined));
   let secretValues: string[] = [];
+  const ci = opts.ci ?? inCi();
 
   const selected = async () => {
     const base = opts.base ?? (await baseRef(repoDir, repo.base_branch));
-    return selectChecks(repo.checks, tier, await changedFiles(repoDir, base));
+    const checks = selectChecks(repo.checks, tier, await changedFiles(repoDir, base));
+    return ci ? checks.filter((c) => !c.local_only) : checks;
   };
 
   if (opts.toolchains) {
@@ -105,13 +119,14 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   });
   let results: CheckResult[];
   try {
-    results = (await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, services })).map((r) =>
-      secretValues.length && r.output_tail ? { ...r, output_tail: redact(r.output_tail, secretValues) } : r,
-    );
+    results = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, services });
+    const hide = [...secretValues, ...services.redactValues].sort((a, b) => b.length - a.length);
+    results = results.map((r) => (hide.length && r.output_tail ? { ...r, output_tail: redact(r.output_tail, hide) } : r));
   } catch (e) {
     if (!(e instanceof EnvMissing)) throw e;
-    io.err(`gates: ${e.message}\n`);
-    if (opts.json) io.out(JSON.stringify({ green: false, env_missing: e.message, checks: [] }) + "\n");
+    const msg = redact(e.message, [...secretValues, ...services.redactValues].sort((a, b) => b.length - a.length));
+    io.err(`gates: ${msg}\n`);
+    if (opts.json) io.out(JSON.stringify({ green: false, env_missing: msg, checks: [] }) + "\n");
     return 1;
   } finally {
     await services.stopAll();

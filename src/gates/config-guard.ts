@@ -135,7 +135,8 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   for (const c of b.checks) {
     const now = a.checks.find((x) => x.name === c.name);
     if (!now) out.push(`check ${c.name} removed`);
-    else if (!same(c, now)) out.push(`check ${c.name} changed (run, tier, paths or services)`);
+    else if (!c.local_only && now.local_only) out.push(`check ${c.name} made local_only (dropped from CI)`);
+    else if (!same(c, now)) out.push(`check ${c.name} changed (run, tier, paths, services or local_only)`);
   }
   removed("human_only_paths", b.human_only_paths, a.human_only_paths);
   removed("sensitive_paths", b.sensitive_paths, a.sensitive_paths);
@@ -162,6 +163,10 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   for (const s of b.services) {
     const now = a.services.find((x) => x.name === s.name);
     if (!now || !same(s, now)) out.push(`service ${s.name} changed or removed`);
+  }
+  // A new host service runs repo commands outside the sandbox (and env_from feeds checks): only a human adds one.
+  for (const s of a.services) {
+    if (s.host && !b.services.some((x) => x.name === s.name)) out.push(`host service ${s.name} added (runs outside the sandbox)`);
   }
   if (!same(b.models, a.models)) out.push("models changed");
   if (!same(b.git, a.git)) out.push("git author changed");

@@ -38,6 +38,36 @@ describe("factory gates CLI on the fixture repo", () => {
     expect(JSON.parse(manual.out)).toEqual(["cloud"]);
   });
 
+  it("in CI (CI set) local_only checks are not selected; locally they are", async () => {
+    const repo = createFixtureRepo((c) => {
+      (c.checks as Record<string, unknown>[]).push({ name: "hostdb", run: "true", tier: "fast", local_only: true });
+    });
+    const prev = process.env.CI;
+    try {
+      process.env.CI = "true";
+      const ci = await cli(["gates", "--select", "--repo", repo, "--base", "main", "--json"]);
+      expect(JSON.parse(ci.out)).not.toContain("hostdb");
+      process.env.CI = "";
+      const local = await cli(["gates", "--select", "--repo", repo, "--base", "main", "--json"]);
+      expect(JSON.parse(local.out)).toContain("hostdb");
+    } finally {
+      if (prev === undefined) delete process.env.CI;
+      else process.env.CI = prev;
+    }
+  });
+
+  it("redacts env_from values of host services from check output", async () => {
+    const value = "gates-envfrom-secret-5d1c";
+    const repo = createFixtureRepo((c) => {
+      c.services = [{ name: "db", host: true, start: "true", env_from: { command: `echo TOKEN=${value}`, map: { DB_TOKEN: "TOKEN" } } }];
+      (c.checks as Record<string, unknown>[]).push({ name: "hostdb", run: 'echo "got $DB_TOKEN"; exit 1', tier: "fast", services: ["db"], local_only: true });
+    });
+    const r = await cli(["gates", "--run", "hostdb", "--repo", repo, "--json"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("got [redacted]");
+    expect(r.out + r.err).not.toContain(value);
+  });
+
   it("defaults the base to the repo's base branch and sees working-tree changes", async () => {
     const repo = createFixtureRepo();
     writeFileSync(join(repo, "docs.md"), "x");

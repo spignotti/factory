@@ -86,7 +86,14 @@ limits: { forbidden_paths: [".env*"] }
   });
   it("removing or changing checks, protections, secrets or agent env is", () => {
     expect(repoConfigLoosening(base, base.replace("checks:\n  - { name: typecheck, run: npm run typecheck, tier: fast }\n", "checks: []\n"))).toEqual(["check typecheck removed"]);
-    expect(repoConfigLoosening(base, base.replace("tier: fast", "tier: manual"))).toEqual(["check typecheck changed (run, tier, paths or services)"]);
+    expect(repoConfigLoosening(base, base.replace("tier: fast", "tier: manual"))).toEqual(["check typecheck changed (run, tier, paths, services or local_only)"]);
+    expect(repoConfigLoosening(base, base.replace("tier: fast", "tier: fast, local_only: true"))).toEqual(["check typecheck made local_only (dropped from CI)"]);
+    // a new local_only check adds coverage; a new host service runs outside the sandbox
+    expect(repoConfigLoosening(base, base.replace("checks:\n", "checks:\n  - { name: db, run: x, tier: full, local_only: true }\n"))).toEqual([]);
+    const host = `${base}services:\n  - { name: db, host: true, start: x, ports: [54322], env_from: { command: s, map: { DB_URL: DB_URL } } }\n`;
+    expect(repoConfigLoosening(base, host)).toEqual(["host service db added (runs outside the sandbox)"]);
+    expect(repoConfigLoosening(host, host.replace("ports: [54322], ", ""))).toEqual(["service db changed or removed"]);
+    expect(repoConfigLoosening(host, host.replace(", env_from: { command: s, map: { DB_URL: DB_URL } }", ""))).toEqual(["service db changed or removed"]);
     expect(repoConfigLoosening(base, base.replace('[".factory/**"]', "[]"))).toEqual(["human_only_paths removed: .factory/**"]);
     expect(repoConfigLoosening(base, base.replace('[".env*"]', "[]"))).toEqual(["limits.forbidden_paths removed: .env*"]);
     expect(repoConfigLoosening(base, `${base}agent_env: [API_TOKEN]\nmerge: { auto_merge_max_risk: medium }\n`)).toEqual([

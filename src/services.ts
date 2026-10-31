@@ -3,6 +3,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync
 import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import { commandsKilled, sh, tail, trackProcessGroup } from "./exec.js";
+import { MIN_REDACT_LENGTH, parseDotenv } from "./secrets.js";
 import { type Jail, jailedArgv } from "./sandbox/sandbox.js";
 import { MAX_NAMED_PORTS, MAX_PORT_OFFSET, placeholderTexts, type RepoConfig, type Service } from "./schemas/repo.js";
 
@@ -20,6 +21,12 @@ import { MAX_NAMED_PORTS, MAX_PORT_OFFSET, placeholderTexts, type RepoConfig, ty
  * Sandbox: a jailed service gets pasta forwards host 127.0.0.1:p → jail :p for its own ports (it must
  * listen on 0.0.0.0 inside its namespace and stay in the foreground); a jailed check reaches exactly the
  * ports of its services (jail 127.0.0.1:p → host 127.0.0.1:p). `host: true` services run unjailed.
+ *
+ * Fixed host ports (`host: true` + `ports`): not shifted per run, so one instance per box. The service claims
+ * `ports/host-<port>.json` for each port while it runs; another process (a second run, a manual `factory
+ * gates`, doctor) gets env_missing instead of sharing or restarting the stack under a running check. A
+ * second Services in the same process (the evaluator's base capture) shares the running instance and
+ * neither starts nor stops it. `env_from` values are resolved once per start and redacted like secrets.
  */
 export const PORT_SLOTS = 99;
 export const SLOT_SIZE = 100;
@@ -140,6 +147,75 @@ export async function allocatePorts(
   throw new EnvMissing(`no free port slot (1..${PORT_SLOTS}, offset ≤ ${MAX_PORT_OFFSET}) under ${dir}`);
 }
 
+function claimFile(dir: string, file: string, runId: string): "taken" | { run_id?: string; pid: number } {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(file, "wx");
+      writeSync(fd, JSON.stringify({ run_id: runId, pid: process.pid }) + "\n");
+      closeSync(fd);
+      return "taken";
+    } catch {
+      let holder: { run_id?: string; pid?: number } = {};
+      try {
+        holder = JSON.parse(readFileSync(file, "utf8")) as typeof holder;
+      } catch {
+        // half-written or gone: retry
+      }
+      // A live other process holds it; our own pid means a stale claim of an earlier instance in this process.
+      if (typeof holder.pid === "number" && holder.pid !== process.pid && pidAlive(holder.pid)) return { run_id: holder.run_id, pid: holder.pid };
+      try {
+        unlinkSync(file);
+      } catch {
+        // already gone
+      }
+    }
+  }
+  throw new EnvMissing(`could not claim ${file} under ${dir}`);
+}
+
+/**
+ * Claims fixed host ports for one service instance; throws EnvMissing naming the holder when another live
+ * process has one. Returns the release function.
+ */
+export function claimHostPorts(factoryHome: string, runId: string, service: string, ports: number[]): () => void {
+  const dir = join(factoryHome, "ports");
+  mkdirSync(dir, { recursive: true });
+  const taken: string[] = [];
+  const release = () => {
+    for (const f of taken.splice(0)) {
+      try {
+        unlinkSync(f);
+      } catch {
+        // already gone
+      }
+    }
+  };
+  for (const port of [...new Set(ports)].sort((a, b) => a - b)) {
+    const file = join(dir, `host-${port}.json`);
+    const r = claimFile(dir, file, runId);
+    if (r !== "taken") {
+      release();
+      throw new EnvMissing(
+        `service ${service}: host port ${port} is held by ${r.run_id ?? "another factory process"} (pid ${r.pid}); fixed-port host services run one instance per box, retry when it has finished`,
+      );
+    }
+    taken.push(file);
+  }
+  return release;
+}
+
+/** Target env → value from a `KEY=VALUE` (dotenv) output; names of mapped keys that are missing. */
+export function mapEnvFrom(output: string, map: Record<string, string>): { env: Record<string, string>; missing: string[]; values: string[] } {
+  const parsed = parseDotenv(output);
+  const env: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const [target, key] of Object.entries(map)) {
+    if (parsed[key] === undefined) missing.push(key);
+    else env[target] = parsed[key];
+  }
+  return { env, missing, values: Object.values(parsed) };
+}
+
 /** Readiness probe: the port accepts a connection and holds it (pasta closes forwards to nobody at once). */
 export function portHolds(port: number, holdMs = 300): Promise<boolean> {
   return new Promise((resolve) => {
@@ -183,7 +259,17 @@ interface Started {
   exited: { code: number | null } | undefined;
   untrack: () => void;
   ports: number[];
+  /** `env_from` values (checks of this service only). */
+  fromEnv: Record<string, string>;
+  /** Fixed host port claim. */
+  releaseClaim?: () => void;
+  /** Shared instance of another Services in this process: never started or stopped here. */
+  borrowed?: boolean;
 }
+
+/** Running fixed-port host services of this process, by service name and ports. */
+const hostInstances = new Map<string, Started>();
+const hostKey = (def: Def) => `${def.name}:${[...new Set(def.ports)].sort((a, b) => a - b).join(",")}`;
 
 export interface ServicesOptions {
   runId: string;
@@ -200,6 +286,8 @@ export interface ServicesOptions {
   pollMs?: number;
   onEvent?: (event: string, data: Record<string, unknown>) => void;
   probe?: (port: number) => Promise<boolean>;
+  /** Values to redact from now on (`env_from` output), called before any check gets them. */
+  onSecrets?: (values: string[]) => void;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -212,6 +300,7 @@ export class Services {
   private readonly started = new Map<string, Started>();
   private readonly defs: Map<string, Def>;
   private readonly refs: { names: string[]; numbers: number[] };
+  private readonly secrets: string[] = [];
 
   constructor(
     readonly repo: Pick<RepoConfig, "services" | "checks" | "ui"> & { verify?: { run?: string } },
@@ -227,6 +316,11 @@ export class Services {
 
   get names(): string[] {
     return [...this.defs.keys()];
+  }
+
+  /** `env_from` values resolved so far (for redaction by callers without an event log), longest first. */
+  get redactValues(): string[] {
+    return [...this.secrets].sort((a, b) => b.length - a.length);
   }
 
   private needsPorts(text: string): boolean {
@@ -262,13 +356,17 @@ export class Services {
       const u = new URL(await this.expand(def.url));
       if (u.port) out.add(Number(u.port));
     }
+    if (def.host) for (const p of def.ports ?? []) out.add(p);
     return [...out];
   }
 
-  /** Expanded env of these services (for their checks). */
+  /** Expanded env of these services plus their `env_from` values once started (for their checks). */
   async envOf(names: string[]): Promise<Record<string, string>> {
     const env: Record<string, string> = {};
-    for (const n of names) for (const [k, v] of Object.entries(this.defs.get(n)?.env ?? {})) env[k] = await this.expand(v);
+    for (const n of names) {
+      for (const [k, v] of Object.entries(this.defs.get(n)?.env ?? {})) env[k] = await this.expand(v);
+      Object.assign(env, this.started.get(n)?.fromEnv ?? {});
+    }
     return env;
   }
 
@@ -297,17 +395,25 @@ export class Services {
     if (killed) throw new EnvMissing(`service ${def.name} not started: ${killed}`);
     mkdirSync(this.opts.logDir, { recursive: true });
     const logFile = join(this.opts.logDir, `${def.name}.log`);
+    const key = def.host && def.ports?.length ? hostKey(def) : undefined;
+    const shared = key ? hostInstances.get(key) : undefined;
+    if (shared) {
+      this.started.set(def.name, { ...shared, borrowed: true, untrack: () => {} });
+      this.opts.onEvent?.("service_shared", { service: def.name, ports: shared.ports });
+      return;
+    }
     const ports = await this.portsOf(def);
     const others = [...this.started.values()].flatMap((s) => s.ports);
     const cmd = await this.expand(def.start);
     const env = { ...this.opts.env, ...(await this.envOf([def.name])) };
     const jail = def.host ? undefined : this.jailWith({ expose: ports, reach: others });
     const [file, ...args] = jailedArgv(jail, "sh", cmd, this.opts.cwd, env);
+    const releaseClaim = key ? claimHostPorts(this.opts.factoryHome, this.opts.runId, def.name, def.ports!) : undefined;
     const log = openSync(logFile, "a");
     writeSync(log, `[factory] start ${def.name}${jail ? " (sandboxed)" : def.host ? " (host)" : ""}: ${cmd}\n`);
     const child = spawn(file!, args, { cwd: this.opts.cwd, env, stdio: ["ignore", log, log], detached: true });
     closeSync(log);
-    const st: Started = { def, child, exited: undefined, untrack: child.pid ? trackProcessGroup(child.pid) : () => {}, ports };
+    const st: Started = { def, child, exited: undefined, untrack: child.pid ? trackProcessGroup(child.pid) : () => {}, ports, fromEnv: {}, releaseClaim };
     child.on("exit", (code) => (st.exited = { code }));
     child.on("error", () => (st.exited = { code: 127 }));
     this.started.set(def.name, st);
@@ -337,7 +443,35 @@ export class Services {
       if (Date.now() > deadline) return fail(`not ready after ${def.ready_timeout_s}s`);
       await sleep(this.opts.pollMs ?? 250);
     }
+    if (def.env_from) {
+      const why = await this.resolveEnvFrom(def, st, logFile);
+      if (why) return fail(why);
+    }
+    if (key) hostInstances.set(key, st);
     this.opts.onEvent?.("service_ready", { service: def.name, ms: Date.now() - t0 });
+  }
+
+  /** Runs `env_from.command` on the host; the values never reach the log. Returns why it failed, if it did. */
+  private async resolveEnvFrom(def: Def, st: Started, logFile: string): Promise<string | undefined> {
+    const from = def.env_from!;
+    const cmd = await this.expand(from.command);
+    const r = await sh(cmd, { cwd: this.opts.cwd, env: { ...this.opts.env, ...(await this.envOf([def.name])) }, timeoutMs: 60_000 });
+    const { env, missing, values } = mapEnvFrom(r.output, from.map);
+    // Every printed value is redacted (not only the mapped ones): the output is a status dump of the stack.
+    const secret = [...new Set([...values, ...Object.values(env)].filter((v) => v.length >= MIN_REDACT_LENGTH))];
+    for (const v of secret) if (!this.secrets.includes(v)) this.secrets.push(v);
+    if (secret.length) this.opts.onSecrets?.(secret);
+    const scrub = (t: string) => this.redactValues.reduce((acc, v) => acc.split(v).join("[redacted]"), t);
+    try {
+      writeFileSync(logFile, `[factory] env_from ${def.name}: exit ${r.code}, ${Object.keys(env).length}/${Object.keys(from.map).length} mapped (values not shown)\n${r.code === 0 ? "" : scrub(tail(r.output, 10))}`, { flag: "a" });
+    } catch {
+      // log dir gone
+    }
+    if (r.code !== 0) return `env_from command exited with code ${r.code}`;
+    if (missing.length) return `env_from: the command printed no ${missing.join(", ")}`;
+    st.fromEnv = env;
+    this.opts.onEvent?.("service_env", { service: def.name, names: Object.keys(env) });
+    return undefined;
   }
 
   private async ready(def: Def, ports: number[], st: Started, elapsed: number): Promise<boolean> {
@@ -354,6 +488,16 @@ export class Services {
   }
 
   private async stopOne(st: Started): Promise<void> {
+    if (st.borrowed) return;
+    try {
+      await this.stopProcess(st);
+    } finally {
+      for (const [k, v] of hostInstances) if (v === st) hostInstances.delete(k);
+      st.releaseClaim?.();
+    }
+  }
+
+  private async stopProcess(st: Started): Promise<void> {
     const { def } = st;
     const logFile = join(this.opts.logDir, `${def.name}.log`);
     if (def.stop) {

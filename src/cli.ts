@@ -46,7 +46,8 @@ const USAGE = `usage:
   factory gc [--dry-run] [--force] [--retention-days N] [--strip-after-hours N] [--json]
               (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
   factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
-              (--run starts the services its checks need; --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
+              (--run starts the services its checks need; with CI set, local_only checks are not selected;
+               --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
   factory eval --profile <name|file> [--profile …] [--tasks <glob>] [--repeat N] [--out <dir>] [--json]
               (fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
   factory eval --validate [--tasks <glob>] [--json]

@@ -224,5 +224,7 @@ export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" 
     factoryHome: ctx.deps.factoryHome,
     jail: jailFor(ctx, ctx.worktree),
     onEvent: (action, data) => void ctx.events.emit({ step: "gates", event: "service", data: { action, ...data } }),
+    // env_from values: redacted from events, artifacts, prompts and the PR from here on, like repo secrets.
+    onSecrets: (values) => ctx.events.addSecrets(values),
   });
 }
