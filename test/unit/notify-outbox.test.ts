@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { EventLog, type RunResult } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
 import { repoLockId } from "../../src/git.js";
-import { flushNotifyOutbox, notifyRunFinished, type Fetch } from "../../src/notify.js";
+import { flushNotifyOutbox, notifyRunFinished, START_FLUSH, type Fetch } from "../../src/notify.js";
 import { listOutboxEntries, notifyAbortSignal, notifyEventId, NOTIFY_SIGTERM_GRACE_MS, outboxCount } from "../../src/notify-outbox.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
 import { runFactory } from "../../src/pipeline/run.js";
@@ -123,6 +123,51 @@ describe("notify outbox", () => {
     expect(sig.aborted).toBe(false);
     await new Promise((r) => setTimeout(r, 40));
     expect(sig.aborted).toBe(true);
+  });
+
+  it("write-ahead: the entry exists while the POST is in flight and is removed once sent", async () => {
+    const factoryHome = home(yamlFor());
+    const repo = repoWithOrigin("https://github.com/acme/widgets.git");
+    let during = -1;
+    const fetch: Fetch = async () => {
+      during = outboxCount(factoryHome);
+      return { status: 200 };
+    };
+    const out = await notifyRunFinished(result(repo), { factoryHome, fetch, sleep: async () => undefined, backoffMs: [0] });
+    expect(out).toMatchObject({ status: "sent" });
+    expect(during).toBe(1);
+    expect(outboxCount(factoryHome)).toBe(0);
+  });
+
+  it("redacts run secrets from the reason before it is persisted", async () => {
+    const factoryHome = home(yamlFor());
+    const runDir = mkdtempSync(join(tmpdir(), "factory-outbox-run-"));
+    const events = new EventLog(runDir, "r1", Date.now, ["repo-secret-value-123456"]);
+    const repo = repoWithOrigin("https://github.com/acme/widgets.git");
+    await notifyRunFinished(result(repo, { reason: "gate failed: token repo-secret-value-123456" }), { factoryHome, fetch: async () => ({ status: 500 }), sleep: async () => undefined, backoffMs: [0] }, events);
+    const [entry] = listOutboxEntries(factoryHome);
+    expect(entry!.payload.reason).toBe("gate failed: token [redacted]");
+  });
+
+  it("start flush is bounded: one attempt, later entries of a down repo wait, budget stops it", async () => {
+    const factoryHome = home(yamlFor());
+    const repo = repoWithOrigin("https://github.com/acme/widgets.git");
+    for (const id of ["20261030-101010-aaaaaa", "20261030-101010-bbbbbb", "20261030-101010-cccccc"]) {
+      await notifyRunFinished(result(repo, { run_id: id }), { factoryHome, fetch: async () => ({ status: 503 }), sleep: async () => undefined, backoffMs: [0] });
+    }
+    expect(outboxCount(factoryHome)).toBe(3);
+    let calls = 0;
+    const down: Fetch = async () => (calls++, { status: 503 });
+    const rep = await flushNotifyOutbox(factoryHome, { factoryHome, fetch: down, sleep: async () => undefined, backoffMs: [0] }, START_FLUSH);
+    expect(calls).toBe(1);
+    expect(rep).toMatchObject({ sent: 0, failed: 1, skipped: 2, remaining: 3 });
+
+    let ticks = 0;
+    // start, first entry within budget, then the budget is spent
+    const clock = () => (ticks++ < 2 ? 0 : 100);
+    const rep2 = await flushNotifyOutbox(factoryHome, { factoryHome, fetch: async () => ({ status: 200 }) }, { attempts: 1, budgetMs: 10, now: clock });
+    expect(rep2.sent).toBe(1);
+    expect(rep2.remaining).toBe(2);
   });
 
   it("NOTIFY_SIGTERM_GRACE_MS is 45 seconds", () => {

@@ -53,8 +53,9 @@ add its entry with `json` from the Python standard library (see Setup).
   408/425/429 is not retried.
 - A notification that fails is logged as a `notify` event in the run's `events.jsonl` and **never** changes
   the result. The payload (without URL or key) is also written to `$FACTORY_HOME/outbox/` for retry.
-  `factory notify flush` sends pending outbox entries; every `factory run` and `factory resume` flushes
-  the outbox at start as well. The URL and key are never written to events, logs, the outbox, `status`,
+  The entry is written before the POST and removed once it is delivered, so a kill during delivery
+  leaves it for the next flush. `factory notify flush` sends pending outbox entries; every `factory run`
+  and `factory resume` flushes the outbox at start as well (bounded: one attempt per entry, about 20 s). The URL and key are never written to events, logs, the outbox, `status`,
   the PR or `doctor` output.
 - No file: nothing is sent (and nothing is logged). A repo without an entry: a `notify` event with
   `status: skipped`.
