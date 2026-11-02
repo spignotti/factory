@@ -15,6 +15,17 @@ roles:
   evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
   pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
   harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
+# Scheduled `factory gc --scheduled` defaults to dry-run until you flip this after a week of log review.
+gc:
+  retention:
+    dry_run: true
+    home_hours: 24
+    worktree_failed_days: 7
+    worktree_resume_days: 14
+    metadata_days: 90
+    metadata_failed_days: 180
+    metadata_min_per_repo: 20
+    archive_tarball_days: 180
 # Billing kind per provider: subscription usage is reported in tokens, metered usage in USD.
 # Providers not listed are metered. Only this file and the user profile may set it.
 billing:

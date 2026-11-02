@@ -179,7 +179,7 @@
         "additionalProperties": false
       }
     },
-    "archived": {
+    "home_removed": {
       "default": [],
       "type": "array",
       "items": {
@@ -191,20 +191,102 @@
           "repo": {
             "type": "string"
           },
-          "removed": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string"
           }
         },
         "required": [
           "run_id",
           "repo",
-          "removed"
+          "bytes",
+          "reason"
         ],
         "additionalProperties": false
       }
+    },
+    "metadata_moved": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "tarball": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "tarball",
+          "bytes",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "archive_purged": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "bytes",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "worktree_pruned": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "log_path": {
+      "type": "string"
     }
   },
   "required": [
@@ -214,7 +296,10 @@
     "stripped",
     "evidence",
     "abandoned",
-    "archived"
+    "home_removed",
+    "metadata_moved",
+    "archive_purged",
+    "worktree_pruned"
   ],
   "additionalProperties": false
 }

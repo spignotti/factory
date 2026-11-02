@@ -100,8 +100,18 @@ export const GcReportSchema = z.strictObject({
   evidence: z.array(z.strictObject({ repo: z.string(), removed: z.array(z.string()), note: z.string().optional() })).default([]),
   // needs_input left unanswered for the working-day timeout: abandoned, lock released, worktree removed.
   abandoned: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), reason: z.string(), notified: z.boolean() })).default([]),
-  // Run directories past the archive retention, reduced to the result summary and logs.
-  archived: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), removed: z.array(z.string()) })).default([]),
+  /** Sandbox agent homes removed from terminal runs. */
+  home_removed: z
+    .array(z.strictObject({ run_id: z.string(), repo: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
+    .default([]),
+  /** Run metadata moved to `$FACTORY_HOME/archive/runs/<id>.tar.gz`. */
+  metadata_moved: z
+    .array(z.strictObject({ run_id: z.string(), repo: z.string(), tarball: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
+    .default([]),
+  /** Purged paths under `$FACTORY_HOME/archive/runs`. */
+  archive_purged: z.array(z.strictObject({ path: z.string(), bytes: z.number().int().min(0), reason: z.string() })).default([]),
+  worktree_pruned: z.array(z.strictObject({ repo: z.string() })).default([]),
+  log_path: z.string().optional(),
 });
 
 export const DoctorReportSchema = z.strictObject({
