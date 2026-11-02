@@ -1,0 +1,3 @@
+# Box heartbeat (pm 248): ping Healthchecks `box-heartbeat` every 5 minutes.
+# Expects this directory deployed at /workspace/ops/box-heartbeat/ (see README.md).
+*/5 * * * * /workspace/ops/box-heartbeat/ping.sh >> /workspace/ops/box-heartbeat-logs/heartbeat.log 2>&1
