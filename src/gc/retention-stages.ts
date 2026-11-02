@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { basename, join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { basename, dirname, join, relative, sep } from "node:path";
 import type { GcOptions, GcReport } from "../commands/gc.js";
 import { git, repoLockId } from "../git.js";
 import { acquireRepoLock, activeHolders } from "../pipeline/lock.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { listRuns } from "../runs.js";
 import { isProtectedFactoryPath, type GcRetention } from "./retention-config.js";
+import type { RunRecord } from "../runs.js";
 import {
   DAY,
   dirBytes,
@@ -35,9 +36,44 @@ function baseRedHours(repo: string): number {
   return 48;
 }
 
+/**
+ * True when `path` is a real directory (not a symlink) whose resolved location is strictly inside the resolved
+ * `root`. Fails closed on any error, so gc never follows a link out of `$FACTORY_HOME`.
+ */
+export function realDirInside(root: string, path: string): boolean {
+  try {
+    if (!lstatSync(path).isDirectory()) return false;
+    const r = realpathSync(root);
+    const rel = relative(r, realpathSync(path));
+    return rel !== "" && !rel.startsWith("..") && !rel.startsWith(sep) && rel === relative(root, path);
+  } catch {
+    return false;
+  }
+}
+
+/** Takes every lock slot of the run's repository for `fn`; returns false (nothing done) when a slot is held. */
+async function withRunRepoLock(opts: GcOptions, run: RunRecord, tag: string, fn: () => void): Promise<boolean> {
+  const repo = run.state!.repo;
+  let id = repo;
+  try {
+    if (existsSync(repo)) id = await repoLockId(repo);
+  } catch {
+    // fall back to the path
+  }
+  const release = acquireRepoLock(opts.factoryHome, id, `${tag}-${run.run_id}`, { maxRuns: existsSync(repo) ? lockMaxRuns(repo) : 1, exclusive: true });
+  if (!release) return false;
+  try {
+    fn();
+  } finally {
+    release();
+  }
+  return true;
+}
+
 /** Removes eligible `runs/<id>/home` directories. */
-export function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): void {
+export async function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): Promise<void> {
   const live = new Set(activeHolders(opts.factoryHome).map((h) => h.runId).filter((id): id is string => !!id));
+  const runsRoot = join(opts.factoryHome, "runs");
   const now = nowMs();
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
@@ -47,22 +83,35 @@ export function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcRetention, 
     const home = join(run.dir, "home");
     if (!existsSync(home)) continue;
     if (isProtectedFactoryPath(opts.factoryHome, home)) continue;
+    if (!realDirInside(runsRoot, home)) {
+      report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "home/ is a symlink or outside $FACTORY_HOME/runs; kept" });
+      continue;
+    }
     const bytes = dirBytes(home);
     const entry = { run_id: run.run_id, repo: st.repo, bytes, reason: `terminal run idle ≥ ${cfg.home_hours}h; sandbox home is cache` };
     if (opts.dryRun) {
       report.home_removed.push(entry);
       continue;
     }
-    rmSync(home, { recursive: true, force: true });
+    const done = await withRunRepoLock(opts, run, "gc-home", () => rmSync(home, { recursive: true, force: true }));
+    if (!done) {
+      report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "repository is locked by a running factory process; home/ kept" });
+      continue;
+    }
     report.home_removed.push(entry);
   }
 }
 
-/** Moves old run metadata into `$FACTORY_HOME/archive/runs/<id>.tar.gz`. */
-export function gcMetadataArchive(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): void {
+/**
+ * Moves old run metadata into `$FACTORY_HOME/archive/runs/<id>.tar.gz` (without `home/` and `worktree/`).
+ * The tarball is written to a temp name, listed back with `tar -tzf`, then renamed; the run directory is removed
+ * only after that. A run whose recorded worktree still exists is skipped (the worktree stage owns it).
+ */
+export async function gcMetadataArchive(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): Promise<void> {
   const runs = listRuns(opts.factoryHome);
   const protectedIds = protectedMetadataRunIds(runs, cfg.metadata_min_per_repo);
   const live = new Set(activeHolders(opts.factoryHome).map((h) => h.runId).filter((id): id is string => !!id));
+  const runsRoot = join(opts.factoryHome, "runs");
   const archiveRoot = join(opts.factoryHome, "archive", "runs");
   const now = nowMs();
   for (const run of runs) {
@@ -71,6 +120,15 @@ export function gcMetadataArchive(opts: GcOptions, report: GcReport, cfg: GcRete
     if (protectedIdleRun(run, now, cfg.worktree_resume_days)) continue;
     if (metadataArchiveBlocked(run, now, baseRedHours(st.repo))) continue;
     if (now - lastActivity(run) < metadataRetentionMs(run, cfg)) continue;
+    const skip = (reason: string) => void report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason });
+    if (st.worktree && existsSync(st.worktree)) {
+      skip("worktree still exists; metadata kept until the worktree is collected");
+      continue;
+    }
+    if (!realDirInside(runsRoot, run.dir) || dirname(run.dir) !== runsRoot) {
+      skip("run directory is a symlink or outside $FACTORY_HOME/runs; kept");
+      continue;
+    }
     const tarball = join(archiveRoot, `${run.run_id}.tar.gz`);
     if (isProtectedFactoryPath(opts.factoryHome, tarball)) continue;
     const bytes = dirBytes(run.dir);
@@ -79,9 +137,35 @@ export function gcMetadataArchive(opts: GcOptions, report: GcReport, cfg: GcRete
       report.metadata_moved.push(entry);
       continue;
     }
-    mkdirSync(archiveRoot, { recursive: true });
-    execFileSync("tar", ["-czf", tarball, "-C", join(run.dir, ".."), basename(run.dir)], { stdio: "ignore" });
-    rmSync(run.dir, { recursive: true, force: true });
+    const out = { failure: "" };
+    const done = await withRunRepoLock(opts, run, "gc-meta", () => {
+      const tmp = `${tarball}.tmp-${process.pid}`;
+      try {
+        mkdirSync(archiveRoot, { recursive: true });
+        const name = basename(run.dir);
+        execFileSync("tar", ["-czf", tmp, "--exclude", `${name}/home`, "--exclude", `${name}/worktree`, "-C", runsRoot, name], { stdio: "ignore" });
+        const listing = execFileSync("tar", ["-tzf", tmp], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+        if (!listing.split("\n").includes(`${name}/state.json`)) throw new Error("tarball does not contain state.json");
+        renameSync(tmp, tarball);
+      } catch (e) {
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          // nothing was written
+        }
+        out.failure = (e as Error).message.slice(0, 200) || "tar failed";
+        return;
+      }
+      rmSync(run.dir, { recursive: true, force: true });
+    });
+    if (!done) {
+      skip("repository is locked by a running factory process; metadata kept");
+      continue;
+    }
+    if (out.failure) {
+      skip(`tarball failed; run directory kept (${out.failure})`);
+      continue;
+    }
     report.metadata_moved.push(entry);
   }
 }

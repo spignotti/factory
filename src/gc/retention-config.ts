@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -20,7 +20,10 @@ export const GcRetentionSchema = z
   .strict();
 export type GcRetention = z.infer<typeof GcRetentionSchema>;
 
-const GcBlockSchema = z.object({ gc: z.object({ retention: GcRetentionSchema.partial().optional() }).optional() }).strict();
+// Only the `gc` key is read here; the rest of the layer (roles, providers, ...) is validated by the profile loader.
+// Not `.strict()` at the top level: a profile layer always carries other keys, and a strict parse would fail and
+// silently drop the user's `gc.retention` overrides.
+const GcBlockSchema = z.object({ gc: z.object({ retention: GcRetentionSchema.partial().optional() }).optional() });
 
 /** Paths under `$FACTORY_HOME` that gc must never touch. */
 export const GC_PROTECTED_TOP = new Set([
@@ -34,7 +37,7 @@ export const GC_PROTECTED_TOP = new Set([
 
 export function isProtectedFactoryPath(factoryHome: string, absPath: string): boolean {
   const root = factoryHome.endsWith("/") ? factoryHome.slice(0, -1) : factoryHome;
-  if (!absPath.startsWith(root)) return false;
+  if (absPath !== root && !absPath.startsWith(`${root}/`)) return false;
   const rel = absPath.slice(root.length).replace(/^\//, "");
   const parts = rel.split("/");
   const top = parts[0] ?? "";
@@ -51,10 +54,9 @@ function mergeRetention(layers: ReturnType<typeof loadLayers>): GcRetention {
   let out: GcRetention = GcRetentionSchema.parse({});
   for (const layer of layers) {
     if (layer.name !== "built-in" && layer.name !== "user") continue;
-    const block = GcBlockSchema.safeParse(layer.data);
-    if (block.success && block.data.gc?.retention) {
-      out = { ...out, ...GcRetentionSchema.partial().parse(block.data.gc.retention) };
-    }
+    // parse (not safeParse): an invalid gc block fails closed instead of falling back to defaults.
+    const block = GcBlockSchema.parse(layer.data);
+    if (block.gc?.retention) out = { ...out, ...block.gc.retention };
   }
   return GcRetentionSchema.parse(out);
 }
@@ -69,12 +71,8 @@ export function deploySelfBusy(env: NodeJS.ProcessEnv = process.env): boolean {
   const rel = env.FACTORY_RELEASES ?? join(homedir(), ".local/share/factory-releases");
   const lock = join(rel, ".deploy.lock");
   if (!existsSync(lock)) return false;
-  try {
-    readFileSync(lock, "utf8");
-  } catch {
-    return false;
-  }
-  // Non-blocking flock: exit 1 when the lock is held by deploy-self.
+  // Non-blocking flock: exit 1 when the lock is held by deploy-self. Any other failure (flock missing,
+  // lock unreadable) counts as busy, so gc fails closed.
   try {
     execFileSync("flock", ["-n", lock, "true"], { stdio: "ignore" });
     return false;

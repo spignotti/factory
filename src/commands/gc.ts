@@ -33,6 +33,20 @@ async function remoteSha(repo: string, branch: string): Promise<string | null> {
   return out ? out.split(/\s+/)[0]! : null;
 }
 
+/** True when GitHub's `refs/pull/<n>/head` points at the local branch tip; false on any error. */
+async function pullHeadMatches(repo: string, prUrl: string, branch: string): Promise<boolean> {
+  const n = /\/pull\/(\d+)(?:$|[/?#])/.exec(prUrl)?.[1];
+  if (!n) return false;
+  try {
+    const local = await localSha(repo, branch);
+    if (!local) return false;
+    const out = (await git(repo, ["ls-remote", "origin", `refs/pull/${n}/head`])).trim();
+    return out.split(/\s+/)[0] === local;
+  } catch {
+    return false;
+  }
+}
+
 function markCollected(run: RunRecord, at: string): void {
   const path = join(run.dir, "state.json");
   const tmp = `${path}.gc-${process.pid}`;
@@ -111,7 +125,10 @@ function emptyReport(dryRun: boolean): GcReport {
 export async function gc(opts: GcOptions): Promise<GcReport> {
   let cfg = opts.retention ?? loadGcRetention(opts.factoryHome);
   if (opts.archiveDays !== undefined) cfg = { ...cfg, metadata_days: opts.archiveDays };
-  const dryRun = opts.dryRun ?? (opts.scheduled ? cfg.dry_run : false);
+  // `--scheduled` (cron) is dry-run whenever the profile says so, even though the CLI passes dryRun=false by
+  // default, and it never forces: dirty worktrees are always kept on the scheduled path.
+  const dryRun = opts.scheduled ? opts.dryRun === true || cfg.dry_run : (opts.dryRun ?? false);
+  if (opts.scheduled) opts = { ...opts, force: false };
   const report = emptyReport(dryRun);
   const nowMs = () => opts.now?.() ?? Date.now();
   const now = () => new Date(nowMs()).toISOString();
@@ -170,6 +187,9 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
       }
       if (st.branch) {
         const unpushed = await branchHasUnpushedCommits(st.repo, st.branch);
+        // A merged PR whose head branch GitHub auto-deleted (and a pruned fetch dropped) is still pushed:
+        // GitHub keeps refs/pull/<n>/head. Fails closed when that ref cannot be read.
+        if (unpushed.unpushed && st.pr && prState === "merged" && (await pullHeadMatches(st.repo, st.pr, st.branch))) unpushed.unpushed = false;
         if (unpushed.unpushed) {
           skip(unpushed.reason ?? "branch has unpushed commits");
           continue;
@@ -240,8 +260,8 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
   }
   await abandonUnanswered({ ...opts, dryRun }, report, nowMs);
   if (opts.retentionStages ?? true) {
-    gcRunHomes({ ...opts, dryRun }, report, cfg, nowMs);
-    gcMetadataArchive({ ...opts, dryRun }, report, cfg, nowMs);
+    await gcRunHomes({ ...opts, dryRun }, report, cfg, nowMs);
+    await gcMetadataArchive({ ...opts, dryRun }, report, cfg, nowMs);
     gcArchiveRuns({ ...opts, dryRun }, report, cfg, nowMs);
   }
   if (opts.evidence ?? true) {
