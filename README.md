@@ -91,6 +91,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
 | `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
+| `factory notify flush` | retry pending run-end notifications from `~/.factory/outbox/` (also at run/resume start) |
 | `factory --version` | package version (plus the commit for a checkout install) |
 
 `factory` without arguments prints every flag. All commands take `--json` where the output is machine-readable.

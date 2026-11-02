@@ -105,7 +105,16 @@ describe("notify.yaml", () => {
 
 describe("sendNotification", () => {
   const hook = { url: URL_, key: KEY, header: "Authorization", scheme: "Bearer" };
-  const payload = { event: "factory.run_finished" as const, run_id: "r", repo: "acme/widgets", result: "done", reason: "ok", pr: null, finished_at: "2026-10-30T10:00:00.000Z" };
+  const payload = {
+    event: "factory.run_finished" as const,
+    event_id: "deadbeefdeadbeefdeadbeef",
+    run_id: "r",
+    repo: "acme/widgets",
+    result: "done",
+    reason: "ok",
+    pr: null,
+    finished_at: "2026-10-30T10:00:00.000Z",
+  };
 
   it("POSTs JSON with the key in the configured header", async () => {
     const { fetch, calls } = fakeFetch([200]);
@@ -149,10 +158,11 @@ describe("notifyRunFinished", () => {
     const { fetch, calls } = fakeFetch([200]);
     const out = await notifyRunFinished(result(repo, { pr: "https://github.com/acme/widgets/pull/8" }), { factoryHome, fetch, sleep: noSleep }, events, new Date("2026-10-30T00:20:41Z"));
     expect(out).toMatchObject({ status: "sent" });
-    expect(calls[0]!.body).toEqual({
+    expect(calls[0]!.body).toMatchObject({
       event: "factory.run_finished", run_id: "20261030-101010-abcdef", repo: "acme/widgets", result: "needs_human",
       reason: "watchdog: no event for 1491s", pr: "https://github.com/acme/widgets/pull/8", finished_at: "2026-10-30T00:20:41.000Z",
     });
+    expect(calls[0]!.body.event_id).toHaveLength(24);
     const log = readFileSync(join(runDir, "events.jsonl"), "utf8");
     expect(log).toContain('"event":"notify"');
     expect(log).toContain('"status":"sent"');
@@ -192,6 +202,7 @@ describe("notify test and doctor", () => {
     const r = await notifyTest("acme/widgets", { factoryHome: home(yamlFor()), fetch, sleep: noSleep }, new Date("2026-10-30T10:00:00Z"));
     expect(r).toEqual({ ok: true, message: "test ping for acme/widgets sent (HTTP 200, 1 attempt)" });
     expect(calls[0]!.body).toMatchObject({ event: "factory.notify_test", repo: "acme/widgets", result: "test", run_id: null });
+    expect(calls[0]!.body.event_id).toHaveLength(24);
     const missing = await notifyTest("acme/nope", { factoryHome: home(yamlFor()), fetch });
     expect(missing.ok).toBe(false);
     const failed = await notifyTest("acme/widgets", { factoryHome: home(yamlFor()), fetch: fakeFetch([403]).fetch, sleep: noSleep });
@@ -205,6 +216,7 @@ describe("notify test and doctor", () => {
     const io = { out: () => undefined, err: (s: string) => void err.push(s) };
     expect(await main(["notify"], io)).toBe(2);
     expect(await main(["notify", "test"], io)).toBe(2);
+    expect(await main(["notify", "flush"], io)).toBe(0);
     expect(err.join("")).toContain("factory notify test <owner/name>");
   });
 

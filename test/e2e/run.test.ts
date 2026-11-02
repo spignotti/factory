@@ -64,10 +64,11 @@ describe("notify hook on run_finished", () => {
     expect(r.result.result).toBe(expected);
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]!.headers.Authorization).toBe(`Bearer ${HOOK_KEY}`);
-    expect(h.sent[0]!.body).toEqual({
+    expect(h.sent[0]!.body).toMatchObject({
       event: "factory.run_finished", run_id: r.runId, repo: "acme/widgets", result: expected,
       reason: r.result.reason.slice(0, 500), pr: r.result.pr, finished_at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
     });
+    expect(String(h.sent[0]!.body.event_id)).toHaveLength(24);
     expect(eventsOf(r, "notify")).toEqual([expect.objectContaining({ data: expect.objectContaining({ repo: "acme/widgets", status: "sent", http_status: 200 }) })]);
     const all = readdirSync(r.runDir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => readFileSync(join(r.runDir, d.name), "utf8")).join("\n");
     expect(all).not.toContain(HOOK_KEY);

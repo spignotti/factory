@@ -7,6 +7,7 @@ import { type EventLog, redact, type RunResult } from "./events.js";
 import { originUrl } from "./git.js";
 import { canonicalRepoId } from "./memory.js";
 import { expandHome, looseMode } from "./secrets.js";
+import { enqueueOutbox, listOutboxEntries, notifyAbortSignal, outboxCount, outboxPath, removeOutboxFile, withEventId, type OutboxEntry } from "./notify-outbox.js";
 
 /**
  * Run-end notification: one POST per finished run to the webhook of the bot that owns the repo
@@ -112,6 +113,8 @@ export async function ownerRepoOfDir(repoDir: string): Promise<string | undefine
 /** The JSON body a bot's webhook routine receives. Untrusted for the bot: it reads result.json itself. */
 export interface NotifyPayload {
   event: "factory.run_finished" | "factory.notify_test";
+  /** Stable idempotency key (same run finish → same value). */
+  event_id: string;
   run_id: string | null;
   repo: string;
   result: string;
@@ -197,15 +200,27 @@ export interface NotifyDeps {
 
 /** Payload of a finished run. */
 export function runPayload(result: RunResult, repo: string, finishedAt: Date): NotifyPayload {
-  return {
-    event: "factory.run_finished",
-    run_id: result.run_id,
+  const finished_at = finishedAt.toISOString();
+  return withEventId(
+    {
+      event: "factory.run_finished",
+      run_id: result.run_id,
+      repo,
+      result: result.result,
+      reason: result.reason.slice(0, 500),
+      pr: result.pr,
+      finished_at,
+    },
     repo,
-    result: result.result,
-    reason: result.reason.slice(0, 500),
-    pr: result.pr,
-    finished_at: finishedAt.toISOString(),
-  };
+  );
+}
+
+function outboxEnqueue(factoryHome: string, entry: Omit<OutboxEntry, "enqueued_at">): void {
+  try {
+    enqueueOutbox(factoryHome, { ...entry, enqueued_at: new Date().toISOString() });
+  } catch {
+    // outbox must not fail the run
+  }
 }
 
 /**
@@ -224,14 +239,32 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
   try {
     cfg = loadNotifyConfig(deps.factoryHome);
   } catch (e) {
-    log({ status: "error", error: (e as Error).message.slice(0, 300) });
+    const msg = (e as Error).message.slice(0, 300);
+    log({ status: "error", error: msg });
+    const repo = await ownerRepoOfDir(result.repo);
+    if (repo) {
+      const payload = runPayload(result, repo, finishedAt);
+      outboxEnqueue(deps.factoryHome, { event_id: payload.event_id, repo, payload, kind: "error", detail: msg });
+    }
     return undefined;
   }
   if (!cfg) return undefined;
   const repo = await ownerRepoOfDir(result.repo);
   const hook = repo ? cfg.repos[repo] : undefined;
+  const raw = repo ? runPayload(result, repo, finishedAt) : undefined;
+  // The outbox persists the payload on disk: redact run secrets from the free-text reason.
+  const payload = raw && events ? { ...raw, reason: events.redact(raw.reason) } : raw;
   if (!repo || !hook) {
     log({ status: "skipped", repo: repo ?? null, reason: "no hook for this repo in notify.yaml" });
+    if (payload) {
+      outboxEnqueue(deps.factoryHome, {
+        event_id: payload.event_id,
+        repo: payload.repo,
+        payload,
+        kind: "skipped",
+        detail: "no hook for this repo in notify.yaml",
+      });
+    }
     return undefined;
   }
   let key: string;
@@ -239,18 +272,46 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
     key = hookKey(hook);
   } catch (e) {
     log({ status: "error", repo, error: (e as Error).message.slice(0, 300) });
+    if (payload) {
+      outboxEnqueue(deps.factoryHome, {
+        event_id: payload.event_id,
+        repo: payload.repo,
+        payload,
+        kind: "error",
+        detail: (e as Error).message.slice(0, 300),
+      });
+    }
     return undefined;
   }
   events?.addSecrets([hook.url, key]);
-  const out = await sendNotification(hook, key, runPayload(result, repo, finishedAt), {
+  const body = payload!;
+  // Write-ahead: the entry exists while the POST is in flight, so a second signal, SIGKILL or OOM
+  // during delivery leaves it for the next flush (receivers dedupe on event_id).
+  outboxEnqueue(deps.factoryHome, { event_id: body.event_id, repo: body.repo, payload: body, kind: "failed", detail: "delivery in progress" });
+  const out = await sendNotification(hook, key, body, {
     fetch: deps.fetch,
     sleep: deps.sleep,
     attempts: cfg.attempts,
     timeoutMs: cfg.timeout_s * 1000,
     backoffMs: deps.backoffMs,
-    signal: deps.signal,
+    signal: notifyAbortSignal(deps.signal),
   });
-  log({ repo, result: result.result, ...out });
+  log({ repo, result: result.result, event_id: body.event_id, ...out });
+  if (out.status === "sent") {
+    try {
+      removeOutboxFile(deps.factoryHome, body.event_id);
+    } catch {
+      // a leftover entry is re-sent once by the next flush; receivers dedupe on event_id
+    }
+  } else {
+    outboxEnqueue(deps.factoryHome, {
+      event_id: body.event_id,
+      repo: body.repo,
+      payload: body,
+      kind: "failed",
+      detail: out.error ?? (out.http_status !== null ? `HTTP ${out.http_status}` : "delivery failed"),
+    });
+  }
   return out;
 }
 
@@ -272,8 +333,16 @@ export async function notifyTest(repo: string, deps: NotifyDeps, now = new Date(
   } catch (e) {
     return { ok: false, message: (e as Error).message };
   }
-  const payload: NotifyPayload = { event: "factory.notify_test", run_id: null, repo, result: "test", reason: "factory notify test", pr: null, finished_at: now.toISOString() };
-  const out = await sendNotification(hook, key, payload, { fetch: deps.fetch, sleep: deps.sleep, attempts: cfg.attempts, timeoutMs: cfg.timeout_s * 1000, backoffMs: deps.backoffMs, signal: deps.signal });
+  const finished_at = now.toISOString();
+  const payload = withEventId({ event: "factory.notify_test", run_id: null, repo, result: "test", reason: "factory notify test", pr: null, finished_at }, repo);
+  const out = await sendNotification(hook, key, payload, {
+    fetch: deps.fetch,
+    sleep: deps.sleep,
+    attempts: cfg.attempts,
+    timeoutMs: cfg.timeout_s * 1000,
+    backoffMs: deps.backoffMs,
+    signal: notifyAbortSignal(deps.signal),
+  });
   const tries = `${out.attempts} attempt${out.attempts === 1 ? "" : "s"}`;
   return out.status === "sent"
     ? { ok: true, message: `test ping for ${repo} sent (HTTP ${out.http_status}, ${tries})` }
@@ -318,3 +387,90 @@ export async function notifyChecks(factoryHome: string, repoDir?: string): Promi
   }
   return checks;
 }
+
+export interface FlushReport {
+  sent: number;
+  failed: number;
+  skipped: number;
+  remaining: number;
+  errors: string[];
+}
+
+export interface FlushOptions {
+  /** Attempts per entry (default: notify.yaml `attempts`). */
+  attempts?: number;
+  /** Stop starting new deliveries after this many ms (default: no limit). */
+  budgetMs?: number;
+  now?: () => number;
+}
+
+/**
+ * Bounded flush at the start of `factory run`/`resume`: one attempt per entry, at most ~20 s before
+ * new deliveries stop, so a dead webhook cannot delay every run start by minutes.
+ */
+export const START_FLUSH: FlushOptions = { attempts: 1, budgetMs: 20_000 };
+
+/**
+ * Sends every deliverable outbox entry; leaves entries that still fail or have no hook. After a
+ * failure, the remaining entries of the same repo wait for the next flush (its hook is down).
+ */
+export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = { factoryHome }, opts: FlushOptions = {}): Promise<FlushReport> {
+  const report: FlushReport = { sent: 0, failed: 0, skipped: 0, remaining: 0, errors: [] };
+  const now = opts.now ?? Date.now;
+  const started = now();
+  const downRepos = new Set<string>();
+  let cfg: NotifyConfig | undefined;
+  try {
+    cfg = loadNotifyConfig(factoryHome);
+  } catch (e) {
+    report.errors.push((e as Error).message.slice(0, 300));
+    report.remaining = outboxCount(factoryHome);
+    return report;
+  }
+  if (!cfg) {
+    report.remaining = outboxCount(factoryHome);
+    return report;
+  }
+  const signal = notifyAbortSignal(deps.signal);
+  for (const entry of listOutboxEntries(factoryHome)) {
+    if (opts.budgetMs !== undefined && now() - started >= opts.budgetMs) break;
+    if (signal.aborted) break;
+    if (downRepos.has(entry.repo)) {
+      report.skipped++;
+      continue;
+    }
+    const hook = cfg.repos[entry.repo];
+    if (!hook) {
+      report.skipped++;
+      continue;
+    }
+    let key: string;
+    try {
+      key = hookKey(hook);
+    } catch (e) {
+      report.errors.push(`${entry.repo}: ${(e as Error).message.slice(0, 200)}`);
+      report.skipped++;
+      continue;
+    }
+    const out = await sendNotification(hook, key, entry.payload, {
+      fetch: deps.fetch,
+      sleep: deps.sleep,
+      attempts: opts.attempts ?? cfg.attempts,
+      timeoutMs: cfg.timeout_s * 1000,
+      backoffMs: deps.backoffMs,
+      signal,
+    });
+    if (out.status === "sent") {
+      removeOutboxFile(factoryHome, entry.event_id);
+      report.sent++;
+    } else {
+      report.failed++;
+      downRepos.add(entry.repo);
+      if (out.error || out.http_status !== null) report.errors.push(`${entry.repo}: ${out.error ?? `HTTP ${out.http_status}`}`);
+    }
+  }
+  report.remaining = outboxCount(factoryHome);
+  return report;
+}
+
+export { outboxCount, outboxPath, listOutboxEntries };
