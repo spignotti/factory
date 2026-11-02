@@ -75,10 +75,10 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 | Command | Purpose |
 | --- | --- |
-| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
+| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
 | `factory resume <run-id>` | continue after a human fix |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub, disk/inodes |
-| `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
+| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
@@ -586,7 +586,7 @@ API key for OpenCode Go).
 ## Status, stats, cleanup
 
 ```
-factory status [--json]                     # running, waiting for you, interrupted; open factory PRs
+factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs
 factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
 factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12]  # clean up finished runs
 ```

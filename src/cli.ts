@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { defaultRef, renderCiStub } from "./ci.js";
 
@@ -25,13 +25,14 @@ import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 import { asset } from "./prompts.js";
-import { notifyTest, flushNotifyOutbox } from "./notify.js";
+import { notifyTest, flushNotifyOutbox, requireNotifyHook } from "./notify.js";
 
 const USAGE = `usage:
   factory --version
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
               [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
+              [--no-notify] (refuse to start without a notify hook for the repo unless this flag is set)
   factory resume <run-id> [--wait] [--no-pr] [--profile <file>]
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
   factory doctor [--repo <path>] [--profile <file>] [--ping] [--services] [--json]
@@ -338,6 +339,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           "plan-effort": { type: "string" },
           "no-pr": { type: "boolean", default: false },
           wait: { type: "boolean", default: false },
+          "no-notify": { type: "boolean", default: false },
           profile: { type: "string" },
         },
       });
@@ -349,6 +351,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
       if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = factoryHomeOf();
+      if (!values["no-notify"]) {
+        const hook = await requireNotifyHook(factoryHome, resolve(values.repo));
+        if (!hook.ok) {
+          io.err(`factory: ${hook.message}\n`);
+          return 2;
+        }
+      }
       // Best effort, bounded, never fails the run; FACTORY_NO_AUTO_GC=1 turns it off.
       if (process.env.FACTORY_NO_AUTO_GC !== "1") await autoGc({ factoryHome, github: new GhCli(), log: io.err });
       const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));

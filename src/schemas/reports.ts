@@ -21,6 +21,19 @@ export const StatusReportSchema = z.strictObject({
     }),
   ),
   interrupted: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), step: z.string() })),
+  queued: z.array(
+    z.strictObject({
+      run_id: z.string(), repo: z.string(), task: z.string(), holder_run_id: nullableStr, holder_pid: z.number().int().nullable(),
+      minutes: z.number(),
+    }),
+  ),
+  orphaned: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), step: z.string() })),
+  stalled: z.array(
+    z.strictObject({
+      run_id: z.string(), repo: z.string(), task: z.string(), step: z.string(), lane: z.enum(["standard", "fast"]),
+      pid: z.number().int(), minutes: z.number(), silent_minutes: z.number(), branch: nullableStr, pr: nullableStr,
+    }),
+  ),
   prs: z.array(
     z.strictObject({
       run_id: z.string(), repo: z.string(), task: z.string(), pr: z.string(), state: z.enum(["open", "unknown"]), draft: z.boolean().nullable(),

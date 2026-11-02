@@ -6,6 +6,7 @@ import { realSleep, type Sleep } from "./agents/fake-runner.js";
 import { type EventLog, redact, type RunResult } from "./events.js";
 import { originUrl } from "./git.js";
 import { canonicalRepoId } from "./memory.js";
+import { listRuns, readEvents } from "./runs.js";
 import { expandHome, looseMode } from "./secrets.js";
 import { enqueueOutbox, listOutboxEntries, notifyAbortSignal, outboxCount, outboxPath, removeOutboxFile, withEventId, type OutboxEntry } from "./notify-outbox.js";
 
@@ -433,3 +434,92 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
 }
 
 export { outboxCount, outboxPath, listOutboxEntries };
+
+const NOTIFY_DOCTOR_DAYS = 7;
+const MS_DAY = 86_400_000;
+
+export async function reposWithRecentRunsMissingHook(factoryHome: string, sinceMs: number, now = Date.now()): Promise<string[]> {
+  const cutoff = now - sinceMs;
+  const counts = new Map<string, number>();
+  for (const run of listRuns(factoryHome)) {
+    if (run.started_at.getTime() < cutoff) continue;
+    const dir = run.state?.repo ?? run.result?.repo;
+    if (dir) counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  if (!counts.size) return [];
+  let cfg: NotifyConfig | undefined;
+  try {
+    cfg = loadNotifyConfig(factoryHome);
+  } catch {
+    cfg = undefined;
+  }
+  const missing: string[] = [];
+  for (const dir of counts.keys()) {
+    const key = await ownerRepoOfDir(dir);
+    if (!key) continue;
+    if (!cfg?.repos[key]) missing.push(key);
+  }
+  return missing.sort();
+}
+
+/** Extra doctor checks: outbox backlog, recent skipped/failed notify, repos with runs but no hook. */
+export async function notifyDoctorChecks(factoryHome: string, now = Date.now()): Promise<NotifyCheck[]> {
+  const checks: NotifyCheck[] = [];
+  const pending = outboxCount(factoryHome);
+  if (pending > 0) {
+    checks.push({
+      name: "notify outbox",
+      status: "fail",
+      detail: `${pending} pending notification(s) in ${outboxPath(factoryHome)}; run factory notify flush`,
+    });
+  }
+  const window = NOTIFY_DOCTOR_DAYS * MS_DAY;
+  const missing = await reposWithRecentRunsMissingHook(factoryHome, window, now);
+  if (missing.length) {
+    checks.push({
+      name: "notify coverage",
+      status: "fail",
+      detail: `recent runs but no hook for ${missing.join(", ")} (see docs/BOTS.md)`,
+    });
+  }
+  let skipped = 0;
+  let failed = 0;
+  const cutoff = now - window;
+  for (const run of listRuns(factoryHome)) {
+    if (run.started_at.getTime() < cutoff) continue;
+    for (const e of readEvents(run)) {
+      if (e.event !== "notify") continue;
+      if (e.data.status === "skipped") skipped++;
+      if (e.data.status === "failed") failed++;
+    }
+  }
+  if (skipped > 0 || failed > 0) {
+    checks.push({
+      name: "notify delivery",
+      status: "fail",
+      detail: `last ${NOTIFY_DOCTOR_DAYS} days: ${skipped} skipped, ${failed} failed notification(s) in run events; fix hooks and run factory notify flush`,
+    });
+  }
+  if (!checks.length) checks.push({ name: "notify delivery", status: "ok", detail: `no outbox backlog; hooks cover recent repos (last ${NOTIFY_DOCTOR_DAYS} days)` });
+  return checks;
+}
+
+/** Whether a GitHub-origin repo has a configured hook (used before factory run). */
+export async function requireNotifyHook(factoryHome: string, repoDir: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const repo = await ownerRepoOfDir(repoDir);
+  if (!repo) return { ok: true };
+  let cfg: NotifyConfig | undefined;
+  try {
+    cfg = loadNotifyConfig(factoryHome);
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
+  if (!cfg) return { ok: false, message: `no ${notifyPath(factoryHome)}: factory run requires a notify hook (see docs/BOTS.md) or pass --no-notify` };
+  if (!cfg.repos[repo]) return { ok: false, message: `no hook for ${repo} in ${notifyPath(factoryHome)}; pass --no-notify to run without waking the bot` };
+  try {
+    hookKey(cfg.repos[repo]!);
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
+  return { ok: true };
+}
