@@ -317,6 +317,23 @@ describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", 
   });
 });
 
+describe("factory doctor: concurrency", () => {
+  it("reports max_runs and warns when parallel runs meet fixed host ports", async () => {
+    const repo = createFixtureRepo((c) => {
+      c.concurrency = { max_runs: 2, exclusive_paths: ["supabase/migrations/**"] };
+      c.services = [{ name: "db", start: "true", host: true, ports: [5432] }];
+    });
+    const c = capture();
+    await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c.io);
+    const r = JSON.parse(c.text()) as DoctorReport;
+    expect(check(r, "concurrency")).toEqual({
+      name: "concurrency",
+      status: "warn",
+      detail: "max_runs 2; exclusive_paths supabase/migrations/**; db has fixed host ports (one instance per box)",
+    });
+  });
+});
+
 describe("factory doctor: services and ui", () => {
   const SERVE = `node -e "require('http').createServer((q,r)=>r.end('ok')).listen(Number(process.argv[1]),'0.0.0.0')"`;
   const services = (c: Record<string, unknown>) => {

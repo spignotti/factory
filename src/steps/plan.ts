@@ -15,6 +15,7 @@ export const PLAN_SHAPE = `plan.json shape:
  "packages":[{"id":"P1","title":"","description":"","files":[],"depends_on":[],"changes_flows":[]}],
  "acceptance":[{"id":"A1","package":"P1","text":"","verify":"test|check|evaluator|review","kind":"behavior|edge_case|repro","risk":false}],
  "out_of_scope":[],"protected_changes":[]}
+Optional, only when the change needs manual production-host commands (launchd, restic, Docker Desktop, files outside the repo): "host_steps":{"commands":["exact command"],"verify":"how to check","rollback":"how to undo"}. Omit host_steps otherwise.
 or {"version":1,"questions":["..."]}. Return it as a single \`\`\`json block.`;
 
 async function planInput(ctx: PlanContext): Promise<string> {

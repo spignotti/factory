@@ -170,6 +170,8 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   }
   if (!same(b.models, a.models)) out.push("models changed");
   if (!same(b.git, a.git)) out.push("git author changed");
+  if (a.concurrency.max_runs > b.concurrency.max_runs) out.push("concurrency.max_runs raised");
+  removed("concurrency.exclusive_paths", b.concurrency.exclusive_paths, a.concurrency.exclusive_paths);
   return out;
 }
 

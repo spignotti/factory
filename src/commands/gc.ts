@@ -118,7 +118,7 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
         continue;
       }
     }
-    const release = acquireRepoLock(opts.factoryHome, await repoLockId(st.repo), `gc-${run.run_id}`);
+    const release = acquireRepoLock(opts.factoryHome, await repoLockId(st.repo), `gc-${run.run_id}`, { maxRuns: lockMaxRuns(st.repo), exclusive: true });
     if (!release) {
       skip("repository is locked by a running factory process");
       continue;
@@ -311,6 +311,15 @@ async function abandonUnanswered(opts: GcOptions, report: GcReport, nowMs: () =>
   }
 }
 
+/** Checkout `concurrency.max_runs`, or 1 when repo.yaml cannot be read. Exclusive claim still covers higher slots that exist. */
+function lockMaxRuns(repo: string): number {
+  try {
+    return loadRepoConfig(repo).concurrency.max_runs;
+  } catch {
+    return 1;
+  }
+}
+
 /**
  * Run directories idle for `archiveDays` (default 14) drop worktree copies, artifacts and intermediate
  * files. `result.json`, `pr.md`, `events.jsonl`, `state.json` (gc still retires the branch) and `*.log` stay.
@@ -326,7 +335,7 @@ async function archiveOldRuns(opts: GcOptions, report: GcReport, nowMs: () => nu
     if (now - lastActivity(run) < archiveMs) continue;
     const wt = st.worktree && existsSync(st.worktree) ? st.worktree : null;
     if (wt && existsSync(st.repo)) {
-      const release = acquireRepoLock(opts.factoryHome, await repoLockId(st.repo), `gc-archive-${run.run_id}`);
+      const release = acquireRepoLock(opts.factoryHome, await repoLockId(st.repo), `gc-archive-${run.run_id}`, { maxRuns: lockMaxRuns(st.repo), exclusive: true });
       if (!release) {
         report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "repository is locked by a running factory process" });
         continue;

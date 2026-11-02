@@ -223,6 +223,34 @@
                   ],
                   "additionalProperties": false
                 }
+              },
+              "host_steps": {
+                "type": "object",
+                "properties": {
+                  "commands": {
+                    "minItems": 1,
+                    "maxItems": 40,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "verify": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "rollback": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "commands",
+                  "verify",
+                  "rollback"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join, resolve } from "node:path";
 import type { BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
+import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
@@ -23,7 +24,8 @@ import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
-import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
+import { acquireRepoLock, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
+import { planPaths, touchesExclusive } from "./overlap.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -88,25 +90,77 @@ function flakyChecks(runDir: string): string[] {
   return [...names];
 }
 
-/** One factory process per repository (runs and resumes); `wait` queues instead of `locked`. */
+/** One slot per run, up to `maxRuns` (default 1). `wait` queues instead of `locked`. The reason names the lock key, never a credential URL. */
 export async function takeRepoLock(
   deps: RunDeps,
   repoDir: string,
   runId: string,
   events: EventLog,
   wait: boolean,
-): Promise<{ release?: () => void; reason: string }> {
-  const id = await repoLockId(repoDir);
-  const release = acquireRepoLock(deps.factoryHome, id, runId);
+  maxRuns = 1,
+): Promise<{ release?: LockRelease; reason: string }> {
+  const raw = await repoLockId(repoDir);
+  const id = lockRepoKey(raw);
+  const release = acquireRepoLock(deps.factoryHome, raw, runId, { maxRuns });
   if (release) return { release, reason: "" };
-  const holder = repoLockHolder(deps.factoryHome, id);
+  const holder = repoLockHolder(deps.factoryHome, raw);
   const by = holder ? `run ${holder.runId ?? "?"} (pid ${holder.pid})` : "another run";
   if (!wait) return { reason: `repo ${id} is locked by ${by}` };
   events.emit({ step: "intake", event: "queued", data: { repo: id, holder_run_id: holder?.runId ?? null, holder_pid: holder?.pid ?? null } });
   const queuedAt = Date.now();
-  const got = await waitForRepoLock(deps.factoryHome, id, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal });
+  const got = await waitForRepoLock(deps.factoryHome, raw, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal, maxRuns });
   events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
   return { release: got, reason: "" };
+}
+
+/**
+ * After the plan names files: keep the slot only when those paths do not overlap another live run.
+ * A conflict releases the slot before waiting, so two runs cannot each hold a slot and wait.
+ * Returns false when the run is `locked` (the lock is already released).
+ */
+async function ensurePathClaim(
+  f: RunFrame,
+  deps: RunDeps,
+  repoDir: string,
+  runId: string,
+  events: EventLog,
+  plan: Plan,
+  exclusivePaths: string[],
+  wait: boolean,
+): Promise<boolean> {
+  const paths = planPaths(plan);
+  const exclusive = touchesExclusive(paths, exclusivePaths);
+  const raw = await repoLockId(repoDir);
+  const key = lockRepoKey(raw);
+  const poll = deps.lockPollMs ?? 15_000;
+  for (;;) {
+    const slot = f.release?.slot;
+    if (slot === undefined) return false;
+    const decision = decidePathClaim(deps.factoryHome, raw, slot, runId, { paths, exclusive });
+    if (decision.ok) return true;
+    if (decision.kind === "busy") {
+      await realSleep(poll, deps.signal);
+      continue;
+    }
+    const reason = `planned paths overlap active runs: ${decision.conflicts.join("; ")}`;
+    if (!wait) {
+      f.release?.();
+      f.release = undefined;
+      f.set({ result: "locked", reason });
+      return false;
+    }
+    events.emit({ step: "intake", event: "queued", data: { repo: key, overlap: decision.conflicts } });
+    f.release?.();
+    f.release = undefined;
+    await realSleep(poll, deps.signal);
+    const again = await takeRepoLock(deps, repoDir, runId, events, true, f.maxRuns);
+    if (!again.release) {
+      f.set({ result: "locked", reason: again.reason || reason });
+      return false;
+    }
+    f.release = again.release;
+    f.lockSlot = again.release.slot;
+  }
 }
 
 interface Outcome {
@@ -126,7 +180,11 @@ interface Outcome {
 class RunFrame {
   out: Outcome = { result: "failed", reason: "", type: null, risk: null, merge_policy: null, pr: null, rounds: 0, branch: null, worktree: null };
   state?: RunState;
-  release?: () => void;
+  release?: LockRelease;
+  /** Slot taken with the repo lock; port allocation prefers this slot. */
+  lockSlot = 0;
+  /** `concurrency.max_runs` from the checkout, used when a path conflict re-acquires. */
+  maxRuns = 1;
   /** Set once the repo lock is held: findings memory to flush at the end. */
   memory?: { factoryHome: string; repoId: string };
   /** For the run-end notification. */
@@ -320,9 +378,11 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const checkout: RepoConfig = loadRepoConfig(repoDir);
     const task: Task = await readTask(opts, repoDir, deps.github);
     f.taskRef = task.ref;
-    const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false);
+    const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
     f.release = lock.release;
+    f.lockSlot = lock.release.slot;
+    f.maxRuns = checkout.concurrency.max_runs;
     // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
     // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
     const baseSha = await revParse(repoDir, await baseRef(repoDir, checkout.base_branch));
@@ -361,6 +421,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     writeJson(base, "plan.json", plan);
     events.emit({ step: "intake", event: "step_finished", data: { plan_source: planned.source, packages: plan.packages.length } });
     f.save();
+    if (!(await ensurePathClaim(f, deps, repoDir, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false))) return;
 
     // Base check, then the worktree.
     checkDeadline(base);
@@ -405,18 +466,27 @@ async function beginWork(
   const { deps, events, repo, deadline, repoDir, runDir, runId, task } = base;
   const st = f.state!;
   if (plan.type === "bug" && !repo.tests.run) {
-    return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR for human review, then re-runs after the merge" });
+    return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR, then re-runs after the merge" });
   }
-  let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
+  const stem = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
+  const slot = f.lockSlot;
+  let branch = f.maxRuns > 1 ? `${stem}-${runId.slice(-6)}-s${slot}` : stem;
   const taken = (b: string) =>
     gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${b}`]).then(async (local) => local || remoteBranchExists(repoDir, b));
-  if (await taken(branch)) branch += `-${runId.slice(-6)}`;
+  if (await taken(branch)) branch = f.maxRuns > 1 ? `${stem}-${runId}-s${slot}` : `${branch}-${runId.slice(-6)}`;
   const worktree = join(runDir, "worktree");
-  await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
+  const add = (b: string) => git(repoDir, ["worktree", "add", "-q", "-b", b, worktree, baseSha]);
+  try {
+    await add(branch);
+  } catch (e) {
+    if (f.maxRuns <= 1) throw e;
+    branch = `${stem}-${runId}-s${slot}`;
+    await add(branch);
+  }
   f.set({ branch, worktree });
   Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement", base_ci: undefined });
   f.save();
-  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation] };
+  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation], lockSlot: f.lockSlot };
   const services = (ctx.services = runServices(ctx));
   f.cleanups.push(() => services.stopAll());
   const env = agentEnv(ctx);
@@ -458,12 +528,13 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     return undefined;
   }
   if (!isBaseRedWaiting(st) || !st.base_sha || !existsSync(st.repo) || !existsSync(join(runDir, "plan.json"))) return undefined;
-  let hours: number;
+  let checkout: RepoConfig;
   try {
-    hours = loadRepoConfig(st.repo).limits.base_red_resume_hours;
+    checkout = loadRepoConfig(st.repo);
   } catch {
     return undefined;
   }
+  const hours = checkout.limits.base_red_resume_hours;
   if (hours <= 0) return undefined;
   const now = deps.now ?? Date.now;
   const updated = Date.parse(st.updated_at);
@@ -479,13 +550,30 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   const f = new RunFrame(runId, runDir, st.repo, st.lane ?? "standard", events, startedAt, now, st.task.ref);
-  const lock = await takeRepoLock(deps, st.repo, runId, events, false);
+  const lock = await takeRepoLock(deps, st.repo, runId, events, false, checkout.concurrency.max_runs);
   if (!lock.release) {
     events.emit({ step: "resume", event: "progress", data: { base_red_resume: "locked" } });
     return undefined;
   }
   f.release = lock.release;
+  f.lockSlot = lock.release.slot;
+  f.maxRuns = checkout.concurrency.max_runs;
   f.deps = deps;
+  let plan: Plan;
+  try {
+    plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
+  } catch (e) {
+    f.release();
+    f.release = undefined;
+    throw e;
+  }
+  try {
+    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, false))) return undefined;
+  } catch (e) {
+    f.release?.();
+    f.release = undefined;
+    throw e;
+  }
   rmSync(join(runDir, "result.json"), { force: true });
   st.result = null;
   st.reason = "";
@@ -646,8 +734,9 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   f.deps = deps;
   f.set({ branch: st.branch, worktree: st.worktree, pr: st.pr, rounds: st.rounds });
 
-  // Locked: report without touching this run's result.json/state.json (they describe the run, not this attempt).
-  const lock = await takeRepoLock(deps, st.repo, runId, events, opts.wait ?? false);
+  // Locked, or planned paths overlapping another run: report without touching this run's result.json.
+  const checkout = loadRepoConfig(st.repo);
+  const lock = await takeRepoLock(deps, st.repo, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
   if (!lock.release) {
     const locked: RunResult = {
       run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
@@ -657,6 +746,30 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     return locked;
   }
   f.release = lock.release;
+  f.lockSlot = lock.release.slot;
+  f.maxRuns = checkout.concurrency.max_runs;
+  let plan: Plan;
+  try {
+    plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
+  } catch (e) {
+    f.release();
+    f.release = undefined;
+    throw e;
+  }
+  try {
+    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false))) {
+      const locked: RunResult = {
+        run_id: runId, repo: st.repo, task: st.task.ref, type: plan.type, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
+        pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: f.out.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
+      };
+      await notifyFinished(locked, deps, events);
+      return locked;
+    }
+  } catch (e) {
+    f.release?.();
+    f.release = undefined;
+    throw e;
+  }
   f.state = st;
   // This attempt now owns the outcome: the previous attempt's result.json (e.g. `failed`) must not be read
   // as current while it runs; finish() writes the new one (every exit path, errors included).
@@ -677,6 +790,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
       lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline, secrets,
+      lockSlot: f.lockSlot,
     };
     const services = (ctx.services = runServices(ctx));
     f.cleanups.push(() => services.stopAll());

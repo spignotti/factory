@@ -9,7 +9,8 @@ import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { protectedFiles } from "../gates/builtin.js";
-import { type MergePolicy, mergePolicy, riskClass, type RiskAssessment } from "../pipeline/risk.js";
+import { type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
+import type { HostSteps } from "../schemas/plan.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { type GateReport, runGates } from "./gates.js";
@@ -48,7 +49,7 @@ export function protectedSection(ctx: Pick<RunContext, "plan">, files: string[],
   return [
     "## ⚠️ Changes protected config (CI / factory)",
     "",
-    "This PR changes files under `human_only_paths`. It is never auto-merged and needs a human's approval.",
+    "This PR changes files under `human_only_paths`.",
     "The factory's gates ran with the base branch's `.factory/repo.yaml`, not the changed one; CI on this PR runs the changed workflow files.",
     "",
     ...items,
@@ -121,6 +122,32 @@ function cell(s: string): string {
   return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
+/** Copy-paste host commands. Empty when the repo has no section title or the plan has no steps. */
+export function hostStepsMarkdown(title: string | undefined, steps: HostSteps | undefined): string {
+  if (!title || !steps) return "";
+  const host = /mac/i.test(title) ? "production Mac host" : "production host";
+  const script = steps.commands.join("\n");
+  const fence = [script, steps.verify, steps.rollback].some((s) => s.includes("```")) ? "~~~~" : "```";
+  return [
+    `## ${title}`,
+    "",
+    `Run these on the ${host}, in order:`,
+    "",
+    fence,
+    script,
+    fence,
+    "",
+    "**Verify**",
+    "",
+    steps.verify.trim(),
+    "",
+    "**Roll back**",
+    "",
+    steps.rollback.trim(),
+    "",
+  ].join("\n");
+}
+
 export function renderPrBody(ctx: RunContext, v: {
   summary: string;
   input: FinalizeInput;
@@ -155,8 +182,14 @@ export function renderPrBody(ctx: RunContext, v: {
     summary: v.summary,
     protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
     risk: out.risk.risk,
-    merge_policy: out.mergePolicy,
-    risk_reasons: list(out.risk.reasons),
+    risk_reason: cell(riskReasonLine(out.risk)),
+    security_rows: securityRows(v.changed)
+      .map((r) => `| ${cell(r.area)} | ${r.touched ? "yes" : "no"} | ${cell(r.note)} |`)
+      .join("\n"),
+    host_steps: (() => {
+      const md = hostStepsMarkdown(ctx.repo.pr?.host_steps_section, ctx.plan.host_steps);
+      return md ? `\n${md}` : "";
+    })(),
     revert_notes: migrations.length ? `Migrations changed (${migrations.join(", ")}): roll them back explicitly.` : "",
     packages: plan.packages.map((p) => `- ${p.id} ${p.title}: ${input.packages.get(p.id) ?? "not run"}${input.failures[p.id] ? ` (${input.failures[p.id]})` : ""}`).join("\n"),
     acceptance: rows.join("\n"),

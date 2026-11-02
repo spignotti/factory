@@ -219,7 +219,7 @@ describe("factory gc", () => {
     expect((await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true })).evidence).toEqual([{ repo: r.repo, removed: [r.runId] }]);
     expect((await gc({ factoryHome: r.factoryHome, github: r.github, now: later })).evidence).toEqual([{ repo: r.repo, removed: [r.runId] }]);
     expect(git(r.repo, "ls-remote", "origin", "refs/heads/factory-evidence").split(/\s/)[0]).not.toBe(pub.sha);
-    expect(git(r.repo, "ls-tree", "-r", "refs/factory/evidence").trim()).not.toBe("");
+    expect(() => git(r.repo, "rev-parse", "--verify", "refs/factory/evidence")).toThrow();
     git(r.repo, "fetch", "-q", "origin", "+refs/heads/factory-evidence:refs/factory/evidence");
     expect(git(r.repo, "ls-tree", "-r", "refs/factory/evidence").trim()).toBe("");
     expect(git(r.repo, "rev-parse", "refs/factory/evidence^").trim()).toBe(pub.sha);

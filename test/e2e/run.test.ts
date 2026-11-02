@@ -164,7 +164,10 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.github.autoMerged).toEqual([]);
     expect(pr.body).toContain("Adds multiply(a, b)");
     expect(pr.body).toContain("| [x] | A1 | multiply(2, 3) returns 6 | test | test: `test/multiply.test.js::multiply` |");
-    expect(pr.body).toContain("merge policy: **human_review**");
+    expect(pr.body).toContain("## Risk & Security");
+    expect(pr.body).toContain("**low** — no sensitive paths, dependency changes, or migrations");
+    expect(pr.body).toContain("| Data/migrations | no | none in this diff |");
+    expect(pr.body).not.toMatch(/merge policy|Needs human review|## Mac install steps/);
     expect(pr.body).toMatch(/✅ unit/);
     expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, subscription/);
     expect(pr.body).toMatch(/- subscription tokens: \d+ in \/ \d+ out/);

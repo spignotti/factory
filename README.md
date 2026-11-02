@@ -18,7 +18,7 @@ source of truth; this README is the reference for concepts, configuration and co
    instructions; repo facts live in the repo's `AGENTS.md`.
 7. **Evidence over feelings.** Prompt, profile or pipeline changes need an `eval` comparison.
 
-All models run through Pi; no Claude/Codex CLI, no production data, one run per repository at a time.
+All models run through Pi; no Claude/Codex CLI, no production data. One run per repository unless the repo sets `concurrency.max_runs`.
 
 **Where runs happen.** A `factory run` targets only repositories that have `.factory/repo.yaml` (enrolled
 via `factory adopt`). Today that is **tourenpilot** and **tourenpilot-ops**. This repository ships the CLI
@@ -31,8 +31,8 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 - **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks are used as
   is; `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check; questions
-  → `needs_input`; per-repo lock (`--wait` queues); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
-  `factory/<task>-<slug>`.
+  → `needs_input`; per-repo lock (`concurrency.max_runs`, default 1; `--wait` queues on a full slot or on overlapping plans); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
+  `factory/<task>-<slug>` (with `-<run id>-s<slot>` when `max_runs` is above 1).
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
   bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity). The planner
   reads the repo's `AGENTS.md` at the base commit.
@@ -47,7 +47,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   `biome-ignore`, …), unless the plan lists that config file in a package's `files` or names the suppression.
   A `.factory/repo.yaml` change that weakens the factory's own checks (removing or changing a check,
   making one `local_only`, adding a `host: true` service, dropping `human_only_paths`/`sensitive_paths`/`forbidden_paths` entries, raising merge or diff limits,
-  changing secrets, `setup`, `env_command`, services, models, adding `agent_env`) fails it even when declared.
+  raising `concurrency.max_runs`, removing `concurrency.exclusive_paths`, changing secrets, `setup`, `env_command`, services, models, adding `agent_env`) fails it even when declared.
   The `protected_paths` gate fails on any changed `human_only_paths` file the plan does not declare (see
   [Protected config](#protected-config)).
 - **Evaluate** (only with `ui`, see below) runs before the reviewers; any evaluator bug skips review that round.
@@ -56,7 +56,11 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 - **Merge/exit** (`src/pipeline/merge.ts`, `loop.ts`): ids, dedupe, nit cap, stalemate, exit rules, fix rounds.
 - **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (no
   rebase, so never a force-push) plus full gates again, conflict → `needs_human`; risk class and merge
-  policy; PR body from `standards/pr-template.md`; push/PR through `src/gh.ts`. After the PR exists, pending
+  policy stay in `result.json`. The PR body (`standards/pr-template.md`) has one **Risk & Security** section:
+  five yes/no rows (data/migrations, auth/permissions, secrets handling, prod deploy/infra, dependencies)
+  and an overall rating (low/medium/high) with a one-line reason. When the plan carries `host_steps` and
+  the repo sets `pr.host_steps_section`, the body also has that section (copy-paste commands, verify, roll back);
+  otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, pending
   CI on the head is polled up to `limits.pr_ci_wait_minutes` and does not fail the run; red CI ends it `needs_human`.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/limit/auth/invalid_output classification with same-model
@@ -215,6 +219,11 @@ agent_env: []                        # extra env var names for agent tools and c
 docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
 ci: { toolchains: { uv: true, python: "3.12" } }  # what the CI stub installs [detected], see CI
 models: {}                           # per-repo role chains, see Model configuration
+concurrency:                     # parallel runs; see Parallel runs [max_runs 1]
+  max_runs: 1                    # 1..32 lock slots; raising it is a loosening
+  exclusive_paths: []            # globs that run alone (e.g. supabase/migrations/**); removing one is a loosening
+pr:
+  host_steps_section: "Mac install steps"   # omit to leave host steps out of the PR; see Risk & Security
 ```
 
 `repo.yaml` defines *when* a check runs, the command (nox session, npm script) *how*; the CI workflow is
@@ -233,10 +242,10 @@ protected) are the CI and factory config. A run may change them, the sanctioned 
    base commit, never from the user's checkout or the run branch, so a changed check list takes effect only
    after a human merged it. The `protected_paths` gate fails on any undeclared protected file, and the
    config guard fails on `repo.yaml` loosening even when declared (see Gates).
-3. **Always a human's OK.** Risk is `high`, the merge policy `human_review` whatever `merge:` says (never
-   auto-merge), the PR gets the label `factory:protected-config` and a "⚠️ Changes protected config
-   (CI / factory)" section with each declared change and the exact diff of the protected files. CI on the PR
-   runs the changed workflow files, so read that diff before approving.
+3. **High risk, no auto-merge.** Risk is `high`, so the recorded merge policy is `human_review` whatever
+   `merge:` says (never auto-merge). The PR gets the label `factory:protected-config` and a "⚠️ Changes
+   protected config (CI / factory)" section with each declared change and the exact diff of the protected
+   files. CI on the PR runs the changed workflow files.
 
 Agents still never get secret values; a protected change does not change what agents see.
 
@@ -244,6 +253,22 @@ These rules bind agents *inside a run*. Outside a run, the repo's own bot mainta
 (`.factory/repo.yaml`, `.factory/review-rules.md`, `AGENTS.md`) through normal PRs from its clone; a human
 still reviews and merges them (see [docs/BOTS.md](docs/BOTS.md#who-changes-what)). Factory code, the global
 config and model choice are changed in this repository via Cloud Agent PRs (not `factory run` on this repo).
+
+## Parallel runs
+
+`concurrency.max_runs` (default 1) is how many factory runs may hold the repo at once. Each run still has its own worktree, run directory and branch. The lock is N slot files under `$FACTORY_HOME/locks/`, named `<owner>-<repo>-<hash>.lock` (further slots `.<n>.lock`). The hash is of the canonical origin (`host/owner/repo`, credentials and `.git` stripped), so a URL with an embedded token never becomes a filename. A live lock left under the old sanitized-URL name still blocks the repo; a stale one is deleted.
+
+With `max_runs` above 1 the branch is `factory/<task>-<slug>-<run id>-s<slot>`, and port slots prefer lock slot + 1 (`{port_offset}` stays per run). Fixed host ports (`host: true` plus `ports`) are not shifted: the second run that needs them ends `env_missing`. `factory doctor` reports `max_runs`, `exclusive_paths` when set or when `max_runs` is above 1, and warns in that fixed-port case.
+
+After the plan names files, the run publishes those paths. Overlap with another live run's paths (a directory covers its children; `src/auth` does not cover `src/authz`; globs match either way) waits with `--wait` or returns `locked`. A plan that touches `exclusive_paths` is exclusive with every other such plan, even when the files differ — use it for database migrations (`supabase/migrations/**`). A run that is still planning has no paths yet and does not block; the later one yields. `factory gc` and archive take every slot first.
+
+`concurrency` is read from the checkout's `.factory/repo.yaml` at the start of the run. `pr.host_steps_section` is read from the base commit, with the rest of the PR policy.
+
+## Risk & Security
+
+The PR body has a single **Risk & Security** section: whether the diff touches data/migrations, auth/permissions, secrets handling, prod deploy/infra, or dependencies (yes/no plus a short note), then the overall rating and a one-line reason. The rating is the same `risk` as `result.json`. Merge policy stays on the result and in `factory status`; the PR body does not recommend a merge.
+
+When the change needs manual steps on the production host (launchd plists, restic, Docker Desktop, files outside the repo), the plan includes `host_steps`: `{ commands, verify, rollback }` with the commands in order. The section is rendered only when both that object and `pr.host_steps_section` are set; the heading is the configured title (for example `Mac install steps` on tourenpilot-ops, see [docs/examples/tourenpilot-ops.yaml](docs/examples/tourenpilot-ops.yaml)). Other repos leave the key unset. An empty plan omits the key, and the section is omitted with it.
 
 ## Model configuration
 
@@ -435,8 +460,8 @@ checks:
   - { name: test_db, run: "uv run pytest tests/db", tier: full, services: [dbstack], local_only: true }
 ```
 
-Runs of one repo are serialized by its lock; a manual `factory gates` takes no lock (it only meets a run on
-the fixed-port claim above). Residual risk as for secrets: checks run agent-written code with these
+Runs of one repo share `concurrency.max_runs` lock slots (default 1). A manual `factory gates` takes no lock (it only meets a run on
+the fixed-port claim above). With `max_runs` above 1, shifted ports follow the lock slot; fixed host ports stay one instance per box, and `factory doctor` warns. Residual risk as for secrets: checks run agent-written code with these
 values and reach the stack's ports (for a local database usually as its superuser, inside its containers);
 use a dev-only stack with demo data. A `start` that prints keys puts them in the service log, which is
 redacted at run end once `env_from` resolved them.
@@ -640,7 +665,7 @@ What `gc` cleans:
 
 A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume. Local fast checks that failed on the base are not resumed. The daily cron below is the timer when nothing else starts a run.
 
-Runs of a locked repository (a run or resume in progress) are skipped, and a worktree with uncommitted changes needs `--force` (archive retention of a finished run removes that worktree anyway).
+Runs of a repository are skipped while any of its lock slots is held, and a worktree with uncommitted changes needs `--force` (archive retention of a finished run removes that worktree anyway). `gc` and archive take every slot before touching the repo, so a new run cannot start mid-cleanup.
 `factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The base_red resume sweep still runs.
 Evidence pruning (30 days) runs only with an explicit `factory gc`; for a daily cleanup add e.g. `0 4 * * * factory gc` to cron.
 `factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.

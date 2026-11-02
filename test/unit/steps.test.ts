@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeGitHub } from "../../src/gh.js";
-import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "../../src/pipeline/lock.js";
+import { acquireRepoLock, repoLockHolder, repoLockPath, waitForRepoLock } from "../../src/pipeline/lock.js";
 import { validateResponses } from "../../src/pipeline/loop.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
@@ -60,7 +60,7 @@ describe("handoff validation", () => {
 
 describe("repo lock", () => {
   const REPO = "git@github.com:o/r.git";
-  const file = (home: string) => join(home, "locks", "git_github.com_o_r.git.lock");
+  const file = (home: string) => repoLockPath(home, REPO);
 
   it("is exclusive per repo (any task), released, and taken over when stale", () => {
     const home = mkdtempSync(join(tmpdir(), "lock-"));
