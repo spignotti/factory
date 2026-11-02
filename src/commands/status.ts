@@ -1,9 +1,11 @@
 import type { GitHub, PrStatus } from "../gh.js";
 import { activeHolders } from "../pipeline/lock.js";
+import { loadRepoConfig } from "../schemas/repo.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatusReportSchema } from "../schemas/reports.js";
+import { eventsForRun, isQueuedWaiter, lastEventMs, orphanedRunIds, queuedFromEvents } from "../run-health.js";
 
 /** `factory status --json` (schema `schemas/status.schema.json`). */
 export type StatusReport = z.infer<typeof StatusReportSchema>;
@@ -14,8 +16,17 @@ const taskOf = (r: RunRecord) => r.state?.task.ref ?? r.result?.task ?? "";
 export async function statusReport(opts: { factoryHome: string; github: GitHub; now?: () => number }): Promise<StatusReport> {
   const now = opts.now?.() ?? Date.now();
   const holders = new Map(activeHolders(opts.factoryHome).filter((h) => h.runId).map((h) => [h.runId!, h.pid]));
-  const report: StatusReport = { generated_at: new Date(now).toISOString(), running: [], waiting: [], interrupted: [], prs: [] };
-  // PR states are looked up once per PR, and never for PRs `gc` already cleaned up.
+  const orphanedIds = orphanedRunIds(opts.factoryHome);
+  const report: StatusReport = {
+    generated_at: new Date(now).toISOString(),
+    running: [],
+    queued: [],
+    waiting: [],
+    interrupted: [],
+    orphaned: [],
+    stalled: [],
+    prs: [],
+  };
   const prCache = new Map<string, Promise<PrStatus | Error>>();
   const prState = (r: RunRecord) => {
     const pr = r.state!.pr!;
@@ -24,18 +35,47 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
   };
 
   for (const r of listRuns(opts.factoryHome)) {
-    const st = r.state;
-    if (!st) continue; // `locked` attempts never got a state
-    const pid = holders.get(r.run_id);
-    if (pid !== undefined) {
-      report.running.push({
-        run_id: r.run_id, repo: st.repo, task: taskOf(r), step: st.step, lane: st.lane ?? "standard", pid,
-        minutes: Math.round(((now - r.started_at.getTime()) / 60_000) * 10) / 10, branch: st.branch, pr: st.pr,
+    const events = eventsForRun(r);
+    // A current lock holder is running, even if an earlier `queued` (e.g. path overlap) has no
+    // matching lock_acquired event.
+    if (!holders.has(r.run_id) && isQueuedWaiter(r, events)) {
+      const q = queuedFromEvents(events);
+      const lockRepo = events.findLast((e) => e.event === "queued")?.data.repo;
+      report.queued.push({
+        run_id: r.run_id,
+        repo: typeof lockRepo === "string" ? lockRepo : repoOf(r),
+        task: taskOf(r) || r.result?.task || "",
+        holder_run_id: q.holder_run_id,
+        holder_pid: q.holder_pid,
+        minutes: Math.round(((now - r.started_at.getTime()) / 60_000) * 10) / 10,
       });
       continue;
     }
+
+    const st = r.state;
+    if (!st) continue;
+    const pid = holders.get(r.run_id);
+    if (pid !== undefined) {
+      const entry = {
+        run_id: r.run_id, repo: st.repo, task: taskOf(r), step: st.step, lane: st.lane ?? "standard", pid,
+        minutes: Math.round(((now - r.started_at.getTime()) / 60_000) * 10) / 10, branch: st.branch, pr: st.pr,
+      };
+      report.running.push(entry);
+      try {
+        const stallMin = loadRepoConfig(st.repo).limits.stall_minutes;
+        const lastMs = lastEventMs(events);
+        if (lastMs !== undefined && now - lastMs > 2 * stallMin * 60_000) {
+          report.stalled.push({ ...entry, silent_minutes: Math.round(((now - lastMs) / 60_000) * 10) / 10 });
+        }
+      } catch {
+        // repo config unreadable: stall not determinable
+      }
+      continue;
+    }
     if (st.result === null && st.step !== "finished") {
-      report.interrupted.push({ run_id: r.run_id, repo: st.repo, task: taskOf(r), step: st.step });
+      const row = { run_id: r.run_id, repo: st.repo, task: taskOf(r), step: st.step };
+      if (orphanedIds.has(r.run_id)) report.orphaned.push(row);
+      else report.interrupted.push(row);
       continue;
     }
     let pr: PrStatus | Error | undefined;
@@ -63,7 +103,10 @@ export function renderStatus(s: StatusReport): string {
   const out: string[] = [];
   const section = (title: string, lines: string[]) => out.push(`${title} (${lines.length})${lines.length ? `:\n${lines.map((l) => `  ${l}`).join("\n")}` : ""}`);
   section("running", s.running.map((r) => `${r.run_id} ${r.task} — ${r.step}, ${r.lane}, ${r.minutes} min (${r.repo})`));
+  section("queued", s.queued.map((r) => `${r.run_id} ${r.task} — waiting for lock (holder ${r.holder_run_id ?? "?"}), ${r.minutes} min (${r.repo})`));
+  section("stalled", s.stalled.map((r) => `${r.run_id} ${r.task} — no event for ${r.silent_minutes} min, still in ${r.step} (${r.repo})`));
   section("waiting", s.waiting.map((r) => `${r.run_id} ${r.task} — ${r.result}: ${r.reason}${r.pr ? ` ${r.pr}` : ""}`));
+  section("orphaned", s.orphaned.map((r) => `${r.run_id} ${r.task} — lock holder gone in ${r.step}; factory resume ${r.run_id} or factory status`));
   section("interrupted", s.interrupted.map((r) => `${r.run_id} ${r.task} — stopped in ${r.step}; factory resume ${r.run_id}`));
   section("open PRs", s.prs.map((p) => `${p.pr} ${p.task} — ${p.state}${p.draft ? ", draft" : ""}, merge policy ${p.merge_policy ?? "?"}, risk ${p.risk ?? "?"}`));
   return out.join("\n") + "\n";

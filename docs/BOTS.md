@@ -14,7 +14,9 @@ factory run --repo /path/to/checkout --plan plan.md --wait    # or --issue <n> /
 - `--wait` queues behind another run on the same repo instead of ending `locked`.
 - The run id is printed at the start and is the directory name under `~/.factory/runs/<run-id>/`.
   Note it in the bot's memory/notes with the task, so a wake can be matched to the work.
-- `factory status` lists running, interrupted and finished runs.
+- `factory status` lists running, queued (`--wait`), stalled, orphaned, interrupted and finished runs.
+- `factory run` refuses to start when the repo has no notify hook unless you pass `--no-notify` (see below);
+  a `--no-notify` run sends no webhook and writes no outbox entry (its `notify` event says `disabled`).
 
 ## A finished background shell does NOT wake the bot
 
@@ -131,7 +133,9 @@ routine and pastes its URL and key into secret cards in that bot's chat.
    Never `cat` the file or the key file, and never pass a value on the command line (it would land in the
    process list and shell history); the snippet only reads the env vars by name.
 4. **Check**: `factory notify test <owner/name>` → `test ping … sent (HTTP 200 …)`; the bot wakes with a
-   `factory.notify_test` event. `factory doctor` shows `notify.yaml 0600; hooks for …` (no URLs).
+   `factory.notify_test` event. `factory doctor` shows `notify.yaml 0600; hooks for …` (no URLs), fails on a
+   non-empty notify outbox, skipped/failed deliveries in the last 7 days that no later delivery to the same
+   repo resolved, or recent runs (other than `--no-notify`) for a repo without a hook.
 
 A cheap safety net for a factory process that dies (box reboot, OOM; then no `run_finished` is emitted): a
 daily cron routine on the bot that runs `factory status` and reports runs that are interrupted.
