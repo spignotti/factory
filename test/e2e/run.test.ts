@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
@@ -13,6 +13,10 @@ import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
+const lockFile = (home: string, repoId: string) => {
+  const safe = repoId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120);
+  return join(home, "locks", `${safe}.lock`);
+};
 const eventsOf = (r: ScenarioRun, type: string) => r.events.filter((e) => e.event === type);
 
 /** Standard script → fast lane: `plan_normalize` instead of the planner, plan + simplicity in one lean review. */
@@ -61,10 +65,12 @@ describe("notify hook on run_finished", () => {
     expect(r.result.result).toBe(expected);
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]!.headers.Authorization).toBe(`Bearer ${HOOK_KEY}`);
-    expect(h.sent[0]!.body).toEqual({
+    expect(h.sent[0]!.body).toMatchObject({
       event: "factory.run_finished", run_id: r.runId, repo: "acme/widgets", result: expected,
       reason: r.result.reason.slice(0, 500), pr: r.result.pr, finished_at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
     });
+    expect(h.sent[0]!.body.event_id).toEqual(expect.any(String));
+    expect(String(h.sent[0]!.body.event_id)).toHaveLength(24);
     expect(eventsOf(r, "notify")).toEqual([expect.objectContaining({ data: expect.objectContaining({ repo: "acme/widgets", status: "sent", http_status: 200 }) })]);
     const all = readdirSync(r.runDir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => readFileSync(join(r.runDir, d.name), "utf8")).join("\n");
     expect(all).not.toContain(HOOK_KEY);
@@ -81,16 +87,24 @@ describe("notify hook on run_finished", () => {
 
   it("locked runs notify too", async () => {
     const h = withHook();
-    let release: (() => void) | undefined;
-    const r = await runScenario({
-      script: "clean.json",
-      setup: h.setup,
-      before: (repo, home) => (h.before(repo, home), void (release = acquireRepoLock(home, "https://github.com/acme/widgets.git", "20261029-000000-aaaaaa"))),
-      deps: h.deps,
-    });
-    release?.();
-    expect(r.result.result).toBe("locked");
-    expect(h.sent.map((s) => s.body.result)).toEqual(["locked"]);
+    const child = spawn("sleep", ["120"], { stdio: "ignore" });
+    try {
+      const r = await runScenario({
+        script: "clean.json",
+        setup: h.setup,
+        before: (repo, home) => {
+          h.before(repo, home);
+          const id = git(repo, "remote", "get-url", "origin").trim();
+          mkdirSync(join(home, "locks"), { recursive: true });
+          writeFileSync(lockFile(home, id), `${child.pid}\n20261029-000000-aaaaaa`);
+        },
+        deps: h.deps,
+      });
+      expect(r.result.result).toBe("locked");
+      expect(h.sent.map((s) => s.body.result)).toEqual(["locked"]);
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   it("no notify.yaml: nothing is sent and no notify event is logged", async () => {

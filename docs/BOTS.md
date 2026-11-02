@@ -52,7 +52,10 @@ add its entry with `json` from the Python standard library (see Setup).
 - Exactly one of `key` / `key_file` per repo. Retries back off 2 s, 10 s, 30 s; a 4xx other than
   408/425/429 is not retried.
 - A notification that fails is logged as a `notify` event in the run's `events.jsonl` and **never** changes
-  the result. The URL and key are never written to events, logs, `status`, the PR or `doctor` output.
+  the result. The payload (without URL or key) is also written to `$FACTORY_HOME/outbox/` for retry.
+  `factory notify flush` sends pending outbox entries; every `factory run` and `factory resume` flushes
+  the outbox at start as well. The URL and key are never written to events, logs, the outbox, `status`,
+  the PR or `doctor` output.
 - No file: nothing is sent (and nothing is logged). A repo without an entry: a `notify` event with
   `status: skipped`.
 - Repos whose origin is not a GitHub-style `host/owner/name` URL cannot have a hook.
@@ -60,10 +63,14 @@ add its entry with `json` from the Python standard library (see Setup).
 ### Payload (untrusted)
 
 ```json
-{ "event": "factory.run_finished", "run_id": "20261030-093523-30a2fc", "repo": "spignotti/social-studio",
+{ "event": "factory.run_finished", "event_id": "a1b2c3…24 hex chars", "run_id": "20261030-093523-30a2fc", "repo": "spignotti/social-studio",
   "result": "base_red", "reason": "CI on main (9b7084f2) is still pending after 20 min, not green",
   "pr": null, "finished_at": "2026-10-30T09:37:12.000Z" }
 ```
+
+`event_id` is stable for the same run finish so the bot can ignore duplicate deliveries (outbox flush
+retries and manual `factory notify flush` reuse the same id). On SIGTERM the run stops at once but
+notification retries continue for up to 45 seconds so a shutdown still wakes the bot when possible.
 
 `reason` is cut at 500 characters. `factory notify test <owner/name>` sends the same shape with
 `"event": "factory.notify_test"`, `"result": "test"` and `run_id`/`pr` `null`.
