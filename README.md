@@ -522,6 +522,10 @@ GIFs; `factory doctor --repo .` checks both.
 
 `factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
 selects the checks with the same code as a local run and runs each one (`factory gates --run`).
+It does not run on pushes to the base branch (the PR run already checked the merged tree; a base commit
+without check runs makes the factory run the fast checks locally), and only a newer push to the same PR
+cancels a run, so no cancelled check marks a base commit red. The npx install of the pinned factory is
+cached per ref.
 
 **Required status check:** `done`, the stub's last job. GitHub Actions reports a check run under its job
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub

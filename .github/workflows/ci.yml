@@ -1,33 +1,72 @@
 name: ci
 
+# Pull requests run the checks; pushes to main do not (the PR run already checked the merged tree).
+# Release tags and manual runs run everything.
 on:
   pull_request:
   push:
-    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Only a newer push to the same PR cancels a run; tag and manual runs are never cancelled.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # `check` is the required status check: it always reports. On a PR that only touches
+  # docs (`docs/**`, root `*.md`; prompts under roles/ and standards/ are code), its steps are skipped and it passes at once. Anything else runs in full.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+        with:
+          fetch-depth: 0
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "$EVENT" = pull_request ]; then
+            files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^docs/|^[^/]+\.md$'; then
+              skip=true; echo "docs-only change: checks skipped"
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+      - if: steps.scope.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+      - if: steps.scope.outputs.skip != 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - if: steps.scope.outputs.skip != 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.scope.outputs.skip != 'true'
+        id: pw
+        run: echo "version=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+      - if: steps.scope.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-shell-${{ runner.os }}-${{ steps.pw.outputs.version }}
       # The evaluator's browser tests run against Playwright's Chromium headless shell.
-      - run: pnpm exec playwright-core install --with-deps --only-shell chromium
+      - if: steps.scope.outputs.skip != 'true'
+        run: pnpm exec playwright-core install --with-deps --only-shell chromium
       # Session GIFs (src/evaluate/gif.ts) need the system ffmpeg.
-      - run: command -v ffmpeg || (sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg)
-      - run: pnpm typecheck
-      - run: pnpm lint
-      - run: pnpm test
+      - if: steps.scope.outputs.skip != 'true'
+        run: command -v ffmpeg || (sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg)
+      - if: steps.scope.outputs.skip != 'true'
+        run: pnpm typecheck
+      - if: steps.scope.outputs.skip != 'true'
+        run: pnpm lint
+      - if: steps.scope.outputs.skip != 'true'
+        run: pnpm test
