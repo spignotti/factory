@@ -197,7 +197,7 @@ describe("notify hook on resume", () => {
     });
     expect(sent.map((p) => p.result)).toEqual(["needs_human"]);
 
-    const release = acquireRepoLock(r.factoryHome, "https://github.com/acme/widgets.git", "20261029-000000-dddddd")!;
+    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
     try {
       expect((await resumeScenario(r, { script: "clean.json", deps })).result.result).toBe("locked");
     } finally {

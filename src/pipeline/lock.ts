@@ -94,6 +94,24 @@ export function repoLockHolder(factoryHome: string, repoId: string): LockHolder 
   return holderAlive(path) ? readHolder(path) : undefined;
 }
 
+/** Path of the per-repo lock file (tests plant a stale holder). */
+export function repoLockPath(factoryHome: string, repoId: string): string {
+  return lockPath(factoryHome, repoId);
+}
+
+/**
+ * Drops a lock held by `runId` when its process is gone. A live holder is left in place:
+ * abandoning a run that is still executing would let a second run share the repo.
+ */
+export function releaseRunLock(factoryHome: string, repoId: string, runId: string): { status: "released" | "absent" | "live"; pid?: number } {
+  const path = lockPath(factoryHome, repoId);
+  const holder = readHolder(path);
+  if (!holder || holder.runId !== runId) return { status: "absent" };
+  if (alive(holder.pid)) return { status: "live", pid: holder.pid };
+  rmSync(path, { force: true });
+  return { status: "released", pid: holder.pid };
+}
+
 /**
  * Queue: polls until the repo lock is free and takes it. Rejects with the signal's reason when
  * aborted (SIGINT/SIGTERM while waiting).

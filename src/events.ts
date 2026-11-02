@@ -178,7 +178,7 @@ export function redact(text: string, secrets: string[]): string {
   return out;
 }
 
-export const RESULTS = ["done", "needs_human", "needs_input", "failed", "base_red", "locked"] as const;
+export const RESULTS = ["done", "needs_human", "needs_input", "failed", "base_red", "locked", "abandoned"] as const;
 export type RunResultKind = (typeof RESULTS)[number];
 
 export const ResultSchema = z.object({

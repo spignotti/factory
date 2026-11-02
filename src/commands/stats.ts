@@ -72,7 +72,7 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
       if (res.merge_policy) inc(p.merge_policy, res.merge_policy);
       if (res.merge_policy === "auto" && res.pr) p.auto_merged++;
     }
-    if (result === "needs_human" || result === "needs_input") {
+    if (result === "needs_human" || result === "needs_input" || result === "abandoned") {
       const reason = (r.state?.reason ?? res?.reason ?? "").slice(0, 160);
       const key = `${result}\n${reason}`;
       const e = reasons.get(key) ?? { result, reason, count: 0 };
