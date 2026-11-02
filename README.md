@@ -20,6 +20,11 @@ source of truth; this README is the reference for concepts, configuration and co
 
 All models run through Pi; no Claude/Codex CLI, no production data, one run per repository at a time.
 
+**Where runs happen.** A `factory run` targets only repositories that have `.factory/repo.yaml` (enrolled
+via `factory adopt`). Today that is **tourenpilot** and **tourenpilot-ops**. This repository ships the CLI
+and uses the **`ci`** GitHub workflow for its own PRs (no `.factory/` here). Every other repo uses the Cloud
+Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
+
 ## Pipeline
 
 `intake → plan → implement → loop { fast gates → evaluate → review → merge findings → exit? → fix } → finalize`
@@ -230,7 +235,7 @@ Agents still never get secret values; a protected change does not change what ag
 These rules bind agents *inside a run*. Outside a run, the repo's own bot maintains its factory config
 (`.factory/repo.yaml`, `.factory/review-rules.md`, `AGENTS.md`) through normal PRs from its clone; a human
 still reviews and merges them (see [docs/BOTS.md](docs/BOTS.md#who-changes-what)). Factory code, the global
-config and model choice are changed only in this repository.
+config and model choice are changed in this repository via Cloud Agent PRs (not `factory run` on this repo).
 
 ## Model configuration
 

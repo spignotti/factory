@@ -156,7 +156,7 @@ with the same `run_id`. A resume refused because another run holds the lock noti
 |---|---|---|
 | The repo's factory config: `.factory/repo.yaml`, `.factory/review-rules.md`, `.factory/verify/**`, `AGENTS.md` | the repo's bot | a normal PR from its own clone (no factory run, no Schmiede); Silas reviews and merges |
 | The bot's own `notify.yaml` entry and key file | the repo's bot | Setup above, from secret cards |
-| Factory code, global config (`~/.factory/config`, `profile.yaml`, Pi login), model choice | Schmiede | PRs on spignotti/factory |
+| Factory code, global config (`~/.factory/config`, `profile.yaml`, Pi login), model choice | Schmiede (Cloud Agent) | Cloud Agent path on spignotti/factory (see below) |
 | `.factory/**` *inside a factory run* | nobody, unless declared | `human_only_paths` and the config guard stay: a run never weakens its own gates; a declared `protected_changes` entry still needs Silas's OK at merge |
 
 So when a run stops with `needs_human` because the repo config is missing something (e.g. `tests.run` for a
@@ -166,17 +166,26 @@ so the change takes effect for runs started (or re-run) after the merge.
 
 ## Choosing the path for a code change
 
+**Factory runs** — only repos with `.factory/` (today: **tourenpilot**, **tourenpilot-ops**): full pipeline,
+`repo.yaml` gates, protected config, notify/resume below.
+
+**Cloud Agent path** — every other repo (pm, factory, bots, profile, website, hygiene, …): **Composer** by
+default (cheap); split larger work into small packages. Cohesive hard changes → **Grok 4.7** at **medium** or
+**high** reasoning. No GPT or other API models (Cursor subscription only). Fresh context per task; branch,
+PR, green CI, no force-push, squash merge per the matrix. The coding bot checks every result (task done, CI
+green); deeper review only for harder changes. Improvements go straight to a PR (no ticket first). No
+`factory run`.
+
 | Change | Path |
 |---|---|
-| Normal work (features, bugs, refactors) | `factory run` (standard lane) |
-| Small, single-package change | `factory run … --lane fast` (see the README's Fast lane section) |
-| Emergency (e.g. a server hotfix) or Silas explicitly says so | direct work, below |
+| Normal work in a **factory-enrolled** repo | `factory run` (standard lane) |
+| Small, single-package change in a **factory-enrolled** repo | `factory run … --lane fast` (see the README's Fast lane section) |
+| Work in any **other** repo | Cloud Agent (above) |
+| Emergency or Silas explicitly says so | direct work, below |
 
-**Direct work** skips the factory: the repo's bot edits its own clone itself. It is only for emergencies or
-when Silas explicitly asks for it; "the factory is slower" is not a reason. The rest stays: a branch, a PR,
-the repo's CI, no force-push, and a merge only after Silas's explicit OK. The PR body says why the factory
-was skipped (`Direct change: emergency …` / `Direct change: requested by Silas`). If a direct change shows
-the factory could not have handled it, the bot tells Schmiede so the factory gets fixed.
+**Direct work** — the repo bot or Silas edits the clone (no factory run, no Cloud Agent). Emergencies or
+explicit request only. Same as before: branch, PR, CI, no force-push, merge after Silas's OK; PR body
+`Direct change: …`. If that exposes a gap for an enrolled repo, tell Schmiede.
 
 ## Base CI
 
@@ -185,7 +194,9 @@ polled every 30 s for up to `limits.base_ci_wait_minutes` (repo.yaml, default 20
 it continues as soon as CI is green and ends `base_red` only if CI turns red or is still pending at the end.
 The wait does not count against `max_wall_minutes`.
 
-## Onboarding checklist (new repo / new bot)
+## Onboarding checklist (new **factory-enrolled** repo / bot)
+
+Skip this for Cloud-Agent-only repos; use branch + PR + CI there instead.
 
 - [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection with the required status check `done`
       (GitHub Actions; not `factory / done`, which never reports and blocks every PR).
