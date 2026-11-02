@@ -1,5 +1,5 @@
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,10 +11,6 @@ import { addOrigin, commitFile } from "../helpers/repo.js";
 import { resumeScenario, runScenario, SECRET } from "../helpers/scenario.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
-const lockFile = (home: string, repoId: string) => {
-  const safe = repoId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120);
-  return join(home, "locks", `${safe}.lock`);
-};
 const gitAs = (cwd: string, ...args: string[]) => git(cwd, "-c", "user.name=human", "-c", "user.email=human@test", ...args);
 const roles = (...keep: string[]) => (steps: FakeStep[]) => steps.filter((s) => keep.includes(s.role));
 
@@ -201,14 +197,11 @@ describe("notify hook on resume", () => {
     });
     expect(sent.map((p) => p.result)).toEqual(["needs_human"]);
 
-    const child = spawn("sleep", ["120"], { stdio: "ignore" });
-    const id = git(r.repo, "remote", "get-url", "origin").trim();
-    mkdirSync(join(r.factoryHome, "locks"), { recursive: true });
-    writeFileSync(lockFile(r.factoryHome, id), `${child.pid}\n20261029-000000-dddddd`);
+    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
     try {
       expect((await resumeScenario(r, { script: "clean.json", deps })).result.result).toBe("locked");
     } finally {
-      child.kill("SIGKILL");
+      release();
     }
     expect(sent.map((p) => p.result)).toEqual(["needs_human", "locked"]);
 

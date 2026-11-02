@@ -1,22 +1,21 @@
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
+import type { RunDeps } from "../../src/pipeline/context.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
+import { continueBaseRed } from "../../src/pipeline/run.js";
+import { loadProfile } from "../../src/schemas/profile.js";
 import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
 import type { AgentRequest } from "../../src/agents/runner.js";
 import type { FakeStep } from "../../src/agents/fake-runner.js";
 import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
-import { addOrigin, commitFile } from "../helpers/repo.js";
+import { addOrigin, commitFile, FIXTURES } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
-const lockFile = (home: string, repoId: string) => {
-  const safe = repoId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120);
-  return join(home, "locks", `${safe}.lock`);
-};
 const eventsOf = (r: ScenarioRun, type: string) => r.events.filter((e) => e.event === type);
 
 /** Standard script → fast lane: `plan_normalize` instead of the planner, plan + simplicity in one lean review. */
@@ -69,7 +68,6 @@ describe("notify hook on run_finished", () => {
       event: "factory.run_finished", run_id: r.runId, repo: "acme/widgets", result: expected,
       reason: r.result.reason.slice(0, 500), pr: r.result.pr, finished_at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
     });
-    expect(h.sent[0]!.body.event_id).toEqual(expect.any(String));
     expect(String(h.sent[0]!.body.event_id)).toHaveLength(24);
     expect(eventsOf(r, "notify")).toEqual([expect.objectContaining({ data: expect.objectContaining({ repo: "acme/widgets", status: "sent", http_status: 200 }) })]);
     const all = readdirSync(r.runDir, { withFileTypes: true }).filter((d) => d.isFile()).map((d) => readFileSync(join(r.runDir, d.name), "utf8")).join("\n");
@@ -87,24 +85,17 @@ describe("notify hook on run_finished", () => {
 
   it("locked runs notify too", async () => {
     const h = withHook();
-    const child = spawn("sleep", ["120"], { stdio: "ignore" });
-    try {
-      const r = await runScenario({
-        script: "clean.json",
-        setup: h.setup,
-        before: (repo, home) => {
-          h.before(repo, home);
-          const id = git(repo, "remote", "get-url", "origin").trim();
-          mkdirSync(join(home, "locks"), { recursive: true });
-          writeFileSync(lockFile(home, id), `${child.pid}\n20261029-000000-aaaaaa`);
-        },
-        deps: h.deps,
-      });
-      expect(r.result.result).toBe("locked");
-      expect(h.sent.map((s) => s.body.result)).toEqual(["locked"]);
-    } finally {
-      child.kill("SIGKILL");
-    }
+    let release: (() => void) | undefined;
+    const r = await runScenario({
+      script: "clean.json",
+      setup: h.setup,
+      // Lock id is the origin URL git reports. A credential rewrite (https://token@github.com/…) must not miss the lock.
+      before: (repo, home) => (h.before(repo, home), void (release = acquireRepoLock(home, git(repo, "remote", "get-url", "origin").trim(), "20261029-000000-aaaaaa"))),
+      deps: h.deps,
+    });
+    release?.();
+    expect(r.result.result).toBe("locked");
+    expect(h.sent.map((s) => s.body.result)).toEqual(["locked"]);
   });
 
   it("no notify.yaml: nothing is sent and no notify event is logged", async () => {
@@ -174,7 +165,10 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.github.autoMerged).toEqual([]);
     expect(pr.body).toContain("Adds multiply(a, b)");
     expect(pr.body).toContain("| [x] | A1 | multiply(2, 3) returns 6 | test | test: `test/multiply.test.js::multiply` |");
-    expect(pr.body).toContain("merge policy: **human_review**");
+    expect(pr.body).toContain("## Risk & Security");
+    expect(pr.body).toContain("**low** — no sensitive paths, dependency changes, or migrations");
+    expect(pr.body).toContain("| Data/migrations | no | none in this diff |");
+    expect(pr.body).not.toMatch(/merge policy|Needs human review|## Mac install steps/);
     expect(pr.body).toMatch(/✅ unit/);
     expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, subscription/);
     expect(pr.body).toMatch(/- subscription tokens: \d+ in \/ \d+ out/);
@@ -534,6 +528,73 @@ ${fixed}` } };
     expect(r.slept).toEqual([]);
   });
 
+  const autoMerge = (c: Record<string, unknown>) => {
+    (c.limits as Record<string, unknown>).pr_ci_wait_minutes = 2;
+    ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
+  };
+
+  it("pending CI on the PR head is polled and still pending does not fail the run", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "pending");
+      },
+      patch: autoMerge,
+      deps: { baseCiPollMs: 30_000 },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.result.merge_policy).toBe("auto");
+    expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
+    expect(r.events.some((e) => e.event === "progress" && (e.data.pr_ci as { status?: string } | undefined)?.status === "pending")).toBe(true);
+  });
+
+  it("pending PR CI that turns green continues and does not wait out the whole window", async () => {
+    const seq = ["none", "pending", "green"] as const;
+    let i = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
+      },
+      patch: autoMerge,
+      deps: { baseCiPollMs: 30_000 },
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.slept).toEqual([30_000]);
+    expect(r.github.autoMerged).toEqual([r.result.pr]);
+  });
+
+  it("red CI on the PR head is needs_human and is not auto-merged", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "red");
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
+    expect(r.result.reason).toMatch(/CI on the PR head \([0-9a-f]{8}\) is red/);
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.updates.some((u) => u.body.includes("## CI"))).toBe(true);
+    expect(r.slept).toEqual([]);
+  });
+
+  it("pr_ci_wait_minutes 0 does not wait; a pending head still does not fail", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "pending");
+      },
+      patch: (c) => void ((c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0),
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.slept).toEqual([]);
+  });
+
   it("green CI status on base skips the local base check", async () => {
     const r = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "green") });
     expect(r.result.result).toBe("done");
@@ -822,4 +883,85 @@ describe("run guards", () => {
     expect(impl.jail?.ro).toEqual([join(r.repo, ".git")]);
     expect(impl.jail?.hide).toEqual([r.factoryHome]);
   }, 60_000);
+});
+
+describe("base_red resume", () => {
+  function depsOf(r: ScenarioRun, extra: Partial<RunDeps> = {}): RunDeps {
+    return {
+      runner: r.runner,
+      github: r.github,
+      profile: loadProfile(join(FIXTURES, "profile.yaml")),
+      factoryHome: r.factoryHome,
+      parentEnv: { ...process.env, FOO_TOKEN: SECRET },
+      sleep: async () => {},
+      ...extra,
+    };
+  }
+
+  it("resumes the same run once the base commit is green", async () => {
+    const r = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "red") });
+    expect(r.result.result).toBe("base_red");
+    const st = JSON.parse(r.file("state.json")) as { base_ci?: string; base_sha?: string; worktree?: string | null };
+    expect(st.base_ci).toBe("red");
+    expect(st.base_sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(st.worktree ?? null).toBeNull();
+
+    expect(await continueBaseRed(r.runId, depsOf(r))).toBeUndefined();
+    expect(JSON.parse(r.file("result.json")).result).toBe("base_red");
+
+    r.github.status = "green";
+    const resumed = await continueBaseRed(r.runId, depsOf(r));
+    expect(resumed).toMatchObject({ result: "done", run_id: r.runId });
+    expect(JSON.parse(r.file("state.json")).base_ci).toBeUndefined();
+  });
+
+  it("a pending timeout is resumed once CI is green; an expired window and hours 0 are not", async () => {
+    const pending = await runScenario({
+      script: "clean.json",
+      github: (gh) => void (gh.status = "pending"),
+      patch: (c) => void ((c.limits as Record<string, unknown>).base_ci_wait_minutes = 0),
+    });
+    expect(JSON.parse(pending.file("state.json")).base_ci).toBe("pending");
+    pending.github.status = "green";
+    expect((await continueBaseRed(pending.runId, depsOf(pending)))?.result).toBe("done");
+
+    const expired = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "red") });
+    const st = JSON.parse(expired.file("state.json")) as { updated_at: string };
+    st.updated_at = new Date(Date.now() - 49 * 3_600_000).toISOString();
+    writeFileSync(join(expired.runDir, "state.json"), JSON.stringify(st));
+    expired.github.status = "green";
+    expect(await continueBaseRed(expired.runId, depsOf(expired))).toBeUndefined();
+    expect(JSON.parse(expired.file("result.json")).result).toBe("base_red");
+
+    const off = await runScenario({
+      script: "clean.json",
+      github: (gh) => void (gh.status = "red"),
+      patch: (c) => void ((c.limits as Record<string, unknown>).base_red_resume_hours = 0),
+    });
+    off.github.status = "green";
+    expect(await continueBaseRed(off.runId, depsOf(off))).toBeUndefined();
+  });
+
+  it("a local fast-check base_red is not resumed, and a locked repo is left base_red", async () => {
+    const local = await runScenario({
+      script: "base-red.json",
+      patch: (c) => void (c.checks as unknown[]).push({ name: "broken", run: "false", tier: "fast" }),
+    });
+    expect(JSON.parse(local.file("state.json")).base_ci).toBeUndefined();
+    local.github.status = "green";
+    expect(await continueBaseRed(local.runId, depsOf(local))).toBeUndefined();
+
+    const locked = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "red") });
+    const release = acquireRepoLock(locked.factoryHome, locked.repo, "20261029-000000-bbbbbb")!;
+    locked.github.status = "green";
+    try {
+      expect(await continueBaseRed(locked.runId, depsOf(locked))).toBeUndefined();
+      expect(JSON.parse(locked.file("result.json")).result).toBe("base_red");
+      expect(locked.eventsText).not.toContain("base_red_resume");
+      const text = readFileSync(join(locked.runDir, "events.jsonl"), "utf8");
+      expect(text).toContain("base_red_resume");
+    } finally {
+      release();
+    }
+  });
 });

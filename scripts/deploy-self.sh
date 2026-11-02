@@ -12,7 +12,7 @@
 #   ~/.local/share/factory                     git source clone (fetch + worktrees)
 #   ~/.local/share/factory-releases/<sha>      one built release per main commit (git worktree)
 #   ~/.local/share/factory-releases/current -> <sha>
-#   ~/.local/bin/factory -> ~/.local/share/factory-releases/current/dist/cli.js
+#   ~/.local/bin/factory -> ~/.local/share/factory-releases/current/scripts/factory
 #   ~/.local/share/factory-releases/{deploy.log,state.json,deploy-self.sh}
 #
 # A release is built (pnpm install --frozen-lockfile, pnpm build) and smoke-tested
@@ -35,7 +35,16 @@ KEEP=${FACTORY_DEPLOY_KEEP:-3}
 INTERVAL=${FACTORY_DEPLOY_INTERVAL:-300}
 BUILD=${FACTORY_DEPLOY_BUILD:-pnpm install --frozen-lockfile && pnpm build}
 # Factory processes that block a switch (entry via the bin link or any release/checkout dist).
-PROC_RE=${FACTORY_DEPLOY_PROC_RE:-(\.local/bin/factory|factory-releases/[^ ]*/dist/cli\.js|share/factory/dist/cli\.js)( |$)}
+PROC_RE=${FACTORY_DEPLOY_PROC_RE:-(\.local/bin/factory|factory-releases/[^ ]*/scripts/factory|factory-releases/[^ ]*/dist/cli\.js|share/factory/dist/cli\.js)( |$)}
+
+resolve_node_sh() {
+  if [ -n "${FACTORY_RESOLVE_NODE:-}" ] && [ -f "$FACTORY_RESOLVE_NODE" ]; then printf '%s' "$FACTORY_RESOLVE_NODE"; return; fi
+  if [ -f "$REL/current/scripts/resolve-node.sh" ]; then printf '%s' "$REL/current/scripts/resolve-node.sh"; return; fi
+  local d; d=$(dirname "$(readlink -f "$0")")
+  if [ -f "$d/resolve-node.sh" ]; then printf '%s' "$d/resolve-node.sh"; return; fi
+  if [ -f "$d/scripts/resolve-node.sh" ]; then printf '%s' "$d/scripts/resolve-node.sh"; return; fi
+  die "resolve-node.sh missing (reinstall factory from a checkout)"
+}
 
 LOG=$REL/deploy.log
 STATE=$REL/state.json
@@ -72,10 +81,14 @@ die() {
 }
 
 need_tools() {
-  local t
+  local t resolve
   for t in git jq flock; do command -v "$t" >/dev/null || die "$t not found on PATH"; done
-  command -v node >/dev/null || die "node not found on PATH ($(printf '%s' "$PATH")). The box may have moved and lost /usr/local; reinstall node >= 22.19 before deploying. Nothing was changed."
-  node --version >/dev/null 2>&1 || die "node on PATH ($(command -v node)) does not run. Nothing was changed."
+  resolve=$(resolve_node_sh)
+  # shellcheck source=resolve-node.sh
+  . "$resolve"
+  resolve_node || die "$(printf '%s' "node not found: set FACTORY_NODE, put node on PATH, or install to ${FACTORY_NODE_FALLBACK:-$HOME/.local/share/factory-node/bin/node}. Nothing was changed.")"
+  export NODE_BIN
+  "$NODE_BIN" --version >/dev/null 2>&1 || die "node at $NODE_BIN does not run. Nothing was changed."
 }
 
 # Live factory lock holders (stale locks of dead pids are ignored, like the factory does).
@@ -122,11 +135,16 @@ build_release() {
   fi
   log "building $sha in $dir"
   git -C "$SRC" worktree add --detach "$dir" "$sha" >>"$LOG" 2>&1 || return 1
-  (cd "$dir" && bash -c "$BUILD") >>"$LOG" 2>&1 || { log "build failed for $sha (see above)"; return 1; }
+  local resolve; resolve=$(resolve_node_sh)
+  # shellcheck source=resolve-node.sh
+  . "$resolve"
+  resolve_node || { log "node not found for build"; return 1; }
+  (cd "$dir" && PATH="$(dirname "$NODE_BIN"):$PATH" bash -c "$BUILD") >>"$LOG" 2>&1 || { log "build failed for $sha (see above)"; return 1; }
   # tsc does not set the exec bit that npm/pnpm bin links would; the bin link runs the file directly.
   chmod +x "$dir/dist/cli.js" 2>/dev/null || true
   local v
-  v=$(cd "$dir" && ./dist/cli.js --version 2>>"$LOG") || { log "smoke test failed for $sha: ./dist/cli.js --version"; return 1; }
+  chmod +x "$dir/scripts/factory" 2>/dev/null || true
+  v=$("$dir/scripts/factory" --version 2>>"$LOG") || { log "smoke test failed for $sha: scripts/factory --version"; return 1; }
   log "smoke ok: $v"
   printf '%s\n' "$v" >"$dir/.deploy-ok"
 }
@@ -162,7 +180,7 @@ once() {
   cur=$(current_sha)
   state "last_check=$(date -Iseconds)" "remote_sha=$remote_sha" "current=$cur"
 
-  if [ "$cur" = "$remote_sha" ] && [ "$(readlink "$BIN" 2>/dev/null)" = "$REL/current/dist/cli.js" ]; then
+  if [ "$cur" = "$remote_sha" ] && [ "$(readlink "$BIN" 2>/dev/null)" = "$REL/current/scripts/factory" ]; then
     state "last_result=up_to_date"
     result "up_to_date $cur ($(cat "$REL/$cur/.deploy-ok" 2>/dev/null))"
     return 0
@@ -184,11 +202,14 @@ once() {
   fi
 
   swap_link "$remote_sha" "$REL/current"
-  swap_link "$REL/current/dist/cli.js" "$BIN"
+  swap_link "$REL/current/scripts/factory" "$BIN"
   [ -z "$LIB_LINK" ] || swap_link "$REL/current" "$LIB_LINK"
   # The daemon runs the installed copy, so it updates itself with each release.
   if [ -f "$REL/current/scripts/deploy-self.sh" ]; then
     cp "$REL/current/scripts/deploy-self.sh" "$REL/deploy-self.sh.tmp" && chmod +x "$REL/deploy-self.sh.tmp" && mv -f "$REL/deploy-self.sh.tmp" "$REL/deploy-self.sh"
+  fi
+  if [ -f "$REL/current/scripts/resolve-node.sh" ]; then
+    cp "$REL/current/scripts/resolve-node.sh" "$REL/resolve-node.sh.tmp" && mv -f "$REL/resolve-node.sh.tmp" "$REL/resolve-node.sh"
   fi
   log "switched current ${cur:-none} -> $remote_sha ($(cat "$REL/$remote_sha/.deploy-ok"))"
   state "last_result=deployed" "previous=$cur" "current=$remote_sha" "deployed_at=$(date -Iseconds)" "version=$(cat "$REL/$remote_sha/.deploy-ok")" "pending=" "last_error="

@@ -9,12 +9,14 @@ import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { protectedFiles } from "../gates/builtin.js";
-import { type MergePolicy, mergePolicy, riskClass, type RiskAssessment } from "../pipeline/risk.js";
+import { type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
+import type { HostSteps } from "../schemas/plan.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { type GateReport, runGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
+import { pollCommitCi } from "../pipeline/ci-wait.js";
 
 export interface FinalizeInput {
   result: "done" | "needs_human";
@@ -47,7 +49,7 @@ export function protectedSection(ctx: Pick<RunContext, "plan">, files: string[],
   return [
     "## ⚠️ Changes protected config (CI / factory)",
     "",
-    "This PR changes files under `human_only_paths`. It is never auto-merged and needs a human's approval.",
+    "This PR changes files under `human_only_paths`.",
     "The factory's gates ran with the base branch's `.factory/repo.yaml`, not the changed one; CI on this PR runs the changed workflow files.",
     "",
     ...items,
@@ -120,6 +122,32 @@ function cell(s: string): string {
   return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 
+/** Copy-paste host commands. Empty when the repo has no section title or the plan has no steps. */
+export function hostStepsMarkdown(title: string | undefined, steps: HostSteps | undefined): string {
+  if (!title || !steps) return "";
+  const host = /mac/i.test(title) ? "production Mac host" : "production host";
+  const script = steps.commands.join("\n");
+  const fence = [script, steps.verify, steps.rollback].some((s) => s.includes("```")) ? "~~~~" : "```";
+  return [
+    `## ${title}`,
+    "",
+    `Run these on the ${host}, in order:`,
+    "",
+    fence,
+    script,
+    fence,
+    "",
+    "**Verify**",
+    "",
+    steps.verify.trim(),
+    "",
+    "**Roll back**",
+    "",
+    steps.rollback.trim(),
+    "",
+  ].join("\n");
+}
+
 export function renderPrBody(ctx: RunContext, v: {
   summary: string;
   input: FinalizeInput;
@@ -154,8 +182,14 @@ export function renderPrBody(ctx: RunContext, v: {
     summary: v.summary,
     protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
     risk: out.risk.risk,
-    merge_policy: out.mergePolicy,
-    risk_reasons: list(out.risk.reasons),
+    risk_reason: cell(riskReasonLine(out.risk)),
+    security_rows: securityRows(v.changed)
+      .map((r) => `| ${cell(r.area)} | ${r.touched ? "yes" : "no"} | ${cell(r.note)} |`)
+      .join("\n"),
+    host_steps: (() => {
+      const md = hostStepsMarkdown(ctx.repo.pr?.host_steps_section, ctx.plan.host_steps);
+      return md ? `\n${md}` : "";
+    })(),
     revert_notes: migrations.length ? `Migrations changed (${migrations.join(", ")}): roll them back explicitly.` : "",
     packages: plan.packages.map((p) => `- ${p.id} ${p.title}: ${input.packages.get(p.id) ?? "not run"}${input.failures[p.id] ? ` (${input.failures[p.id]})` : ""}`).join("\n"),
     acceptance: rows.join("\n"),
@@ -291,7 +325,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
-  const policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
+  let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const out = { result, reason, risk, mergePolicy: policy };
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits);
@@ -331,7 +365,36 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           draft = false;
         }
       }
-      if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+      // Pending PR checks are polled; they are not a failure. Red checks are: the PR is not merged on its own.
+      if (result === "done" && pr) {
+        const ci = await pollCommitCi({
+          github: ctx.deps.github,
+          repoDir: ctx.worktree,
+          sha: head,
+          waitMinutes: ctx.repo.limits.pr_ci_wait_minutes,
+          pollMs: ctx.deps.baseCiPollMs ?? 30_000,
+          sleep: ctx.deps.sleep,
+          signal: ctx.deps.signal,
+          onUpdate: (info) =>
+            ctx.events.emit({
+              step: "finalize",
+              event: "progress",
+              data: {
+                pr_ci:
+                  info.phase === "waiting"
+                    ? { status: info.status, sha: head, waiting_up_to_minutes: ctx.repo.limits.pr_ci_wait_minutes }
+                    : { status: info.status, sha: head, waited_ms: info.waitedMs },
+              },
+            }),
+        });
+        ctx.deadline.extend?.(ci.waitedMs);
+        if (ci.status === "red") {
+          result = "needs_human";
+          reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
+          await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
+        }
+      }
+      if (policy === "auto" && result === "done") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
@@ -340,6 +403,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
+  if (result !== "done") policy = "human_review";
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, reason, pr, draft };
+  return { ...out, result, reason, mergePolicy: policy, pr, draft };
 }

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Installed CLI entry (~/.local/bin/factory): resolve node, then run dist/cli.js from this release.
+set -euo pipefail
+ROOT=$(dirname "$(readlink -f "$0")")
+# In a release checkout ROOT is .../scripts; in a copied layout it may be the release root.
+if [ -f "$ROOT/dist/cli.js" ]; then CLI=$ROOT/dist/cli.js
+elif [ -f "$ROOT/../dist/cli.js" ]; then CLI=$ROOT/../dist/cli.js
+else printf '%s\n' "factory: dist/cli.js missing next to $0" >&2; exit 1; fi
+RESOLVE=$ROOT/resolve-node.sh
+[ -f "$RESOLVE" ] || RESOLVE=$ROOT/../scripts/resolve-node.sh
+# shellcheck source=resolve-node.sh
+. "$RESOLVE"
+resolve_node || exit 1
+exec "$NODE_BIN" "$CLI" "$@"

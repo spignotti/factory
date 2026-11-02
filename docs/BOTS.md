@@ -26,9 +26,10 @@ a run ended at 01:21, the bot noticed at 10:14 when Silas wrote). Do not rely on
 
 ## The notify hook
 
-On every `run_finished`, for `done`, `needs_human`, `failed`, `base_red`, `locked`, a watchdog abort,
+On every `run_finished`, for `done`, `needs_human`, `failed`, `base_red`, `locked`, `abandoned`, a watchdog abort,
 and again after every `factory resume`, the factory POSTs a small JSON payload to the webhook configured
-for the repo. It is sent after `result.json` is written and the repo lock is released, so the bot can act
+for the repo. The same hook fires when `factory gc` abandons a `needs_input` run that nobody answered
+(see below). It is sent after `result.json` is written and the repo lock is released, so the bot can act
 (even start the next run) right away.
 
 ### `~/.factory/notify.yaml`
@@ -146,7 +147,14 @@ daily cron routine on the bot that runs `factory status` and reports runs that a
 > - `needs_human`: read `reason` and the last events; fix what you may fix in the run's worktree and run
 >   `factory resume <run_id>`. If the repo's factory config lacks something (e.g. `tests.run`), open a config
 >   PR yourself and ask Silas to merge it, then re-run. Else tell Silas what is needed.
-> - `base_red`: main is red (or CI stayed pending). Find out why; fix main or tell Silas; then re-run the task.
+> - `base_red`: GitHub CI on main was red or stayed pending. The factory resumes this same run itself once that
+>   commit is green (`factory gc`, and the start of the next `factory run`), for `limits.base_red_resume_hours`
+>   (default 48). Do not re-run the task in that window. If the run is still `base_red` after the window, find
+>   out why, fix main or tell Silas, then start a new run. A `base_red` from local fast checks on main is not
+>   auto-resumed.
+> - `abandoned`: the run was dropped (`factory abandon`, or `needs_input` with no answer for 2 working days,
+>   Mon–Fri Europe/Berlin). Tell the project owner the question or the reason; do not resume. Start a new run
+>   only if they still want the work.
 > - `locked`: another run holds the repo; re-run with `--wait`.
 > - `failed` / watchdog abort: read the error, tell Silas, resume when it is safe.
 > Always end with one short message to Silas: result, PR, next step.
@@ -197,10 +205,30 @@ explicit request only. Same as before: branch, PR, CI, no force-push, merge afte
 
 ## Base CI
 
-Before planning, the factory checks CI on the base commit. Red ends the run as `base_red` at once. Pending is
+After the plan is accepted, and before the worktree is created, the factory checks CI on the base commit. Red ends the run as `base_red` at once. Pending is
 polled every 30 s for up to `limits.base_ci_wait_minutes` (repo.yaml, default 20, `0` = old behaviour, max 120);
 it continues as soon as CI is green and ends `base_red` only if CI turns red or is still pending at the end.
-The wait does not count against `max_wall_minutes`.
+The wait does not count against `max_wall_minutes` (default 240, 4 h).
+
+A `base_red` from that GitHub check (red, or still pending when the wait ends) is resumed automatically when
+the same base commit is green again, or has no check runs. `factory gc` does it, and so does the start of
+`factory run`. The window is `limits.base_red_resume_hours` (default 48, `0` = off, max 168). The run id does
+not change; another `run_finished` is sent when the resumed run ends. A daily `factory gc` cron is what
+moves these runs if nobody starts another run. Fast checks that failed locally on the base are not resumed.
+
+## PR CI
+
+After the PR is pushed, pending check runs on the head are polled up to `limits.pr_ci_wait_minutes` (default
+20, `0` = one sample). Still pending does not fail the run and does not count as work time. Red checks end
+the run `needs_human` and auto-merge is not enabled. No check runs (`none`) means the repo has no CI on that
+commit; the run does not wait for checks that have not registered yet.
+
+## needs_input and abandon
+
+A `needs_input` run that still has no answer after 2 working days (Monday–Friday, Europe/Berlin, from the
+moment it stopped) is abandoned by `factory gc`: worktree removed, result `abandoned`, logs kept, and a
+`run_finished` notify so the bot can tell the owner. `factory abandon <run-id>` does the same on request.
+A run whose process is still alive is not abandoned. Resume refuses an abandoned run.
 
 ## Onboarding checklist (new **factory-enrolled** repo / bot)
 

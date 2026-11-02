@@ -27,7 +27,7 @@ export type Acceptance = z.infer<typeof AcceptanceSchema>;
 
 /**
  * A declared change to a `human_only_paths` file (CI workflows, `.factory/`). Only declared files may
- * change; such a run always ends with human review and its gates keep the base commit's config.
+ * change; such a run is high risk (auto-merge stays off) and its gates keep the base commit's config.
  */
 export const ProtectedChangeSchema = z.object({
   file: z.string().min(1),
@@ -58,6 +58,14 @@ export const OutOfScopeItemSchema = z.preprocess((v) => {
   return `${file ? `${file}: ` : ""}${change}${reason ? ` (${reason})` : ""}`;
 }, z.string());
 
+/** Manual commands on the production host. Omit the key when the change needs none. */
+export const HostStepsSchema = z.object({
+  commands: z.array(z.string().trim().min(1)).min(1).max(40),
+  verify: z.string().trim().min(1),
+  rollback: z.string().trim().min(1),
+});
+export type HostSteps = z.infer<typeof HostStepsSchema>;
+
 export const PlanSchema = z.object({
   version: z.literal(1),
   type: z.enum(["feature", "bug", "chore"]),
@@ -68,6 +76,8 @@ export const PlanSchema = z.object({
   out_of_scope: z.array(OutOfScopeItemSchema).default([]),
   resolves_findings: z.array(z.string()).default([]),
   protected_changes: z.array(ProtectedChangeSchema).default([]),
+  /** Present only when the change needs copy-paste commands on the production host. */
+  host_steps: HostStepsSchema.optional(),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
@@ -87,6 +97,13 @@ export interface PlanValidationContext {
 }
 
 export type PlanValidation = { ok: true; plan: Plan } | { ok: false; errors: string[] };
+
+function dropNullHostSteps(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("host_steps" in raw)) return raw;
+  if ((raw as { host_steps?: unknown }).host_steps !== null) return raw;
+  const { host_steps: _drop, ...rest } = raw as { host_steps?: unknown };
+  return rest;
+}
 
 function normalizeWs(s: string): string {
   return s.replace(/\s+/g, " ").trim();
@@ -111,7 +128,8 @@ export function isProtected(file: string, humanOnly: string[]): boolean {
 }
 
 export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanValidation {
-  const parsed = PlanSchema.safeParse(raw);
+  const input = dropNullHostSteps(raw);
+  const parsed = PlanSchema.safeParse(input);
   if (!parsed.success) {
     return { ok: false, errors: parsed.error.issues.map((i) => `${i.path.join(".") || "plan"}: ${i.message}`) };
   }

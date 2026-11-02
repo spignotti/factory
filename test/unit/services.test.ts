@@ -51,6 +51,17 @@ describe("service placeholders and port scheme", () => {
     await expect(allocatePorts(fh, "f", refs, async () => false)).rejects.toThrow(EnvMissing);
   });
 
+  it("tries the preferred slot first, then the lowest free slot", async () => {
+    const fh = home();
+    const refs = { names: ["db"], numbers: [] };
+    const preferred = await allocatePorts(fh, "a", refs, async () => true, 3);
+    expect(preferred.plan.slot).toBe(3);
+    const next = await allocatePorts(fh, "b", refs, async () => true, 3);
+    expect(next.plan.slot).toBe(1);
+    preferred.release();
+    next.release();
+  });
+
   it("repo.yaml validation: unknown service in a check, reserved name ui, bad placeholders", () => {
     expect(() => repoWith(`checks: [{name: a, run: x, tier: fast, services: [db]}]`)).toThrow(/check a: unknown service db/);
     expect(() => repoWith(`services: [{name: ui, start: x}]`)).toThrow(/reserved/);

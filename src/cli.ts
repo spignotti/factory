@@ -12,6 +12,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { Context7Client } from "./docs/context7.js";
 import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
+import { abandonRun } from "./commands/abandon.js";
 import { autoGc, gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
@@ -20,7 +21,8 @@ import { hardenCommand } from "./commands/harden.js";
 import { MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
-import { resumeFactory, runFactory } from "./pipeline/run.js";
+import { isBaseRedWaiting, resumeFactory, runFactory, sweepBaseRed } from "./pipeline/run.js";
+import { listRuns } from "./runs.js";
 import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
@@ -34,6 +36,8 @@ const USAGE = `usage:
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
   factory resume <run-id> [--wait] [--no-pr] [--profile <file>]
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
+  factory abandon <run-id> [--json]
+              (marks the run abandoned, releases a stale lock, removes its worktree; result and logs stay)
   factory doctor [--repo <path>] [--profile <file>] [--ping] [--services] [--json]
               (setup checks, Zen guard, ChatGPT login; effective model per role and its layer;
                CI stub hash; --ping sends one tiny request per configured model;
@@ -43,8 +47,11 @@ const USAGE = `usage:
               (running, waiting for a human, interrupted runs; open factory PRs)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one)
-  factory gc [--dry-run] [--force] [--retention-days N] [--strip-after-hours N] [--json]
-              (worktree, factory/* branch and unchanged remote branch of merged/closed PRs)
+  factory gc [--dry-run] [--force] [--retention-days N] [--strip-after-hours N] [--archive-days N] [--json]
+              (worktree and branch of merged/closed PRs; needs_input unanswered for 2 working days
+               (Mon-Fri, Europe/Berlin) is abandoned and the owner notified; run dirs idle for
+               --archive-days (default 14) keep the result summary and logs; a base_red run whose
+               base CI is green again is resumed, within limits.base_red_resume_hours)
   factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
               (--run starts the services its checks need; with CI set, local_only checks are not selected;
                --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
@@ -84,6 +91,23 @@ function sandboxFor(profile: Profile, io: Io): Sandbox {
 }
 
 const defaultIo: Io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) };
+
+/**
+ * Resumes GitHub-CI `base_red` runs whose base commit is green again. No-op when none are waiting,
+ * so `factory gc` / `factory run` do not load a runner otherwise. Failures are logged and swallowed.
+ */
+async function sweepBaseRedRuns(factoryHome: string, io: Io): Promise<void> {
+  if (!listRuns(factoryHome).some((r) => isBaseRedWaiting(r.state))) return;
+  const profile = resolveProfile(loadLayers({ factoryHome }));
+  const runner = new PiRunner(join(factoryHome, "pi"));
+  try {
+    await sweepBaseRed({ runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome }, io.err);
+  } catch (e) {
+    io.err(`factory: base_red resume failed (continuing): ${(e as Error).message.slice(0, 200)}\n`);
+  } finally {
+    await runner.close();
+  }
+}
 
 /** Package version, plus the commit when run from a git checkout (npm link / checkout installs). */
 function packageVersion(): string {
@@ -296,6 +320,21 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       });
       return statsCommand({ factoryHome: factoryHomeOf(), since: values.since, repo: values.repo, json: values.json }, io);
     }
+    if (command === "abandon") {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { json: { type: "boolean", default: false } },
+      });
+      if (positionals.length !== 1) {
+        io.err(USAGE);
+        return 2;
+      }
+      const outcome = await abandonRun({ factoryHome: factoryHomeOf(), runId: positionals[0]!, reason: "abandoned with factory abandon" });
+      if (values.json) io.out(JSON.stringify(outcome) + "\n");
+      else (outcome.ok ? io.out : io.err)(`${outcome.message}\n`);
+      return outcome.ok ? 0 : 1;
+    }
     if (command === "gc") {
       const { values } = parseArgs({
         args: rest,
@@ -304,6 +343,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           force: { type: "boolean", default: false },
           "retention-days": { type: "string" },
           "strip-after-hours": { type: "string" },
+          "archive-days": { type: "string" },
           json: { type: "boolean", default: false },
         },
       });
@@ -313,18 +353,23 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         if (!Number.isFinite(n) || n < 0) throw new Error(`invalid --${flag} ${v}`);
         return n;
       };
-      return await gcCommand(
+      const factoryHome = factoryHomeOf();
+      const code = await gcCommand(
         {
-          factoryHome: factoryHomeOf(),
+          factoryHome,
           github: new GhCli(),
           dryRun: values["dry-run"],
           force: values.force,
           retentionDays: num("retention-days", values["retention-days"]),
           stripAfterHours: num("strip-after-hours", values["strip-after-hours"]),
+          archiveDays: num("archive-days", values["archive-days"]),
           json: values.json,
         },
         io,
       );
+      // Dry-run only reports. A real gc is the timer that continues base_red runs once CI is green.
+      if (!values["dry-run"]) await sweepBaseRedRuns(factoryHome, io);
+      return code;
     }
     if (command === "run") {
       const { values } = parseArgs({
@@ -351,6 +396,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const factoryHome = factoryHomeOf();
       // Best effort, bounded, never fails the run; FACTORY_NO_AUTO_GC=1 turns it off.
       if (process.env.FACTORY_NO_AUTO_GC !== "1") await autoGc({ factoryHome, github: new GhCli(), log: io.err });
+      await sweepBaseRedRuns(factoryHome, io);
       const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();

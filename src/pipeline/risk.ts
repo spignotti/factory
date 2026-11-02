@@ -5,13 +5,60 @@ import type { RunResultKind } from "../events.js";
 
 export type MergePolicy = "auto" | "bot_review" | "human_review";
 
+/** Risk reason of every run that changes `human_only_paths`. Auto-merge stays off via `mergePolicy`. */
+export const PROTECTED_REASON = "changes protected config (CI / factory)";
 
-/** Risk reason of every run that changes `human_only_paths`: never auto, always a human's OK. */
-export const PROTECTED_REASON = "changes protected config (CI / factory): human approval required, never auto-merged";
+const DATA_GLOBS = [...MIGRATION_GLOBS, "**/migration/**", "**/*.sql", "**/schema.prisma"];
+const AUTH_GLOBS = ["**/*auth*", "**/*auth*/**", "**/auth/**", "**/*permission*", "**/*rbac*", "**/*rls*", "**/policies/**", "**/*policies*"];
+const SECRET_GLOBS = ["**/.env", "**/.env.*", "**/secrets/**", "**/*credential*", "**/*secret*", "**/*.pem", "**/*.key"];
+const DEPLOY_GLOBS = [
+  "**/Dockerfile",
+  "**/Dockerfile.*",
+  "**/docker-compose*.yml",
+  "**/docker-compose*.yaml",
+  "**/*.plist",
+  "**/deploy/**",
+  "**/infra/**",
+  "**/*.tf",
+  "**/k8s/**",
+  "**/helm/**",
+  "**/.github/workflows/**",
+  "**/fly.toml",
+  "**/render.yaml",
+  "**/Procfile",
+  "**/*launchd*",
+];
+
+export interface SecurityRow {
+  area: string;
+  touched: boolean;
+  note: string;
+}
+
+/** What the diff touches, one yes/no row per area. Notes list up to eight paths. */
+export function securityRows(changed: string[]): SecurityRow[] {
+  const row = (area: string, globs: string[]): SecurityRow => {
+    const hits = changed.filter((f) => matchesAny(f, globs)).slice(0, 8);
+    return { area, touched: hits.length > 0, note: hits.length ? hits.join(", ") : "none in this diff" };
+  };
+  return [
+    row("Data/migrations", DATA_GLOBS),
+    row("Auth/permissions", AUTH_GLOBS),
+    row("Secrets handling", SECRET_GLOBS),
+    row("Prod deploy/infra", DEPLOY_GLOBS),
+    row("Dependencies", DEPENDENCY_GLOBS),
+  ];
+}
 
 export interface RiskAssessment {
   risk: Risk;
   reasons: string[];
+}
+
+/** One line under the risk rating. Reasons come from `riskClass`; a low rating says so. */
+export function riskReasonLine(risk: RiskAssessment): string {
+  const line = risk.reasons.length ? risk.reasons.join("; ") : "no sensitive paths, dependency changes, or migrations";
+  return line.length > 300 ? `${line.slice(0, 297)}...` : line;
 }
 
 /** Risk classification, in code. */
