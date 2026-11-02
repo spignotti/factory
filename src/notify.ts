@@ -252,7 +252,9 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
   if (!cfg) return undefined;
   const repo = await ownerRepoOfDir(result.repo);
   const hook = repo ? cfg.repos[repo] : undefined;
-  const payload = repo ? runPayload(result, repo, finishedAt) : undefined;
+  const raw = repo ? runPayload(result, repo, finishedAt) : undefined;
+  // The outbox persists the payload on disk: redact run secrets from the free-text reason.
+  const payload = raw && events ? { ...raw, reason: events.redact(raw.reason) } : raw;
   if (!repo || !hook) {
     log({ status: "skipped", repo: repo ?? null, reason: "no hook for this repo in notify.yaml" });
     if (payload) {
@@ -284,6 +286,9 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
   }
   events?.addSecrets([hook.url, key]);
   const body = payload!;
+  // Write-ahead: the entry exists while the POST is in flight, so a second signal, SIGKILL or OOM
+  // during delivery leaves it for the next flush (receivers dedupe on event_id).
+  outboxEnqueue(deps.factoryHome, { event_id: body.event_id, repo: body.repo, payload: body, kind: "failed", detail: "delivery in progress" });
   const out = await sendNotification(hook, key, body, {
     fetch: deps.fetch,
     sleep: deps.sleep,
@@ -293,7 +298,13 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
     signal: notifyAbortSignal(deps.signal),
   });
   log({ repo, result: result.result, event_id: body.event_id, ...out });
-  if (out.status === "failed") {
+  if (out.status === "sent") {
+    try {
+      removeOutboxFile(deps.factoryHome, body.event_id);
+    } catch {
+      // a leftover entry is re-sent once by the next flush; receivers dedupe on event_id
+    }
+  } else {
     outboxEnqueue(deps.factoryHome, {
       event_id: body.event_id,
       repo: body.repo,
@@ -386,9 +397,29 @@ export interface FlushReport {
   errors: string[];
 }
 
-/** Sends every deliverable outbox entry; leaves entries that still fail or have no hook. */
-export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = { factoryHome }): Promise<FlushReport> {
+export interface FlushOptions {
+  /** Attempts per entry (default: notify.yaml `attempts`). */
+  attempts?: number;
+  /** Stop starting new deliveries after this many ms (default: no limit). */
+  budgetMs?: number;
+  now?: () => number;
+}
+
+/**
+ * Bounded flush at the start of `factory run`/`resume`: one attempt per entry, at most ~20 s before
+ * new deliveries stop, so a dead webhook cannot delay every run start by minutes.
+ */
+export const START_FLUSH: FlushOptions = { attempts: 1, budgetMs: 20_000 };
+
+/**
+ * Sends every deliverable outbox entry; leaves entries that still fail or have no hook. After a
+ * failure, the remaining entries of the same repo wait for the next flush (its hook is down).
+ */
+export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = { factoryHome }, opts: FlushOptions = {}): Promise<FlushReport> {
   const report: FlushReport = { sent: 0, failed: 0, skipped: 0, remaining: 0, errors: [] };
+  const now = opts.now ?? Date.now;
+  const started = now();
+  const downRepos = new Set<string>();
   let cfg: NotifyConfig | undefined;
   try {
     cfg = loadNotifyConfig(factoryHome);
@@ -403,6 +434,12 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
   }
   const signal = notifyAbortSignal(deps.signal);
   for (const entry of listOutboxEntries(factoryHome)) {
+    if (opts.budgetMs !== undefined && now() - started >= opts.budgetMs) break;
+    if (signal.aborted) break;
+    if (downRepos.has(entry.repo)) {
+      report.skipped++;
+      continue;
+    }
     const hook = cfg.repos[entry.repo];
     if (!hook) {
       report.skipped++;
@@ -419,7 +456,7 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
     const out = await sendNotification(hook, key, entry.payload, {
       fetch: deps.fetch,
       sleep: deps.sleep,
-      attempts: cfg.attempts,
+      attempts: opts.attempts ?? cfg.attempts,
       timeoutMs: cfg.timeout_s * 1000,
       backoffMs: deps.backoffMs,
       signal,
@@ -427,7 +464,11 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
     if (out.status === "sent") {
       removeOutboxFile(factoryHome, entry.event_id);
       report.sent++;
-    } else report.failed++;
+    } else {
+      report.failed++;
+      downRepos.add(entry.repo);
+      if (out.error || out.http_status !== null) report.errors.push(`${entry.repo}: ${out.error ?? `HTTP ${out.http_status}`}`);
+    }
   }
   report.remaining = outboxCount(factoryHome);
   return report;
