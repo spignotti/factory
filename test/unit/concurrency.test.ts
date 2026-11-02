@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -222,5 +223,48 @@ describe("risk and host steps", () => {
     expect(attemptAcquireRepoLock(dir, REPO, "b", { maxRuns: 1 })).toEqual({ status: "unavailable" });
     a();
     expect(attemptAcquireRepoLock(dir, REPO, "b", { maxRuns: 1 }).status).toBe("acquired");
+  });
+
+  describe("alloc guard (NB1/NB2)", () => {
+    const guardOf = (dir: string) => join(dir, "locks", `${lockRepoKey(REPO)}.alloc`);
+    const withGuard = (dir: string, pid: number, ageMs = 0) => {
+      mkdirSync(join(dir, "locks"), { recursive: true });
+      writeFileSync(guardOf(dir), String(pid));
+      if (ageMs) {
+        const t = (Date.now() - ageMs) / 1000;
+        utimesSync(guardOf(dir), t, t);
+      }
+    };
+
+    it("a fresh guard of another live process is alloc_busy and stays untouched; retry succeeds once it is released", async () => {
+      const child = spawn("sleep", ["30"], { stdio: "ignore" });
+      try {
+        const dir = home();
+        withGuard(dir, child.pid!);
+        expect(attemptAcquireRepoLock(dir, REPO, "a", { maxRuns: 2 })).toEqual({ status: "alloc_busy" });
+        expect(readFileSync(guardOf(dir), "utf8")).toBe(String(child.pid));
+        setTimeout(() => rmSync(guardOf(dir), { force: true }), 30);
+        const rel = await acquireRepoLockWithRetry(dir, REPO, "a", { maxRuns: 2 });
+        expect(rel).toBeTypeOf("function");
+        rel!();
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("a guard of a dead process or older than 10 s is taken over", () => {
+      const dead = home();
+      withGuard(dead, 999_999_999);
+      const a = acquireRepoLock(dead, REPO, "a", { maxRuns: 2 });
+      expect(a).toBeTypeOf("function");
+      a!();
+      const old = home();
+      withGuard(old, process.pid === 1 ? 2 : 1, 60_000);
+      const b = acquireRepoLock(old, REPO, "b", { maxRuns: 2 });
+      expect(b).toBeTypeOf("function");
+      b!();
+      // released guard and no .stale leftovers
+      expect(readdirSync(join(old, "locks")).filter((n) => n.endsWith(".alloc") || n.endsWith(".stale"))).toEqual([]);
+    });
   });
 });

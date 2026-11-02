@@ -59,7 +59,13 @@ function stealStaleAllocGuard(guard: string): boolean {
   } catch {
     return true;
   }
-  const pid = Number(readFileSync(guard, "utf8").trim());
+  let pid: number;
+  try {
+    pid = Number(readFileSync(guard, "utf8").trim());
+  } catch {
+    // released between stat and read: free again, the caller retries the claim
+    return true;
+  }
   if (Number.isInteger(pid) && pid > 0 && alive(pid) && Date.now() - st.mtimeMs <= GUARD_STALE_MS) return false;
   const trash = `${guard}.${process.pid}.${Date.now()}.stale`;
   try {
@@ -71,11 +77,13 @@ function stealStaleAllocGuard(guard: string): boolean {
     const tp = Number(readFileSync(trash, "utf8").trim());
     const tst = statSync(trash);
     if (Number.isInteger(tp) && tp > 0 && alive(tp) && Date.now() - tst.mtimeMs <= GUARD_STALE_MS) {
+      // Put the live guard back without replacing one created meanwhile (rename would clobber it).
       try {
-        renameSync(trash, guard);
+        linkSync(trash, guard);
       } catch {
-        rmSync(trash, { force: true });
+        // a newer guard exists; it wins
       }
+      rmSync(trash, { force: true });
       return false;
     }
   } catch {

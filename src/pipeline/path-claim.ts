@@ -1,6 +1,6 @@
 import { repoLockId } from "../git.js";
 import { realSleep } from "../agents/fake-runner.js";
-import type { RunContext } from "./context.js";
+import { checkDeadline, type RunContext } from "./context.js";
 import { decidePathClaim } from "./lock.js";
 import { lockRepoKey } from "./lock.js";
 import { touchesExclusive } from "./overlap.js";
@@ -16,7 +16,7 @@ export function needsConcurrencyPathClaim(repo: Pick<RepoConfig, "concurrency">)
  * live run. `wait` polls at finalize the same way as `--wait` at intake.
  */
 export async function ensureChangedPathClaim(
-  ctx: Pick<RunContext, "deps" | "repoDir" | "runId" | "repo" | "lockSlot" | "events">,
+  ctx: Pick<RunContext, "deps" | "repoDir" | "runId" | "repo" | "lockSlot" | "events" | "deadline">,
   changed: string[],
   wait: boolean,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -31,6 +31,8 @@ export async function ensureChangedPathClaim(
   const exclusive = touchesExclusive(paths, ctx.repo.concurrency.exclusive_paths);
 
   for (;;) {
+    // `--wait` at finalize stays within max_wall_minutes (and stops on SIGINT/SIGTERM).
+    checkDeadline(ctx);
     const decision = decidePathClaim(ctx.deps.factoryHome, raw, slot, ctx.runId, { paths, exclusive });
     if (decision.ok) return { ok: true };
     if (decision.kind === "busy") {
