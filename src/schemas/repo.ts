@@ -115,6 +115,63 @@ export const CiToolchainsSchema = z
   })
   .strict();
 
+const SelectorSchema = z.string().refine((s) => s.trim().length > 0, "selector is empty");
+
+/**
+ * A credential is a name, never an inline value. `secret` is resolved by the repo's secrets provider;
+ * `env` is a `NAME=value` line printed by `ui.auth.setup`.
+ */
+const AuthCredentialSchema = z.union(
+  [z.object({ secret: EnvNameSchema }).strict(), z.object({ env: EnvNameSchema }).strict()],
+  "credential must be { secret: NAME } or { env: NAME }, not an inline value",
+);
+
+const AuthSuccessSchema = z.union(
+  [
+    z
+      .object({
+        url: z.string().refine((s) => (s.startsWith("/") && !s.startsWith("//")) || s.includes("*"), "success url is a path (/dashboard) or a glob (**/dashboard)"),
+      })
+      .strict(),
+    z.object({ selector: SelectorSchema }).strict(),
+  ],
+  "success check is { url } or { selector }",
+);
+
+/**
+ * Deterministic login before the evaluator's browser session. Playwright fills the form; the model
+ * never sees the password. `setup` (seed a test user, for example) runs first and is required when a
+ * credential comes from its env.
+ */
+export const UiAuthSchema = z
+  .object({
+    login_path: z.string().regex(/^\/(?!\/)/, "login_path is a path on the app (starts with /)"),
+    fields: z
+      .object({
+        user: SelectorSchema,
+        password: SelectorSchema,
+        submit: SelectorSchema,
+      })
+      .strict(),
+    success: AuthSuccessSchema,
+    credentials: z
+      .object({
+        user: AuthCredentialSchema,
+        password: AuthCredentialSchema,
+      })
+      .strict(),
+    setup: z
+      .string()
+      .refine((s) => s.trim().length > 0, "setup is empty")
+      .optional(),
+  })
+  .strict()
+  .superRefine((auth, ctx) => {
+    const needsSetup = [auth.credentials.user, auth.credentials.password].some((c) => "env" in c);
+    if (needsSetup && !auth.setup) ctx.addIssue({ code: "custom", path: ["setup"], message: "credentials from a setup env need setup" });
+  });
+export type UiAuth = z.infer<typeof UiAuthSchema>;
+
 export const RepoConfigSchema = z
   .object({
     base_branch: z.string().default("main"),
@@ -190,7 +247,10 @@ export const RepoConfigSchema = z
         devices: z.array(z.string().min(1)).min(1).default(["Desktop Chrome"]),
         // Pages (paths under `url`) screenshotted base vs HEAD and checked for console/network errors.
         pages: z.array(z.string()).default(["/"]),
+        // Playwright logs in before the evaluator session. Strict: a typo or an inline password fails the config.
+        auth: UiAuthSchema.optional(),
       })
+      // Unknown ui keys stay tolerated; `auth` itself is strict.
       .loose()
       .optional(),
     verify: z
@@ -255,6 +315,7 @@ export function placeholderTexts(cfg: Pick<RepoConfig, "services" | "checks" | "
   }
   for (const c of cfg.checks) out.push({ where: `check ${c.name}`, text: c.run });
   if (cfg.ui) out.push({ where: "ui start", text: cfg.ui.start }, { where: "ui url", text: cfg.ui.url });
+  if (cfg.ui?.auth?.setup) out.push({ where: "ui auth setup", text: cfg.ui.auth.setup });
   if (cfg.verify?.run) out.push({ where: "verify run", text: cfg.verify.run });
   return out;
 }

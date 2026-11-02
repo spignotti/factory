@@ -3,7 +3,8 @@ import { basename, join } from "node:path";
 import { z } from "zod";
 import { InvalidOutputError } from "../agents/models.js";
 import { extractJson } from "../agents/runner.js";
-import { browsersPath, type ConsoleEntry, EvalBrowser, findHeadlessShell, INSTALL_HINT, knownDevice, type NetworkEntry } from "../evaluate/browser.js";
+import { browsersPath, type BrowserStorageState, type ConsoleEntry, EvalBrowser, findHeadlessShell, INSTALL_HINT, knownDevice, type NetworkEntry } from "../evaluate/browser.js";
+import { AuthLoginError, establishLogin } from "../evaluate/login.js";
 import { videoToGif } from "../evaluate/gif.js";
 import { diffPngs } from "../evaluate/pixeldiff.js";
 import { BrowserSession } from "../evaluate/tools.js";
@@ -17,10 +18,11 @@ import type { RepoConfig } from "../schemas/repo.js";
 import { type Finding, FindingSchema, type ReviewOutput } from "../schemas/review.js";
 import { shellQuote } from "../sandbox/sandbox.js";
 import { EnvMissing, Services } from "../services.js";
+import { MIN_REDACT_LENGTH } from "../secrets.js";
 
 /**
- * Evaluate: code first (app start, recorded flows, console/network capture, pixel
- * diff base vs HEAD), then the `evaluate` LLM session for `verify: evaluator` criteria. Output is a
+ * Evaluate: code first (app start, optional `ui.auth` login, recorded flows, console/network capture,
+ * pixel diff base vs HEAD), then the `evaluate` LLM session for `verify: evaluator` criteria. Output is a
  * review (`reviewer: evaluator`); every code finding has a stable claim so it dedupes across rounds.
  * Artifacts land in `runs/<id>/evidence/` and are listed in `evaluate-<round>.json`.
  */
@@ -177,11 +179,17 @@ interface Capture {
 /** Screenshots and console/network of every device × page, one browser per device. */
 async function capturePages(
   ctx: RunContext,
-  opts: { url: string; reach: number[]; devices: string[]; pages: string[]; dir: string; prefix: string; cwd: string },
+  opts: { url: string; reach: number[]; devices: string[]; pages: string[]; dir: string; prefix: string; cwd: string; storageState?: BrowserStorageState },
 ): Promise<Map<string, Capture>> {
   const out = new Map<string, Capture>();
   for (const device of opts.devices) {
-    const b = await EvalBrowser.launch({ jail: jailFor(ctx, opts.cwd), reach: opts.reach, device, env: agentEnv(ctx) });
+    const b = await EvalBrowser.launch({
+      jail: jailFor(ctx, opts.cwd),
+      reach: opts.reach,
+      device,
+      env: agentEnv(ctx),
+      ...(opts.storageState ? { storageState: opts.storageState } : {}),
+    });
     try {
       for (const page of opts.pages) {
         const c0 = b.console.length;
@@ -234,7 +242,17 @@ async function baseCaptures(ctx: RunContext, devices: string[], pages: string[],
       const names = [...ui.services, "ui"];
       await services.ensure(names);
       const url = await services.expand(ui.url);
-      const captures = await capturePages(ctx, { url, reach: services.reachOf(names), devices, pages, dir, prefix: "base", cwd: wt });
+      const reach = services.reachOf(names);
+      // A different origin than HEAD (its own port), so the HEAD session's cookies do not apply.
+      let storageState: BrowserStorageState | undefined;
+      if (ui.auth) {
+        try {
+          storageState = (await loginIfConfigured(ctx, { cwd: wt, services, url, reach, device: devices[0]! }))?.storageState;
+        } catch (e) {
+          return { error: (e instanceof Error ? e.message : String(e)).split("\n")[0]! };
+        }
+      }
+      const captures = await capturePages(ctx, { url, reach, devices, pages, dir, prefix: "base", cwd: wt, ...(storageState ? { storageState } : {}) });
       return { captures, origin: new URL(url).origin };
     } catch (e) {
       return { error: `base app: ${(e as Error).message.split("\n")[0]}` };
@@ -273,14 +291,22 @@ async function runFlows(ctx: RunContext, services: Services, areas: Area[], url:
 /** The LLM session over the `verify: evaluator` criteria, with browser tools and a video. */
 async function llmSession(
   ctx: RunContext,
-  input: { round: number; url: string; reach: number[]; areas: Area[]; device: string; dir: string; prior: TrackedFinding[] },
+  input: { round: number; url: string; reach: number[]; areas: Area[]; device: string; dir: string; prior: TrackedFinding[]; storageState?: BrowserStorageState },
   evidence: EvidenceItem[],
   notes: string[],
 ): Promise<{ criteria: CriterionResult[]; findings: Finding[] }> {
   const criteria = ctx.plan.acceptance.filter((a) => a.verify === "evaluator");
   if (!criteria.length) return { criteria: [], findings: [] };
   const videoDir = join(input.dir, `video-${input.round}`);
-  const b = await EvalBrowser.launch({ jail: jailFor(ctx, ctx.worktree), reach: input.reach, device: input.device, env: agentEnv(ctx), videoDir });
+  // The login browser is already closed. This recording starts from the restored session, not the password form.
+  const b = await EvalBrowser.launch({
+    jail: jailFor(ctx, ctx.worktree),
+    reach: input.reach,
+    device: input.device,
+    env: agentEnv(ctx),
+    videoDir,
+    ...(input.storageState ? { storageState: input.storageState } : {}),
+  });
   const session = new BrowserSession(b, { baseUrl: input.url, evidenceDir: input.dir, prefix: `r${input.round}` });
   const areas = input.areas.length ? input.areas : ctx.repo.verify.areas;
   const guides = areas
@@ -289,6 +315,7 @@ async function llmSession(
   const prior = input.prior.filter((f) => f.reviewer === "evaluator" && f.status === "open").map(({ id, claim, response }) => ({ id, claim, response: response ?? null }));
   let prompt = [
     `The app runs at ${input.url} (device: ${input.device}).`,
+    ctx.repo.ui?.auth ? "You are already logged in (session restored). Do not type credentials or submit the login form." : "",
     asData("criteria", JSON.stringify(criteria.map(({ id, text, package: pkg }) => ({ id, package: pkg, text })), null, 2)),
     ...guides,
     prior.length ? asData("prior_evaluator_findings", JSON.stringify(prior, null, 2)) : "",
@@ -333,6 +360,38 @@ async function llmSession(
 }
 
 /**
+ * Logs in when `ui.auth` is set. Credential values are registered for redaction before the browser
+ * runs and before a setup failure's output is turned into an error. The browser process itself gets
+ * `agentEnv` (no secrets); only the setup command gets the command env.
+ */
+async function loginIfConfigured(
+  ctx: RunContext,
+  opts: { cwd: string; services: Services; url: string; reach: number[]; device: string },
+): Promise<{ storageState: BrowserStorageState; short: ("user" | "password")[] } | undefined> {
+  const auth = ctx.repo.ui?.auth;
+  if (!auth) return undefined;
+  const names = [...ctx.repo.ui!.services, "ui"];
+  try {
+    return await establishLogin({
+      auth,
+      appUrl: opts.url,
+      secrets: ctx.secrets?.env ?? {},
+      cwd: opts.cwd,
+      env: { ...commandEnv(ctx), ...(await opts.services.envOf(names)) },
+      jail: opts.services.jailWith({ reach: opts.reach }),
+      reach: opts.reach,
+      device: opts.device,
+      browserEnv: agentEnv(ctx),
+      expand: (text) => opts.services.expand(text),
+      onSecrets: (values) => ctx.events.addSecrets(values),
+    });
+  } catch (e) {
+    if (e instanceof AuthLoginError) throw new EnvMissing(e.message);
+    throw e;
+  }
+}
+
+/**
  * One evaluate round. Returns undefined when it does not apply (no ui, or `ui.paths` untouched).
  * Service failures throw EnvMissing (→ needs_human, like a check that needs a service).
  */
@@ -358,10 +417,20 @@ export async function evaluateRound(ctx: RunContext, round: number, prior: Track
   const origin = new URL(url).origin;
   const areas = affectedAreas(ctx.repo, changed);
 
+  // Before flows and the session: setup seeds users, then Playwright logs in. A failure is needs_human.
+  let storageState: BrowserStorageState | undefined;
+  if (ui.auth) {
+    const logged = await loginIfConfigured(ctx, { cwd: ctx.worktree, services: ctx.services, url, reach, device: ui.devices[0]! });
+    storageState = logged?.storageState;
+    notes.push("ui.auth: logged in before the evaluator session");
+    if (logged?.short.length) notes.push(`ui.auth: ${logged.short.join(" and ")} value is shorter than ${MIN_REDACT_LENGTH} characters, so it is not redacted from logs`);
+    ctx.events.emit({ step: "evaluate", event: "progress", data: { auth: "logged_in" } });
+  }
+
   const flows = await runFlows(ctx, ctx.services, areas, url, reach, notes);
 
   const pages = [...new Set([...ui.pages, ...areas.flatMap((a) => a.pages)])];
-  const head = await capturePages(ctx, { url, reach, devices: ui.devices, pages, dir, prefix: `r${round}`, cwd: ctx.worktree });
+  const head = await capturePages(ctx, { url, reach, devices: ui.devices, pages, dir, prefix: `r${round}`, cwd: ctx.worktree, ...(storageState ? { storageState } : {}) });
   const base = await baseCaptures(ctx, ui.devices, pages, dir);
   if ("error" in base) notes.push(`no base comparison: ${base.error}`);
   const checks: PageCheck[] = [];
@@ -393,7 +462,7 @@ export async function evaluateRound(ctx: RunContext, round: number, prior: Track
     }
   }
 
-  const llm = await llmSession(ctx, { round, url, reach, areas, device: ui.devices[0]!, dir, prior }, evidence, notes);
+  const llm = await llmSession(ctx, { round, url, reach, areas, device: ui.devices[0]!, dir, prior, ...(storageState ? { storageState } : {}) }, evidence, notes);
   const findings = [...flowFindings(flows), ...pageFindings(checks), ...criteriaFindings(llm.criteria), ...llm.findings];
   const review: ReviewOutput = { reviewer: "evaluator", prior: priorVerdicts(prior, findings), findings };
   const report: EvaluateReport = { round, url, devices: ui.devices, areas: areas.map((a) => a.name), flows, pages: checks, ...("error" in base ? { base_error: base.error } : {}), criteria: llm.criteria, evidence, notes, review };

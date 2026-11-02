@@ -99,6 +99,119 @@ describe("evaluate helpers", () => {
     expect(f).toEqual([expect.objectContaining({ severity: "bug", claim: "acceptance criterion A2 is not met in the running app", evidence: "button missing" })]);
   });
 
+  it("ui.auth is strict: secret or setup-env names, no inline values, setup required for env", () => {
+    const repo = parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#email", password: "#password", submit: "button[type=submit]" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: { secret: EVAL_PASSWORD }
+secrets: { provider: env_file, names: [EVAL_USER, EVAL_PASSWORD] }
+`);
+    expect(repo.ui?.auth?.login_path).toBe("/login");
+    expect(repo.ui?.auth?.credentials.password).toEqual({ secret: "EVAL_PASSWORD" });
+    expect(
+      placeholderTexts(parseRepoConfig(`
+ui:
+  start: "s --port {port:app}"
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#email", password: "#password", submit: "button[type=submit]" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: { secret: EVAL_PASSWORD }
+    setup: "node seed.mjs --port {port:app}"
+secrets: { provider: env_file, names: [EVAL_USER, EVAL_PASSWORD] }
+`)).map((t) => t.where),
+    ).toContain("ui auth setup");
+    // ui stays loose for unknown keys; auth does not.
+    expect(() => parseRepoConfig("ui: { start: x, url: y, theme: dark }")).not.toThrow();
+    expect(() =>
+      parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#u", password: "#p", submit: "#s" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: { secret: EVAL_PASSWORD }
+    note: leak
+`),
+    ).toThrow(/Unrecognized key/);
+    const inline = `
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#u", password: "#p", submit: "#s" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: "inline-password-value"
+`;
+    let msg = "";
+    try {
+      parseRepoConfig(inline);
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/not an inline value/);
+    expect(msg).not.toContain("inline-password-value");
+    expect(() =>
+      parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#u", password: "#p", submit: "#s" }
+    success: { selector: "#ok" }
+    credentials:
+      user: { env: SEED_USER }
+      password: { env: SEED_PASSWORD }
+`),
+    ).toThrow(/need setup/);
+    expect(() =>
+      parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: "https://evil.example/login"
+    fields: { user: "#u", password: "#p", submit: "#s" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: { secret: EVAL_PASSWORD }
+`),
+    ).toThrow(/login_path/);
+    expect(() =>
+      parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#u", password: "  ", submit: "#s" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: { secret: EVAL_PASSWORD }
+`),
+    ).toThrow(/selector is empty/);
+  });
+
   it("prior verdicts in code: found again → still open (or reject_wontfix), else resolved", () => {
     const base: Finding = { severity: "bug", file: "", line: 0, claim: "acceptance criterion A2 is not met in the running app", evidence: "", fix: "", checkable: "no", check_sketch: "" };
     const prior: TrackedFinding[] = [

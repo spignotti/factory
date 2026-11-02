@@ -1,14 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PiRunner } from "../../src/agents/pi-runner.js";
 import { isZenEndpoint, pingRequestOptions, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
-import { diskChecks, doctorCommand, type DoctorReport, evaluatorChecks } from "../../src/commands/doctor.js";
-import { loadRepoConfig } from "../../src/schemas/repo.js";
+import { diskChecks, doctorCommand, type DoctorReport, evaluatorChecks, repoConfigError, uiAuthChecks } from "../../src/commands/doctor.js";
+import { loadRepoConfig, parseRepoConfig, type RepoConfig } from "../../src/schemas/repo.js";
+import { defaultSecretsFile, type ResolvedSecrets } from "../../src/secrets.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { createSandbox, hostProbe } from "../../src/sandbox/sandbox.js";
 import { createFixtureRepo } from "../helpers/repo.js";
@@ -375,10 +376,102 @@ describe("evaluator checks", () => {
     ]);
   });
 
+  it("ui.auth: selectors, resolvable secret names, no inline values; silent without auth", () => {
+    const PASSWORD = "password-value-should-not-leak";
+    const repo = parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#email", password: "#password", submit: "button[type=submit]" }
+    success: { url: "/app" }
+    credentials:
+      user: { secret: EVAL_USER }
+      password: { secret: EVAL_PASSWORD }
+secrets: { provider: env_file, names: [EVAL_USER, EVAL_PASSWORD] }
+`);
+    const resolved = (env: Record<string, string>, missing: string[] = []): ResolvedSecrets => ({ env, missing, redact: Object.values(env), short: [], files: [], names: Object.keys(env) });
+    const ok = uiAuthChecks(repo, resolved({ EVAL_USER: "user-value-should-not-leak", EVAL_PASSWORD: PASSWORD }));
+    expect(ok.map((c) => c.status)).toEqual(["ok", "ok"]);
+    expect(ok[0]).toMatchObject({ detail: expect.stringMatching(/selectors for user, password and submit/) });
+    expect(ok[1]!.detail).toMatch(/user from secret EVAL_USER, password from secret EVAL_PASSWORD/);
+    expect(ok[1]!.detail).toMatch(/no inline values/);
+    expect(JSON.stringify(ok)).not.toContain(PASSWORD);
+    expect(uiAuthChecks(repo, resolved({ EVAL_USER: "user-value-should-not-leak" }, ["EVAL_PASSWORD"])).find((c) => c.status === "fail")?.detail).toMatch(/password secret EVAL_PASSWORD is not resolvable/);
+    expect(uiAuthChecks(parseRepoConfig("ui: { start: x, url: y, auth: { login_path: /login, fields: { user: \"#u\", password: \"#p\", submit: \"#s\" }, success: { url: \"/app\" }, credentials: { user: { secret: EVAL_USER }, password: { secret: EVAL_PASSWORD } } } }")).find((c) => c.status === "fail")?.detail).toMatch(/not in secrets\.names/);
+    const fromSetup = parseRepoConfig(`
+ui:
+  start: x
+  url: y
+  auth:
+    login_path: /login
+    fields: { user: "#u", password: "#p", submit: "#s" }
+    success: { selector: "#ok" }
+    credentials:
+      user: { env: SEED_USER }
+      password: { secret: EVAL_PASSWORD }
+    setup: "node seed.mjs"
+secrets: { provider: env_file, names: [EVAL_PASSWORD] }
+`);
+    const mixed = uiAuthChecks(fromSetup, resolved({ EVAL_PASSWORD: PASSWORD }));
+    expect(mixed.every((c) => c.status === "ok")).toBe(true);
+    expect(mixed[1]!.detail).toMatch(/user from setup env SEED_USER/);
+    expect(JSON.stringify(mixed)).not.toContain(PASSWORD);
+    expect(uiAuthChecks(parseRepoConfig("ui: { start: x, url: y }"))).toEqual([]);
+    expect(uiAuthChecks({ ...repo, ui: undefined } as RepoConfig)).toEqual([]);
+  });
+
   it("is ok with a shell, mobile emulation and ffmpeg; silent without ui", () => {
     const checks = evaluatorChecks(ui(["Desktop Chrome", "iPhone 15"]), { shell: "/x/chrome-headless-shell", browsers: "/x", ffmpeg: true });
     expect(checks.map((c) => c.status)).toEqual(["ok", "ok", "ok"]);
     expect(evaluatorChecks(loadRepoConfig(createFixtureRepo()), { shell: undefined, browsers: "/x", ffmpeg: false })).toEqual([]);
+  });
+
+  it("doctor output names ui.auth checks and never prints a credential value, including a rejected inline one", async () => {
+    const PASSWORD = "password-value-should-not-leak";
+    const fh = mkdtempSync(join(tmpdir(), "fh-"));
+    const repo = createFixtureRepo((c) => {
+      c.secrets = { provider: "env_file", names: ["EVAL_USER", "EVAL_PASSWORD"] };
+      c.ui = {
+        start: "node server.mjs --port {port:app}",
+        url: "http://127.0.0.1:{port:app}",
+        auth: {
+          login_path: "/login",
+          fields: { user: "#email", password: "#password", submit: "button[type=submit]" },
+          success: { url: "/app" },
+          credentials: { user: { secret: "EVAL_USER" }, password: { secret: "EVAL_PASSWORD" } },
+        },
+      };
+    });
+    const file = defaultSecretsFile(repo, fh).file;
+    mkdirSync(join(file, ".."), { recursive: true });
+    writeFileSync(file, `EVAL_USER=user-value-should-not-leak\nEVAL_PASSWORD=${PASSWORD}\n`);
+    chmodSync(file, 0o600);
+    const c = capture();
+    await doctorCommand({ factoryHome: fh, repo, json: true, probe, view, github: new FakeGitHub() }, c.io);
+    const text = c.text();
+    expect(text).not.toContain(PASSWORD);
+    expect(text).not.toContain("user-value-should-not-leak");
+    const r = JSON.parse(text) as DoctorReport;
+    expect(r.checks.filter((x) => x.name === "ui auth").map((x) => x.status)).toEqual(["ok", "ok"]);
+
+    writeFileSync(
+      join(repo, ".factory", "repo.yaml"),
+      `ui:\n  start: x\n  url: y\n  auth:\n    login_path: /login\n    fields: { user: "#u", password: "#p", submit: "#s" }\n    success: { url: /app }\n    credentials:\n      user: { secret: EVAL_USER }\n      password: "${PASSWORD}"\n`,
+    );
+    let leaked = "";
+    try {
+      parseRepoConfig(readFileSync(join(repo, ".factory", "repo.yaml"), "utf8"));
+    } catch (e) {
+      leaked = repoConfigError(e);
+    }
+    expect(leaked).toMatch(/not an inline value/);
+    expect(leaked).not.toContain(PASSWORD);
+    const c2 = capture();
+    await doctorCommand({ factoryHome: fh, repo, json: true, probe, view, github: new FakeGitHub() }, c2.io);
+    expect(c2.text()).not.toContain(PASSWORD);
+    expect(c2.text()).toMatch(/not an inline value/);
   });
 });
 
