@@ -293,6 +293,34 @@ export const RepoConfigSchema = z
     ci: z.object({ toolchains: CiToolchainsSchema.optional() }).strict().optional(),
     // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
+    /**
+     * How many factory runs may hold this repo at once. Default 1 keeps the single-run lock.
+     * `exclusive_paths`: a plan that touches any of these globs runs alone (database migrations).
+     * Read from the checkout's repo.yaml at the start of the run. Raising `max_runs` or removing
+     * an exclusive path is a loosening (config_guard).
+     */
+    concurrency: z
+      .object({
+        max_runs: z.number().int().min(1).max(32).default(1),
+        exclusive_paths: z.array(z.string().min(1)).default([]),
+      })
+      .default({ max_runs: 1, exclusive_paths: [] }),
+    /**
+     * PR body options. `host_steps_section` is the heading for manual production-host commands
+     * (for example "Mac install steps"). Unset: the section is omitted. Read from the base commit.
+     */
+    pr: z
+      .object({
+        host_steps_section: z
+          .string()
+          .trim()
+          .min(1)
+          .max(80)
+          .regex(/^[^#\n\r]+$/, "pr.host_steps_section is a heading, without # or newlines")
+          .optional(),
+      })
+      .strict()
+      .optional(),
   })
   .loose()
   .superRefine((cfg, ctx) => {

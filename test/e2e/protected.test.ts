@@ -45,7 +45,10 @@ describe("protected config changes (human_only_paths)", () => {
     expect(body).toContain("## ⚠️ Changes protected config (CI / factory)");
     expect(body).toContain("`.factory/repo.yaml`: add a red check (why: the task asks for it)");
     expect(body).toMatch(/```diff\n[\s\S]*\+\s+- name: red[\s\S]*```/);
-    expect(body).toMatch(/changes protected config \(CI \/ factory\): human approval required/);
+    expect(body).toContain("## Risk & Security");
+    expect(body).toContain("**high**");
+    expect(body).toContain("changes protected config (CI / factory)");
+    expect(body).not.toMatch(/human approval required|merge policy|Needs human review/);
     const gates = JSON.parse(r.file("gates-1.json")) as { checks: { name: string; status: string }[] };
     expect(gates.checks.map((c) => c.name)).not.toContain("red");
     expect(gates.checks.find((c) => c.name === "protected_paths")).toMatchObject({ status: "pass" });

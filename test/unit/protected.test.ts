@@ -63,10 +63,11 @@ describe("protected_paths gate", () => {
 });
 
 describe("risk of protected changes", () => {
-  it("is high with the human-approval reason", () => {
+  it("is high because the diff changes protected config", () => {
     const r = riskClass({ changed: [".github/workflows/ci.yml"], diffLines: 3, repo });
     expect(r.risk).toBe("high");
-    expect(r.reasons.join("\n")).toMatch(/human approval required, never auto-merged/);
+    expect(r.reasons.join("\n")).toContain("changes protected config (CI / factory)");
+    expect(r.reasons.join("\n")).not.toMatch(/human approval required|never auto-merged/);
     expect(riskClass({ changed: [".factory/verify/a.md"], diffLines: 3, repo }).risk).toBe("low");
   });
 });
@@ -108,6 +109,11 @@ limits: { forbidden_paths: [".env*"] }
     expect(repoConfigLoosening(base, base.replace("npm ci", "npm i"))).toEqual(["setup changed"]);
     expect(repoConfigLoosening(base, undefined)).toEqual(["repo.yaml deleted"]);
     expect(repoConfigLoosening(base, "checks: 3\n")[0]).toMatch(/^repo\.yaml no longer valid/);
+    expect(repoConfigLoosening(base, `${base}concurrency: { max_runs: 2 }\n`)).toEqual(["concurrency.max_runs raised"]);
+    const exclusive = `${base}concurrency:\n  exclusive_paths: ["supabase/migrations/**"]\n`;
+    expect(repoConfigLoosening(exclusive, base)).toEqual(["concurrency.exclusive_paths removed: supabase/migrations/**"]);
+    expect(repoConfigLoosening(base, exclusive)).toEqual([]);
+    expect(repoConfigLoosening(`${base}concurrency: { max_runs: 2 }\n`, base)).toEqual([]);
   });
 });
 

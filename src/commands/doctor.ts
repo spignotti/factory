@@ -338,6 +338,19 @@ export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): Doct
   return checks;
 }
 
+/** How many runs this repo allows, and whether fixed host ports make a second run env_missing. */
+export function concurrencyCheck(repo: RepoConfig): DoctorCheck {
+  const { max_runs, exclusive_paths } = repo.concurrency;
+  const paths = exclusive_paths.length ? exclusive_paths.join(", ") : "(none)";
+  const showPaths = exclusive_paths.length > 0 || max_runs > 1;
+  const base = showPaths ? `max_runs ${max_runs}; exclusive_paths ${paths}` : `max_runs ${max_runs}`;
+  const fixed = repo.services.filter((s) => s.host && (s.ports?.length ?? 0) > 0);
+  if (max_runs > 1 && fixed.length) {
+    return { name: "concurrency", status: "warn", detail: `${base}; ${fixed.map((s) => s.name).join(", ")} has fixed host ports (one instance per box)` };
+  }
+  return { name: "concurrency", status: "ok", detail: base };
+}
+
 /** Static service/ui checks: what runs unsandboxed, what nothing uses. */
 export function serviceConfigChecks(repo: RepoConfig): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
@@ -527,6 +540,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
           : { name: "git remotes", status: "ok", detail: "no credentials in remote URLs" },
       );
       const repo = loadRepoConfig(repoDir);
+      checks.push(concurrencyCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
       checks.push(...serviceConfigChecks(repo));
       const sec = await secretsChecks(repoDir, repo, opts.factoryHome);
