@@ -24,6 +24,8 @@ export interface RunState {
   repo: string;
   task: Task;
   no_pr: boolean;
+  /** `--wait` at intake: queue on slot or path overlap at finalize too. */
+  wait?: boolean;
   step: RunStep;
   result: RunResultKind | null;
   reason: string;
@@ -59,13 +61,14 @@ export interface RunState {
   updated_at: string;
 }
 
-export function newState(v: { runId: string; repo: string; task: Task; noPr: boolean; lane?: Lane }): RunState {
+export function newState(v: { runId: string; repo: string; task: Task; noPr: boolean; lane?: Lane; wait?: boolean }): RunState {
   return {
     version: 1,
     run_id: v.runId,
     repo: v.repo,
     task: v.task,
     no_pr: v.noPr,
+    wait: v.wait ?? false,
     step: "intake",
     result: null,
     reason: "",

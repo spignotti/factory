@@ -17,6 +17,7 @@ import { type GateReport, runGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
+import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
   result: "done" | "needs_human";
@@ -326,9 +327,19 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
-  const out = { result, reason, risk, mergePolicy: policy };
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
-  const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits);
+  let blockPush = false;
+  if (!input.noPr && hasCommits) {
+    const claim = await ensureChangedPathClaim(ctx, changed, ctx.wait ?? false);
+    if (!claim.ok) {
+      result = "needs_human";
+      reason = claim.reason;
+      policy = "human_review";
+      blockPush = true;
+    }
+  }
+  const out = { result, reason, risk, mergePolicy: policy };
+  const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits && !blockPush);
   const protectedConfig = protectedSection(ctx, guarded, await diffFiles(ctx.worktree, ctx.baseSha, guarded));
   if (guarded.length) ctx.events.emit({ step: "finalize", event: "progress", data: { protected_changes: guarded } });
   const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig }));
@@ -337,7 +348,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   throwIfInterrupted(ctx.deps);
   let pr: string | null = input.existingPr?.url ?? null;
   let draft: boolean | null = input.existingPr?.draft ?? null;
-  if (!input.noPr && hasCommits) {
+  if (!input.noPr && hasCommits && !blockPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
     try {
