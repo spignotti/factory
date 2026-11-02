@@ -198,6 +198,7 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command
 # "943 lines (+533 excluded: package-lock.json; 4 binary files)". Lockfiles still are dependency
 # changes for lane escalation and risk. Adding a diff_exclude entry is a loosening (config_guard).
 ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: ["src/app/**"], pages: ["/"], devices: ["Desktop Chrome"] }
+# ui.auth logs the evaluator in before the session; credentials are secret names, never inline values. See Evaluate.
 verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]
   run: "uv run pytest {files}"       # runs recorded flows [tests.run]
@@ -446,6 +447,36 @@ first runs the evaluator, before the reviewers:
   Expo / React Native Web app); new console errors and failed requests are bugs; pixel diffs are evidence;
 - `verify: evaluator` criteria are checked by the `evaluate` role with browser tools (`goto`, `click`,
   `fill`, `text`, `screenshot`, `console`, `network`), a screenshot per criterion and a recorded video/GIF.
+
+`ui.auth` logs in before that session, in Playwright, not through the model. The factory opens
+`login_path`, fills the `fields` selectors (`user`, `password`, `submit`) and waits until `success`
+(a path such as `/app`, a Playwright URL glob such as `**/app`, or a selector). It keeps the browser
+storage state (cookies, localStorage, IndexedDB) and starts the page captures and the evaluator session
+with it, so the model never sees the password and the session video does not include the login form.
+An optional `setup` command runs first, in the worktree, with the same secrets as checks (seed a test
+user); it also runs before recorded flows. Credentials are names, never inline values:
+
+- `{ secret: NAME }` — resolved by the repo's `secrets:` provider (the same values checks and services get);
+- `{ env: NAME }` — a `NAME=value` line printed by `setup` (required when any credential uses `env`).
+
+Values are added to the run's redaction list before login and never written into events, tool output,
+screenshot metadata or the PR. A value shorter than 6 characters is not redacted (it would match inside
+other words); doctor already warns about short secrets. `factory doctor --repo .` checks that the
+selectors are set, that `secret` names resolve, and that credentials are names rather than inline values.
+It does not run `setup`. A failed login on HEAD ends the run as `needs_human`; a failed login against the
+base commit is reported as a missing base comparison.
+
+```yaml
+ui:
+  auth:
+    login_path: /login
+    fields: { user: "#email", password: "#password", submit: "button[type=submit]" }
+    success: { url: "/app" }                # or { selector: "[data-logged-in]" }
+    credentials:
+      user: { secret: EVAL_USER }           # name in secrets:
+      password: { secret: EVAL_PASSWORD }   # or { env: EVAL_PASSWORD } printed by setup
+    setup: "node scripts/seed-test-user.mjs" # optional; required for env credentials
+```
 
 Any evaluator bug skips the reviewers that round and goes to fix. Evidence is pushed to the orphan branch
 `factory-evidence` (one folder per run, pruned after 30 days by `factory gc`) and embedded in the PR.

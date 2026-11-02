@@ -17,7 +17,7 @@ import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
 import { sh, tail } from "../exec.js";
 import { Services } from "../services.js";
 import { browsersPath, findHeadlessShell, INSTALL_HINT, knownDevice } from "../evaluate/browser.js";
-import type { z } from "zod";
+import { ZodError, type z } from "zod";
 import type { DoctorReportSchema } from "../schemas/reports.js";
 import { type Context7Client, context7Probe } from "../docs/context7.js";
 import { redact } from "../events.js";
@@ -103,6 +103,19 @@ export function diskChecks(paths: string[], statfs: (p: string) => FsUsage = sta
   return checks;
 }
 
+/**
+ * Repo-config failures as `path: message` only. Zod's own `Error.message` is a JSON dump of the issues
+ * and a YAML parse error quotes the offending line; either can echo an inline password.
+ */
+export function repoConfigError(e: unknown): string {
+  if (e instanceof ZodError) return e.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+  if (e instanceof Error && e.name === "YAMLParseError") {
+    const pos = (e as { linePos?: { line: number; col: number }[] }).linePos?.[0];
+    return `${REPO_CONFIG_PATH} is not valid YAML${pos ? ` (line ${pos.line}, column ${pos.col})` : ""}`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
 /** Resolves the layered model config (with the repo layer if `--repo`), reporting errors as a failed check. */
 export function modelConfigCheck(opts: DoctorOptions): { check: DoctorCheck; profile?: Profile } {
   try {
@@ -112,7 +125,7 @@ export function modelConfigCheck(opts: DoctorOptions): { check: DoctorCheck; pro
     return { check: { name: "model config", status: "ok", detail: "layers merged; provider policy and family rules hold" }, profile };
   } catch (e) {
     if (!(e instanceof Error)) throw e;
-    return { check: { name: "model config", status: "fail", detail: e.message } };
+    return { check: { name: "model config", status: "fail", detail: repoConfigError(e) } };
   }
 }
 
@@ -288,6 +301,40 @@ export function evaluatorChecks(repo: RepoConfig, env: { shell: string | undefin
     unknown.length ? { name: "ui devices", status: "fail", detail: `unknown Playwright device ${unknown.join(", ")}` } : { name: "ui devices", status: "ok", detail: repo.ui.devices.join(", ") },
     env.ffmpeg ? { name: "ffmpeg", status: "ok", detail: "session GIFs" } : { name: "ffmpeg", status: "warn", detail: "not found: evaluator sessions get a video but no GIF preview" },
   ];
+}
+
+/**
+ * `ui.auth`: selectors and a success check are set, credential names resolve (`secret` via the secrets
+ * provider, `env` only together with `setup`), and nothing in the block is an inline value. Names and
+ * counts only; `env` values are printed by setup at evaluate time, so doctor does not run it.
+ */
+export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): DoctorCheck[] {
+  const auth = repo.ui?.auth;
+  if (!auth) return [];
+  const missing = (["user", "password", "submit"] as const).filter((k) => !auth.fields[k]?.trim());
+  const success = "url" in auth.success ? "a url" : "a selector";
+  const checks: DoctorCheck[] = [
+    missing.length
+      ? { name: "ui auth", status: "fail", detail: `login selectors missing: ${missing.join(", ")}` }
+      : { name: "ui auth", status: "ok", detail: `login selectors for user, password and submit; success check is ${success}` },
+  ];
+  const problems: string[] = [];
+  const how: string[] = [];
+  for (const which of ["user", "password"] as const) {
+    const ref = auth.credentials[which];
+    if ("secret" in ref) {
+      if (!repo.secrets?.names.includes(ref.secret)) problems.push(`${which} secret ${ref.secret} is not in secrets.names`);
+      else if (!resolved?.env[ref.secret]) problems.push(`${which} secret ${ref.secret} is not resolvable`);
+      else how.push(`${which} from secret ${ref.secret}`);
+    } else if (!auth.setup) problems.push(`${which} env ${ref.env} needs setup`);
+    else how.push(`${which} from setup env ${ref.env}`);
+  }
+  checks.push(
+    problems.length
+      ? { name: "ui auth", status: "fail", detail: `${problems.join("; ")} (credentials are names, not inline values)` }
+      : { name: "ui auth", status: "ok", detail: `${how.join(", ")} (values not shown, no inline values)` },
+  );
+  return checks;
 }
 
 /** Static service/ui checks: what runs unsandboxed, what nothing uses. */
@@ -484,6 +531,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       const sec = await secretsChecks(repoDir, repo, opts.factoryHome);
       checks.push(...sec.checks);
       if (repo.ui) checks.push(...evaluatorChecks(repo, { shell: findHeadlessShell(), browsers: browsersPath(), ffmpeg: (await sh("command -v ffmpeg", { cwd: repoDir, env: { PATH: process.env.PATH ?? "" } })).code === 0 }));
+      checks.push(...uiAuthChecks(repo, sec.resolved));
       if (opts.services && profile) {
         try {
           checks.push(...(await liveServiceChecks(repoDir, repo, opts.factoryHome, createSandbox(profile.sandbox, opts.probe), sec.resolved)));
@@ -496,7 +544,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       checks.push(...(await githubChecks(opts.github ?? new GhCli(), repoDir, repo)));
     } catch (e) {
       const missing = (e as NodeJS.ErrnoException).code === "ENOENT";
-      checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand or run \`factory adopt\`)` : (e as Error).message.slice(0, 300) });
+      checks.push({ name: "repo.yaml", status: "fail", detail: missing ? `${REPO_CONFIG_PATH} is missing (write it by hand or run \`factory adopt\`)` : repoConfigError(e).slice(0, 300) });
     }
   }
   const report: DoctorReport = {
