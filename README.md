@@ -684,6 +684,19 @@ Machine-readable outputs have JSON Schemas in [`schemas/`](schemas/): `result.js
 eval profiles, eval result lines and the experiment verdict. They are
 generated from the zod schemas in code (`pnpm schemas`); a test keeps them in sync.
 
+## Releases
+
+Versions and tags come from [Release Please](https://github.com/googleapis/release-please)
+(`.github/workflows/release-please.yml`, `release-please-config.json`, `.release-please-manifest.json`).
+On every push to `main` it updates one release PR (`chore: release <version>`) that bumps `package.json`
+and `CHANGELOG.md` from the conventional-commit squash titles since the last tag (`feat` → minor and
+`fix` → patch while below 1.0; `docs`, `ci`, `chore` and `test` alone cut no release). A human merges the
+release PR per the merge matrix; the workflow then tags `v<version>` and publishes the GitHub release.
+Tags are what `factory ci-stub --ref` and `adopt --ref` pin. The box deploy is separate: `deploy-self.sh`
+builds every new `main` commit (a merged release PR is just one more), never a tag.
+The release PR and the tag are pushed with `GITHUB_TOKEN`, which starts no workflows: run
+`gh workflow run ci.yml --ref <release-branch>` so the required `check` reports before the merge.
+
 ## Development
 
 ```
