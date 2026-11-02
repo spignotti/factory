@@ -80,11 +80,11 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 | Command | Purpose |
 | --- | --- |
-| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
+| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, disk/inodes |
-| `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
+| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
@@ -522,6 +522,10 @@ GIFs; `factory doctor --repo .` checks both.
 
 `factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
 selects the checks with the same code as a local run and runs each one (`factory gates --run`).
+It does not run on pushes to the base branch (the PR run already checked the merged tree; a base commit
+without check runs makes the factory run the fast checks locally), and only a newer push to the same PR
+cancels a run, so no cancelled check marks a base commit red. The npx install of the pinned factory is
+cached per ref.
 
 **Required status check:** `done`, the stub's last job. GitHub Actions reports a check run under its job
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub
@@ -651,7 +655,7 @@ API key for OpenCode Go).
 ## Status, stats, cleanup
 
 ```
-factory status [--json]                     # running, waiting for you, interrupted; open factory PRs
+factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs
 factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
 factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 14]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs

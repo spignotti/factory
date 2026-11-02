@@ -156,6 +156,143 @@
         "additionalProperties": false
       }
     },
+    "queued": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "holder_run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "holder_pid": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "minutes": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "holder_run_id",
+          "holder_pid",
+          "minutes"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "orphaned": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "step"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stalled": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          },
+          "lane": {
+            "type": "string",
+            "enum": [
+              "standard",
+              "fast"
+            ]
+          },
+          "pid": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "minutes": {
+            "type": "number"
+          },
+          "silent_minutes": {
+            "type": "number"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "task",
+          "step",
+          "lane",
+          "pid",
+          "minutes",
+          "silent_minutes",
+          "branch",
+          "pr"
+        ],
+        "additionalProperties": false
+      }
+    },
     "prs": {
       "type": "array",
       "items": {
@@ -228,6 +365,9 @@
     "running",
     "waiting",
     "interrupted",
+    "queued",
+    "orphaned",
+    "stalled",
     "prs"
   ],
   "additionalProperties": false
