@@ -48,6 +48,14 @@ export interface RunState {
   transient?: boolean;
   /** Set by `factory gc` once the worktree and branches of a merged/closed PR are gone. */
   gc_at?: string;
+  /**
+   * Set when the run stopped because GitHub CI on the base commit was `red` or still `pending`.
+   * `factory gc` / the start of `factory run` resumes the same run once that commit is green,
+   * within `limits.base_red_resume_hours`. Absent for a local fast-check `base_red`.
+   */
+  base_ci?: "red" | "pending";
+  /** Set once archive retention has dropped the run directory down to the result and logs. */
+  archived_at?: string;
   updated_at: string;
 }
 

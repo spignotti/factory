@@ -15,6 +15,7 @@ import { asData, asset, rolePrompt } from "../prompts.js";
 import { type GateReport, runGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
+import { pollCommitCi } from "../pipeline/ci-wait.js";
 
 export interface FinalizeInput {
   result: "done" | "needs_human";
@@ -291,7 +292,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
-  const policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
+  let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const out = { result, reason, risk, mergePolicy: policy };
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits);
@@ -331,7 +332,36 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           draft = false;
         }
       }
-      if (policy === "auto") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+      // Pending PR checks are polled; they are not a failure. Red checks are: the PR is not merged on its own.
+      if (result === "done" && pr) {
+        const ci = await pollCommitCi({
+          github: ctx.deps.github,
+          repoDir: ctx.worktree,
+          sha: head,
+          waitMinutes: ctx.repo.limits.pr_ci_wait_minutes,
+          pollMs: ctx.deps.baseCiPollMs ?? 30_000,
+          sleep: ctx.deps.sleep,
+          signal: ctx.deps.signal,
+          onUpdate: (info) =>
+            ctx.events.emit({
+              step: "finalize",
+              event: "progress",
+              data: {
+                pr_ci:
+                  info.phase === "waiting"
+                    ? { status: info.status, sha: head, waiting_up_to_minutes: ctx.repo.limits.pr_ci_wait_minutes }
+                    : { status: info.status, sha: head, waited_ms: info.waitedMs },
+              },
+            }),
+        });
+        ctx.deadline.extend?.(ci.waitedMs);
+        if (ci.status === "red") {
+          result = "needs_human";
+          reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
+          await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
+        }
+      }
+      if (policy === "auto" && result === "done") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
@@ -340,6 +370,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
+  if (result !== "done") policy = "human_review";
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, reason, pr, draft };
+  return { ...out, result, reason, mergePolicy: policy, pr, draft };
 }

@@ -150,6 +150,61 @@
         ],
         "additionalProperties": false
       }
+    },
+    "abandoned": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "notified": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "reason",
+          "notified"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "archived": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "removed"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -157,7 +212,9 @@
     "cleaned",
     "skipped",
     "stripped",
-    "evidence"
+    "evidence",
+    "abandoned",
+    "archived"
   ],
   "additionalProperties": false
 }

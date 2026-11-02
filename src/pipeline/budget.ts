@@ -6,6 +6,8 @@ export interface Deadline {
   readonly at: number;
   /** Why the limit was reached, for the needs_human reason (active vs. suspended time). */
   describe?(): string;
+  /** Moves the deadline later by time that is not work (CI waits). */
+  extend?(ms: number): void;
 }
 
 export interface WallBudgetOptions {

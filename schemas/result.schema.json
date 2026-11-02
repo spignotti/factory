@@ -43,7 +43,8 @@
         "needs_input",
         "failed",
         "base_red",
-        "locked"
+        "locked",
+        "abandoned"
       ]
     },
     "risk": {

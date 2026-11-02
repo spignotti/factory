@@ -3,12 +3,16 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { abandonRun } from "../../src/commands/abandon.js";
 import { autoGc, gc } from "../../src/commands/gc.js";
 import { publishEvidence } from "../../src/evaluate/evidence.js";
 import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { FakeGitHub } from "../../src/gh.js";
-import { acquireRepoLock } from "../../src/pipeline/lock.js";
+import { repoLockId } from "../../src/git.js";
+import { acquireRepoLock, repoLockPath } from "../../src/pipeline/lock.js";
+import { resumeFactory } from "../../src/pipeline/run.js";
+import { addWorkingDays } from "../../src/working-days.js";
 import { listRuns, runStartedAt } from "../../src/runs.js";
 import { addOrigin, commitFile } from "../helpers/repo.js";
 import { runScenario } from "../helpers/scenario.js";
@@ -181,7 +185,7 @@ describe("factory gc", () => {
     expect(remoteHas(r.repo, branch)).toBe(false);
     expect(stateOf(r.runDir).gc_at).toEqual(expect.any(String));
     expect(git(r.repo, "branch", "--show-current").trim()).toBe("main");
-    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [], stripped: [], evidence: [{ repo: r.repo, removed: [] }] });
+    expect(await gc({ factoryHome: r.factoryHome, github: r.github })).toEqual({ dry_run: false, cleaned: [], skipped: [], stripped: [], evidence: [{ repo: r.repo, removed: [] }], abandoned: [], archived: [] });
     const s = await statusReport({ factoryHome: r.factoryHome, github: r.github });
     expect(s.prs).toEqual([]);
   });
@@ -248,7 +252,7 @@ describe("factory gc: runs without PR, open PRs, automatic gc", () => {
   it("a run without PR keeps its worktree inside the retention; afterwards only the worktree goes, the branch stays", async () => {
     const { r, wt, branch } = await doneRun();
     rewrite(r.runDir, { pr: null, result: "needs_human", step: "implement" });
-    expect(await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).toEqual({ dry_run: false, cleaned: [], skipped: [], stripped: [], evidence: [] });
+    expect(await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).toEqual({ dry_run: false, cleaned: [], skipped: [], stripped: [], evidence: [], abandoned: [], archived: [] });
     expect(existsSync(wt)).toBe(true);
 
     const later = () => Date.now() + 8 * DAY;
@@ -327,6 +331,159 @@ describe("factory gc: runs without PR, open PRs, automatic gc", () => {
   });
 });
 
+describe("needs_input timeout and archive retention", () => {
+  const DAY = 86_400_000;
+  const hook = () => {
+    const sent: { body: Record<string, unknown> }[] = [];
+    return {
+      sent,
+      setup: (repo: string) => void git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git"),
+      before: (_repo: string, home: string) => {
+        writeFileSync(join(home, "notify.yaml"), "repos:\n  acme/widgets:\n    url: https://hooks.example.test/h\n    key: crsr_needs-input-key-0123456789\n", { mode: 0o600 });
+      },
+      notifyFetch: async (_url: string, init: { body: string }) => {
+        sent.push({ body: JSON.parse(init.body) as Record<string, unknown> });
+        return { status: 200 };
+      },
+    };
+  };
+  const stamp = (runDir: string, at: string) => writeFileSync(join(runDir, "state.json"), JSON.stringify({ ...stateOf(runDir), updated_at: at }));
+
+  it("abandons an unanswered needs_input after 2 Berlin working days and notifies the owner", async () => {
+    const h = hook();
+    const r = await runScenario({ script: "needs-input.json", setup: h.setup, before: h.before });
+    expect(r.result.result).toBe("needs_input");
+    const stopped = new Date("2026-11-06T09:00:00.000Z"); // Friday 10:00 Europe/Berlin
+    stamp(r.runDir, stopped.toISOString());
+    const monday = Date.parse("2026-11-09T09:00:00.000Z"); // Monday 10:00, one working day
+    const opts = { factoryHome: r.factoryHome, github: r.github, evidence: false, notifyFetch: h.notifyFetch, notifyBackoffMs: [0] };
+    expect((await gc({ ...opts, now: () => monday })).abandoned).toEqual([]);
+    expect(stateOf(r.runDir).result).toBe("needs_input");
+
+    const due = addWorkingDays(stopped, 2).getTime();
+    const dry = await gc({ ...opts, now: () => due, dryRun: true });
+    expect(dry.abandoned).toEqual([expect.objectContaining({ run_id: r.runId, notified: false, reason: expect.stringMatching(/2 working days/) })]);
+    expect(stateOf(r.runDir).result).toBe("needs_input");
+
+    const res = await gc({ ...opts, now: () => due });
+    expect(res.abandoned).toEqual([expect.objectContaining({ run_id: r.runId, notified: true })]);
+    expect(stateOf(r.runDir).result).toBe("abandoned");
+    expect(h.sent.map((s) => s.body.result)).toEqual(["abandoned"]);
+    expect(readFileSync(join(r.runDir, "events.jsonl"), "utf8")).toMatch(/"event":"notify"/);
+    expect(JSON.parse(readFileSync(join(r.runDir, "result.json"), "utf8")).questions).toEqual(r.result.questions);
+    await expect(resumeFactory(r.runId, {}, { factoryHome: r.factoryHome } as never)).rejects.toThrow(/was abandoned/);
+  });
+
+  it("a live lock is not abandoned", async () => {
+    const r = await runScenario({ script: "needs-input.json" });
+    const stopped = new Date("2026-11-02T09:00:00.000Z");
+    stamp(r.runDir, stopped.toISOString());
+    const release = acquireRepoLock(r.factoryHome, await repoLockId(r.repo), r.runId)!;
+    try {
+      const due = addWorkingDays(stopped, 2).getTime();
+      expect((await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => due })).abandoned).toEqual([]);
+      expect(stateOf(r.runDir).result).toBe("needs_input");
+    } finally {
+      release();
+    }
+  });
+
+  it("archives a finished run after 14 days and still deletes the branch when the PR merges", async () => {
+    const r = await runScenario({ script: "clean.json", setup: (repo) => void addOrigin(repo) });
+    const wt = join(r.runDir, "worktree");
+    writeFileSync(join(wt, "scratch.txt"), "dirty");
+    mkdirSync(join(r.runDir, "services"), { recursive: true });
+    writeFileSync(join(r.runDir, "services", "svc.log"), "kept");
+    writeFileSync(join(r.runDir, "notes.txt"), "drop");
+    const branch = r.result.branch!;
+    stamp(r.runDir, new Date(Date.now() - 15 * DAY).toISOString());
+
+    const early = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now(), archiveDays: 30 });
+    expect(early.archived).toEqual([]);
+    expect(existsSync(join(r.runDir, "plan.json"))).toBe(true);
+
+    stamp(r.runDir, new Date(Date.now() - 15 * DAY).toISOString());
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now() });
+    expect(res.archived[0]).toMatchObject({ run_id: r.runId, removed: expect.arrayContaining(["plan.json", "worktree", "notes.txt"]) });
+    expect(existsSync(wt)).toBe(false);
+    expect(existsSync(join(r.runDir, "plan.json"))).toBe(false);
+    expect(existsSync(join(r.runDir, "notes.txt"))).toBe(false);
+    expect(readFileSync(join(r.runDir, "result.json"), "utf8")).toContain('"done"');
+    expect(existsSync(join(r.runDir, "events.jsonl"))).toBe(true);
+    expect(existsSync(join(r.runDir, "pr.md"))).toBe(true);
+    expect(readFileSync(join(r.runDir, "services", "svc.log"), "utf8")).toBe("kept");
+    const archived = stateOf(r.runDir);
+    expect(archived.archived_at).toEqual(expect.any(String));
+    expect(archived.worktree).toBeNull();
+    expect(archived.branch).toBe(branch);
+    expect((await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now() })).archived).toEqual([]);
+
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    const cleaned = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now() });
+    expect(cleaned.cleaned[0]).toMatchObject({ branch_deleted: true });
+    expect(git(r.repo, "branch", "--list", branch).trim()).toBe("");
+    expect(existsSync(join(r.runDir, "result.json"))).toBe(true);
+  });
+
+  it("does not archive needs_human, a GitHub-CI base_red inside its window, or a live run", async () => {
+    const human = await runScenario({ script: "clean.json" });
+    const rewrite = (runDir: string, patch: Record<string, unknown>) => writeFileSync(join(runDir, "state.json"), JSON.stringify({ ...stateOf(runDir), ...patch }));
+    rewrite(human.runDir, { result: "needs_human", updated_at: new Date(Date.now() - 30 * DAY).toISOString() });
+    const red = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "red") });
+    expect((await gc({ factoryHome: human.factoryHome, github: human.github, evidence: false, now: () => Date.now(), archiveDays: 0 })).archived).toEqual([]);
+    expect(existsSync(join(human.runDir, "plan.json"))).toBe(true);
+    expect((await gc({ factoryHome: red.factoryHome, github: red.github, evidence: false, now: () => Date.now(), archiveDays: 0 })).archived).toEqual([]);
+    expect(existsSync(join(red.runDir, "plan.json"))).toBe(true);
+
+    const live = await runScenario({ script: "clean.json" });
+    rewrite(live.runDir, { updated_at: new Date(Date.now() - 30 * DAY).toISOString() });
+    const release = acquireRepoLock(live.factoryHome, await repoLockId(live.repo), live.runId)!;
+    try {
+      expect((await gc({ factoryHome: live.factoryHome, github: live.github, evidence: false, now: () => Date.now(), archiveDays: 0 })).archived).toEqual([]);
+      expect(existsSync(join(live.runDir, "worktree"))).toBe(true);
+    } finally {
+      release();
+    }
+  });
+});
+
+describe("factory abandon", () => {
+  it("drops the worktree and a stale lock, keeps the branch, result and logs", async () => {
+    const r = await runScenario({ script: "clean.json" });
+    const wt = join(r.runDir, "worktree");
+    const id = await repoLockId(r.repo);
+    mkdirSync(join(r.factoryHome, "locks"), { recursive: true });
+    writeFileSync(repoLockPath(r.factoryHome, id), `2147483647\n${r.runId}\n`);
+    const outcome = await abandonRun({ factoryHome: r.factoryHome, runId: r.runId, reason: "abandoned with factory abandon" });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.worktree_removed).toBe(true);
+    expect(outcome.message).toMatch(/released stale lock/);
+    expect(existsSync(wt)).toBe(false);
+    expect(existsSync(repoLockPath(r.factoryHome, id))).toBe(false);
+    expect(git(r.repo, "branch", "--list", r.result.branch!).trim()).not.toBe("");
+    expect(JSON.parse(readFileSync(join(r.runDir, "result.json"), "utf8")).result).toBe("abandoned");
+    const events = readFileSync(join(r.runDir, "events.jsonl"), "utf8");
+    expect(events).toContain('"result":"abandoned"');
+    expect(events).toContain("no notify.yaml");
+    expect((await abandonRun({ factoryHome: r.factoryHome, runId: r.runId, reason: "again" })).message).toMatch(/already abandoned/);
+    await expect(resumeFactory(r.runId, {}, { factoryHome: r.factoryHome } as never)).rejects.toThrow(/was abandoned/);
+  });
+
+  it("refuses a run whose process still holds the lock", async () => {
+    const r = await runScenario({ script: "clean.json" });
+    const release = acquireRepoLock(r.factoryHome, await repoLockId(r.repo), r.runId)!;
+    try {
+      const outcome = await abandonRun({ factoryHome: r.factoryHome, runId: r.runId, reason: "abandoned with factory abandon" });
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toMatch(/still running/);
+      expect(existsSync(join(r.runDir, "worktree"))).toBe(true);
+      expect(stateOf(r.runDir).result).toBe("done");
+    } finally {
+      release();
+    }
+  });
+});
+
 describe("CLI wiring", () => {
   it("status, stats and gc print JSON from $FACTORY_HOME", async () => {
     const { main } = await import("../../src/cli.js");
@@ -339,6 +496,27 @@ describe("CLI wiring", () => {
         expect(await main([...args], { out: (s) => void (out += s), err: () => {} })).toBe(0);
         expect(JSON.parse(out)).toHaveProperty(key);
       }
+    } finally {
+      if (prev === undefined) delete process.env.FACTORY_HOME;
+      else process.env.FACTORY_HOME = prev;
+    }
+  });
+
+  it("abandon is in --help and abandons the run in $FACTORY_HOME", async () => {
+    const { main } = await import("../../src/cli.js");
+    let err = "";
+    expect(await main(["--help"], { out: () => {}, err: (s) => void (err += s) })).toBe(0);
+    expect(err).toContain("factory abandon <run-id>");
+
+    const r = await runScenario({ script: "clean.json" });
+    const prev = process.env.FACTORY_HOME;
+    process.env.FACTORY_HOME = r.factoryHome;
+    try {
+      let out = "";
+      expect(await main(["abandon", r.runId], { out: (s) => void (out += s), err: () => {} })).toBe(0);
+      expect(out).toMatch(/abandoned/);
+      expect(existsSync(join(r.runDir, "worktree"))).toBe(false);
+      expect(await main(["abandon", "no-such-run"], { out: () => {}, err: () => {} })).toBe(1);
     } finally {
       if (prev === undefined) delete process.env.FACTORY_HOME;
       else process.env.FACTORY_HOME = prev;
