@@ -38,17 +38,26 @@ Each run appends one JSON line to `$FACTORY_HOME/gc.log` (rotated at 5 MiB) with
 
 ## Scheduling (supercronic)
 
-This box uses **supercronic** and supervisord, not systemd. Example crontab line (daily 04:30):
+This box uses **supercronic** and supervisord, not systemd. The crontab line (daily 04:30) is in [ops/supercronic/factory-gc.crontab](../ops/supercronic/factory-gc.crontab).
 
-See [ops/supercronic/factory-gc.crontab](../ops/supercronic/factory-gc.crontab).
+On the box every job has its own supercronic process under supervisord (`/workspace/ops/supervisor/conf.d/*.conf`,
+one `[program:…]` per crontab, like `backup-cron` and `box-heartbeat`). To enable gc:
 
-Point supercronic at your crontab file the same way as the restic backup job.
+1. Copy the crontab to `/workspace/ops/factory-gc/crontab`.
+2. Add `/workspace/ops/supervisor/conf.d/factory-gc.conf` with
+   `command=/workspace/ops/bin/supercronic -quiet /workspace/ops/factory-gc/crontab`, `directory=/workspace/ops`,
+   `autostart=true`, `autorestart=true` and a `stdout_logfile` under `/workspace/ops/supervisor/logs/`.
+3. `supervisorctl reread && supervisorctl update`, then check `supervisorctl status factory-gc`.
+4. Leave `gc.retention.dry_run: true` for the first week and read `$FACTORY_HOME/gc.log`; flip it to `false` in
+   `$FACTORY_HOME/profile.yaml` only after that review.
+
+`--scheduled` never forces and stays dry-run while the profile says so, even though the CLI otherwise defaults to live.
 
 ## Backups (restic)
 
 Owned by a separate bot. Suggested policy:
 
-**Exclude** (large, regenerable): `runs/*/home`, `runs/*/worktree`, `archive/runs/*/home`, `archive/runs/*/worktree`, `archive/keys`, `archive/notify.yaml*`.
+**Exclude** (large and regenerable, or secret): `runs/*/home`, `runs/*/worktree`, `archive/runs/*/home`, `archive/runs/*/worktree`, `archive/keys`, `archive/notify.yaml*`, and the top-level `keys/`, `secrets/`, `notify.yaml` and `locks/`. Global excludes in the box profile: `*.key`, `*.pem`, `.env*`.
 
 **Include** (small, valuable): run metadata under `runs/` (until archived), `archive/runs/*.tar.gz`, patches, events, state, `memory/`, `profile.yaml`, `*.bak`.
 
