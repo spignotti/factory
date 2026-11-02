@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SCRIPT = join(__dirname, "..", "..", "scripts", "deploy-self.sh");
+const FACTORY_BIN = join(__dirname, "..", "..", "scripts", "factory");
+const RESOLVE_NODE = join(__dirname, "..", "..", "scripts", "resolve-node.sh");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
 // A fake factory: `dist/cli.js` is copied from `cli.js` by the build; `lib.txt` is read lazily.
@@ -26,6 +28,11 @@ let fhome: string;
 function commit(version: string, extra: Record<string, string> = {}): string {
   writeFileSync(join(upstream, "VERSION"), version);
   writeFileSync(join(upstream, "cli.js"), CLI);
+  const scripts = join(upstream, "scripts");
+  mkdirSync(scripts, { recursive: true });
+  writeFileSync(join(scripts, "factory"), readFileSync(FACTORY_BIN));
+  writeFileSync(join(scripts, "resolve-node.sh"), readFileSync(RESOLVE_NODE));
+  execFileSync("chmod", ["+x", join(scripts, "factory")]);
   for (const [f, c] of Object.entries(extra)) writeFileSync(join(upstream, f), c);
   git(upstream, "add", "-A");
   git(upstream, "commit", "-qm", version, "--allow-empty");
@@ -62,7 +69,7 @@ beforeEach(() => {
     FACTORY_DEPLOY_LIB_LINK: join(tmp, "lib", "node_modules", "factory"),
     FACTORY_HOME: fhome,
     FACTORY_DEPLOY_BUILD: BUILD,
-    FACTORY_DEPLOY_PROC_RE: `${tmp}/bin/factory( |$)`,
+    FACTORY_DEPLOY_PROC_RE: `(${tmp}/bin/factory|${tmp}/releases/[^ ]*/dist/cli\\.js)( |$)`,
   };
 });
 
@@ -74,7 +81,7 @@ describe("scripts/deploy-self.sh", () => {
     const r = deploy();
     expect(r.status, r.stderr).toBe(0);
     expect(readlinkSync(join(rel, "current"))).toBe(a);
-    expect(readlinkSync(bin)).toBe(join(rel, "current", "dist", "cli.js"));
+    expect(readlinkSync(bin)).toBe(join(rel, "current", "scripts", "factory"));
     expect(runBin("--version")).toBe("1.0.0-a");
     // node resolves the bin link to the release's real path
     expect(runBin("where")).toBe(join(realpathSync(rel), a, "dist", "cli.js"));
@@ -159,7 +166,7 @@ describe("scripts/deploy-self.sh", () => {
     const plain = noNode;
     const r = deploy("once", { PATH: plain });
     expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/node not found on PATH/);
+    expect(r.stderr).toMatch(/node not found: set FACTORY_NODE/);
     expect(existsSync(join(rel, "current"))).toBe(false);
     expect(existsSync(bin)).toBe(false);
   });
