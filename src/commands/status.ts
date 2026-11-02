@@ -36,7 +36,9 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
 
   for (const r of listRuns(opts.factoryHome)) {
     const events = eventsForRun(r);
-    if (isQueuedWaiter(r, events)) {
+    // A current lock holder is running, even if an earlier `queued` (e.g. path overlap) has no
+    // matching lock_acquired event.
+    if (!holders.has(r.run_id) && isQueuedWaiter(r, events)) {
       const q = queuedFromEvents(events);
       const lockRepo = events.findLast((e) => e.event === "queued")?.data.repo;
       report.queued.push({

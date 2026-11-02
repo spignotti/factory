@@ -180,7 +180,7 @@ export class GhCli implements GitHub {
 
   async addLabel(repoDir: string, pr: string, label: string): Promise<void> {
     // The PR body carries the same warning; a missing label permission must not fail the run.
-    await gh(repoDir, ["label", "create", label, "--force", "--color", "B60205", "--description", "Changes CI or factory config: human review required"]).catch(() => "");
+    await gh(repoDir, ["label", "create", label, "--force", "--color", "B60205", "--description", "Changes CI or factory config"]).catch(() => "");
     await gh(repoDir, ["pr", "edit", pr, "--add-label", label]).catch(() => "");
   }
 

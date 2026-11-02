@@ -89,6 +89,8 @@ export interface RunContext {
   services?: Services;
   /** repo.yaml `secrets:` resolved for this run (commands only, never agents); absent = none. */
   secrets?: ResolvedSecrets;
+  /** Repo lock slot (0-based). Port allocation prefers slot + 1. */
+  lockSlot?: number;
 }
 
 export type Lane = "standard" | "fast";
@@ -217,7 +219,7 @@ export async function callAgent(
 }
 
 /** Services of a run in its worktree, with the run's env and jail; events as `service`. */
-export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "runId" | "runDir" | "events" | "worktree" | "secrets">): Services {
+export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "runId" | "runDir" | "events" | "worktree" | "secrets" | "lockSlot">): Services {
   return new Services(ctx.repo, {
     runId: ctx.runId,
     logDir: join(ctx.runDir, "services"),
@@ -228,5 +230,6 @@ export function runServices(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" 
     onEvent: (action, data) => void ctx.events.emit({ step: "gates", event: "service", data: { action, ...data } }),
     // env_from values: redacted from events, artifacts, prompts and the PR from here on, like repo secrets.
     onSecrets: (values) => ctx.events.addSecrets(values),
+    ...(ctx.lockSlot !== undefined ? { preferredSlot: ctx.lockSlot + 1 } : {}),
   });
 }

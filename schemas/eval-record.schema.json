@@ -37,6 +37,7 @@
         "failed",
         "base_red",
         "locked",
+        "abandoned",
         "error"
       ]
     },

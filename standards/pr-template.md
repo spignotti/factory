@@ -3,10 +3,14 @@
 {{summary}}
 {{protected}}
 
-## Risk
+## Risk & Security
 
-**{{risk}}** — merge policy: **{{merge_policy}}**
-{{risk_reasons}}
+| Area | Touched | Note |
+|---|---|---|
+{{security_rows}}
+
+**{{risk}}** — {{risk_reason}}
+{{host_steps}}
 
 ## How to revert
 

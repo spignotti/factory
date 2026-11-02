@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,12 +45,24 @@ export function evidenceUrl(slug: string, sha: string, path: string): string {
   return `https://github.com/${slug}/blob/${sha}/${path.split("/").map(encodeURIComponent).join("/")}?raw=true`;
 }
 
-/** Remote tip of the evidence branch, fetched into `refs/factory/evidence`; null when it does not exist yet. */
+/**
+ * Remote tip of the evidence branch, fetched into a per-call ref (deleted before return) so two
+ * publishes in one repo do not clobber a shared local ref. Null when the branch does not exist yet.
+ */
 async function fetchTip(repoDir: string): Promise<string | null> {
   const remote = await run(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${EVIDENCE_BRANCH}`]);
   if (!remote) return null;
-  await run(repoDir, ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${EVIDENCE_BRANCH}:refs/factory/evidence`]);
-  return run(repoDir, ["rev-parse", "refs/factory/evidence"]);
+  const ref = `refs/factory/evidence-${randomBytes(4).toString("hex")}`;
+  try {
+    await run(repoDir, ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${EVIDENCE_BRANCH}:${ref}`]);
+    return await run(repoDir, ["rev-parse", ref]);
+  } finally {
+    try {
+      await run(repoDir, ["update-ref", "-d", ref]);
+    } catch {
+      // the fetch never created it
+    }
+  }
 }
 
 /**

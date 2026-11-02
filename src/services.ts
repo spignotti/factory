@@ -101,17 +101,23 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-/** Claims the lowest free port slot; returns the plan and its release function. */
+/**
+ * Claims a free port slot. `preferredSlot` (1..99) is tried first so a repo lock slot maps to a
+ * stable offset; the rest are scanned from slot 1. Returns the plan and its release function.
+ */
 export async function allocatePorts(
   factoryHome: string,
   runId: string,
   refs: { names: string[]; numbers: number[] },
   probe: (port: number) => Promise<boolean> = isPortFree,
+  preferredSlot?: number,
 ): Promise<{ plan: PortPlan; release: () => void }> {
   if (refs.names.length > MAX_NAMED_PORTS) throw new Error(`more than ${MAX_NAMED_PORTS} named ports`);
   const dir = join(factoryHome, "ports");
   mkdirSync(dir, { recursive: true });
-  for (let slot = 1; slot <= PORT_SLOTS; slot++) {
+  const preferred = preferredSlot !== undefined && preferredSlot >= 1 && preferredSlot <= PORT_SLOTS ? preferredSlot : undefined;
+  const order = preferred !== undefined ? [preferred, ...Array.from({ length: PORT_SLOTS }, (_, i) => i + 1).filter((s) => s !== preferred)] : Array.from({ length: PORT_SLOTS }, (_, i) => i + 1);
+  for (const slot of order) {
     const file = join(dir, `slot-${slot}.json`);
     let fd: number;
     try {
@@ -288,6 +294,8 @@ export interface ServicesOptions {
   probe?: (port: number) => Promise<boolean>;
   /** Values to redact from now on (`env_from` output), called before any check gets them. */
   onSecrets?: (values: string[]) => void;
+  /** Tried first (lock slot + 1). Omitted: lowest free slot, same as a single run. */
+  preferredSlot?: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -329,7 +337,7 @@ export class Services {
 
   private async ports(): Promise<PortPlan> {
     if (this.plan) return this.plan;
-    this.allocating ??= allocatePorts(this.opts.factoryHome, this.opts.runId, this.refs, this.opts.probe).then(({ plan, release }) => {
+    this.allocating ??= allocatePorts(this.opts.factoryHome, this.opts.runId, this.refs, this.opts.probe, this.opts.preferredSlot).then(({ plan, release }) => {
       this.plan = plan;
       this.release = release;
       this.opts.onEvent?.("ports", { slot: plan.slot, port_offset: plan.offset, ports: plan.named });

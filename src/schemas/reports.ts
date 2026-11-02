@@ -98,6 +98,10 @@ export const GcReportSchema = z.strictObject({
   stripped: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, removed: z.array(z.string()) })).default([]),
   // Evidence-branch retention per repository (folders removed, or why not).
   evidence: z.array(z.strictObject({ repo: z.string(), removed: z.array(z.string()), note: z.string().optional() })).default([]),
+  // needs_input left unanswered for the working-day timeout: abandoned, lock released, worktree removed.
+  abandoned: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), reason: z.string(), notified: z.boolean() })).default([]),
+  // Run directories past the archive retention, reduced to the result summary and logs.
+  archived: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), removed: z.array(z.string()) })).default([]),
 });
 
 export const DoctorReportSchema = z.strictObject({

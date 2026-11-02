@@ -50,6 +50,11 @@ export interface BrowserOptions {
   executable?: string;
   /** Default timeout of page actions (ms). */
   timeoutMs?: number;
+  /**
+   * Session captured by a prior login. Passed over CDP as an object, so a jailed browser never reads a
+   * state file and the password is not in it (cookies and storage only).
+   */
+  storageState?: BrowserStorageState;
 }
 
 /** Device names Playwright knows (validated in repo.yaml). */
@@ -97,6 +102,9 @@ export function freePort(): Promise<number> {
 const CHROME_ARGS = ["--headless", "--no-sandbox", "--disable-dev-shm-usage", "--hide-scrollbars", "--mute-audio", "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", "--disable-sync", "--metrics-recording-only", "--password-store=basic", "--use-mock-keychain"];
 /** Debug port inside an isolated jail; only the relay's port is forwarded. */
 const INNER_DEBUG_PORT = 9222;
+
+/** Cookies and localStorage (and IndexedDB) captured after a login, applied to a later context. */
+export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
 /** Inline relay: jail 0.0.0.0:outer → jail 127.0.0.1:inner. */
 function relayScript(outer: number, inner: number): string {
@@ -149,6 +157,7 @@ export class EvalBrowser {
       const context = await browser.newContext({
         ...descriptor,
         ...(opts.videoDir ? { recordVideo: { dir: opts.videoDir, size: descriptor.viewport } } : {}),
+        ...(opts.storageState ? { storageState: opts.storageState } : {}),
       });
       context.setDefaultTimeout(opts.timeoutMs ?? 10_000);
       context.setDefaultNavigationTimeout(Math.max(opts.timeoutMs ?? 10_000, 30_000));

@@ -1,0 +1,14 @@
+# tourenpilot-ops — copy into that repo's .factory/repo.yaml.
+# This file is an example only. Other repositories leave `pr` unset, so their PR bodies
+# omit the host-steps section.
+
+# Heading for manual production-Mac commands (launchd, restic, Docker Desktop, files outside the repo).
+# The plan supplies host_steps (commands, verify, rollback) only when the change needs them.
+pr:
+  host_steps_section: "Mac install steps"
+
+# Optional: more than one factory run at a time. A plan that touches a migration runs alone.
+# concurrency:
+#   max_runs: 2
+#   exclusive_paths:
+#     - "supabase/migrations/**"
