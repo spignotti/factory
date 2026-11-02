@@ -115,4 +115,37 @@ describe("parallel runs and host steps", () => {
     expect(r.github.prs[0]!.body).not.toContain("Mac install steps");
     expect(r.github.prs[0]!.body).not.toContain("launchctl");
   });
+
+  it("needs_human before push when the diff adds a migration the plan omitted beside an exclusive run", async () => {
+    let release: (() => void) | undefined;
+    const migration = "supabase/migrations/001_add.sql";
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 2, exclusive_paths: ["supabase/migrations/**"] }),
+      before: (repo, home) => {
+        const held = acquireRepoLock(home, repo, "migration-blocker", { maxRuns: 2 })!;
+        expect(
+          decidePathClaim(home, repo, held.slot, "migration-blocker", { paths: [migration], exclusive: true }).ok,
+        ).toBe(true);
+        release = held;
+      },
+      steps: (steps) =>
+        steps.map((s) =>
+          s.role === "implement"
+            ? {
+                ...s,
+                writes: {
+                  ...(s.writes as Record<string, string>),
+                  [migration]: "alter table t add column c int;\n",
+                },
+              }
+            : s,
+        ),
+    });
+    release?.();
+    expect(r.result.result).toBe("needs_human");
+    expect(r.result.reason).toMatch(/changed files overlap another factory run/);
+    expect(r.github.pushes).toEqual([]);
+    expect(r.runner.calls.some((c) => c.role === "implement")).toBe(true);
+  });
 });

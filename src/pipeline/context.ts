@@ -89,6 +89,10 @@ export interface RunContext {
   secrets?: ResolvedSecrets;
   /** Repo lock slot (0-based). Port allocation prefers slot + 1. */
   lockSlot?: number;
+  /** Checkout `concurrency.max_runs` for path-claim refresh at finalize. */
+  maxRuns?: number;
+  /** Whether `--wait` was set at intake. */
+  wait?: boolean;
 }
 
 export type Lane = "standard" | "fast";

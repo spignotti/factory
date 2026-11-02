@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { realSleep } from "../agents/fake-runner.js";
 import { canonicalRepoId } from "../memory.js";
@@ -37,6 +37,73 @@ function holderAlive(path: string): boolean {
 
 /** A takeover or alloc guard older than this belongs to a crashed process. */
 const GUARD_STALE_MS = 10_000;
+/** Retries when another process briefly holds the per-repo `.alloc` guard (not when slots are full). */
+const ALLOC_GUARD_RETRIES = 12;
+
+function releaseAllocGuard(guard: string): void {
+  try {
+    if (existsSync(guard) && readFileSync(guard, "utf8").trim() === String(process.pid)) rmSync(guard, { force: true });
+  } catch {
+    // already gone
+  }
+}
+
+/**
+ * Remove a stale `.alloc` guard without unlinking a file another process just recreated.
+ * Renames the guard aside, re-checks the holder, then deletes the trash name.
+ */
+function stealStaleAllocGuard(guard: string): boolean {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(guard);
+  } catch {
+    return true;
+  }
+  const pid = Number(readFileSync(guard, "utf8").trim());
+  if (Number.isInteger(pid) && pid > 0 && alive(pid) && Date.now() - st.mtimeMs <= GUARD_STALE_MS) return false;
+  const trash = `${guard}.${process.pid}.${Date.now()}.stale`;
+  try {
+    renameSync(guard, trash);
+  } catch {
+    return false;
+  }
+  try {
+    const tp = Number(readFileSync(trash, "utf8").trim());
+    const tst = statSync(trash);
+    if (Number.isInteger(tp) && tp > 0 && alive(tp) && Date.now() - tst.mtimeMs <= GUARD_STALE_MS) {
+      try {
+        renameSync(trash, guard);
+      } catch {
+        rmSync(trash, { force: true });
+      }
+      return false;
+    }
+  } catch {
+    // empty or unreadable trash: drop it
+  }
+  rmSync(trash, { force: true });
+  return true;
+}
+
+function withAlloc<T>(dir: string, key: string, fn: () => T): T | "busy" {
+  const guard = join(dir, `${key}.alloc`);
+  let claimed = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      writeFileSync(guard, String(process.pid), { flag: "wx" });
+      claimed = true;
+      break;
+    } catch {
+      if (!stealStaleAllocGuard(guard)) return "busy";
+    }
+  }
+  if (!claimed) return "busy";
+  try {
+    return fn();
+  } finally {
+    releaseAllocGuard(guard);
+  }
+}
 
 const safe = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120);
 
@@ -107,27 +174,6 @@ function settleLegacy(dir: string, repoId: string, key: string): "live" | "clear
   return "clear";
 }
 
-function withAlloc<T>(dir: string, key: string, fn: () => T): T | "busy" {
-  const guard = join(dir, `${key}.alloc`);
-  try {
-    const st = statSync(guard);
-    const pid = Number(readFileSync(guard, "utf8"));
-    if (!alive(pid) || Date.now() - st.mtimeMs > GUARD_STALE_MS) rmSync(guard, { force: true });
-  } catch {
-    // no guard
-  }
-  try {
-    writeFileSync(guard, String(process.pid), { flag: "wx" });
-  } catch {
-    return "busy";
-  }
-  try {
-    return fn();
-  } finally {
-    rmSync(guard, { force: true });
-  }
-}
-
 /** Hard-link claim of one slot. Same takeover guard as the single-slot lock. */
 function tryClaim(path: string, runId: string): (() => void) | undefined {
   const guard = `${path}.takeover`;
@@ -177,6 +223,68 @@ function tryClaim(path: string, runId: string): (() => void) | undefined {
 
 export type LockRelease = (() => void) & { slot: number };
 
+export type AcquireLockResult = { status: "acquired"; release: LockRelease } | { status: "alloc_busy" } | { status: "unavailable" };
+
+function claimSlotsUnderAlloc(dir: string, key: string, repoId: string, runId: string, opts?: LockOptions): LockRelease | undefined {
+  if (settleLegacy(dir, repoId, key) === "live") return undefined;
+  const maxRuns = Math.min(32, Math.max(1, Math.floor(opts?.maxRuns ?? 1)));
+  if (opts?.exclusive) {
+    const highest = existingSlots(dir, key).reduce((m, s) => Math.max(m, s), -1);
+    const n = Math.max(maxRuns, highest + 1);
+    const taken: LockRelease[] = [];
+    for (let slot = 0; slot < n; slot++) {
+      const rel = claimSlot(dir, key, slot, runId);
+      if (!rel) {
+        for (const r of taken) r();
+        return undefined;
+      }
+      taken.push(rel);
+    }
+    return Object.assign(
+      () => {
+        for (const r of taken) r();
+      },
+      { slot: 0 },
+    ) as LockRelease;
+  }
+  for (let slot = 0; slot < maxRuns; slot++) {
+    const rel = claimSlot(dir, key, slot, runId);
+    if (rel) return rel;
+  }
+  return undefined;
+}
+
+/** One attempt to take a slot; `alloc_busy` means the `.alloc` guard was held, not that slots are full. */
+export function attemptAcquireRepoLock(factoryHome: string, repoId: string, runId: string, opts?: LockOptions): AcquireLockResult {
+  const key = lockRepoKey(repoId);
+  const dir = locksDir(factoryHome);
+  mkdirSync(dir, { recursive: true });
+  const outcome = withAlloc(dir, key, () => claimSlotsUnderAlloc(dir, key, repoId, runId, opts));
+  if (outcome === "busy") return { status: "alloc_busy" };
+  if (!outcome) return { status: "unavailable" };
+  return { status: "acquired", release: outcome };
+}
+
+function allocRetryDelayMs(attempt: number): number {
+  return 5 + Math.floor(Math.random() * 35) + attempt * 2;
+}
+
+/** Retries briefly when only the `.alloc` guard is busy (see NB1). */
+export async function acquireRepoLockWithRetry(
+  factoryHome: string,
+  repoId: string,
+  runId: string,
+  opts?: LockOptions & { signal?: AbortSignal },
+): Promise<LockRelease | undefined> {
+  for (let attempt = 0; attempt < ALLOC_GUARD_RETRIES; attempt++) {
+    const r = attemptAcquireRepoLock(factoryHome, repoId, runId, opts);
+    if (r.status === "acquired") return r.release;
+    if (r.status === "unavailable") return undefined;
+    await realSleep(allocRetryDelayMs(attempt), opts?.signal);
+  }
+  return undefined;
+}
+
 export interface LockOptions {
   /** How many runs may hold a slot at once. Default 1 (one run per repo). */
   maxRuns?: number;
@@ -197,38 +305,8 @@ function claimSlot(dir: string, key: string, slot: number, runId: string): LockR
  * Returns a release function (`.slot` is the slot taken), or undefined when the lock is held.
  */
 export function acquireRepoLock(factoryHome: string, repoId: string, runId: string, opts?: LockOptions): LockRelease | undefined {
-  const maxRuns = Math.min(32, Math.max(1, Math.floor(opts?.maxRuns ?? 1)));
-  const key = lockRepoKey(repoId);
-  const dir = locksDir(factoryHome);
-  mkdirSync(dir, { recursive: true });
-  const outcome = withAlloc(dir, key, () => {
-    if (settleLegacy(dir, repoId, key) === "live") return undefined;
-    if (opts?.exclusive) {
-      const highest = existingSlots(dir, key).reduce((m, s) => Math.max(m, s), -1);
-      const n = Math.max(maxRuns, highest + 1);
-      const taken: LockRelease[] = [];
-      for (let slot = 0; slot < n; slot++) {
-        const rel = claimSlot(dir, key, slot, runId);
-        if (!rel) {
-          for (const r of taken) r();
-          return undefined;
-        }
-        taken.push(rel);
-      }
-      return Object.assign(
-        () => {
-          for (const r of taken) r();
-        },
-        { slot: 0 },
-      ) as LockRelease;
-    }
-    for (let slot = 0; slot < maxRuns; slot++) {
-      const rel = claimSlot(dir, key, slot, runId);
-      if (rel) return rel;
-    }
-    return undefined;
-  });
-  return outcome === "busy" || !outcome ? undefined : outcome;
+  const r = attemptAcquireRepoLock(factoryHome, repoId, runId, opts);
+  return r.status === "acquired" ? r.release : undefined;
 }
 
 /** Who holds slot 0 right now (undefined when free or stale). */
@@ -351,8 +429,12 @@ export async function waitForRepoLock(
   opts: { pollMs: number; signal?: AbortSignal; maxRuns?: number },
 ): Promise<LockRelease> {
   for (;;) {
-    const release = acquireRepoLock(factoryHome, repoId, runId, { maxRuns: opts.maxRuns });
-    if (release) return release;
+    const r = attemptAcquireRepoLock(factoryHome, repoId, runId, { maxRuns: opts.maxRuns });
+    if (r.status === "acquired") return r.release;
+    if (r.status === "alloc_busy") {
+      await realSleep(allocRetryDelayMs(0), opts.signal);
+      continue;
+    }
     await realSleep(opts.pollMs, opts.signal);
   }
 }

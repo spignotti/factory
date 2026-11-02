@@ -24,7 +24,7 @@ import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
-import { acquireRepoLock, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
+import { acquireRepoLockWithRetry, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
@@ -101,7 +101,7 @@ export async function takeRepoLock(
 ): Promise<{ release?: LockRelease; reason: string }> {
   const raw = await repoLockId(repoDir);
   const id = lockRepoKey(raw);
-  const release = acquireRepoLock(deps.factoryHome, raw, runId, { maxRuns });
+  const release = await acquireRepoLockWithRetry(deps.factoryHome, raw, runId, { maxRuns, signal: deps.signal });
   if (release) return { release, reason: "" };
   const holder = repoLockHolder(deps.factoryHome, raw);
   const by = holder ? `run ${holder.runId ?? "?"} (pid ${holder.pid})` : "another run";
@@ -392,7 +392,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
     if (!secrets) return;
-    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane }));
+    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane, wait: opts.wait ?? false }));
     f.save();
 
     const agentHome = prepareAgentHome(runDir);
@@ -486,7 +486,7 @@ async function beginWork(
   f.set({ branch, worktree });
   Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement", base_ci: undefined });
   f.save();
-  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation], lockSlot: f.lockSlot };
+  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation], lockSlot: f.lockSlot, maxRuns: f.maxRuns, wait: f.state?.wait ?? false };
   const services = (ctx.services = runServices(ctx));
   f.cleanups.push(() => services.stopAll());
   const env = agentEnv(ctx);
@@ -791,6 +791,8 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline, secrets,
       lockSlot: f.lockSlot,
+      maxRuns: f.maxRuns,
+      wait: st.wait ?? false,
     };
     const services = (ctx.services = runServices(ctx));
     f.cleanups.push(() => services.stopAll());

@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { concurrencyCheck } from "../../src/commands/doctor.js";
-import { acquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
+import { acquireRepoLock, acquireRepoLockWithRetry, attemptAcquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
+import { needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
 import { claimsConflict, pathsOverlap, touchesExclusive } from "../../src/pipeline/overlap.js";
 import { riskReasonLine, securityRows } from "../../src/pipeline/risk.js";
 import { validatePlan } from "../../src/schemas/plan.js";
@@ -197,5 +198,29 @@ describe("risk and host steps", () => {
     expect(concurrencyCheck(repo)).toEqual({ name: "concurrency", status: "ok", detail: "max_runs 1" });
     const parallel = parseRepoConfig("concurrency: { max_runs: 2 }\n");
     expect(concurrencyCheck(parallel).detail).toBe("max_runs 2; exclusive_paths (none)");
+  });
+
+  it("needsConcurrencyPathClaim when max_runs>1 or exclusive_paths set", () => {
+    expect(needsConcurrencyPathClaim(parseRepoConfig(""))).toBe(false);
+    expect(needsConcurrencyPathClaim(parseRepoConfig("concurrency: { max_runs: 2 }\n"))).toBe(true);
+    expect(needsConcurrencyPathClaim(parseRepoConfig('concurrency: { exclusive_paths: ["a/**"] }\n'))).toBe(true);
+  });
+
+  it("parallel slot acquires retry through brief alloc guard contention", async () => {
+    const dir = home();
+    const n = 12;
+    const held = await Promise.all(
+      Array.from({ length: n }, (_, i) => acquireRepoLockWithRetry(dir, REPO, `run-${i}`, { maxRuns: n })),
+    );
+    expect(held.every(Boolean)).toBe(true);
+    for (const r of held) r!();
+  });
+
+  it("attemptAcquire distinguishes a full repo from a busy alloc guard", () => {
+    const dir = home();
+    const a = acquireRepoLock(dir, REPO, "a", { maxRuns: 1 })!;
+    expect(attemptAcquireRepoLock(dir, REPO, "b", { maxRuns: 1 })).toEqual({ status: "unavailable" });
+    a();
+    expect(attemptAcquireRepoLock(dir, REPO, "b", { maxRuns: 1 }).status).toBe("acquired");
   });
 });
