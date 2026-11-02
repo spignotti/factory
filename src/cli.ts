@@ -27,7 +27,7 @@ import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 import { asset } from "./prompts.js";
-import { notifyTest } from "./notify.js";
+import { notifyTest, flushNotifyOutbox } from "./notify.js";
 
 const USAGE = `usage:
   factory --version
@@ -71,6 +71,8 @@ const USAGE = `usage:
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
   factory notify test <owner/name>
               (one test POST to the repo's webhook from $FACTORY_HOME/notify.yaml; doctor lists the configured repos)
+  factory notify flush [--json]
+              (retry pending notifications from $FACTORY_HOME/outbox/; also runs at the start of every run and resume)
   factory ci-stub [--ref <tag>]
               (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; doctor checks its hash)
 `;
@@ -287,7 +289,18 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       );
     }
     if (command === "notify") {
-      const [sub, repo, ...extra] = rest;
+      const [sub, ...subRest] = rest;
+      if (sub === "flush") {
+        const { values } = parseArgs({ args: subRest, options: { json: { type: "boolean", default: false } } });
+        const report = await flushNotifyOutbox(factoryHomeOf(), { factoryHome: factoryHomeOf() });
+        if (values.json) io.out(JSON.stringify(report) + "\n");
+        else {
+          io.out(`notify flush: sent ${report.sent}, failed ${report.failed}, skipped ${report.skipped}, remaining ${report.remaining}\n`);
+          for (const e of report.errors) io.err(`factory: ${e}\n`);
+        }
+        return report.remaining > 0 || report.failed > 0 ? 1 : 0;
+      }
+      const [repo, ...extra] = subRest;
       if (sub !== "test" || !repo || extra.length) {
         io.err(USAGE);
         return 2;

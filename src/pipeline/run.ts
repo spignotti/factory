@@ -29,7 +29,7 @@ import { planPaths, touchesExclusive } from "./overlap.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
-import { notifyRunFinished } from "../notify.js";
+import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
 import { listRuns } from "../runs.js";
 
 export interface RunOptions extends TaskInput {
@@ -360,6 +360,7 @@ async function openSecrets(f: RunFrame, repo: RepoConfig, repoDir: string, deps:
 
 /** `factory run`: intake → plan → implement → review loop → finalize. Always writes `result.json`. */
 export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunResult> {
+  await flushNotifyOutbox(deps.factoryHome, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, START_FLUSH).catch(() => undefined);
   const now = deps.now ?? Date.now;
   const startedAt = now();
   const runId = newRunId(startedAt);
@@ -718,6 +719,7 @@ export async function baseRepoConfig(repoDir: string, sha: string, checkout: Rep
  * session), then continues from the saved step and updates the existing PR.
  */
 export async function resumeFactory(runId: string, opts: ResumeOptions, deps: RunDeps): Promise<RunResult> {
+  await flushNotifyOutbox(deps.factoryHome, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, START_FLUSH).catch(() => undefined);
   const runDir = join(deps.factoryHome, "runs", runId);
   const st = readState(runDir);
   if (st.result === "abandoned") throw new Error(`run ${runId} was abandoned (${st.reason}); start a new run`);
