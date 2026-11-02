@@ -69,7 +69,7 @@ describe("factory doctor: model layers", () => {
     const bad = createFixtureRepo((c) => void (c.models = { implement: [{ model: "openai/gpt-6-luna" }] }));
     const c2 = capture();
     expect(await doctorCommand({ factoryHome: home, repo: bad, json: true, probe, view, github: new FakeGitHub() }, c2.io)).toBe(1);
-    expect((JSON.parse(c2.text()) as DoctorReport).checks[0]).toMatchObject({ status: "fail" });
+    expect((JSON.parse(c2.text()) as DoctorReport).checks.find((c) => c.name === "model config")).toMatchObject({ status: "fail" });
   });
 
   it("reports the sandbox: required but unavailable fails, preferred degraded warns", async () => {

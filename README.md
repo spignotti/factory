@@ -77,7 +77,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | --- | --- |
 | `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
 | `factory resume <run-id>` | continue after a human fix |
-| `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub, disk/inodes |
+| `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, disk/inodes |
 | `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
@@ -131,7 +131,9 @@ their release (node runs the entry's real path); the newest 3 releases are kept.
 once (`git ls-remote`; one `deploy: <result>` line, exit 0 deployed/up to date, 1 error/build failed, 3 deferred),
 `ensure` starts a background loop (every 5 min) unless one runs, `status` prints
 `state.json`; the log is `deploy.log` next to it. It needs `node`, `git`, `jq`, `flock` and a source clone in
-`~/.local/share/factory` (paths and the interval via `FACTORY_DEPLOY_*` / `FACTORY_RELEASES`).
+`~/.local/share/factory` (paths and the interval via `FACTORY_DEPLOY_*` / `FACTORY_RELEASES`). Node is resolved like
+the installed `factory` launcher: `FACTORY_NODE`, then `PATH`, then `~/.local/share/factory-node/bin/node`
+(`factory doctor` reports the result).
 
 From a checkout:
 
