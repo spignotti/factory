@@ -31,7 +31,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 - **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks are used as
   is; `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check; questions
-  → `needs_input`; per-repo lock (`--wait` queues); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`); worktree and branch
+  → `needs_input`; per-repo lock (`--wait` queues); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
   `factory/<task>-<slug>`.
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
   bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity). The planner
@@ -56,7 +56,8 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 - **Merge/exit** (`src/pipeline/merge.ts`, `loop.ts`): ids, dedupe, nit cap, stalemate, exit rules, fix rounds.
 - **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (no
   rebase, so never a force-push) plus full gates again, conflict → `needs_human`; risk class and merge
-  policy; PR body from `standards/pr-template.md`; push/PR through `src/gh.ts`.
+  policy; PR body from `standards/pr-template.md`; push/PR through `src/gh.ts`. After the PR exists, pending
+  CI on the head is polled up to `limits.pr_ci_wait_minutes` and does not fail the run; red CI ends it `needs_human`.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
@@ -77,6 +78,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | --- | --- |
 | `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
 | `factory resume <run-id>` | continue after a human fix |
+| `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, provider policy, models per role, agent context, CI stub, disk/inodes |
 | `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
@@ -183,10 +185,15 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
 # once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
-# max_wall_minutes is active time: time the box was suspended (VM paused, laptop asleep) is credited
+# limits.base_red_resume_hours [48]: a base_red caused by GitHub CI on the base commit is resumed (same run
+# id) once that commit is green or has no checks, if it stopped within this many hours (0–168; 0 = off).
+# `factory gc` and the start of `factory run` do the check. A local fast-check base_red is not resumed.
+# limits.pr_ci_wait_minutes [20]: after the PR is pushed, pending CI on the head is polled this long (0–120).
+# Still pending does not fail the run; red CI ends it needs_human (no auto-merge). The wait is not work time.
+# max_wall_minutes [240, 4 h] is active time: time the box was suspended (VM paused, laptop asleep) is credited
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
 # commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
 # factory resume <run-id>"), the worktree keeps the work and resume re-runs the gates over it.
@@ -618,16 +625,23 @@ API key for OpenCode Go).
 ```
 factory status [--json]                     # running, waiting for you, interrupted; open factory PRs
 factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
-factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12]  # clean up finished runs
+factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 14]
+factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
 
 What `gc` cleans:
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
 - **No PR** (failed, needs_input, needs_human, interrupted) and idle for `--retention-days` (default 7): the worktree only; the branch and its commits stay, the run can no longer be resumed.
 - **PR open, run finished,** idle for `--strip-after-hours` (default 12): only `node_modules`, `.venv` and `.nox` at the worktree root.
+- **needs_input** with no answer for 2 working days (Mon–Fri, Europe/Berlin, from `state.updated_at`): the run is abandoned (worktree removed, result and logs kept) and the repo's notify hook is POSTed so the bot can tell the owner. A live lock is left alone.
+- **Archive:** run directories idle for `--archive-days` (default 14) keep `result.json`, `pr.md`, `events.jsonl`, `state.json` and `*.log`. Worktree copies (removed even when dirty), agent homes and intermediate artifacts are deleted. `state.json` stays so a later gc can still delete the `factory/*` branch once the PR merges. Active runs are not touched: a live lock, no result yet, `needs_human` / `needs_input`, a resumable `failed`, or a GitHub-CI `base_red` still inside `base_red_resume_hours`.
 
-Runs of a locked repository (a run or resume in progress) are skipped, and a worktree with uncommitted changes needs `--force`.
-`factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off).
+`factory abandon <run-id>` does the same abandon by hand (stale lock released; a process that is still running must be stopped first). The branch is kept. `factory resume` refuses an abandoned run.
+
+A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume. Local fast checks that failed on the base are not resumed. The daily cron below is the timer when nothing else starts a run.
+
+Runs of a locked repository (a run or resume in progress) are skipped, and a worktree with uncommitted changes needs `--force` (archive retention of a finished run removes that worktree anyway).
+`factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The base_red resume sweep still runs.
 Evidence pruning (30 days) runs only with an explicit `factory gc`; for a daily cleanup add e.g. `0 4 * * * factory gc` to cron.
 `factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.
 

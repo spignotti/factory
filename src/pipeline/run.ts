@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
-import { PlanSchema } from "../schemas/plan.js";
+import { PlanSchema, type Plan } from "../schemas/plan.js";
 import { loadRepoConfig, parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import { withRepoModels } from "../config.js";
 import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from "../memory.js";
@@ -20,13 +21,14 @@ import { fastLaneEscalation } from "./lane.js";
 import { EnvMissing } from "../services.js";
 import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "../secrets.js";
 import { WallBudget } from "./budget.js";
+import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLock, repoLockHolder, waitForRepoLock } from "./lock.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { notifyRunFinished } from "../notify.js";
-import { realSleep } from "../agents/fake-runner.js";
+import { listRuns } from "../runs.js";
 
 export interface RunOptions extends TaskInput {
   repo: string;
@@ -252,23 +254,27 @@ async function notifyFinished(result: RunResult, deps: RunDeps, events: EventLog
  * CI status of the base commit; while `pending`, polls until it settles or `base_ci_wait_minutes` pass.
  * Returns the final status and how long it waited.
  */
-async function settledBaseStatus(f: RunFrame, deps: RunDeps, repoDir: string, baseSha: string, waitMinutes: number): Promise<{ status: Awaited<ReturnType<RunDeps["github"]["baseStatus"]>>; waitedMs: number }> {
-  const started = Date.now();
-  let status = await deps.github.baseStatus(repoDir, baseSha);
-  if (status !== "pending" || waitMinutes <= 0) return { status, waitedMs: 0 };
-  const poll = deps.baseCiPollMs ?? 30_000;
-  const sleep = deps.sleep ?? realSleep;
-  f.events.emit({ step: "intake", event: "progress", data: { base_ci: { status, sha: baseSha, waiting_up_to_minutes: waitMinutes } } });
-  // Counted in polls, not wall time: deterministic with an injected sleep.
-  const polls = Math.ceil((waitMinutes * 60_000) / poll);
-  for (let i = 0; i < polls && status === "pending"; i++) {
-    await sleep(poll, deps.signal);
-    throwIfInterrupted(deps);
-    status = await deps.github.baseStatus(repoDir, baseSha);
-  }
-  const waitedMs = Date.now() - started;
-  f.events.emit({ step: "intake", event: "progress", data: { base_ci: { status, sha: baseSha, waited_ms: waitedMs } } });
-  return { status, waitedMs };
+async function settledBaseStatus(f: RunFrame, deps: RunDeps, repoDir: string, baseSha: string, waitMinutes: number): Promise<{ status: BaseStatus; waitedMs: number }> {
+  return pollCommitCi({
+    github: deps.github,
+    repoDir,
+    sha: baseSha,
+    waitMinutes,
+    pollMs: deps.baseCiPollMs ?? 30_000,
+    sleep: deps.sleep,
+    signal: deps.signal,
+    onUpdate: (info) =>
+      f.events.emit({
+        step: "intake",
+        event: "progress",
+        data: {
+          base_ci:
+            info.phase === "waiting"
+              ? { status: info.status, sha: baseSha, waiting_up_to_minutes: waitMinutes }
+              : { status: info.status, sha: baseSha, waited_ms: info.waitedMs },
+        },
+      }),
+  });
 }
 
 /**
@@ -364,41 +370,161 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     // during the wait is already credited by the budget, so it is not added twice).
     deadline.extend(waitedMs - (deadline.suspendedMs - suspendedBefore));
     if (status === "red" || status === "pending") {
+      // Remember the commit so a later gc can resume this same run once CI is green.
+      st.base_sha = baseSha;
+      st.base_ci = status === "red" ? "red" : "pending";
       const why = status === "pending" ? `still pending after ${repo.limits.base_ci_wait_minutes} min` : "red";
       return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${why}, not green` });
     }
-    if (plan.type === "bug" && !repo.tests.run) {
-      return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR for human review, then re-runs after the merge" });
-    }
-    let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
-    const taken = (b: string) =>
-      gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${b}`]).then(async (local) => local || remoteBranchExists(repoDir, b));
-    if (await taken(branch)) branch += `-${runId.slice(-6)}`;
-    const worktree = join(runDir, "worktree");
-    await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
-    f.set({ branch, worktree });
-    Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement" });
-    f.save();
-    const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation] };
-    const services = (ctx.services = runServices(ctx));
-    f.cleanups.push(() => services.stopAll());
-    const env = agentEnv(ctx);
-
-    if (repo.setup) {
-      const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline.at - Date.now()), jail: jailFor(ctx, worktree) });
-      checkDeadline(ctx);
-      if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` });
-    }
-    if (status === "none") {
-      const fast = repo.checks.filter((c) => c.tier === "fast");
-      const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
-      throwIfInterrupted(deps);
-      for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
-      const red = results.filter((r) => r.status === "fail").map((r) => r.name);
-      if (red.length) return f.set({ result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` });
-    }
-    await advance(f, ctx, { noPr: opts.noPr ?? false, startedAt });
+    await beginWork(f, base, plan, baseSha, status, escalation, { noPr: opts.noPr ?? false, startedAt });
   });
+}
+
+/** Worktree, setup and the rest of the pipeline, once the base commit is not a red/pending CI stop. */
+async function beginWork(
+  f: RunFrame,
+  base: {
+    deps: RunDeps;
+    runId: string;
+    runDir: string;
+    repoDir: string;
+    repo: RepoConfig;
+    events: EventLog;
+    agentHome: string;
+    task: Task;
+    deadline: WallBudget;
+    briefing: string;
+    secrets: ResolvedSecrets;
+  },
+  plan: Plan,
+  baseSha: string,
+  ciStatus: BaseStatus,
+  escalation: string[],
+  opts: { noPr: boolean; startedAt: number },
+): Promise<void> {
+  const { deps, events, repo, deadline, repoDir, runDir, runId, task } = base;
+  const st = f.state!;
+  if (plan.type === "bug" && !repo.tests.run) {
+    return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR for human review, then re-runs after the merge" });
+  }
+  let branch = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
+  const taken = (b: string) =>
+    gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${b}`]).then(async (local) => local || remoteBranchExists(repoDir, b));
+  if (await taken(branch)) branch += `-${runId.slice(-6)}`;
+  const worktree = join(runDir, "worktree");
+  await git(repoDir, ["worktree", "add", "-q", "-b", branch, worktree, baseSha]);
+  f.set({ branch, worktree });
+  Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement", base_ci: undefined });
+  f.save();
+  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation] };
+  const services = (ctx.services = runServices(ctx));
+  f.cleanups.push(() => services.stopAll());
+  const env = agentEnv(ctx);
+
+  if (repo.setup) {
+    const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline.at - Date.now()), jail: jailFor(ctx, worktree) });
+    checkDeadline(ctx);
+    if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` });
+  }
+  if (ciStatus === "none") {
+    const fast = repo.checks.filter((c) => c.tier === "fast");
+    const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
+    throwIfInterrupted(deps);
+    for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
+    const red = results.filter((r) => r.status === "fail").map((r) => r.name);
+    if (red.length) return f.set({ result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` });
+  }
+  await advance(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
+}
+
+/** A stopped GitHub-CI `base_red` that gc / `factory run` may continue. */
+export function isBaseRedWaiting(st: { result: string | null; base_ci?: string; base_sha?: string | null; gc_at?: string; worktree?: string | null } | undefined): boolean {
+  return !!st && st.result === "base_red" && !!st.base_ci && !!st.base_sha && !st.gc_at && !st.worktree;
+}
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * Continues a GitHub-CI `base_red` run once that base commit is green (or has no checks).
+ * Outside `limits.base_red_resume_hours` (or while CI is still red/pending) the run is left as it is.
+ * Returns undefined when nothing was resumed, so a sweep can try again later.
+ */
+export async function continueBaseRed(runId: string, deps: RunDeps): Promise<RunResult | undefined> {
+  const runDir = join(deps.factoryHome, "runs", runId);
+  let st: RunState;
+  try {
+    st = readState(runDir);
+  } catch {
+    return undefined;
+  }
+  if (!isBaseRedWaiting(st) || !st.base_sha || !existsSync(st.repo) || !existsSync(join(runDir, "plan.json"))) return undefined;
+  let hours: number;
+  try {
+    hours = loadRepoConfig(st.repo).limits.base_red_resume_hours;
+  } catch {
+    return undefined;
+  }
+  if (hours <= 0) return undefined;
+  const now = deps.now ?? Date.now;
+  const updated = Date.parse(st.updated_at);
+  if (!Number.isFinite(updated) || now() - updated > hours * HOUR_MS) return undefined;
+  let ci: BaseStatus;
+  try {
+    ci = await deps.github.baseStatus(st.repo, st.base_sha);
+  } catch {
+    return undefined;
+  }
+  if (ci === "red" || ci === "pending") return undefined;
+
+  const startedAt = now();
+  const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
+  const f = new RunFrame(runId, runDir, st.repo, st.lane ?? "standard", events, startedAt, now, st.task.ref);
+  const lock = await takeRepoLock(deps, st.repo, runId, events, false);
+  if (!lock.release) {
+    events.emit({ step: "resume", event: "progress", data: { base_red_resume: "locked" } });
+    return undefined;
+  }
+  f.release = lock.release;
+  f.deps = deps;
+  rmSync(join(runDir, "result.json"), { force: true });
+  st.result = null;
+  st.reason = "";
+  st.base_ci = undefined;
+  f.state = st;
+  f.save();
+
+  return f.execute(async () => {
+    events.emit({ step: "resume", event: "step_started", data: { base_red_resume: true, base_sha: st.base_sha, ci } });
+    const checkout = loadRepoConfig(st.repo);
+    const repo = await baseRepoConfig(st.repo, st.base_sha!, checkout, events, "resume");
+    deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
+    f.deps = deps;
+    const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
+    if (!secrets) return;
+    const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
+    f.set({ type: plan.type });
+    const deadline = wallBudget(f, events, repo);
+    const memoryBriefing = await openMemory(f, deps, st.repo);
+    const base = { deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, deadline, briefing: memoryBriefing, secrets };
+    await beginWork(f, base, plan, st.base_sha!, ci, st.lane_escalation ?? [], { noPr: st.no_pr, startedAt });
+  });
+}
+
+/** Resumes every eligible `base_red` run. One failure does not stop the others. */
+export async function sweepBaseRed(deps: RunDeps, log?: (s: string) => void): Promise<RunResult[]> {
+  const out: RunResult[] = [];
+  for (const run of listRuns(deps.factoryHome)) {
+    if (!isBaseRedWaiting(run.state)) continue;
+    try {
+      const result = await continueBaseRed(run.run_id, deps);
+      if (!result) continue;
+      log?.(`factory: resumed ${run.run_id} after base CI turned green → ${result.result}\n`);
+      out.push(result);
+    } catch (e) {
+      log?.(`factory: base_red resume of ${run.run_id} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
+  return out;
 }
 
 /**
@@ -506,6 +632,7 @@ export async function baseRepoConfig(repoDir: string, sha: string, checkout: Rep
 export async function resumeFactory(runId: string, opts: ResumeOptions, deps: RunDeps): Promise<RunResult> {
   const runDir = join(deps.factoryHome, "runs", runId);
   const st = readState(runDir);
+  if (st.result === "abandoned") throw new Error(`run ${runId} was abandoned (${st.reason}); start a new run`);
   if (st.gc_at) throw new Error(`run ${runId} was cleaned up by factory gc at ${st.gc_at} (worktree removed); start a new run`);
   if (st.step === "intake" || !st.worktree || !st.branch || !st.base_sha) {
     throw new Error(`run ${runId} stopped before its worktree existed (${st.result ?? "running"}: ${st.reason}); start a new run`);

@@ -217,7 +217,7 @@ export const RepoConfigSchema = z
     limits: z
       .object({
         max_diff_lines: z.number().int().min(1).default(1500),
-        max_wall_minutes: z.number().positive().default(90),
+        max_wall_minutes: z.number().positive().default(240),
         stall_minutes: z.number().positive().default(15),
         // Per agent bash command: killed after this, the model gets "Command timed out" and goes on.
         // Below stall_minutes, so a hung command (dev server, watch mode) ends before the watchdog.
@@ -225,6 +225,12 @@ export const RepoConfigSchema = z
         // CI on the base commit still running at the base check: wait up to this long for it to settle
         // (0 = no wait). Only red, or still pending after the wait, ends the run as base_red.
         base_ci_wait_minutes: z.number().min(0).max(120).default(20),
+        // After a GitHub-CI base_red, resume the same run once that commit is green, for this many hours
+        // (0 = do not resume). Checked by `factory gc` and at the start of `factory run`.
+        base_red_resume_hours: z.number().min(0).max(168).default(48),
+        // CI on the PR head after finalize pushes: pending is polled this long and never fails the run
+        // (0 = one sample, pending still does not fail). Red ends the run as needs_human.
+        pr_ci_wait_minutes: z.number().min(0).max(120).default(20),
         forbidden_paths: z.array(z.string()).default([]),
         // Generated paths left out of the diff line limits (lockfiles and binaries already are).
         // Test files (`tests.globs`) always count; adding an entry is a loosening (config_guard).
@@ -232,7 +238,17 @@ export const RepoConfigSchema = z
           .array(z.string().min(1).refine((g) => !CATCH_ALL.has(g.replace(/^\.\//, "")), "diff_exclude must not match every file"))
           .default([]),
       })
-      .default({ max_diff_lines: 1500, max_wall_minutes: 90, stall_minutes: 15, command_timeout_minutes: 10, base_ci_wait_minutes: 20, forbidden_paths: [], diff_exclude: [] }),
+      .default({
+        max_diff_lines: 1500,
+        max_wall_minutes: 240,
+        stall_minutes: 15,
+        command_timeout_minutes: 10,
+        base_ci_wait_minutes: 20,
+        base_red_resume_hours: 48,
+        pr_ci_wait_minutes: 20,
+        forbidden_paths: [],
+        diff_exclude: [],
+      }),
     services: z.array(ServiceSchema).default([]),
     ui: z
       .object({
