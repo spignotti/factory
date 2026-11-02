@@ -23,6 +23,7 @@ import { type Context7Client, context7Probe } from "../docs/context7.js";
 import { redact } from "../events.js";
 import { notifyChecks } from "../notify.js";
 import { defaultSecretsFile, isInside, looseMode, MIN_REDACT_LENGTH, type ResolvedSecrets, resolveSecrets, SecretsError, secretsFile } from "../secrets.js";
+import { nodeCheck } from "../node-runtime.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -502,7 +503,7 @@ export async function docsLookupCheck(client: Context7Client, roles: readonly st
 /** `factory doctor`: setup checks, the Zen guard and the effective model per role with its layer. */
 export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number> {
   const { check, profile } = modelConfigCheck(opts);
-  const checks = [check];
+  const checks = [nodeCheck(), check];
   if (profile) {
     checks.push(sandboxCheck(profile.sandbox, opts.probe));
     let view = opts.view;
