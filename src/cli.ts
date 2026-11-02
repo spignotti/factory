@@ -48,10 +48,10 @@ const USAGE = `usage:
               (running, waiting for a human, interrupted runs; open factory PRs)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one)
-  factory gc [--dry-run] [--force] [--retention-days N] [--strip-after-hours N] [--archive-days N] [--json]
+  factory gc [--dry-run] [--scheduled] [--force] [--retention-days N] [--strip-after-hours N] [--archive-days N] [--json]
               (worktree and branch of merged/closed PRs; needs_input unanswered for 2 working days
                (Mon-Fri, Europe/Berlin) is abandoned and the owner notified; run dirs idle for
-               --archive-days (default 14) keep the result summary and logs; a base_red run whose
+               --archive-days (default 90) overrides metadata tarball retention; use factory gc --scheduled for cron (see docs/GC_RETENTION.md)
                base CI is green again is resumed, within limits.base_red_resume_hours)
   factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
               (--run starts the services its checks need; with CI set, local_only checks are not selected;
@@ -341,6 +341,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         args: rest,
         options: {
           "dry-run": { type: "boolean", default: false },
+          scheduled: { type: "boolean", default: false },
           force: { type: "boolean", default: false },
           "retention-days": { type: "string" },
           "strip-after-hours": { type: "string" },
@@ -360,6 +361,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           factoryHome,
           github: new GhCli(),
           dryRun: values["dry-run"],
+          scheduled: values.scheduled,
           force: values.force,
           retentionDays: num("retention-days", values["retention-days"]),
           stripAfterHours: num("strip-after-hours", values["strip-after-hours"]),

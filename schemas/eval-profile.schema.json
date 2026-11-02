@@ -373,6 +373,49 @@
       },
       "additionalProperties": false
     },
+    "gc": {
+      "type": "object",
+      "properties": {
+        "retention": {
+          "type": "object",
+          "properties": {
+            "dry_run": {
+              "type": "boolean"
+            },
+            "home_hours": {
+              "type": "number",
+              "minimum": 0
+            },
+            "worktree_failed_days": {
+              "type": "number",
+              "minimum": 0
+            },
+            "worktree_resume_days": {
+              "type": "number",
+              "minimum": 0
+            },
+            "metadata_days": {
+              "type": "number",
+              "minimum": 0
+            },
+            "metadata_failed_days": {
+              "type": "number",
+              "minimum": 0
+            },
+            "metadata_min_per_repo": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "archive_tarball_days": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
     "retry": {
       "type": "object",
       "properties": {

@@ -657,24 +657,24 @@ API key for OpenCode Go).
 ```
 factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs
 factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
-factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 14]
+factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 90] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
 
-What `gc` cleans:
+What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
-- **No PR** (failed, needs_input, needs_human, interrupted) and idle for `--retention-days` (default 7): the worktree only; the branch and its commits stay, the run can no longer be resumed.
+- **No PR** (failed, needs_input, needs_human, interrupted): worktree after 7 idle days (failed) or 14 days (needs_input / needs_human / base_red); branch kept unless unpushed commits block removal.
 - **PR open, run finished,** idle for `--strip-after-hours` (default 12): only `node_modules`, `.venv` and `.nox` at the worktree root.
 - **needs_input** with no answer for 2 working days (Mon–Fri, Europe/Berlin, from `state.updated_at`): the run is abandoned (worktree removed, result and logs kept) and the repo's notify hook is POSTed so the bot can tell the owner. A live lock is left alone.
-- **Archive:** run directories idle for `--archive-days` (default 14) keep `result.json`, `pr.md`, `events.jsonl`, `state.json` and `*.log`. Worktree copies (removed even when dirty), agent homes and intermediate artifacts are deleted. `state.json` stays so a later gc can still delete the `factory/*` branch once the PR merges. Active runs are not touched: a live lock, no result yet, `needs_human` / `needs_input`, a resumable `failed`, or a GitHub-CI `base_red` still inside `base_red_resume_hours`.
+- **Sandbox home/** on terminal runs after 24 h idle; **metadata** tarballed to `$FACTORY_HOME/archive/runs/` after 90 d (180 d for failed), keeping the newest 20 runs per repo; **archive/runs** tarballs dropped after 180 d. Protected: active runs; needs_input / needs_human / base_red idle &lt; 14 d; locks; unpushed commits; dirty worktrees (no `--force` on `--scheduled`).
 
 `factory abandon <run-id>` does the same abandon by hand (stale lock released; a process that is still running must be stopped first). The branch is kept. `factory resume` refuses an abandoned run.
 
 A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume. Local fast checks that failed on the base are not resumed. The daily cron below is the timer when nothing else starts a run.
 
-Runs of a repository are skipped while any of its lock slots is held, and a worktree with uncommitted changes needs `--force` (archive retention of a finished run removes that worktree anyway). `gc` and archive take every slot before touching the repo, so a new run cannot start mid-cleanup.
+Runs of a repository are skipped while any of its lock slots is held, and a worktree with uncommitted changes needs `--force`. `gc` takes every slot before touching the repo, so a new run cannot start mid-cleanup. When deploy-self holds its deploy lock, gc skips deletions.
 `factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The base_red resume sweep still runs.
-Evidence pruning (30 days) runs only with an explicit `factory gc`; for a daily cleanup add e.g. `0 4 * * * factory gc` to cron.
+Evidence pruning (30 days) runs only with an explicit `factory gc`. Schedule daily cleanup with supercronic, e.g. `factory gc --scheduled` (see [ops/supercronic/factory-gc.crontab](ops/supercronic/factory-gc.crontab)); `gc.retention.dry_run` in `$FACTORY_HOME/profile.yaml` defaults to true until you flip it after reviewing `$FACTORY_HOME/gc.log`.
 `factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.
 
 ## JSON contracts

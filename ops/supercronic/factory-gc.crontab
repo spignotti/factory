@@ -1,0 +1,3 @@
+# Daily factory gc (supercronic). Uses profile `gc.retention.dry_run` until you flip it after log review.
+# Install: copy into the host crontab file that supercronic reads (same pattern as restic backup).
+30 4 * * * /bin/sh -lc 'FACTORY_HOME=${FACTORY_HOME:-$HOME/.factory} exec "$HOME/.local/bin/factory" gc --scheduled --json >>"$FACTORY_HOME/gc.cron.log" 2>&1'
