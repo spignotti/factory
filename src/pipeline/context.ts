@@ -44,6 +44,8 @@ export interface RunDeps {
   notifyFetch?: Fetch;
   /** Backoff between notification attempts (tests: short). */
   notifyBackoffMs?: number[];
+  /** `factory run --no-notify`: skip the run-end webhook and the outbox. */
+  noNotify?: boolean;
   /** Poll interval while CI on the base commit is pending (default 30 s). */
   baseCiPollMs?: number;
 }

@@ -38,7 +38,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     const events = eventsForRun(r);
     if (isQueuedWaiter(r, events)) {
       const q = queuedFromEvents(events);
-      const lockRepo = events.find((e) => e.event === "queued")?.data.repo;
+      const lockRepo = events.findLast((e) => e.event === "queued")?.data.repo;
       report.queued.push({
         run_id: r.run_id,
         repo: typeof lockRepo === "string" ? lockRepo : repoOf(r),

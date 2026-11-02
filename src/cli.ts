@@ -376,7 +376,16 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             noPr: values["no-pr"],
             wait: values.wait,
           },
-          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
+          {
+            runner,
+            github: new GhCli(),
+            profile,
+            sandbox: sandboxFor(profile, io),
+            factoryHome,
+            signal: controller.signal,
+            docs: Context7Client.fromEnv(process.env),
+            noNotify: values["no-notify"],
+          },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);

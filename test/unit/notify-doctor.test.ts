@@ -1,11 +1,12 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { EventLog } from "../../src/events.js";
 import { enqueueOutbox, withEventId } from "../../src/notify-outbox.js";
-import { notifyDoctorChecks, requireNotifyHook } from "../../src/notify.js";
+import { notifyDoctorChecks, notifyRunFinished, requireNotifyHook } from "../../src/notify.js";
+import { outboxCount } from "../../src/notify-outbox.js";
 import { main } from "../../src/cli.js";
 
 const URL_ = "https://hooks.example.test/x";
@@ -89,5 +90,42 @@ describe("notify doctor and run guard", () => {
     const repo = repoWithOrigin();
     writeFileSync(join(factoryHome, "notify.yaml"), `repos:\n  acme/widgets:\n    url: ${URL_}\n    key: k\n`, { mode: 0o600 });
     expect((await requireNotifyHook(factoryHome, repo)).ok).toBe(true);
+  });
+
+  it("notify delivery ignores skips resolved by a later successful delivery to the same repo", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "factory-doc-home-"));
+    writeFileSync(join(factoryHome, "notify.yaml"), `repos:\n  acme/widgets:\n    url: ${URL_}\n    key: k\n`, { mode: 0o600 });
+    const repo = repoWithOrigin();
+    const mkRun = (id: string, ms: number) => {
+      const runDir = join(factoryHome, "runs", id);
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(join(runDir, "result.json"), JSON.stringify({ run_id: id, repo }));
+      return new EventLog(runDir, id, () => ms, []);
+    };
+    const now = Date.now();
+    mkRun("20261030-140000-aaaaaa", now - 3_600_000).emit({ step: "run", event: "notify", data: { status: "skipped", repo: "acme/widgets" } });
+    mkRun("20261030-150000-bbbbbb", now - 60_000).emit({ step: "run", event: "notify", data: { status: "sent", repo: "acme/widgets" } });
+    let checks = await notifyDoctorChecks(factoryHome, now);
+    expect(checks.filter((c) => c.status === "fail")).toEqual([]);
+    mkRun("20261030-160000-cccccc", now - 1_000).emit({ step: "run", event: "notify", data: { status: "failed", repo: "acme/widgets" } });
+    checks = await notifyDoctorChecks(factoryHome, now);
+    expect(checks.find((c) => c.name === "notify delivery")).toMatchObject({ status: "fail" });
+  });
+
+  it("--no-notify (disabled) sends nothing, writes no outbox entry and logs disabled", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "factory-doc-home-"));
+    const repo = repoWithOrigin();
+    const runDir = mkdtempSync(join(tmpdir(), "factory-doc-run-"));
+    const events = new EventLog(runDir, "r1", Date.now, []);
+    let calls = 0;
+    const out = await notifyRunFinished(
+      { run_id: "20261030-101010-abcdef", repo, task: "t", type: "feature", lane: "standard", result: "done", risk: "low", merge_policy: "auto", pr: null, rounds: 1, minutes: 1, cost_usd: 0, reason: "ok", branch: null, worktree: null, run_dir: runDir },
+      { factoryHome, disabled: true, fetch: async () => (calls++, { status: 200 }) },
+      events,
+    );
+    expect(out).toBeUndefined();
+    expect(calls).toBe(0);
+    expect(outboxCount(factoryHome)).toBe(0);
+    expect(readFileSync(join(runDir, "events.jsonl"), "utf8")).toContain('"status":"disabled"');
   });
 });

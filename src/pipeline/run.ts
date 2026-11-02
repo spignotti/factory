@@ -100,7 +100,7 @@ export async function takeRepoLock(
   const holder = repoLockHolder(deps.factoryHome, id);
   const by = holder ? `run ${holder.runId ?? "?"} (pid ${holder.pid})` : "another run";
   if (!wait) return { reason: `repo ${id} is locked by ${by}` };
-  events.emit({ step: "intake", event: "queued", data: { repo: id, holder_run_id: holder?.runId ?? null, holder_pid: holder?.pid ?? null } });
+  events.emit({ step: "intake", event: "queued", data: { repo: id, holder_run_id: holder?.runId ?? null, holder_pid: holder?.pid ?? null, waiter_pid: process.pid } });
   const queuedAt = Date.now();
   const got = await waitForRepoLock(deps.factoryHome, id, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal });
   events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
@@ -242,7 +242,7 @@ function wallBudget(f: RunFrame, events: EventLog, repo: RepoConfig): WallBudget
 /** Run-end webhook to the repo's bot (notify.yaml). Never throws, never changes the result. */
 async function notifyFinished(result: RunResult, deps: RunDeps, events: EventLog): Promise<void> {
   try {
-    await notifyRunFinished(result, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, events);
+    await notifyRunFinished(result, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal, disabled: deps.noNotify }, events);
   } catch {
     // notifyRunFinished does not throw; this guards the run result against any surprise
   }

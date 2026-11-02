@@ -197,6 +197,8 @@ export interface NotifyDeps {
   sleep?: Sleep;
   backoffMs?: number[];
   signal?: AbortSignal;
+  /** `factory run --no-notify`: no webhook and no outbox entry (logged as `disabled`). */
+  disabled?: boolean;
 }
 
 /** Payload of a finished run. */
@@ -236,6 +238,10 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
       // logging must not fail the run either
     }
   };
+  if (deps.disabled) {
+    log({ status: "disabled", reason: "--no-notify" });
+    return undefined;
+  }
   let cfg: NotifyConfig | undefined;
   try {
     cfg = loadNotifyConfig(deps.factoryHome);
@@ -484,6 +490,8 @@ export async function reposWithRecentRunsMissingHook(factoryHome: string, sinceM
   const counts = new Map<string, number>();
   for (const run of listRuns(factoryHome)) {
     if (run.started_at.getTime() < cutoff) continue;
+    // `--no-notify` runs opted out on purpose
+    if (readEvents(run).some((e) => e.event === "notify" && e.data.status === "disabled")) continue;
     const dir = run.state?.repo ?? run.result?.repo;
     if (dir) counts.set(dir, (counts.get(dir) ?? 0) + 1);
   }
@@ -523,16 +531,25 @@ export async function notifyDoctorChecks(factoryHome: string, now = Date.now()):
       detail: `recent runs but no hook for ${missing.join(", ")} (see docs/BOTS.md)`,
     });
   }
+  // A skip or failure counts only while unresolved: a later successful delivery to the same repo
+  // shows its hook works again (undelivered payloads are covered by the outbox check above).
   let skipped = 0;
   let failed = 0;
   const cutoff = now - window;
+  const outcomes: { repo: string; status: string; ms: number }[] = [];
   for (const run of listRuns(factoryHome)) {
     if (run.started_at.getTime() < cutoff) continue;
     for (const e of readEvents(run)) {
-      if (e.event !== "notify") continue;
-      if (e.data.status === "skipped") skipped++;
-      if (e.data.status === "failed") failed++;
+      if (e.event !== "notify" || typeof e.data.repo !== "string" || typeof e.data.status !== "string") continue;
+      outcomes.push({ repo: e.data.repo, status: e.data.status, ms: Date.parse(e.ts) });
     }
+  }
+  const lastSent = new Map<string, number>();
+  for (const o of outcomes) if (o.status === "sent" && o.ms > (lastSent.get(o.repo) ?? -Infinity)) lastSent.set(o.repo, o.ms);
+  for (const o of outcomes) {
+    if (o.ms <= (lastSent.get(o.repo) ?? -Infinity)) continue;
+    if (o.status === "skipped") skipped++;
+    if (o.status === "failed") failed++;
   }
   if (skipped > 0 || failed > 0) {
     checks.push({

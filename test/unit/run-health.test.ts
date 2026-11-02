@@ -24,4 +24,21 @@ describe("run-health", () => {
     expect(isQueuedWaiter(run, ev)).toBe(true);
     expect(queuedFromEvents(ev)).toMatchObject({ holder_run_id: "x", holder_pid: 1 });
   });
+
+  it("isQueuedWaiter: dead waiter is not queued; a live queued resume (with state) is", () => {
+    const mk = (pid: number, withAcquired = false) => {
+      const dir = join(tmpdir(), `queued-${Date.now()}-${pid}-${withAcquired}`);
+      mkdirSync(dir, { recursive: true });
+      const events = new EventLog(dir, "20261030-130000-abc124", () => Date.now(), []);
+      events.emit({ step: "intake", event: "queued", data: { repo: "r", holder_run_id: "x", holder_pid: 1, waiter_pid: pid } });
+      if (withAcquired) events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: 1 } } });
+      return { run_id: "20261030-130000-abc124", dir, started_at: new Date() } as RunRecord;
+    };
+    const dead = mk(999_999_999);
+    expect(isQueuedWaiter(dead, readEvents(dead))).toBe(false);
+    const resume = { ...mk(process.pid), state: {} } as unknown as RunRecord;
+    expect(isQueuedWaiter(resume, readEvents(resume))).toBe(true);
+    const got = mk(process.pid, true);
+    expect(isQueuedWaiter(got, readEvents(got))).toBe(false);
+  });
 });
