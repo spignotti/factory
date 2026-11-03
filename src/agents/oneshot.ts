@@ -9,7 +9,7 @@ import { type RepoConfig, RepoConfigSchema } from "../schemas/repo.js";
 export type OneShotDeps = Pick<RunDeps, "runner" | "profile" | "factoryHome" | "parentEnv" | "sleep" | "now" | "signal" | "sandbox" | "prompts" | "watchdogPollMs">;
 
 /**
- * Agent calls outside a run (`adopt`, `harden`): same model chains, fallbacks, env allowlist, sandbox and
+ * Agent calls outside a run (`adopt`, `harden`, `audit`): same model chains, fallbacks, env allowlist, sandbox and
  * watchdog as in a run; events go to `<logDir>/events.jsonl` (not under `runs/`, so `stats`/`status`
  * do not see them). The agent HOME is a temp dir removed by `close`.
  */

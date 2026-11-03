@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { memoryDir, type MemoryFile } from "../memory.js";
 import { type Metrics, MetricsSchema } from "../schemas/proposal.js";
@@ -25,6 +25,20 @@ export function computeMetrics(input: { ts: string; repoId: string; repo: RepoCo
     median_rounds: input.signals.runs.rounds.median,
     revert_rate: input.factoryPrs ? round(input.signals.reverts.length / input.factoryPrs) : null,
   });
+}
+
+/** Last valid line of `metrics.jsonl`, or null when the file is missing or the last line does not parse. */
+export function latestMetrics(factoryHome: string, repoId: string): Metrics | null {
+  const path = join(memoryDir(factoryHome, repoId), "metrics.jsonl");
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
+  if (!lines.length) return null;
+  try {
+    const parsed = MetricsSchema.safeParse(JSON.parse(lines.at(-1)!));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function appendMetrics(factoryHome: string, repoId: string, m: Metrics): string {

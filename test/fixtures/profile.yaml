@@ -10,5 +10,9 @@ roles:
   evaluate:          [{ model: openai/luna }]
   pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
   harden:            [{ model: openai/sol }]
+  audit_security:    [{ model: openai/sol, thinking: high }]
+  audit_performance: [{ model: openai/sol, thinking: high }]
+  audit_refactor:    [{ model: openai/sol, thinking: medium }]
+  audit_simplify:    [{ model: openai/sol, thinking: medium }]
 retry: { base_ms: 1000, max_ms: 8000, attempts: 3 }
 env: {}

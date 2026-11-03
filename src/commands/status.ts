@@ -1,5 +1,6 @@
 import type { GitHub, PrStatus } from "../gh.js";
 import { activeHolders } from "../pipeline/lock.js";
+import { openAuditTickets } from "../proposals.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
@@ -26,6 +27,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     orphaned: [],
     stalled: [],
     prs: [],
+    audit_tickets: openAuditTickets(opts.factoryHome),
   };
   const prCache = new Map<string, Promise<PrStatus | Error>>();
   const prState = (r: RunRecord) => {
@@ -109,6 +111,7 @@ export function renderStatus(s: StatusReport): string {
   section("orphaned", s.orphaned.map((r) => `${r.run_id} ${r.task} — lock holder gone in ${r.step}; factory resume ${r.run_id} or factory status`));
   section("interrupted", s.interrupted.map((r) => `${r.run_id} ${r.task} — stopped in ${r.step}; factory resume ${r.run_id}`));
   section("open PRs", s.prs.map((p) => `${p.pr} ${p.task} — ${p.state}${p.draft ? ", draft" : ""}, merge policy ${p.merge_policy ?? "?"}, risk ${p.risk ?? "?"}`));
+  section("open audit tickets", s.audit_tickets.map((t) => `${t.repo} [${t.type}] ${t.id} — ${t.goal} (${t.plan_path})`));
   return out.join("\n") + "\n";
 }
 

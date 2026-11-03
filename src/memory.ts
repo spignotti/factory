@@ -148,7 +148,7 @@ function withLock<T>(path: string, fn: () => T): T {
   }
 }
 
-/** Read-modify-write of a repo's memory under its lock, written atomically (harden, adopt, flush). */
+/** Read-modify-write of a repo's memory under its lock, written atomically (harden, adopt, audit, flush). */
 export function updateMemory(factoryHome: string, repoId: string, fn: (mem: MemoryFile) => void): MemoryFile {
   const path = memoryPath(factoryHome, repoId);
   return withLock(path, () => {
@@ -158,6 +158,20 @@ export function updateMemory(factoryHome: string, repoId: string, fn: (mem: Memo
     writeFileSync(tmp, JSON.stringify(mem, null, 2) + "\n");
     renameSync(tmp, path);
     return mem;
+  });
+}
+
+/** Open findings a new proposal owns move to `proposed` (`ref` = the proposal id). */
+export function markFindingsProposed(factoryHome: string, repoId: string, owner: ReadonlyMap<string, string>): void {
+  if (owner.size === 0) return;
+  updateMemory(factoryHome, repoId, (mem) => {
+    for (const e of mem.entries) {
+      const id = owner.get(e.key);
+      if (id && e.status === "open") {
+        e.status = "proposed";
+        e.ref = id;
+      }
+    }
   });
 }
 
