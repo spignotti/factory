@@ -188,12 +188,17 @@ describe("scripts/deploy-self.sh", () => {
     mkdirSync(join(fhome, "locks"), { recursive: true });
     writeFileSync(join(fhome, "locks", "repo.lock"), `${p.pid}\nrun-1`);
     let last = "";
-    for (const v of ["b", "c", "d"]) {
+    const shas: string[] = [];
+    for (const v of ["b", "c", "d", "e"]) {
       last = commit(`1.0.0-${v}`);
+      shas.push(last);
       expect(deploy().status).toBe(0);
     }
     expect(readlinkSync(join(rel, "current"))).toBe(last);
     expect(releases()).toContain(a);
+    // A live lock whose process is readable does not block pruning of unused releases (/proc reports size 0).
+    expect(logText()).not.toMatch(/prune skipped/);
+    expect(releases()).not.toContain(shas[0]);
     p.kill();
     await new Promise((r) => p.on("exit", r));
     // The lock file is still there; its pid is dead, so it no longer protects the release.

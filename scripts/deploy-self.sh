@@ -219,7 +219,8 @@ collect_in_use() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     pid=${line##*:}
-    if [ ! -r "/proc/$pid/cmdline" ] || [ ! -s "/proc/$pid/cmdline" ]; then
+    # /proc files report size 0, so test the content, not `-s`.
+    if [ ! -r "/proc/$pid/cmdline" ] || [ -z "$(tr -d '\0' <"/proc/$pid/cmdline" 2>/dev/null | head -c1)" ]; then
       PRUNE_BLOCK_REASON="live lock ${line%%:*} pid $pid cmdline unreadable"
       return 0
     fi
