@@ -11,11 +11,12 @@ import { expandHome, looseMode } from "./secrets.js";
 import { enqueueOutbox, listOutboxEntries, notifyAbortSignal, outboxCount, outboxPath, removeOutboxFile, withEventId, type OutboxEntry } from "./notify-outbox.js";
 
 /**
- * Run-end notification: one POST per finished run to the webhook of the bot that owns the repo
- * (`$FACTORY_HOME/notify.yaml`, repo `owner/name` → webhook). It is the only way a bot learns that a run
- * ended. URL and key are secrets: they never reach events, logs, status, PR bodies, doctor output or agents
- * (the file lives in `$FACTORY_HOME`, which agent sandboxes do not see). A failed notification is logged as
- * a `notify` event and never changes the run's result.
+ * Run-end notification: one POST per finished run to the webhook of the bot that started the run.
+ * `$FACTORY_HOME/notify.yaml` maps `repos` (`owner/name` → webhook, the repo default) and optional named
+ * `targets` (selected with `factory run --notify <name>`, stored on the run as `notify_target`). It is the
+ * only way a bot learns that a run ended. URL and key are secrets: they never reach events, logs, status,
+ * PR bodies, doctor output, state or agents (the file lives in `$FACTORY_HOME`, which agent sandboxes do not
+ * see). A failed notification is logged as a `notify` event and never changes the run's result.
  */
 
 export const NOTIFY_FILE = "notify.yaml";
@@ -23,6 +24,8 @@ export const notifyPath = (factoryHome: string) => join(factoryHome, NOTIFY_FILE
 
 const REPO_KEY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const HEADER = /^[A-Za-z0-9-]+$/;
+/** Short name only, so a log line that echoes it cannot be a URL or a key. */
+export const TARGET_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 export const NotifyHookSchema = z
   .object({
@@ -44,6 +47,11 @@ export type NotifyHook = z.infer<typeof NotifyHookSchema>;
 export const NotifyConfigSchema = z
   .object({
     repos: z.record(z.string().regex(REPO_KEY, "repo keys are owner/name"), NotifyHookSchema).default({}),
+    /**
+     * Named webhooks (`factory run --notify <name>`). Same shape as a repo hook. Optional so older
+     * notify.yaml files stay valid.
+     */
+    targets: z.record(z.string().regex(TARGET_NAME, "target names are short identifiers"), NotifyHookSchema).default({}),
     /** Attempts per notification (network errors, 408, 429, 5xx are retried with backoff). */
     attempts: z.number().int().min(1).max(10).default(4),
     timeout_s: z.number().positive().max(120).default(10),
@@ -60,7 +68,12 @@ export class NotifyConfigError extends Error {
 
 /** Zod issues as `path: message` only (zod can echo input values; these may be secrets). */
 function issues(e: z.ZodError): string {
-  return e.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+  // A path segment can be a map key the user typed (a URL). Never echo that.
+  const path = e.issues.map((i) => {
+    const segs = i.path.map((p) => (typeof p === "string" && /[:/]/.test(p) ? "<redacted>" : String(p)));
+    return `${segs.join(".") || "(root)"}: ${i.message}`;
+  });
+  return path.join("; ");
 }
 
 /**
@@ -122,6 +135,8 @@ export interface NotifyPayload {
   reason: string;
   pr: string | null;
   finished_at: string;
+  /** Set when the POST went to a named target, so the routine can ignore another bot's run. */
+  target?: string;
 }
 
 export interface NotifyOutcome {
@@ -199,10 +214,15 @@ export interface NotifyDeps {
   signal?: AbortSignal;
   /** `factory run --no-notify`: no webhook and no outbox entry (logged as `disabled`). */
   disabled?: boolean;
+  /**
+   * Target for this process when state.json is not written yet. A stored `notify_target` wins once the
+   * run directory has one (resume and abandon read it from disk).
+   */
+  notifyTarget?: string;
 }
 
-/** Payload of a finished run. */
-export function runPayload(result: RunResult, repo: string, finishedAt: Date): NotifyPayload {
+/** Payload of a finished run. `target` is set only when the POST goes to that named webhook. */
+export function runPayload(result: RunResult, repo: string, finishedAt: Date, target?: string): NotifyPayload {
   const finished_at = finishedAt.toISOString();
   return withEventId(
     {
@@ -213,9 +233,46 @@ export function runPayload(result: RunResult, repo: string, finishedAt: Date): N
       reason: result.reason.slice(0, 500),
       pr: result.pr,
       finished_at,
+      ...(target ? { target } : {}),
     },
     repo,
   );
+}
+
+/** `notify_target` from state.json, when it is a short name. Anything else is ignored (never logged). */
+export function readNotifyTarget(runDir: string | undefined): string | undefined {
+  if (!runDir) return undefined;
+  try {
+    const raw = JSON.parse(readFileSync(join(runDir, "state.json"), "utf8")) as { notify_target?: unknown };
+    return typeof raw.notify_target === "string" && TARGET_NAME.test(raw.notify_target) ? raw.notify_target : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface ResolvedHook {
+  hook?: NotifyHook;
+  /** Included on the payload and the outbox only when the named target is the one we POST to. */
+  target?: string;
+  /** Human-readable, no URL or key. Logged when a stored target is gone and the repo hook is used. */
+  fallback?: string;
+  skipReason?: string;
+}
+
+/**
+ * Named target if it is still in notify.yaml, otherwise the repo hook. A removed target is a fallback,
+ * not a skip, when the repo hook exists.
+ */
+export function resolveNotifyHook(cfg: NotifyConfig, repo: string | undefined, targetName: string | undefined): ResolvedHook {
+  const repoHook = repo ? cfg.repos[repo] : undefined;
+  if (targetName) {
+    const named = cfg.targets[targetName];
+    if (named) return { hook: named, target: targetName };
+    if (repoHook) return { hook: repoHook, fallback: `notify target ${targetName} is not in notify.yaml; using the repo hook` };
+    return { skipReason: `notify target ${targetName} is not in notify.yaml and no hook for this repo` };
+  }
+  if (!repoHook) return { skipReason: repo ? "no hook for this repo in notify.yaml" : "no hook for this repo in notify.yaml" };
+  return { hook: repoHook };
 }
 
 function outboxEnqueue(factoryHome: string, entry: Omit<OutboxEntry, "enqueued_at">): void {
@@ -250,26 +307,32 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
     log({ status: "error", error: msg });
     const repo = await ownerRepoOfDir(result.repo);
     if (repo) {
-      const payload = runPayload(result, repo, finishedAt);
-      outboxEnqueue(deps.factoryHome, { event_id: payload.event_id, repo, payload, kind: "error", detail: msg });
+      const targetName = readNotifyTarget(result.run_dir) ?? (deps.notifyTarget && TARGET_NAME.test(deps.notifyTarget) ? deps.notifyTarget : undefined);
+      const payload = runPayload(result, repo, finishedAt, targetName);
+      outboxEnqueue(deps.factoryHome, { event_id: payload.event_id, repo, payload, kind: "error", detail: msg, ...(targetName ? { target: targetName } : {}) });
     }
     return undefined;
   }
   if (!cfg) return undefined;
   const repo = await ownerRepoOfDir(result.repo);
-  const hook = repo ? cfg.repos[repo] : undefined;
-  const raw = repo ? runPayload(result, repo, finishedAt) : undefined;
+  const stored = readNotifyTarget(result.run_dir);
+  const targetName = stored ?? (deps.notifyTarget && TARGET_NAME.test(deps.notifyTarget) ? deps.notifyTarget : undefined);
+  const resolved = resolveNotifyHook(cfg, repo, targetName);
+  const raw = repo ? runPayload(result, repo, finishedAt, resolved.target) : undefined;
   // The outbox persists the payload on disk: redact run secrets from the free-text reason.
   const payload = raw && events ? { ...raw, reason: events.redact(raw.reason) } : raw;
-  if (!repo || !hook) {
-    log({ status: "skipped", repo: repo ?? null, reason: "no hook for this repo in notify.yaml" });
+  const hook = resolved.hook;
+  if (!repo || !hook || !payload) {
+    const reason = resolved.skipReason ?? "no hook for this repo in notify.yaml";
+    log({ status: "skipped", repo: repo ?? null, reason, ...(resolved.fallback ? { fallback: resolved.fallback } : {}) });
     if (payload) {
       outboxEnqueue(deps.factoryHome, {
         event_id: payload.event_id,
         repo: payload.repo,
         payload,
         kind: "skipped",
-        detail: "no hook for this repo in notify.yaml",
+        detail: reason,
+        ...(targetName ? { target: targetName } : {}),
       });
     }
     return undefined;
@@ -278,23 +341,29 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
   try {
     key = hookKey(hook);
   } catch (e) {
-    log({ status: "error", repo, error: (e as Error).message.slice(0, 300) });
-    if (payload) {
-      outboxEnqueue(deps.factoryHome, {
-        event_id: payload.event_id,
-        repo: payload.repo,
-        payload,
-        kind: "error",
-        detail: (e as Error).message.slice(0, 300),
-      });
-    }
+    log({ status: "error", repo, ...(resolved.target ? { target: resolved.target } : {}), ...(resolved.fallback ? { fallback: resolved.fallback } : {}), error: (e as Error).message.slice(0, 300) });
+    outboxEnqueue(deps.factoryHome, {
+      event_id: payload.event_id,
+      repo: payload.repo,
+      payload,
+      kind: "error",
+      detail: (e as Error).message.slice(0, 300),
+      ...(resolved.target ? { target: resolved.target } : {}),
+    });
     return undefined;
   }
   events?.addSecrets([hook.url, key]);
-  const body = payload!;
+  const body = payload;
   // Write-ahead: the entry exists while the POST is in flight, so a second signal, SIGKILL or OOM
   // during delivery leaves it for the next flush (receivers dedupe on event_id).
-  outboxEnqueue(deps.factoryHome, { event_id: body.event_id, repo: body.repo, payload: body, kind: "failed", detail: "delivery in progress" });
+  outboxEnqueue(deps.factoryHome, {
+    event_id: body.event_id,
+    repo: body.repo,
+    payload: body,
+    kind: "failed",
+    detail: "delivery in progress",
+    ...(resolved.target ? { target: resolved.target } : {}),
+  });
   const out = await sendNotification(hook, key, body, {
     fetch: deps.fetch,
     sleep: deps.sleep,
@@ -303,7 +372,14 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
     backoffMs: deps.backoffMs,
     signal: notifyAbortSignal(deps.signal),
   });
-  log({ repo, result: result.result, event_id: body.event_id, ...out });
+  log({
+    repo,
+    result: result.result,
+    event_id: body.event_id,
+    ...(resolved.target ? { target: resolved.target } : {}),
+    ...(resolved.fallback ? { fallback: resolved.fallback } : {}),
+    ...out,
+  });
   if (out.status === "sent") {
     try {
       removeOutboxFile(deps.factoryHome, body.event_id);
@@ -317,6 +393,7 @@ export async function notifyRunFinished(result: RunResult, deps: NotifyDeps, eve
       payload: body,
       kind: "failed",
       detail: out.error ?? (out.http_status !== null ? `HTTP ${out.http_status}` : "delivery failed"),
+      ...(resolved.target ? { target: resolved.target } : {}),
     });
   }
   return out;
@@ -332,8 +409,15 @@ export async function notifyTest(repo: string, deps: NotifyDeps, now = new Date(
     return { ok: false, message: (e as Error).message };
   }
   if (!cfg) return { ok: false, message: `no ${notifyPath(deps.factoryHome)} (see docs/BOTS.md)` };
-  const hook = cfg.repos[repo];
-  if (!hook) return { ok: false, message: `no hook for ${repo} in ${notifyPath(deps.factoryHome)}` };
+  const targetName = deps.notifyTarget;
+  if (targetName !== undefined && !TARGET_NAME.test(targetName)) return { ok: false, message: "notify target name must be a short identifier, not a URL or key" };
+  const hook = targetName ? cfg.targets[targetName] : cfg.repos[repo];
+  if (!hook) {
+    return {
+      ok: false,
+      message: targetName ? `unknown notify target ${targetName}` : `no hook for ${repo} in ${notifyPath(deps.factoryHome)}`,
+    };
+  }
   let key: string;
   try {
     key = hookKey(hook);
@@ -341,7 +425,10 @@ export async function notifyTest(repo: string, deps: NotifyDeps, now = new Date(
     return { ok: false, message: (e as Error).message };
   }
   const finished_at = now.toISOString();
-  const payload = withEventId({ event: "factory.notify_test", run_id: null, repo, result: "test", reason: "factory notify test", pr: null, finished_at }, repo);
+  const payload = withEventId(
+    { event: "factory.notify_test", run_id: null, repo, result: "test", reason: "factory notify test", pr: null, finished_at, ...(targetName ? { target: targetName } : {}) },
+    repo,
+  );
   const out = await sendNotification(hook, key, payload, {
     fetch: deps.fetch,
     sleep: deps.sleep,
@@ -351,9 +438,10 @@ export async function notifyTest(repo: string, deps: NotifyDeps, now = new Date(
     signal: notifyAbortSignal(deps.signal),
   });
   const tries = `${out.attempts} attempt${out.attempts === 1 ? "" : "s"}`;
+  const who = targetName ? `${repo} target ${targetName}` : repo;
   return out.status === "sent"
-    ? { ok: true, message: `test ping for ${repo} sent (HTTP ${out.http_status}, ${tries})` }
-    : { ok: false, message: `test ping for ${repo} failed after ${tries}: ${out.error ?? "unknown error"}` };
+    ? { ok: true, message: `test ping for ${who} sent (HTTP ${out.http_status}, ${tries})` }
+    : { ok: false, message: `test ping for ${who} failed after ${tries}: ${out.error ?? "unknown error"}` };
 }
 
 export interface NotifyCheck {
@@ -374,6 +462,7 @@ export async function notifyChecks(factoryHome: string, repoDir?: string): Promi
   if (!cfg) return [{ name, status: "info", detail: `no ${notifyPath(factoryHome)}: no bot is woken when a run ends (docs/BOTS.md)` }];
   const checks: NotifyCheck[] = [];
   const repos = Object.keys(cfg.repos).sort();
+  const targets = Object.keys(cfg.targets).sort();
   const broken: string[] = [];
   for (const r of repos) {
     try {
@@ -382,10 +471,18 @@ export async function notifyChecks(factoryHome: string, repoDir?: string): Promi
       broken.push(`${r}: ${(e as Error).message}`);
     }
   }
+  for (const t of targets) {
+    try {
+      hookKey(cfg.targets[t]!);
+    } catch (e) {
+      broken.push(`target ${t}: ${(e as Error).message}`);
+    }
+  }
+  const listed = [repos.length ? `hooks for ${repos.join(", ")}` : "", targets.length ? `targets ${targets.join(", ")}` : ""].filter(Boolean).join("; ");
   checks.push(
     broken.length
       ? { name, status: "fail", detail: `hook key not usable for ${broken.join("; ")}` }
-      : { name, status: repos.length ? "ok" : "warn", detail: repos.length ? `notify.yaml 0600; hooks for ${repos.join(", ")}` : "notify.yaml has no repos" },
+      : { name, status: listed ? "ok" : "warn", detail: listed ? `notify.yaml 0600; ${listed}` : "notify.yaml has no repos" },
   );
   if (repoDir) {
     const repo = await ownerRepoOfDir(repoDir);
@@ -425,7 +522,7 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
   const report: FlushReport = { sent: 0, failed: 0, skipped: 0, remaining: 0, errors: [] };
   const now = opts.now ?? Date.now;
   const started = now();
-  const downRepos = new Set<string>();
+  const downKeys = new Set<string>();
   let cfg: NotifyConfig | undefined;
   try {
     cfg = loadNotifyConfig(factoryHome);
@@ -442,20 +539,23 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
   for (const entry of listOutboxEntries(factoryHome)) {
     if (opts.budgetMs !== undefined && now() - started >= opts.budgetMs) break;
     if (signal.aborted) break;
-    if (downRepos.has(entry.repo)) {
+    const downKey = `${entry.target ?? ""}:${entry.repo}`;
+    if (downKeys.has(downKey)) {
       report.skipped++;
       continue;
     }
-    const hook = cfg.repos[entry.repo];
+    const resolved = resolveNotifyHook(cfg, entry.repo, entry.target);
+    const hook = resolved.hook;
     if (!hook) {
       report.skipped++;
       continue;
     }
+    if (resolved.fallback) report.errors.push(`${entry.repo}: ${resolved.fallback}`);
     let key: string;
     try {
       key = hookKey(hook);
     } catch (e) {
-      report.errors.push(`${entry.repo}: ${(e as Error).message.slice(0, 200)}`);
+      report.errors.push(`${entry.target ? `target ${entry.target}` : entry.repo}: ${(e as Error).message.slice(0, 200)}`);
       report.skipped++;
       continue;
     }
@@ -472,8 +572,8 @@ export async function flushNotifyOutbox(factoryHome: string, deps: NotifyDeps = 
       report.sent++;
     } else {
       report.failed++;
-      downRepos.add(entry.repo);
-      if (out.error || out.http_status !== null) report.errors.push(`${entry.repo}: ${out.error ?? `HTTP ${out.http_status}`}`);
+      downKeys.add(downKey);
+      if (out.error || out.http_status !== null) report.errors.push(`${entry.target ? `target ${entry.target}` : entry.repo}: ${out.error ?? `HTTP ${out.http_status}`}`);
     }
   }
   report.remaining = outboxCount(factoryHome);
@@ -541,7 +641,8 @@ export async function notifyDoctorChecks(factoryHome: string, now = Date.now()):
     if (run.started_at.getTime() < cutoff) continue;
     for (const e of readEvents(run)) {
       if (e.event !== "notify" || typeof e.data.repo !== "string" || typeof e.data.status !== "string") continue;
-      outcomes.push({ repo: e.data.repo, status: e.data.status, ms: Date.parse(e.ts) });
+      const target = typeof e.data.target === "string" && TARGET_NAME.test(e.data.target) ? e.data.target : "";
+      outcomes.push({ repo: target ? `${e.data.repo} target ${target}` : e.data.repo, status: e.data.status, ms: Date.parse(e.ts) });
     }
   }
   const lastSent = new Map<string, number>();
@@ -560,6 +661,30 @@ export async function notifyDoctorChecks(factoryHome: string, now = Date.now()):
   }
   if (!checks.length) checks.push({ name: "notify delivery", status: "ok", detail: `no outbox backlog; hooks cover recent repos (last ${NOTIFY_DOCTOR_DAYS} days)` });
   return checks;
+}
+
+/**
+ * `factory run --notify <name>` / `factory resume --notify <name>`: the name must exist and its key must
+ * be readable. The message names the target and never a URL or key. A name that is not a short identifier
+ * is rejected without echoing it.
+ */
+export async function requireNotifyTarget(factoryHome: string, name: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!TARGET_NAME.test(name)) return { ok: false, message: "--notify expects a target name (letters, digits, dot, underscore, hyphen), not a URL or key" };
+  let cfg: NotifyConfig | undefined;
+  try {
+    cfg = loadNotifyConfig(factoryHome);
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
+  if (!cfg) return { ok: false, message: `unknown notify target ${name}: no ${notifyPath(factoryHome)} (see docs/BOTS.md)` };
+  const hook = cfg.targets[name];
+  if (!hook) return { ok: false, message: `unknown notify target ${name}` };
+  try {
+    hookKey(hook);
+  } catch (e) {
+    return { ok: false, message: (e as Error).message };
+  }
+  return { ok: true };
 }
 
 /** Whether a GitHub-origin repo has a configured hook (used before factory run). */

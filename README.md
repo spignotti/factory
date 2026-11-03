@@ -90,7 +90,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory harden --repo <p>` | signals → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
-| `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
+| `factory notify test <owner/name> [--target <name>]` | send a test ping to the repo hook or a named target (see [docs/BOTS.md](docs/BOTS.md)) |
 | `factory notify flush` | retry pending run-end notifications from `~/.factory/outbox/` (also at run/resume start) |
 | `factory --version` | package version (plus the commit for a checkout install) |
 
@@ -114,9 +114,13 @@ HEAD) counts as pushed, and an open PR on the run's branch at HEAD is adopted an
 
 ## Notify (bots)
 
-On every `run_finished` (also after `resume`) the factory POSTs `{run_id, repo, result, reason, pr,
-finished_at}` to the webhook routine of the bot that owns the repo, configured in `~/.factory/notify.yaml`
-(`0600`, hidden from agents inside a run; each bot writes its own entry). Retries with backoff; a failed notification is logged and never fails the run.
+On every `run_finished` (also after `resume`, `abandon` and a `gc` abandon) the factory POSTs `{run_id, repo, result, reason, pr,
+finished_at}` to the webhook of the bot that started the run. `factory run --notify <target>` stores that
+name on the run (`notify_target` in `state.json`) and POSTs to `targets.<name>` in `~/.factory/notify.yaml`,
+adding `"target"` to the body. Without `--notify`, the repo's `repos:` hook is used as before. The file is
+`0600` and hidden from agents inside a run; each bot writes its own entry. A removed target falls back to the
+repo hook. Retries with backoff; a failed notification is logged and never fails the run. URLs and keys are
+never written to events, state, the outbox, status, doctor output or the PR.
 A background shell that ends does not wake a bot; this hook does. Setup, payload, routine prompt and the
 onboarding checklist: [docs/BOTS.md](docs/BOTS.md).
 
