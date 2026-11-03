@@ -79,6 +79,10 @@ export const PROFILE_ROLES = [
   "evaluate",
   "pr_writer",
   "harden",
+  "audit_security",
+  "audit_performance",
+  "audit_refactor",
+  "audit_simplify",
 ] as const;
 export type ProfileRole = (typeof PROFILE_ROLES)[number];
 

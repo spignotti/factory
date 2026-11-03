@@ -167,7 +167,8 @@
               "type": "string",
               "enum": [
                 "harden",
-                "adopt"
+                "adopt",
+                "audit"
               ]
             },
             "id": {
@@ -205,6 +206,15 @@
                   },
                   "rationale": {
                     "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "security",
+                      "performance",
+                      "refactor",
+                      "simplify"
+                    ]
                   },
                   "plan": {
                     "type": "object",

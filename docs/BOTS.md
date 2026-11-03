@@ -14,9 +14,37 @@ factory run --repo /path/to/checkout --plan plan.md --wait    # or --issue <n> /
 - `--wait` queues behind another run on the same repo instead of ending `locked`.
 - The run id is printed at the start and is the directory name under `~/.factory/runs/<run-id>/`.
   Note it in the bot's memory/notes with the task, so a wake can be matched to the work.
-- `factory status` lists running, queued (`--wait`), stalled, orphaned, interrupted and finished runs.
+- `factory status` lists running, queued (`--wait`), stalled, orphaned, interrupted and finished runs, and open audit tickets.
+- `factory stats` lists the same open audit tickets (with `--repo`, only that repository).
 - `factory run` refuses to start when the repo has no notify hook unless you pass `--no-notify` (see below);
   a `--no-notify` run sends no webhook and writes no outbox entry (its `notify` event says `disabled`).
+
+## Audit
+
+The repo's bot runs `factory audit`. The factory does not schedule it and does not start the proposals.
+One call is one dimension, and only a type listed in `.factory/repo.yaml` `audit.types` runs. With no
+`audit` block the command refuses and does not call a model.
+
+```bash
+factory audit --repo /path/to/checkout --type security
+# also: performance, refactor, simplify
+```
+
+Rhythm, from the bot's own routine: security and performance weekly (alongside `factory harden`), refactor
+and simplify monthly. Each call is one read-only session on the role's model. `audit.thinking` sets the
+reasoning level (high for security and performance, medium for refactor and simplify, unless the repo says
+otherwise).
+
+The ticket is `$FACTORY_HOME/memory/<repo>/proposals/<date>-audit-<type>.json`. Each proposal has a plan
+file next to it. The bot starts that plan as its own run after reading the ticket (the factory does not):
+
+```bash
+factory run --repo /path/to/checkout --plan <plan_path> --wait
+```
+
+When that PR merges, the next `factory audit` or `factory harden` marks the proposal `resolved`. A closed
+unmerged PR, or no merged or open PR for 28 days, drops it. `factory status` and `factory stats` list
+proposals that are still open, per repository.
 
 ## A finished background shell does NOT wake the bot
 

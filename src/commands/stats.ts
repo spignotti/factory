@@ -1,6 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { FactoryEvent } from "../events.js";
+import { canonicalRepoId } from "../memory.js";
+import { openAuditTickets } from "../proposals.js";
 import { listRuns, readEvents, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
@@ -120,6 +123,16 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
   return p;
 }
 
+function repoIdFor(repoDir: string): string {
+  let origin = "";
+  try {
+    origin = execFileSync("git", ["remote", "get-url", "origin"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    // no origin: the repo id is the path
+  }
+  return canonicalRepoId(origin, repoDir);
+}
+
 export function statsReport(opts: { factoryHome: string; since?: string; repo?: string; now?: () => number }): StatsReport {
   const since = opts.since ?? "7d";
   const span = parseSince(since);
@@ -138,6 +151,7 @@ export function statsReport(opts: { factoryHome: string; since?: string; repo?: 
       subscription_tokens: current.subscription_tokens.tokens_in + current.subscription_tokens.tokens_out - previous.subscription_tokens.tokens_in - previous.subscription_tokens.tokens_out,
       median_rounds: diff(current.rounds.median, previous.rounds.median),
     },
+    audit_tickets: openAuditTickets(opts.factoryHome, repo ? repoIdFor(repo) : undefined),
   };
 }
 
@@ -158,6 +172,9 @@ export function statsCommand(opts: { factoryHome: string; since?: string; repo?:
       `subscription tokens: ${c.subscription_tokens.tokens_in} in / ${c.subscription_tokens.tokens_out} out (previous ${s.previous.subscription_tokens.tokens_in} / ${s.previous.subscription_tokens.tokens_out})`,
       `cost (metered providers): $${c.cost_usd.toFixed(4)} (previous $${s.previous.cost_usd.toFixed(4)})`,
       `lane escalations ${c.lane_escalations}, watchdog aborts ${c.watchdog_aborts}`,
+      s.audit_tickets.length
+        ? `open audit tickets:\n${s.audit_tickets.map((t) => `  ${t.repo} [${t.type}] ${t.id} — ${t.goal}`).join("\n")}`
+        : "open audit tickets: 0",
     ].join("\n") + "\n",
   );
   return 0;

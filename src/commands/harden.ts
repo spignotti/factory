@@ -20,7 +20,7 @@ import {
   stubText,
   WINDOW_DAYS,
 } from "../harden/signals.js";
-import { canonicalRepoId, loadMemory, updateMemory } from "../memory.js";
+import { canonicalRepoId, loadMemory, markFindingsProposed, updateMemory } from "../memory.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { nextProposalId, proposalsDir, writeProposal } from "../proposals.js";
 import { listRuns, type RunRecord } from "../runs.js";
@@ -95,7 +95,7 @@ export interface Selected {
  */
 export function validateSelection(
   json: unknown,
-  ctx: { repo: RepoConfig; keys: Set<string>; items: Set<string>; max: number },
+  ctx: { repo: RepoConfig; keys: Set<string>; /** When set, a checklist item must be one of these. */ items?: Set<string>; max: number },
 ): { accepted: Selected[]; errors: string[] } {
   const errors: string[] = [];
   const list = json && typeof json === "object" && Array.isArray((json as { proposals?: unknown }).proposals) ? ((json as { proposals: unknown[] }).proposals) : undefined;
@@ -114,7 +114,7 @@ export function validateSelection(
     if (!rationale) own.push("rationale is missing");
     const checklist = Array.isArray(item.checklist) ? item.checklist.filter((x): x is string => typeof x === "string") : [];
     for (const c of checklist) {
-      if (!ctx.items.has(c)) own.push(`checklist item not in the signals: ${c.slice(0, 80)}`);
+      if (ctx.items && !ctx.items.has(c)) own.push(`checklist item not in the signals: ${c.slice(0, 80)}`);
       else if (usedItems.has(c)) own.push(`checklist item already in an earlier proposal: ${c.slice(0, 80)}`);
     }
     const v = validatePlan(item.plan, { repo: ctx.repo });
@@ -233,16 +233,7 @@ export async function harden(opts: HardenOptions, deps: HardenDeps): Promise<Har
       signals: { ...signals },
       metrics: { ...metrics },
     });
-    const owner = new Map(t.proposals.flatMap((p) => p.references.findings.map((k) => [k, p.id] as const)));
-    updateMemory(deps.factoryHome, repoId, (m) => {
-      for (const e of m.entries) {
-        const id = owner.get(e.key);
-        if (id && e.status === "open") {
-          e.status = "proposed";
-          e.ref = id;
-        }
-      }
-    });
+    markFindingsProposed(deps.factoryHome, repoId, new Map(t.proposals.flatMap((p) => p.references.findings.map((k) => [k, p.id] as const))));
     return HardenReportSchema.parse({ ...report, ticket: t, path: join(proposalsDir(deps.factoryHome, repoId), `${t.id}.json`), rejected: chosen.rejected });
   } finally {
     shot.close();

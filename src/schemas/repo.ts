@@ -5,7 +5,7 @@ import { z } from "zod";
 
 /** `diff_exclude` globs that would switch the diff limits off entirely. */
 const CATCH_ALL = new Set(["*", "**", "**/*", "**/**", "*/**"]);
-import { DocsLookupSchema, RoleOverridesSchema } from "./profile.js";
+import { DocsLookupSchema, RoleOverridesSchema, THINKING_LEVELS } from "./profile.js";
 
 export const TierSchema = z.enum(["fast", "full", "manual"]);
 export type Tier = z.infer<typeof TierSchema>;
@@ -96,9 +96,32 @@ export const SecretsSchema = z.discriminatedUnion("provider", [
 ]);
 export type SecretsConfig = z.infer<typeof SecretsSchema>;
 
-/** Default and upper bound of proposals per harden ticket. */
+/** Default and upper bound of proposals per harden or audit ticket. */
 export const DEFAULT_MAX_PROPOSALS = 5;
 export const MAX_PROPOSALS_LIMIT = 10;
+
+/** Dimensions `factory audit` can judge. A repo enables a subset in `audit.types`. */
+export const AUDIT_TYPES = ["security", "performance", "refactor", "simplify"] as const;
+export const AuditTypeSchema = z.enum(AUDIT_TYPES);
+export type AuditType = z.infer<typeof AuditTypeSchema>;
+
+/** Reasoning level per audit type when `audit.thinking` omits a key. */
+export const DEFAULT_AUDIT_THINKING = {
+  security: "high",
+  performance: "high",
+  refactor: "medium",
+  simplify: "medium",
+} as const;
+
+const AuditThinkingSchema = z
+  .object({
+    security: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.security),
+    performance: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.performance),
+    refactor: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.refactor),
+    simplify: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.simplify),
+  })
+  .strict()
+  .default({ ...DEFAULT_AUDIT_THINKING });
 
 const ToolchainVersionSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._*/+-]{0,39}$/, "toolchain versions use letters, digits and . _ * / + -");
 
@@ -280,6 +303,18 @@ export const RepoConfigSchema = z
     harden: z
       .object({ max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS) })
       .default({ max_proposals: DEFAULT_MAX_PROPOSALS }),
+    /**
+     * `factory audit`. Absent (the default): no types are enabled and the command refuses without a model call.
+     * `thinking` overrides the role chain's thinking level for that type. `--max` overrides `max_proposals`.
+     */
+    audit: z
+      .object({
+        types: z.array(AuditTypeSchema).default([]),
+        max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS),
+        thinking: AuditThinkingSchema,
+      })
+      .strict()
+      .default({ types: [], max_proposals: DEFAULT_MAX_PROPOSALS, thinking: { ...DEFAULT_AUDIT_THINKING } }),
     git: z
       .object({ author: z.string().default("factory"), email: z.string().optional() })
       .default({ author: "factory" }),

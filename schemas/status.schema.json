@@ -358,6 +358,49 @@
         ],
         "additionalProperties": false
       }
+    },
+    "audit_tickets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "security",
+              "performance",
+              "refactor",
+              "simplify"
+            ]
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "goal": {
+            "type": "string"
+          },
+          "plan_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "id",
+          "type",
+          "rank",
+          "goal",
+          "plan_path"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -368,7 +411,8 @@
     "queued",
     "orphaned",
     "stalled",
-    "prs"
+    "prs",
+    "audit_tickets"
   ],
   "additionalProperties": false
 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { OpenAuditTicketSchema } from "./proposal.js";
 
 /**
  * Output contracts of `status`, `stats`, `gc` and `doctor` (`--json`). Strict: a field added in code
@@ -40,6 +41,8 @@ export const StatusReportSchema = z.strictObject({
       merge_policy: nullableStr, risk: nullableStr, result: nullableStr, error: z.string().optional(),
     }),
   ),
+  /** Open audit proposals, one row per proposal, across every repo in `$FACTORY_HOME`. */
+  audit_tickets: z.array(OpenAuditTicketSchema),
 });
 
 const quantiles = z.strictObject({ median: z.number().nullable(), p90: z.number().nullable() });
@@ -82,6 +85,8 @@ export const StatsReportSchema = z.strictObject({
   current: StatsPeriodSchema,
   previous: StatsPeriodSchema,
   delta: z.strictObject({ runs: z.number().int(), done_rate: z.number().nullable(), cost_usd: z.number(), subscription_tokens: z.number(), median_rounds: z.number().nullable() }),
+  /** Open audit proposals. With `--repo`, only that repository. */
+  audit_tickets: z.array(OpenAuditTicketSchema),
 });
 
 export const GcReportSchema = z.strictObject({

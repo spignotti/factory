@@ -17,8 +17,9 @@ import { autoGc, gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
+import { auditCommand } from "./commands/audit.js";
 import { hardenCommand } from "./commands/harden.js";
-import { MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
+import { AUDIT_TYPES, type AuditType, MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { isBaseRedWaiting, resumeFactory, runFactory, sweepBaseRed } from "./pipeline/run.js";
@@ -70,6 +71,10 @@ const USAGE = `usage:
               (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
                $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
+  factory audit --repo <path> --type security|performance|refactor|simplify [--max <1-10>] [--profile <file>] [--json]
+              (one read-only session; ticket proposals/<date>-audit-<type>.json with up to --max
+               (repo.yaml audit.max_proposals, default 5) ranked plans when --type is listed in audit.types;
+               otherwise exit 1 and no model call; each plan is its own run/PR)
   factory notify test <owner/name>
               (one test POST to the repo's webhook from $FACTORY_HOME/notify.yaml; doctor lists the configured repos)
   factory notify flush [--json]
@@ -260,6 +265,33 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       try {
         return await hardenCommand(
           { repo: values.repo, compact: !values["no-compact"], json: values.json, ...(max ? { max } : {}) },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
+          io,
+        );
+      } finally {
+        uninstall();
+        await runner.close();
+      }
+    }
+    if (command === "audit") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { repo: { type: "string" }, type: { type: "string" }, max: { type: "string" }, profile: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      const max = values.max === undefined ? undefined : Number(values.max);
+      const typeOk = values.type !== undefined && (AUDIT_TYPES as readonly string[]).includes(values.type);
+      if (!values.repo || !typeOk || (max !== undefined && !(Number.isInteger(max) && max >= 1 && max <= MAX_PROPOSALS_LIMIT))) {
+        io.err(USAGE);
+        return 2;
+      }
+      const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
+      const runner = new PiRunner(join(factoryHome, "pi"));
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      try {
+        return await auditCommand(
+          { repo: values.repo, type: values.type as AuditType, json: values.json, ...(max ? { max } : {}) },
           { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
           io,
         );

@@ -12,7 +12,7 @@ source of truth; this README is the reference for concepts, configuration and co
    verified in code.
 3. **Checks in CI, judgment in review.** Lint, types, tests, scanners and recorded flows are checks; LLM
    review covers plan fidelity, simplicity, impact and security reasoning.
-4. **Ratchet toward determinism.** Recurring findings and checklist items become checks (`factory harden`).
+4. **Ratchet toward determinism.** Recurring findings and checklist items become checks (`factory harden`). Security, performance and structure are judged on demand (`factory audit`).
 5. **Tests prove criteria.** Every test proves an acceptance criterion the plan names.
 6. **Minimal prompts.** `roles/*.md` are short, role-specific and the factory's only global agent
    instructions; repo facts live in the repo's `AGENTS.md`.
@@ -88,6 +88,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
+| `factory audit --repo <p> --type <t>` | one read-only audit → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
 | `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
@@ -217,6 +218,10 @@ verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]
   run: "uv run pytest {files}"       # runs recorded flows [tests.run]
 harden: { max_proposals: 5 }
+audit:                              # absent: no types enabled, `factory audit` refuses without a model call
+  types: [security, performance, refactor, simplify]
+  max_proposals: 5                 # 1..10; --max overrides
+  thinking: { security: high, performance: high, refactor: medium, simplify: medium }
 git: { author: factory, email: "…" }
 agent_env: []                        # extra env var names for agent tools and checks
 docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
@@ -607,6 +612,38 @@ proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>
    `protected_changes` (see [Protected config](#protected-config)). Each proposal is its own run and PR:
    `factory run --plan <dir>/<date>.<rank>.plan.json`.
 
+## Audit
+
+`factory audit --repo <path> --type security|performance|refactor|simplify` judges the repository against its
+purpose in one dimension and writes a ranked list of proposals. It does not schedule itself and it does not
+start the runs. A type runs only when it is listed in `audit.types`. With no `audit` block every type is
+refused (exit 1, no model call).
+
+The session is read-only (the same tools as harden's ticket step). Roles `audit_security`,
+`audit_performance`, `audit_refactor` and `audit_simplify` default to the strongest plan chain (`plan_high`'s
+model) and are overridden by the profile layers like every other role, including `models:` in repo.yaml.
+`audit.thinking` sets the reasoning level for that call (default high for security and performance, medium
+for refactor and simplify) and replaces the thinking level on the chain. One call, one type.
+
+The model sees open findings from memory, the latest `metrics.jsonl` line, and — for `performance` only —
+harden's CI audit. There is no fixed checklist. Output reuses the proposal pipeline: ticket
+`proposals/<date>-audit-<type>.json`, plan files `<date>-audit-<type>.<rank>.plan.json`, the same plan
+validation (one retry; overlapping or invalid proposals are dropped and listed), and the same lifecycle
+(a later `factory audit` or `factory harden` marks a proposal `resolved` when its factory PR merges, or
+`dropped` when the PR is closed or the ticket goes stale). A proposal may change `.factory/` or CI files
+only as declared `protected_changes`. Findings it names become `proposed`.
+
+```bash
+factory audit --repo <path> --type security
+factory run --repo <path> --plan <plan_path>
+```
+
+`--json` matches `schemas/audit.schema.json`. `factory status` and `factory stats` list open audit tickets
+per repository (`stats --repo` limits the list to that repo).
+
+A practical rhythm, run by the repo's bot (see [docs/BOTS.md](docs/BOTS.md#audit)): security and performance
+weekly, alongside harden; refactor and simplify monthly. Only enabled types.
+
 ## Evals and experiments
 
 ```
@@ -655,8 +692,8 @@ API key for OpenCode Go).
 ## Status, stats, cleanup
 
 ```
-factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs
-factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
+factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
+factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
 factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 90] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```

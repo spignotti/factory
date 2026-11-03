@@ -15,6 +15,11 @@ roles:
   evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
   pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
   harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  # Same chain as plan_high (the strongest plan model). repo.yaml audit.thinking sets the level per type.
+  audit_security:    [{ model: openai/gpt-6.1-sol, thinking: high }]
+  audit_performance: [{ model: openai/gpt-6.1-sol, thinking: high }]
+  audit_refactor:    [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  audit_simplify:    [{ model: openai/gpt-6.1-sol, thinking: medium }]
 # Scheduled `factory gc --scheduled` defaults to dry-run until you flip this after a week of log review.
 gc:
   retention:

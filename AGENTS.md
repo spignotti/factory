@@ -22,11 +22,11 @@ Rules for coding agents in this repository. The code and README are the document
 
 ## Architecture
 
-- `src/cli.ts`: argument parsing and command dispatch; `src/commands/`: one file per command (`adopt`, `doctor`, `gates`, `stats`, `eval`, `harden`, …).
+- `src/cli.ts`: argument parsing and command dispatch; `src/commands/`: one file per command (`adopt`, `doctor`, `gates`, `stats`, `eval`, `harden`, `audit`, …).
 - `src/pipeline/`: the run (lock, state, lanes, risk, merge policy, watchdog) and the run context; `src/steps/`: intake, plan, implement, review, gates, evaluate, finalize.
 - `src/agents/`: model roles, fallback chains, the Pi runner, the provider guard, agent env and context isolation.
 - `src/gates/`, `src/evaluate/`, `src/sandbox/`: checks, the browser evaluator and the bubblewrap jail for agent commands.
-- `src/adopt/`: repo detection, check drafting, legacy-setup cleanup; `src/harden/`: memory and proposals from past runs.
+- `src/adopt/`: repo detection, check drafting, legacy-setup cleanup; `src/harden/`: memory and proposals from past runs (`harden` and `audit`).
 - `src/schemas/`: zod schemas for profile, repo.yaml, plan, events and reports (the source of `schemas/*.json`).
 - `profiles/default.yaml` (built-in profile), `roles/` (role prompts), `standards/` (review rules), `templates/` (CI stub).
 
