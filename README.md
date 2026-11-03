@@ -233,6 +233,8 @@ audit:                              # absent: no types enabled, `factory audit` 
   types: [security, performance, refactor, simplify]
   max_proposals: 5                 # 1..10; --max overrides
   thinking: { security: high, performance: high, refactor: medium, simplify: medium }
+  focus:                           # optional; one note per type, injected only into that type's prompt
+    security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 git: { author: factory, email: "…" }
 agent_env: []                        # extra env var names for agent tools and checks
 docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
@@ -637,7 +639,14 @@ model) and are overridden by the profile layers like every other role, including
 for refactor and simplify) and replaces the thinking level on the chain. One call, one type.
 
 The model sees open findings from memory, the latest `metrics.jsonl` line, and — for `performance` only —
-harden's CI audit. There is no fixed checklist. Output reuses the proposal pipeline: ticket
+harden's CI audit. There is no fixed checklist. `audit.focus.<type>` is an optional short note for that
+dimension only (a string, or a list of bullet points, at most 2000 characters once joined). It is added to
+that type's prompt as data and to no other prompt; the role prompt stays the same. The note says what to
+weigh, it does not add a checklist. A security audit can be pointed at privacy and GDPR — personal data in
+logs, fixtures, exports and retention — without changing performance, refactor or simplify. Leave `focus`
+out and the prompt is unchanged. Do not put secrets or customer data in it.
+
+Output reuses the proposal pipeline: ticket
 `proposals/<date>-audit-<type>.json`, plan files `<date>-audit-<type>.<rank>.plan.json`, the same plan
 validation (one retry; overlapping or invalid proposals are dropped and listed), and the same lifecycle
 (a later `factory audit` or `factory harden` marks a proposal `resolved` when its factory PR merges, or

@@ -77,7 +77,8 @@ const USAGE = `usage:
   factory audit --repo <path> --type security|performance|refactor|simplify [--max <1-10>] [--profile <file>] [--json]
               (one read-only session; ticket proposals/<date>-audit-<type>.json with up to --max
                (repo.yaml audit.max_proposals, default 5) ranked plans when --type is listed in audit.types;
-               otherwise exit 1 and no model call; each plan is its own run/PR)
+               otherwise exit 1 and no model call; audit.focus.<type> is an optional note added only to
+               that type's prompt; each plan is its own run/PR)
   factory notify test <owner/name> [--target <name>]
               (one test POST to the repo's webhook, or to a named target, from $FACTORY_HOME/notify.yaml;
                doctor lists configured repos and target names, never URLs)

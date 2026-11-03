@@ -58,6 +58,17 @@ memory key belongs to at most one proposal. Fewer is fine when the repository do
 ${PLAN_SHAPE.split("\nor ")[0]}
 plan.resolves_findings: memory keys from the open findings, or []. Do not return questions.`;
 
+/**
+ * User prompt for one audit type. `focus` is that type's note only; omitting it keeps the historical
+ * three-part prompt (signals, checks, selection shape) byte for byte.
+ */
+export function auditUserPrompt(input: { signals: unknown; checks: unknown; max: number; type: AuditType; focus?: string }): string {
+  const parts = [asData("signals", JSON.stringify(input.signals, null, 2)), asData("checks", JSON.stringify(input.checks, null, 2))];
+  if (input.focus) parts.push(asData("focus", input.focus));
+  parts.push(selectShape(input.max, input.type));
+  return parts.join("\n\n");
+}
+
 function repoRuns(factoryHome: string, repoDir: string) {
   const me = real(repoDir);
   return listRuns(factoryHome).filter((r) => real(r.state?.repo ?? r.result?.repo ?? "") === me);
@@ -107,7 +118,7 @@ export async function audit(opts: AuditOptions, deps: AuditDeps): Promise<AuditR
     const report: AuditReport = { ...blank, lifecycle, signals };
     const max = opts.max ?? repo.audit.max_proposals;
     const keys = new Set(findings.map((f) => f.key));
-    const base = [asData("signals", JSON.stringify(signals, null, 2)), asData("checks", JSON.stringify(repo.checks, null, 2)), selectShape(max, opts.type)].join("\n\n");
+    const base = auditUserPrompt({ signals, checks: repo.checks, max, type: opts.type, focus: repo.audit.focus[opts.type] });
     let last: { accepted: Selected[]; errors: string[] } = { accepted: [], errors: [] };
     try {
       for (let attempt = 0; attempt < 2; attempt++) {

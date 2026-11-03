@@ -41,6 +41,18 @@ and simplify monthly. Each call is one read-only session on the role's model. `a
 reasoning level (high for security and performance, medium for refactor and simplify, unless the repo says
 otherwise).
 
+`audit.focus.<type>` is an optional short note (a string or a list of bullet points) injected only into
+that type's prompt, as data. Other types and the role prompts stay the same; omit it and the prompt is
+unchanged. It is not a checklist and it must not contain secrets or customer data. A privacy pass for the
+security audit:
+
+```yaml
+audit:
+  types: [security]
+  focus:
+    security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
+```
+
 The ticket is `$FACTORY_HOME/memory/<repo>/proposals/<date>-audit-<type>.json`. Each proposal has a plan
 file next to it. The bot starts that plan as its own run after reading the ticket (the factory does not):
 
