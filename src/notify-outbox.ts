@@ -23,10 +23,14 @@ const OutboxEntrySchema = z
         reason: z.string(),
         pr: z.string().nullable(),
         finished_at: z.string(),
+        /** Named target this delivery belongs to. Absent: the repo hook. */
+        target: z.string().max(64).optional(),
       })
       .strict(),
     kind: z.enum(["failed", "skipped", "error"]),
     detail: z.string().max(500).optional(),
+    /** Named target to retry. Absent: the repo hook. */
+    target: z.string().max(64).optional(),
   })
   .strict();
 export type OutboxEntry = z.infer<typeof OutboxEntrySchema>;

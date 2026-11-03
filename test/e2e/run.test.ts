@@ -98,6 +98,41 @@ describe("notify hook on run_finished", () => {
     expect(h.sent.map((s) => s.body.result)).toEqual(["locked"]);
   });
 
+  it("--notify stores notify_target and posts to that target, not the repo hook", async () => {
+    const repoUrl = "https://hooks.example.test/repo-hook-secret";
+    const targetUrl = "https://hooks.example.test/mercator-hook-secret";
+    const urls: string[] = [];
+    const bodies: Record<string, unknown>[] = [];
+    const r = await runScenario({
+      script: "clean.json",
+      setup: (repo) => void git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git"),
+      before: (_repo, home) => {
+        writeFileSync(
+          join(home, "notify.yaml"),
+          `targets:\n  mercator:\n    url: ${targetUrl}\n    key: target-key-0123456789abcdef\nrepos:\n  acme/widgets:\n    url: ${repoUrl}\n    key: ${HOOK_KEY}\n`,
+          { mode: 0o600 },
+        );
+      },
+      options: { notifyTarget: "mercator" },
+      deps: {
+        notifyBackoffMs: [0],
+        notifyFetch: async (url, init) => {
+          urls.push(url);
+          bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+          return { status: 200 };
+        },
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(urls).toEqual([targetUrl]);
+    expect(bodies[0]).toMatchObject({ target: "mercator", repo: "acme/widgets", result: "done" });
+    expect(JSON.parse(r.file("state.json")).notify_target).toBe("mercator");
+    const dumped = `${r.eventsText}\n${r.file("state.json")}\n${r.file("result.json")}`;
+    expect(dumped).not.toContain("mercator-hook-secret");
+    expect(dumped).not.toContain(HOOK_KEY);
+    expect(dumped).not.toContain("target-key-0123456789abcdef");
+  });
+
   it("no notify.yaml: nothing is sent and no notify event is logged", async () => {
     const h = withHook();
     const r = await runScenario({ script: "clean.json", setup: h.setup, deps: h.deps });
