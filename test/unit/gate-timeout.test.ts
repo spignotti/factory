@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fixedDeadline } from "../../src/pipeline/budget.js";
 import { gateCheckTimeoutMs } from "../../src/gates/timeout.js";
 import { repoConfigLoosening } from "../../src/gates/config-guard.js";
@@ -14,11 +14,19 @@ describe("gate check timeout", () => {
   });
 
   it("effective timeout uses per-check override and caps at the wall budget", () => {
-    const inTwoMin = fixedDeadline(Date.now() + 120_000);
-    expect(gateCheckTimeoutMs({ gateTimeoutMinutes: 20, deadline: inTwoMin })).toBe(120_000);
-    expect(gateCheckTimeoutMs({ check: { timeout_minutes: 5 }, gateTimeoutMinutes: 20, deadline: inTwoMin })).toBe(120_000);
-    expect(gateCheckTimeoutMs({ check: { timeout_minutes: 30 }, gateTimeoutMinutes: 20, deadline: inTwoMin })).toBe(120_000);
-    expect(gateCheckTimeoutMs({ gateTimeoutMinutes: 20 })).toBe(20 * 60_000);
+    // The cap is deadline.at - Date.now(). A real clock moves between the calls, so the
+    // second assertion was 119999 instead of 120000 (CI run 41659495140).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      const inTwoMin = fixedDeadline(Date.now() + 120_000);
+      expect(gateCheckTimeoutMs({ gateTimeoutMinutes: 20, deadline: inTwoMin })).toBe(120_000);
+      expect(gateCheckTimeoutMs({ check: { timeout_minutes: 5 }, gateTimeoutMinutes: 20, deadline: inTwoMin })).toBe(120_000);
+      expect(gateCheckTimeoutMs({ check: { timeout_minutes: 30 }, gateTimeoutMinutes: 20, deadline: inTwoMin })).toBe(120_000);
+      expect(gateCheckTimeoutMs({ gateTimeoutMinutes: 20 })).toBe(20 * 60_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a sleeping check is killed and recorded as timeout", async () => {
