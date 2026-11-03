@@ -95,17 +95,38 @@ describe("repo.yaml harden.max_proposals", () => {
 
 describe("repo.yaml audit", () => {
   it("enables no types until configured, and defaults thinking and max_proposals", () => {
-    expect(parseRepoConfig("checks: []\n").audit).toMatchObject({
+    expect(parseRepoConfig("checks: []\n").audit).toEqual({
       types: [],
       max_proposals: 5,
       thinking: { security: "high", performance: "high", refactor: "medium", simplify: "medium" },
+      focus: {},
     });
     const partial = parseRepoConfig("audit: { types: [security], thinking: { security: xhigh } }\n").audit;
     expect(partial.types).toEqual(["security"]);
+    expect(partial.focus).toEqual({});
     expect(partial.thinking).toMatchObject({ security: "xhigh", performance: "high", refactor: "medium", simplify: "medium" });
     expect(() => parseRepoConfig("audit: { types: [lint] }\n")).toThrow();
     expect(() => parseRepoConfig("audit: { max_proposals: 11 }\n")).toThrow();
     expect(() => parseRepoConfig("audit: { extra: true }\n")).toThrow();
+  });
+
+  it("accepts audit.focus per type and rejects unknown keys, empty notes and overlong text", () => {
+    const note = "Privacy and GDPR: personal data in logs, fixtures, exports and retention.";
+    const cfg = parseRepoConfig(`audit:
+  types: [security]
+  focus:
+    security: ${JSON.stringify(note)}
+    performance:
+      - slow queries
+      - "- already a bullet"
+`).audit;
+    expect(cfg.focus).toEqual({ security: note, performance: "- slow queries\n- already a bullet" });
+    expect(cfg.focus.refactor).toBeUndefined();
+    expect(() => parseRepoConfig("audit: { focus: { lint: nope } }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { focus: { security: '' } }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { focus: { security: ['', 'x'] } }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { focus: { security: [] } }\n")).toThrow();
+    expect(() => parseRepoConfig(`audit: { focus: { security: ${JSON.stringify("x".repeat(2001))} } }\n`)).toThrow();
   });
 });
 

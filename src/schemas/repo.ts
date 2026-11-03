@@ -125,6 +125,38 @@ const AuditThinkingSchema = z
   .strict()
   .default({ ...DEFAULT_AUDIT_THINKING });
 
+/** Upper bound of one `audit.focus.<type>` note, after a bullet list is joined. */
+export const AUDIT_FOCUS_MAX = 2_000;
+
+/**
+ * `audit.focus.<type>`: a short string, or a list of bullet points joined into one.
+ * Empty and unknown keys are rejected. The result is what that type's prompt receives.
+ */
+function auditFocusText(v: unknown): unknown {
+  if (typeof v === "string") return v.trim();
+  if (!Array.isArray(v)) return v;
+  const lines: string[] = [];
+  for (const item of v) {
+    if (typeof item !== "string") return v;
+    const text = item.trim();
+    if (!text) return v;
+    lines.push(text.startsWith("- ") ? text : `- ${text}`);
+  }
+  return lines.join("\n");
+}
+
+const AuditFocusTextSchema = z.preprocess(auditFocusText, z.string().min(1).max(AUDIT_FOCUS_MAX));
+
+const AuditFocusSchema = z
+  .object({
+    security: AuditFocusTextSchema.optional(),
+    performance: AuditFocusTextSchema.optional(),
+    refactor: AuditFocusTextSchema.optional(),
+    simplify: AuditFocusTextSchema.optional(),
+  })
+  .strict()
+  .default({});
+
 const ToolchainVersionSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._*/+-]{0,39}$/, "toolchain versions use letters, digits and . _ * / + -");
 
 /**
@@ -311,15 +343,17 @@ export const RepoConfigSchema = z
     /**
      * `factory audit`. Absent (the default): no types are enabled and the command refuses without a model call.
      * `thinking` overrides the role chain's thinking level for that type. `--max` overrides `max_proposals`.
+     * `focus.<type>` is an optional note injected only into that type's prompt. No secrets or customer data.
      */
     audit: z
       .object({
         types: z.array(AuditTypeSchema).default([]),
         max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS),
         thinking: AuditThinkingSchema,
+        focus: AuditFocusSchema,
       })
       .strict()
-      .default({ types: [], max_proposals: DEFAULT_MAX_PROPOSALS, thinking: { ...DEFAULT_AUDIT_THINKING } }),
+      .default({ types: [], max_proposals: DEFAULT_MAX_PROPOSALS, thinking: { ...DEFAULT_AUDIT_THINKING }, focus: {} }),
     git: z
       .object({ author: z.string().default("factory"), email: z.string().optional() })
       .default({ author: "factory" }),

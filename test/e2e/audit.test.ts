@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner, FakeScriptSchema, type FakeStep } from "../../src/agents/fake-runner.js";
-import { audit, auditCommand } from "../../src/commands/audit.js";
+import { audit, auditCommand, auditUserPrompt } from "../../src/commands/audit.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { statsCommand, statsReport } from "../../src/commands/stats.js";
 import { loadLayers, resolveProfile } from "../../src/config.js";
@@ -11,6 +11,7 @@ import { main } from "../../src/cli.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { canonicalRepoId, loadMemory } from "../../src/memory.js";
 import { runFactory } from "../../src/pipeline/run.js";
+import { asData } from "../../src/prompts.js";
 import { listProposals, proposalsDir } from "../../src/proposals.js";
 import { validatePlan } from "../../src/schemas/plan.js";
 import { loadProfile } from "../../src/schemas/profile.js";
@@ -117,6 +118,51 @@ describe("factory audit", () => {
     expect(runner.calls.every((c) => c.tools === "read_only")).toBe(true);
     expect(runner.calls[0]!.system).toContain("There is no checklist");
     expect(runner.calls[2]!.system).toContain("There is no checklist");
+  });
+
+  it("injects audit.focus only into that type's prompt; without it the prompt is unchanged", async () => {
+    const note = "Privacy and GDPR: personal data in logs, fixtures, exports and retention.";
+    const checks = `checks:\n  - { name: lint, run: "true", tier: fast }\n`;
+    const base = `${checks}audit:\n  types: [security, performance]\n  max_proposals: 5\n`;
+    const plain = setup(base);
+    const focused = setup(`${base}  focus:\n    security: ${JSON.stringify(note)}\n    performance:\n      - slow queries\n`);
+    const answer = selection(item("one change"));
+    const plainRunner = new FakeRunner([
+      { role: "audit_security", output: answer },
+      { role: "audit_performance", output: answer },
+    ]);
+    const focusedRunner = new FakeRunner([
+      { role: "audit_security", output: answer },
+      { role: "audit_performance", output: answer },
+    ]);
+    for (const type of ["security", "performance"] as const) {
+      await audit({ repo: plain.repo, type }, deps(plain, plainRunner));
+      await audit({ repo: focused.repo, type }, deps(focused, focusedRunner));
+    }
+    const [secPlain, perfPlain] = plainRunner.calls;
+    const [secFocus, perfFocus] = focusedRunner.calls;
+    const checksCfg = loadRepoConfig(plain.repo).checks;
+    const noFocus = { findings: [] as unknown[], metrics: null };
+    // No focus: the runner prompt is the historical three-part prompt (signals, checks, selection).
+    expect(secPlain!.prompt).toBe(auditUserPrompt({ signals: noFocus, checks: checksCfg, max: 5, type: "security" }));
+    expect(secPlain!.prompt.split("\n\n")).toHaveLength(3);
+    expect(perfPlain!.prompt.split("\n\n")).toHaveLength(3);
+    expect(secPlain!.prompt).not.toContain("<focus>");
+    expect(perfPlain!.prompt).not.toContain("<focus>");
+    expect(secPlain!.system).toBe(secFocus!.system);
+    expect(perfPlain!.system).toBe(perfFocus!.system);
+    expect(secPlain!.system).not.toContain(note);
+    expect(perfPlain!.system).not.toContain("slow queries");
+    const insert = (plainPrompt: string, focus: string) => {
+      const tail = plainPrompt.split("\n\n").at(-1)!;
+      return plainPrompt.replace(`\n\n${tail}`, `\n\n${asData("focus", focus)}\n\n${tail}`);
+    };
+    expect(secFocus!.prompt).toBe(insert(secPlain!.prompt, note));
+    expect(secFocus!.prompt).toContain(note);
+    expect(secFocus!.prompt).not.toContain("slow queries");
+    expect(perfFocus!.prompt).toBe(insert(perfPlain!.prompt, "- slow queries"));
+    expect(perfFocus!.prompt).toContain("- slow queries");
+    expect(perfFocus!.prompt).not.toContain(note);
   });
 
   it("does not change the repo or open a pull request", async () => {
