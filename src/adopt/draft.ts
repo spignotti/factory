@@ -10,6 +10,12 @@ import type { MeasureResult } from "./measure.js";
 /** Measured duration above which a check is proposed as `full` instead of `fast`. */
 export const SLOW_CHECK_SECONDS = 120;
 
+/** Per-check gate timeout from a measured duration at adopt (5×, at least 5 minutes). */
+export function adoptCheckTimeoutMinutes(seconds: number | null): number | undefined {
+  if (seconds == null) return undefined;
+  return Math.max(5, Math.ceil((seconds * 5) / 60));
+}
+
 export const DEFAULT_HUMAN_ONLY = [".factory/**", ".github/workflows/**"];
 
 export interface DraftCheck extends Check {
@@ -98,7 +104,12 @@ export function draftRepoYaml(input: DraftInput): { text: string; config: RepoCo
   const doc: Record<string, unknown> = {
     base_branch: input.baseBranch,
     setup: d.setup,
-    checks: input.checks.map((c) => ({ name: c.name, run: c.run, tier: c.tier })),
+    checks: input.checks.map((c) => {
+      const row: Record<string, unknown> = { name: c.name, run: c.run, tier: c.tier };
+      const t = adoptCheckTimeoutMinutes(c.seconds);
+      if (t !== undefined) row.timeout_minutes = t;
+      return row;
+    }),
     tests: d.tests.run ? { globs: d.tests.globs, run: d.tests.run } : { globs: d.tests.globs },
     sensitive_paths: d.db.present ? MIGRATION_GLOBS : [],
     human_only_paths: DEFAULT_HUMAN_ONLY,
