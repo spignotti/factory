@@ -499,7 +499,7 @@ async function beginWork(
   }
   if (ciStatus === "none") {
     const fast = repo.checks.filter((c) => c.tier === "fast");
-    const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
+    const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline, jail: jailFor(ctx, worktree), services });
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
     const red = results.filter((r) => r.status === "fail").map((r) => r.name);
