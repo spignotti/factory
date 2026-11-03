@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
@@ -39,12 +39,16 @@ export interface RunOptions extends TaskInput {
   noPr?: boolean;
   /** Repo locked by another run: wait in a queue instead of returning `locked`. */
   wait?: boolean;
+  /** Named notify.yaml target (`factory run --notify`). Stored on the run; the name only. */
+  notifyTarget?: string;
 }
 
 export interface ResumeOptions {
   wait?: boolean;
   /** Overrides the original run's --no-pr. */
   noPr?: boolean;
+  /** Overrides the stored notify target (`factory resume --notify`). Omitted: keep the stored name. */
+  notifyTarget?: string;
 }
 
 function newRunId(now: number): string {
@@ -302,7 +306,7 @@ function wallBudget(f: RunFrame, events: EventLog, repo: RepoConfig): WallBudget
 /** Run-end webhook to the repo's bot (notify.yaml). Never throws, never changes the result. */
 async function notifyFinished(result: RunResult, deps: RunDeps, events: EventLog): Promise<void> {
   try {
-    await notifyRunFinished(result, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal, disabled: deps.noNotify }, events);
+    await notifyRunFinished(result, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal, disabled: deps.noNotify, notifyTarget: deps.notifyTarget }, events);
   } catch {
     // notifyRunFinished does not throw; this guards the run result against any surprise
   }
@@ -360,6 +364,7 @@ async function openSecrets(f: RunFrame, repo: RepoConfig, repoDir: string, deps:
 
 /** `factory run`: intake → plan → implement → review loop → finalize. Always writes `result.json`. */
 export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunResult> {
+  if (opts.notifyTarget) deps = { ...deps, notifyTarget: opts.notifyTarget };
   await flushNotifyOutbox(deps.factoryHome, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, START_FLUSH).catch(() => undefined);
   const now = deps.now ?? Date.now;
   const startedAt = now();
@@ -379,6 +384,9 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const checkout: RepoConfig = loadRepoConfig(repoDir);
     const task: Task = await readTask(opts, repoDir, deps.github);
     f.taskRef = task.ref;
+    // Persist the starter's target before the lock, so a locked run still records who to wake.
+    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane, wait: opts.wait ?? false, notifyTarget: opts.notifyTarget }));
+    f.save();
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
     f.release = lock.release;
@@ -393,8 +401,6 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
     if (!secrets) return;
-    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane, wait: opts.wait ?? false }));
-    f.save();
 
     const agentHome = prepareAgentHome(runDir);
     const deadline = wallBudget(f, events, repo);
@@ -499,7 +505,7 @@ async function beginWork(
   }
   if (ciStatus === "none") {
     const fast = repo.checks.filter((c) => c.tier === "fast");
-    const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, deadline, jail: jailFor(ctx, worktree), services });
+    const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline, jail: jailFor(ctx, worktree), services });
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
     const red = results.filter((r) => r.status === "fail").map((r) => r.name);
@@ -722,6 +728,15 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   await flushNotifyOutbox(deps.factoryHome, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, START_FLUSH).catch(() => undefined);
   const runDir = join(deps.factoryHome, "runs", runId);
   const st = readState(runDir);
+  // Persist an override before the lock check so a locked resume still wakes the named bot.
+  if (opts.notifyTarget) {
+    st.notify_target = opts.notifyTarget;
+    st.updated_at = new Date().toISOString();
+    writeFileSync(join(runDir, "state.json"), JSON.stringify(st, null, 2) + "\n");
+    deps = { ...deps, notifyTarget: opts.notifyTarget };
+  } else if (st.notify_target) {
+    deps = { ...deps, notifyTarget: st.notify_target };
+  }
   if (st.result === "abandoned") throw new Error(`run ${runId} was abandoned (${st.reason}); start a new run`);
   if (st.gc_at) throw new Error(`run ${runId} was cleaned up by factory gc at ${st.gc_at} (worktree removed); start a new run`);
   if (st.step === "intake" || !st.worktree || !st.branch || !st.base_sha) {

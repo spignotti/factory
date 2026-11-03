@@ -225,7 +225,8 @@ async function realFindings(task: EvalTask, deps: EvalDeps, repo: RepoConfig, ro
         if (s.code !== 0) return; // nothing verifiable on this commit
       }
       out.set("hidden", (await runHidden(task, deps, repo, root, wt)).pass);
-      for (const r of await runChecks(checks, { cwd: wt, env, envCommand: repo.env_command, jail })) out.set(`check:${r.name}`, r.status !== "fail");
+      for (const r of await runChecks(checks, { cwd: wt, env, envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, jail }))
+        out.set(`check:${r.name}`, r.status !== "fail" && r.status !== "timeout");
     });
     cache.set(sha, out);
     return out;

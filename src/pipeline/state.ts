@@ -58,10 +58,15 @@ export interface RunState {
   base_ci?: "red" | "pending";
   /** Set once archive retention has dropped the run directory down to the result and logs. */
   archived_at?: string;
+  /**
+   * Named webhook in `notify.yaml` `targets` (the bot that started the run). The name only — never a URL or key.
+   * Absent: the repo's default hook, as before named targets existed.
+   */
+  notify_target?: string;
   updated_at: string;
 }
 
-export function newState(v: { runId: string; repo: string; task: Task; noPr: boolean; lane?: Lane; wait?: boolean }): RunState {
+export function newState(v: { runId: string; repo: string; task: Task; noPr: boolean; lane?: Lane; wait?: boolean; notifyTarget?: string }): RunState {
   return {
     version: 1,
     run_id: v.runId,
@@ -69,6 +74,7 @@ export function newState(v: { runId: string; repo: string; task: Task; noPr: boo
     task: v.task,
     no_pr: v.noPr,
     wait: v.wait ?? false,
+    ...(v.notifyTarget ? { notify_target: v.notifyTarget } : {}),
     step: "intake",
     result: null,
     reason: "",

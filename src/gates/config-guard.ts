@@ -68,6 +68,18 @@ const PROSE = /\.(md|mdx|markdown|txt|rst)$/i;
 
 const sorted = (xs: string[]) => xs.map((x) => x.replace(/\s+/g, " ").trim()).sort().join("\n");
 
+/** Check fields that define what runs; `timeout_minutes` is handled separately in config_guard. */
+const checkIdentity = (c: { name: string; run: string; tier: string; paths?: string[]; services?: string[]; local_only?: boolean }) => ({
+  name: c.name,
+  run: c.run,
+  tier: c.tier,
+  paths: c.paths,
+  services: c.services,
+  local_only: c.local_only,
+});
+
+const effectiveCheckTimeoutMinutes = (cfg: RepoConfig, c: { timeout_minutes?: number }) => c.timeout_minutes ?? cfg.limits.gate_timeout_minutes;
+
 /** Lines of the given TOML/INI sections. */
 function toolSections(text: string): string {
   const out: string[] = [];
@@ -136,7 +148,19 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
     const now = a.checks.find((x) => x.name === c.name);
     if (!now) out.push(`check ${c.name} removed`);
     else if (!c.local_only && now.local_only) out.push(`check ${c.name} made local_only (dropped from CI)`);
-    else if (!same(c, now)) out.push(`check ${c.name} changed (run, tier, paths, services or local_only)`);
+    else if (!same(checkIdentity(c), checkIdentity(now))) out.push(`check ${c.name} changed (run, tier, paths, services or local_only)`);
+  }
+  if (a.limits.gate_timeout_minutes > b.limits.gate_timeout_minutes) out.push("limits.gate_timeout_minutes raised");
+  for (const c of b.checks) {
+    const now = a.checks.find((x) => x.name === c.name);
+    if (!now) continue;
+    const beforeEff = effectiveCheckTimeoutMinutes(b, c);
+    const afterEff = effectiveCheckTimeoutMinutes(a, now);
+    if (afterEff <= beforeEff) continue;
+    const explicit = c.timeout_minutes !== undefined || now.timeout_minutes !== undefined;
+    if (explicit || a.limits.gate_timeout_minutes === b.limits.gate_timeout_minutes) {
+      out.push(`check ${c.name} timeout raised`);
+    }
   }
   removed("human_only_paths", b.human_only_paths, a.human_only_paths);
   removed("sensitive_paths", b.sensitive_paths, a.sensitive_paths);

@@ -71,7 +71,9 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   not count as attempts (`model_retry` with `after_suspend`). When the chain gives up on a capacity/network
   error the run ends `needs_human` (reason `transient …; factory resume <id>`), not `failed`. Every agent bash command
   is killed after `limits.command_timeout_minutes` (default 10, also the maximum the model can ask for)
-  and the model gets "Command timed out" back.
+  and the model gets "Command timed out" back. Gate checks and the red-green proof are killed after
+  `limits.gate_timeout_minutes` (default 20) or a check's `timeout_minutes`, whichever applies, capped by
+  the remaining wall budget; a timed-out check is recorded as `timeout` and is not retried as flaky.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
 - **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
@@ -91,7 +93,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory audit --repo <p> --type <t>` | one read-only audit → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
-| `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
+| `factory notify test <owner/name> [--target <name>]` | send a test ping to the repo hook or a named target (see [docs/BOTS.md](docs/BOTS.md)) |
 | `factory notify flush` | retry pending run-end notifications from `~/.factory/outbox/` (also at run/resume start) |
 | `factory --version` | package version (plus the commit for a checkout install) |
 
@@ -115,9 +117,13 @@ HEAD) counts as pushed, and an open PR on the run's branch at HEAD is adopted an
 
 ## Notify (bots)
 
-On every `run_finished` (also after `resume`) the factory POSTs `{run_id, repo, result, reason, pr,
-finished_at}` to the webhook routine of the bot that owns the repo, configured in `~/.factory/notify.yaml`
-(`0600`, hidden from agents inside a run; each bot writes its own entry). Retries with backoff; a failed notification is logged and never fails the run.
+On every `run_finished` (also after `resume`, `abandon` and a `gc` abandon) the factory POSTs `{run_id, repo, result, reason, pr,
+finished_at}` to the webhook of the bot that started the run. `factory run --notify <target>` stores that
+name on the run (`notify_target` in `state.json`) and POSTs to `targets.<name>` in `~/.factory/notify.yaml`,
+adding `"target"` to the body. Without `--notify`, the repo's `repos:` hook is used as before. The file is
+`0600` and hidden from agents inside a run; each bot writes its own entry. A removed target falls back to the
+repo hook. Retries with backoff; a failed notification is logged and never fails the run. URLs and keys are
+never written to events, state, the outbox, status, doctor output or the PR.
 A background shell that ends does not wake a bot; this hook does. Setup, payload, routine prompt and the
 onboarding checklist: [docs/BOTS.md](docs/BOTS.md).
 
@@ -193,7 +199,12 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 20, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+# limits.gate_timeout_minutes [20]: each gate check (and red-green proof) is killed after this unless the
+# check sets timeout_minutes; effective timeout is min(per-check or default, remaining max_wall_minutes).
+# Per-check timeout_minutes overrides the default. A timed-out check is not retried as flaky. Raising either
+# limit is a loosening (config_guard); lowering is not. `factory adopt` sets timeout_minutes from measured
+# durations (5×, at least 5 min).
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
 # once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
 # limits.base_red_resume_hours [48]: a base_red caused by GitHub CI on the base commit is resumed (same run
