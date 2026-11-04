@@ -8,9 +8,9 @@ import { callAgent, type RunContext, writeJson, writeRunFile } from "../pipeline
 import type { TrackedFinding } from "../pipeline/merge.js";
 import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
-import { matchesAny } from "../schemas/plan.js";
+import { matchesAny, planReviewNotes } from "../schemas/plan.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema, LeanOutputSchema } from "../schemas/review.js";
-import { skippedSecurityGates, type GateReport } from "./gates.js";
+import { skippedSecurityGates, type GateReport, visibleGateDetail } from "./gates.js";
 
 
 export interface ReviewerPlan {
@@ -63,10 +63,14 @@ function reviewedBefore(ctx: RunContext, reviewer: Reviewer, round: number): boo
   return false;
 }
 
-function reviewerExtras(reviewer: Reviewer, plan: ReviewerPlan): string {
+function reviewerExtras(ctx: RunContext, reviewer: Reviewer, plan: ReviewerPlan): string {
   if (reviewer === "security") return asData("security_trigger_files", plan.security.join("\n"));
   if (reviewer === "checklist") {
     return asData("checklist_items", plan.checklist.map((i, n) => `C${n + 1} (checklist.md:${i.line}): ${i.text}`).join("\n"));
+  }
+  if (reviewer === "plan") {
+    const notes = planReviewNotes(ctx.plan, ctx.task.text, ctx.task.labels);
+    return notes ? asData("plan_checks", notes) : "";
   }
   return "";
 }
@@ -106,11 +110,10 @@ function gateResultsJson(gates: GateReport, continued: boolean): string {
   const skippedField = skipped.length ? { skipped_gates: skipped } : {};
   if (continued) return JSON.stringify({ scope_report: gates.scope_report, ...skippedField }, null, 2);
   return JSON.stringify({
-    checks: gates.checks.map((c) => ({
-      name: c.name,
-      status: c.status,
-      ...(c.output_tail.startsWith("SKIPPED") ? { detail: c.output_tail.split("\n")[0] } : {}),
-    })),
+    checks: gates.checks.map((c) => {
+      const detail = visibleGateDetail(c.output_tail);
+      return { name: c.name, status: c.status, ...(detail ? { detail } : {}) };
+    }),
     scope_report: gates.scope_report,
     ...skippedField,
   }, null, 2);
@@ -126,7 +129,7 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", gateResultsJson(input.gates, false)),
       `Review rules:\n${rules}`,
-      ...s.reviewers.map((r) => reviewerExtras(r, plan)),
+      ...s.reviewers.map((r) => reviewerExtras(ctx, r, plan)),
       ctx.briefing ? `Recurring findings in this repo (check whether this diff repeats them):\n${asData("findings_briefing", ctx.briefing)}` : "",
       // Prior findings of a reviewer joining late: open ones still need its verdict.
       input.round > 1 ? priorBlock(input, s) : "",
@@ -202,12 +205,14 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
   await stageAll(ctx.worktree);
   const plan = await planReviewers(ctx, input.round);
   const sessions = sessionsFor(ctx, plan.reviewers);
+  const planChecks = planReviewNotes(ctx.plan, ctx.task.text, ctx.task.labels);
   ctx.events.emit({
     step: "review",
     event: "step_started",
     data: {
       round: input.round, reviewers: plan.reviewers, mode: ctx.lane === "fast" ? "lean" : "full",
       security_files: plan.security.length, checklist_items: plan.checklist.length,
+      ...(planChecks ? { plan_checks: planChecks } : {}),
     },
   });
   const skip = ctx.repo.review.skip_paths;

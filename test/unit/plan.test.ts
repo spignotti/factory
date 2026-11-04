@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { quoteOccursIn, validatePlan } from "../../src/schemas/plan.js";
+import { planReviewNotes, quoteOccursIn, RED_GREEN_NA_LABEL, redGreenDecision, scopeNarrowingWarnings, validatePlan } from "../../src/schemas/plan.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 
 const repo = parseRepoConfig(`
@@ -194,5 +194,77 @@ describe("out_of_scope items", () => {
     const errors = scope([{ file: "x" }, 3]) as string[];
     expect(errors.join("; ")).toMatch(/out_of_scope\.0/);
     expect(errors.join("; ")).toMatch(/out_of_scope\.1/);
+  });
+});
+
+describe("scope narrowing warnings", () => {
+  const narrowed = () => {
+    const r = validatePlan(
+      plan({
+        acceptance: [{ id: "A6", package: "P1", text: "only tests/test_web.py", verify: "test" }],
+        out_of_scope: ["touch only src/app.py"],
+      }),
+      { repo },
+    );
+    if (!r.ok) throw new Error(r.errors.join("; "));
+    return r.plan;
+  };
+
+  it("flags only-path restrictions the task does not state, and does not fail the plan", () => {
+    const p = narrowed();
+    expect(scopeNarrowingWarnings(p, "The issue allows tests/test_web.py and a minimal production seam.")).toEqual([
+      "A6: restricts to only tests/test_web.py, which the task text does not say",
+      "out_of_scope[0]: restricts to only src/app.py, which the task text does not say",
+    ]);
+    expect(errorsOf(plan({ acceptance: [{ id: "A6", package: "P1", text: "only tests/test_web.py", verify: "test" }] }))).toEqual([]);
+  });
+
+  it("stays quiet when the task states the same restriction, and ignores only-when", () => {
+    expect(scopeNarrowingWarnings(narrowed(), "Change only tests/test_web.py. Also touch only src/app.py.")).toEqual([]);
+    const r = validatePlan(plan({ acceptance: [{ id: "A1", package: "P1", text: "only when the input is empty", verify: "test" }] }), { repo });
+    if (!r.ok) throw new Error(r.errors.join("; "));
+    expect(scopeNarrowingWarnings(r.plan, "no paths here")).toEqual([]);
+  });
+
+  it("tells the plan reviewer about the warning and a red-green loosening", () => {
+    const r = validatePlan(
+      plan({
+        type: "bug",
+        acceptance: [{ id: "A6", package: "P1", text: "only tests/test_web.py", verify: "test", kind: "repro" }],
+        red_green: "not_applicable",
+        red_green_reason: "the assertion cannot fail on base without a production seam",
+      }),
+      { repo },
+    );
+    if (!r.ok) throw new Error(r.errors.join("; "));
+    const notes = planReviewNotes(r.plan, "A minimal production seam is allowed.");
+    expect(notes).toContain("A6: restricts to only tests/test_web.py");
+    expect(notes).toContain("red_green loosening: not_applicable");
+    expect(notes).toContain("the assertion cannot fail on base");
+  });
+});
+
+describe("red_green exemption", () => {
+  const bug = () => plan({ type: "bug", acceptance: [{ id: "A1", package: "P1", text: "x", verify: "test", kind: "repro" }] });
+
+  it("is opt-in: default and explicit required keep the proof", () => {
+    expect(redGreenDecision({})).toEqual({ kind: "required" });
+    expect(redGreenDecision({ red_green: "required" }, [RED_GREEN_NA_LABEL])).toEqual({ kind: "required" });
+    expect(errorsOf(bug())).toEqual([]);
+  });
+
+  it("needs a stated reason for the plan field or the issue label", () => {
+    expect(errorsOf({ ...bug(), red_green: "not_applicable" })).toContain(
+      "red_green exemption is a loosening and needs red_green_reason",
+    );
+    const labeled = validatePlan(bug(), { repo, labels: [RED_GREEN_NA_LABEL] });
+    expect(labeled.ok).toBe(false);
+    if (!labeled.ok) expect(labeled.errors).toContain("red_green exemption is a loosening and needs red_green_reason");
+    const ok = validatePlan({ ...bug(), red_green: "not_applicable", red_green_reason: "stabilizing a flaky test" }, { repo });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(redGreenDecision(ok.plan)).toEqual({ kind: "exempt", reason: "stabilizing a flaky test" });
+    const byLabel = validatePlan({ ...bug(), red_green_reason: "labeled test stabilization" }, { repo, labels: [RED_GREEN_NA_LABEL] });
+    expect(byLabel.ok).toBe(true);
+    if (byLabel.ok) expect(redGreenDecision(byLabel.plan, [RED_GREEN_NA_LABEL]).kind).toBe("exempt");
   });
 });

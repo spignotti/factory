@@ -16,6 +16,7 @@ export const PLAN_SHAPE = `plan.json shape:
  "acceptance":[{"id":"A1","package":"P1","text":"","verify":"test|check|evaluator|review","kind":"behavior|edge_case|repro","risk":false}],
  "out_of_scope":[],"protected_changes":[]}
 Optional, only when the change needs manual production-host commands (launchd, restic, Docker Desktop, files outside the repo): "host_steps":{"commands":["exact command"],"verify":"how to check","rollback":"how to undo"}. Omit host_steps otherwise.
+Optional, only for test-stabilization or the issue label factory:red-green-not-applicable: "red_green":"not_applicable","red_green_reason":"why the repro cannot fail on base". That loosens the red-green proof. Omit both for a normal bug.
 or {"version":1,"questions":["..."]}. Return it as a single \`\`\`json block.`;
 
 async function planInput(ctx: PlanContext): Promise<string> {
@@ -32,6 +33,7 @@ async function planInput(ctx: PlanContext): Promise<string> {
     `Verify areas:\n${areas}`,
     checklist.length ? `Checklist items (the checklist reviewer checks the diff against them; plan for the relevant ones):\n${asData("checklist_items", checklist.map((i) => `- ${i.text}`).join("\n"))}` : "",
     `sensitive_paths: ${JSON.stringify(ctx.repo.sensitive_paths)}; human_only_paths: ${JSON.stringify(ctx.repo.human_only_paths)}; ui: ${ctx.repo.ui ? "yes" : "no"}`,
+    ctx.task.labels.length ? `Issue labels: ${ctx.task.labels.join(", ")}` : "",
     PLAN_SHAPE,
   ].filter(Boolean).join("\n\n");
 }
@@ -51,7 +53,7 @@ export async function planStep(ctx: PlanContext, level: "medium" | "high"): Prom
       ctx.events.emit({ step: "plan", event: "step_finished", role, data: { outcome: "needs_input" } });
       return { kind: "needs_input", questions: questions.data.questions };
     }
-    const v = validatePlan(json, { repo: ctx.repo });
+    const v = validatePlan(json, { repo: ctx.repo, labels: ctx.task.labels });
     if (v.ok) {
       ctx.events.emit({ step: "plan", event: "step_finished", role, data: { outcome: "plan" } });
       return { kind: "plan", plan: v.plan, source: role };

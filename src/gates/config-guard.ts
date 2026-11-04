@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { diffText, git, mergeBase } from "../git.js";
-import { matchesAny, type Plan } from "../schemas/plan.js";
+import { matchesAny, type Plan, redGreenLoosening } from "../schemas/plan.js";
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import type { BuiltinResult } from "./builtin.js";
 
@@ -249,18 +249,25 @@ export function configGuard(input: {
   suppressions: { file: string; marker: string; line: string }[];
   /** repo.yaml loosening: fails even when the plan declares the file a protected change. */
   loosening?: string[];
+  /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
+  labels?: string[];
 }): BuiltinResult {
   const files = input.plan.packages.filter((p) => input.packages.includes(p.id)).flatMap((p) => p.files);
   const text = planText(input.plan, input.packages);
   const inScope = (f: string) => files.includes(f) || matchesAny(f, files);
+  const exemption = redGreenLoosening(input.plan, input.labels ?? []);
   const bad = [
     ...input.configChanges.filter((c) => !inScope(c.file)).map((c) => `${c.file}: ${c.why} (not in the plan's files)`),
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
     ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
+    ...(exemption.fail ? [exemption.fail] : []),
   ];
-  return bad.length
-    ? { name: "config_guard", ok: false, detail: `fix the code instead of loosening the tools (bug):\n- ${bad.join("\n- ")}` }
-    : { name: "config_guard", ok: true, detail: "" };
+  const note = exemption.note ?? "";
+  if (bad.length) {
+    const tail = note ? `\n${note}` : "";
+    return { name: "config_guard", ok: false, detail: `fix the code instead of loosening the tools (bug):\n- ${bad.join("\n- ")}${tail}` };
+  }
+  return { name: "config_guard", ok: true, detail: note };
 }
 
 /** Collects config changes and added suppressions in a worktree against `base` (stage first). */

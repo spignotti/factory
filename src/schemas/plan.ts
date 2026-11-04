@@ -78,8 +78,51 @@ export const PlanSchema = z.object({
   protected_changes: z.array(ProtectedChangeSchema).default([]),
   /** Present only when the change needs copy-paste commands on the production host. */
   host_steps: HostStepsSchema.optional(),
+  /**
+   * `not_applicable` skips the red-on-base proof. A loosening: `red_green_reason` is required.
+   * Omit (or `required`) for a normal bug. The issue label `factory:red-green-not-applicable`
+   * is the same opt-in and also needs `red_green_reason`.
+   */
+  red_green: z.enum(["required", "not_applicable"]).optional(),
+  red_green_reason: z.string().trim().min(1).optional(),
 });
 export type Plan = z.infer<typeof PlanSchema>;
+
+/** Issue label that opts a bug out of the red-on-base proof. The plan must still state `red_green_reason`. */
+export const RED_GREEN_NA_LABEL = "factory:red-green-not-applicable";
+
+export const RED_GREEN_NEEDS_REASON = "red_green exemption is a loosening and needs red_green_reason";
+
+export type RedGreenDecision =
+  | { kind: "required" }
+  | { kind: "exempt"; reason: string }
+  | { kind: "missing_reason" };
+
+/**
+ * Opt-in only. `red_green: required` keeps the proof even when the issue is labeled.
+ * A label or `not_applicable` without `red_green_reason` is a loosening that is not yet justified.
+ */
+export function redGreenDecision(plan: Pick<Plan, "red_green" | "red_green_reason">, labels: string[] = []): RedGreenDecision {
+  if (plan.red_green === "required") return { kind: "required" };
+  const optedIn = plan.red_green === "not_applicable" || labels.includes(RED_GREEN_NA_LABEL);
+  if (!optedIn) return { kind: "required" };
+  const reason = plan.red_green_reason?.trim() ?? "";
+  if (!reason) return { kind: "missing_reason" };
+  return { kind: "exempt", reason };
+}
+
+/** Config-guard view of the same decision: a missing reason fails; a stated reason is a visible loosening. */
+export function redGreenLoosening(plan: Pick<Plan, "red_green" | "red_green_reason">, labels: string[] = []): { fail?: string; note?: string } {
+  const d = redGreenDecision(plan, labels);
+  if (d.kind === "missing_reason") return { fail: RED_GREEN_NEEDS_REASON };
+  if (d.kind === "exempt") return { note: `loosening: red_green not_applicable — ${d.reason}` };
+  return {};
+}
+
+/** Gate-result line when the proof is skipped. The `EXEMPT` prefix is what the PR body keeps. */
+export function redGreenExemptDetail(reason: string): string {
+  return `EXEMPT not_applicable (loosening): ${reason}`;
+}
 
 export const QuestionsSchema = z.object({
   version: z.literal(1),
@@ -94,6 +137,8 @@ export interface PlanValidationContext {
   repo: RepoConfig;
   /** Raw task text. When set, every package and criterion needs a `source_quote` found in it (plan_normalize output). */
   sourceText?: string;
+  /** Issue labels. `factory:red-green-not-applicable` opts into the red-green exemption and needs a reason. */
+  labels?: string[];
 }
 
 export type PlanValidation = { ok: true; plan: Plan } | { ok: false; errors: string[] };
@@ -211,5 +256,63 @@ export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanVali
     }
   }
 
+  if (redGreenDecision(plan, ctx.labels ?? []).kind === "missing_reason") errors.push(RED_GREEN_NEEDS_REASON);
+
   return errors.length ? { ok: false, errors } : { ok: true, plan };
+}
+
+const ONLY_FILLER = "in|under|within|to|the|a|an|file|files|path|paths|touch|touching|change|changing|edit|editing|modify|modifying|update|updating";
+const ONLY_EXT = "py|js|jsx|ts|tsx|mjs|cjs|go|rs|java|rb|php|cs|json|ya?ml|toml|md|sql|sh|css|html|vue|svelte";
+
+/** Paths an "only <path>" restriction names. Filler words between `only` and the path stay limited so "only when" is not a restriction. */
+function onlyPaths(text: string): string[] {
+  const re = new RegExp(
+    `\\bonly\\b(?:\\s+(?:${ONLY_FILLER}))*\\s+\`?((?:[A-Za-z0-9_@][\\w.@+-]*\\/)+[\\w.@+-]+|[A-Za-z0-9_@][\\w@+-]*\\.(?:${ONLY_EXT}))\`?`,
+    "gi",
+  );
+  const out: string[] = [];
+  for (const m of text.matchAll(re)) {
+    const path = m[1]?.replace(/[.,;:)]+$/g, "");
+    if (path) out.push(path);
+  }
+  return out;
+}
+
+/**
+ * "only <path>" restrictions in the plan that the task text does not state.
+ * A warning for the plan reviewer, not a validation error: the plan may still be used.
+ */
+export function scopeNarrowingWarnings(plan: Plan, taskText: string): string[] {
+  const allowed = new Set(onlyPaths(taskText).map((p) => p.toLowerCase()));
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+  const consider = (where: string, text: string) => {
+    for (const path of onlyPaths(text)) {
+      const key = `${where}\0${path.toLowerCase()}`;
+      if (seen.has(key) || allowed.has(path.toLowerCase())) continue;
+      seen.add(key);
+      warnings.push(`${where}: restricts to only ${path}, which the task text does not say`);
+    }
+  };
+  for (const p of plan.packages) consider(p.id, `${p.title}\n${p.description}`);
+  for (const a of plan.acceptance) consider(a.id, a.text);
+  plan.out_of_scope.forEach((item, i) => consider(`out_of_scope[${i}]`, item));
+  return warnings;
+}
+
+/** Notes handed to the plan reviewer: scope warnings and a red-green loosening, when either is present. */
+export function planReviewNotes(plan: Plan, taskText: string, labels: string[] = []): string {
+  const lines: string[] = [];
+  const warnings = scopeNarrowingWarnings(plan, taskText);
+  if (warnings.length) {
+    lines.push("Plan scope warnings (not a gate failure). Report a bug when a warning is correct: the plan is stricter than the task.");
+    for (const w of warnings) lines.push(`- ${w}`);
+  }
+  const d = redGreenDecision(plan, labels);
+  if (d.kind === "exempt") {
+    lines.push(`red_green loosening: not_applicable. Stated reason: ${d.reason}. Report a bug unless the task is test-stabilization and this reason justifies skipping the red-on-base proof.`);
+  } else if (d.kind === "missing_reason") {
+    lines.push(`red_green loosening requested without a stated reason. ${RED_GREEN_NEEDS_REASON}. Report a bug.`);
+  }
+  return lines.join("\n");
 }
