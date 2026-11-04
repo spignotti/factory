@@ -1,0 +1,8 @@
+# factory-baseline-version: 1
+# Copy to the repo root as trivy.yaml. Image scans stay in CI (not in factory run gates).
+# Every .trivyignore line needs a reason comment on the same line or the line above.
+severity:
+  - CRITICAL
+  - HIGH
+exit-code: 1
+ignore-unfixed: true

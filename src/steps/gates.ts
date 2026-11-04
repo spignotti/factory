@@ -12,9 +12,11 @@ import {
   testPresence,
 } from "../gates/builtin.js";
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
+import { runBaselineGates } from "../baseline/gates.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { gateCheckTimeoutMs, shTimedOut } from "../gates/timeout.js";
+import { resolveToolchains } from "../toolchains.js";
 import { topoOrder } from "../pipeline/dag.js";
 import type { Deadline } from "../pipeline/budget.js";
 import { checkDeadline, commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
@@ -144,6 +146,16 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),
     configGuard({ plan, packages, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
+    ...(await runBaselineGates({
+      cwd: worktree,
+      tier,
+      changed,
+      baseSha: ctx.baseSha,
+      toolchains: resolveToolchains(worktree, repo).toolchains,
+      timeoutMs: gateCheckTimeoutMs({ gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline: ctx.deadline }) ?? repo.limits.gate_timeout_minutes * 60_000,
+      secrets: ctx.secrets?.redact,
+      requireTools: repo.baseline.require_tools,
+    })),
   ];
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];
@@ -189,6 +201,27 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     });
   }
   return report;
+}
+
+/**
+ * Security gates that passed only because the scanner was missing. The detail starts with `SKIPPED`.
+ * A missing binary with `baseline.require_tools` is a failure and is not listed here.
+ */
+export function skippedSecurityGates(checks: { name: string; status: string; output_tail: string }[]): string[] {
+  return checks.filter((c) => c.status === "pass" && c.output_tail.startsWith("SKIPPED")).map((c) => c.name);
+}
+
+/** Gate list for the PR body. Skipped security gates are named above the check marks. */
+export function formatGateResults(checks: CheckResult[]): string {
+  const skipped = skippedSecurityGates(checks);
+  const lines = checks.map((c) => {
+    const mark = c.status === "pass" ? "✅" : c.status === "flaky" ? "⚠️" : "❌";
+    const flaky = c.status === "flaky" ? ", flaky" : "";
+    const detail = c.output_tail.startsWith("SKIPPED") ? `: ${c.output_tail.split("\n")[0]}` : "";
+    return `- ${mark} ${c.name} (${c.kind}${flaky})${detail}`;
+  });
+  if (skipped.length) lines.unshift(`Skipped security gates: ${skipped.join(", ")}`);
+  return lines.join("\n");
 }
 
 /** Failure tail handed back to the implementer. */

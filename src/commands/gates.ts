@@ -19,6 +19,8 @@ export interface GatesOptions {
   run?: string;
   tier: string;
   base?: string;
+  /** Every check of the tier, ignoring path filters. Tag pushes and workflow_dispatch. */
+  all?: boolean;
   json: boolean;
   /** Port slots live under `<factoryHome>/ports` (default `factoryHomeOf()`). */
   factoryHome?: string;
@@ -55,8 +57,9 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   const ci = opts.ci ?? inCi();
 
   const selected = async () => {
-    const base = opts.base ?? (await baseRef(repoDir, repo.base_branch));
-    const checks = selectChecks(repo.checks, tier, await changedFiles(repoDir, base));
+    const checks = opts.all
+      ? selectChecks(repo.checks, tier, [], { all: true })
+      : selectChecks(repo.checks, tier, await changedFiles(repoDir, opts.base ?? (await baseRef(repoDir, repo.base_branch))));
     return ci ? checks.filter((c) => !c.local_only) : checks;
   };
 

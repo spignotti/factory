@@ -201,6 +201,11 @@ export const ResultSchema = z.object({
   /** USD of metered providers only; subscription usage (see profile `billing`) is reported in tokens. */
   cost_usd: z.number().min(0),
   reason: z.string(),
+  /**
+   * Security gates that did not scan because the binary was missing (`baseline.require_tools` off).
+   * Omitted when none were skipped. A missing binary with `require_tools` on is a failing gate.
+   */
+  skipped_gates: z.array(z.string()).optional(),
   /** Lines counted toward `limits.max_diff_lines`. Set only when `limits.diff_count_tests` is false. */
   counted_lines: z.number().int().min(0).optional(),
   /** Test-file lines left out of that limit. Set only when `limits.diff_count_tests` is false. */

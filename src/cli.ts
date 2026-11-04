@@ -57,9 +57,10 @@ const USAGE = `usage:
                (Mon-Fri, Europe/Berlin) is abandoned and the owner notified; run dirs idle for
                --archive-days (default 90) overrides metadata tarball retention; use factory gc --scheduled for cron (see docs/GC_RETENTION.md)
                base CI is green again is resumed, within limits.base_red_resume_hours)
-  factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
-              (--run starts the services its checks need; with CI set, local_only checks are not selected;
-               --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
+  factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--all] [--repo <path>] [--json]
+              (--all selects every check of the tier, with no path filter: tag pushes and workflow_dispatch.
+               A pull request still filters by the diff. --run starts the services its checks need; with CI set,
+               local_only checks are not selected; --toolchains: what the CI stub installs, repo.yaml ci.toolchains or detected)
   factory eval --profile <name|file> [--profile …] [--tasks <glob>] [--repeat N] [--out <dir>] [--json]
               (fresh clone at base → run --no-pr → hidden tests; results in evals/results/<date>.jsonl + .md)
   factory eval --validate [--tasks <glob>] [--json]
@@ -154,11 +155,12 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           run: { type: "string" },
           tier: { type: "string", default: "fast" },
           base: { type: "string" },
+          all: { type: "boolean", default: false },
           repo: { type: "string", default: "." },
           json: { type: "boolean", default: false },
         },
       });
-      return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, toolchains: values.toolchains, json: values.json }, io);
+      return await gatesCommand({ ...values, repo: values.repo, tier: values.tier, select: values.select, toolchains: values.toolchains, all: values.all, json: values.json }, io);
     }
     if (command === "eval" || command === "experiment") {
       const { values } = parseArgs({

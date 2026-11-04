@@ -16,9 +16,10 @@ const write = (repo: string, path: string, text: string) => {
 describe("CI stub", () => {
   it("template: every PR, select → check matrix → done; done is red when selection failed", () => {
     const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; concurrency: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
-    // no run on pushes to the base branch; no branch filter: every PR
-    expect(Object.keys(wf.on)).toEqual(["pull_request", "workflow_dispatch"]);
+    // no run on pushes to the base branch; tags and manual runs do; no branch filter: every PR
+    expect(Object.keys(wf.on)).toEqual(["pull_request", "push", "workflow_dispatch"]);
     expect(wf.on.pull_request).toBeNull();
+    expect(wf.on.push).toEqual({ tags: ["v*"] });
     // only a newer push to the same PR cancels a run (a cancelled check on a commit reads as red)
     expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
     expect(Object.keys(wf.jobs)).toEqual(["select", "check", "done"]);
@@ -36,6 +37,9 @@ describe("CI stub", () => {
     const wf = parse(renderCiStub("v1.2.3")) as { jobs: Record<string, { outputs?: Record<string, string>; steps: { uses?: string; if?: string; run?: string; with?: Record<string, string> }[] }> };
     expect(wf.jobs.select!.outputs!.toolchains).toBe("${{ steps.s.outputs.toolchains }}");
     expect(wf.jobs.select!.steps.at(-1)!.run).toContain("$FACTORY gates --toolchains --json");
+    // a tag or workflow_dispatch has an empty diff against the base; --all runs every check of the tier
+    expect(wf.jobs.select!.steps.at(-1)!.run).toContain("$FACTORY gates --select --tier \"$TIER\" --all --json");
+    expect(wf.jobs.select!.steps.at(-1)!.run).toContain('"$ALL" = true');
     const steps = wf.jobs.check!.steps;
     const tc = (k: string) => `fromJson(needs.select.outputs.toolchains).${k}`;
     expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v6", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "actions/cache@v4", "run"]);

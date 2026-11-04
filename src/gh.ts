@@ -87,6 +87,15 @@ export interface RepoSettings {
   auto_merge_allowed: boolean | null;
   branch_protected: boolean | null;
   required_checks: string[] | null;
+  /**
+   * `required_status_checks.strict`. Null when the branch is unprotected or the field was not readable.
+   * UNVERIFIED: live GitHub response shape (see docs/VERIFY.md).
+   */
+  strict_required_checks?: boolean | null;
+  /** GitHub secret scanning. Null when the API omits `security_and_analysis` (non-admin tokens). UNVERIFIED. */
+  secret_scanning?: boolean | null;
+  /** Push protection for secrets. Null when not readable. UNVERIFIED. */
+  push_protection?: boolean | null;
   error?: string;
 }
 
@@ -107,6 +116,13 @@ async function gh(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+/** GitHub reports secret scanning as "enabled" or "disabled"; anything else is unknown. */
+function securityFlag(value: string | undefined): boolean | null {
+  if (value === "enabled") return true;
+  if (value === "disabled") return false;
+  return null;
+}
+
 /** `gh` CLI implementation. Not exercised in tests (see docs/VERIFY.md). */
 export class GhCli implements GitHub {
   async authenticated(repoDir: string): Promise<boolean> {
@@ -121,13 +137,29 @@ export class GhCli implements GitHub {
   async repoSettings(repoDir: string, branch: string): Promise<RepoSettings> {
     const out: RepoSettings = { private: null, auto_merge_allowed: null, branch_protected: null, required_checks: null };
     try {
-      const repo = JSON.parse(await gh(repoDir, ["api", "repos/{owner}/{repo}", "--jq", "{private, allow_auto_merge}"])) as { private?: boolean; allow_auto_merge?: boolean | null };
+      // UNVERIFIED: security_and_analysis is omitted for non-admin tokens; status strings are "enabled"|"disabled".
+      const repo = JSON.parse(
+        await gh(repoDir, [
+          "api",
+          "repos/{owner}/{repo}",
+          "--jq",
+          "{private, allow_auto_merge, secret_scanning: (.security_and_analysis.secret_scanning.status // \"\"), push_protection: (.security_and_analysis.secret_scanning_push_protection.status // \"\")}",
+        ]),
+      ) as { private?: boolean; allow_auto_merge?: boolean | null; secret_scanning?: string; push_protection?: string };
       out.private = repo.private ?? null;
       out.auto_merge_allowed = repo.allow_auto_merge ?? null;
+      out.secret_scanning = securityFlag(repo.secret_scanning);
+      out.push_protection = securityFlag(repo.push_protection);
       const b = JSON.parse(
-        await gh(repoDir, ["api", `repos/{owner}/{repo}/branches/${encodeURIComponent(branch)}`, "--jq", "{protected, contexts: .protection.required_status_checks.contexts}"]),
-      ) as { protected?: boolean; contexts?: string[] | null };
+        await gh(repoDir, [
+          "api",
+          `repos/{owner}/{repo}/branches/${encodeURIComponent(branch)}`,
+          "--jq",
+          "{protected, strict: .protection.required_status_checks.strict, contexts: ((.protection.required_status_checks.contexts // []) + ((.protection.required_status_checks.checks // []) | map(.context)))}",
+        ]),
+      ) as { protected?: boolean; strict?: boolean | null; contexts?: string[] | null };
       out.branch_protected = b.protected ?? null;
+      out.strict_required_checks = typeof b.strict === "boolean" ? b.strict : null;
       out.required_checks = b.contexts ?? null;
     } catch (e) {
       out.error = (e as Error).message.split("\n")[0]!.slice(0, 200);

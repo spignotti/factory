@@ -34,6 +34,16 @@ const WHOLE_CONFIG = [
   "**/.clippy.toml",
 ];
 
+/** Security-tool config: any change is a loosening unless the plan names the file. */
+const SECURITY_CONFIG = [
+  "**/.semgrep/**",
+  "**/.gitleaks.toml",
+  "**/.gitleaksignore",
+  "**/.shellcheckrc",
+  "**/.trivyignore",
+  "**/.hadolint.yaml",
+];
+
 /** pyproject/setup.cfg sections that configure linting, typing, formatting or tests. */
 const TOOL_SECTION = /^\[(tool\.(ruff|pyright|mypy|black|isort|pylint|flake8|coverage|pytest)\b[^\]]*|mypy[^\]]*|flake8|pylint[^\]]*|isort|coverage:[^\]]*|tool:pytest)\]\s*$/;
 
@@ -61,6 +71,11 @@ export const SUPPRESSIONS: Suppression[] = [
   { marker: "biome-ignore", pattern: /(?:\/\/|\/\*|\*)\s*biome-ignore\b/ },
   { marker: "nolint", pattern: /\/\/\s*nolint\b/ },
   { marker: "allow(clippy", pattern: /#!?\[allow\(clippy::/ },
+  { marker: "nosemgrep", pattern: /(?:#|\/\/)\s*nosemgrep\b/ },
+  { marker: "gitleaks:allow", pattern: /(?:#|\/\/)\s*gitleaks:allow\b/ },
+  { marker: "# shellcheck disable", pattern: /#\s*shellcheck\s+disable\b/ },
+  { marker: "# nosec", pattern: /#\s*nosec\b/ },
+  { marker: "pragma: no cover", pattern: /#\s*pragma:\s*no\s+cover\b/ },
 ];
 
 /** Prose files may mention markers without suppressing anything. */
@@ -99,6 +114,7 @@ export function configChange(path: string, before: string | undefined, after: st
   if (before === after) return undefined;
   const b = before ?? "";
   const a = after ?? "";
+  if (matchesAny(path, SECURITY_CONFIG)) return "security tool config changed";
   if (matchesAny(path, WHOLE_CONFIG)) return "linter/formatter/type-checker config changed";
   const name = basename(path);
   if (name === "pyproject.toml" || name === "setup.cfg" || name === "tox.ini") {
@@ -197,6 +213,10 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   if (!same(b.git, a.git)) out.push("git author changed");
   if (a.concurrency.max_runs > b.concurrency.max_runs) out.push("concurrency.max_runs raised");
   removed("concurrency.exclusive_paths", b.concurrency.exclusive_paths, a.concurrency.exclusive_paths);
+  const exKey = (e: { tool: string; rule: string }) => `${e.tool}:${e.rule}`;
+  const added = a.tool_exceptions.filter((e) => !b.tool_exceptions.some((x) => exKey(x) === exKey(e)));
+  if (added.length) out.push(`tool_exceptions added: ${added.map(exKey).join(", ")}`);
+  if (b.baseline.require_tools && !a.baseline.require_tools) out.push("baseline.require_tools turned off");
   return out;
 }
 

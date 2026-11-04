@@ -1,0 +1,3 @@
+# factory-baseline-version: 1
+# Copy to the repo root as .hadolint.yaml. Hadolint stays in CI (not in factory run gates).
+failure-threshold: warning

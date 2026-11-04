@@ -1,0 +1,16 @@
+# factory-baseline-version: 1
+# Vendored copy of the factory Python lint baseline. Repos extend it:
+#   extend = "ruff-base.toml"
+# Do not delete a code to get a PR green. Add .factory/repo.yaml tool_exceptions
+# (tool, rule, reason) and fix the code, or the config guard rejects the change.
+
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "BLE", "C4", "SIM", "RUF", "ASYNC"]
+
+[lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+"**/tests/**" = ["S101", "S105", "S106"]
+"test/**" = ["S101", "S105", "S106"]
+"**/test/**" = ["S101", "S105", "S106"]

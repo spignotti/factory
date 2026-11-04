@@ -26,6 +26,19 @@ export const CheckSchema = z.object({
 });
 export type Check = z.infer<typeof CheckSchema>;
 
+/**
+ * A justified gap against the tool baseline. Adding an entry is a loosening (config_guard): the
+ * reason is required so a silent ignore cannot land in a factory PR.
+ */
+export const ToolExceptionSchema = z
+  .object({
+    tool: z.string().trim().min(1),
+    rule: z.string().trim().min(1),
+    reason: z.string().trim().min(1, "tool_exceptions.reason is required"),
+  })
+  .strict();
+export type ToolException = z.infer<typeof ToolExceptionSchema>;
+
 const ServiceNameSchema = z.string().regex(/^[A-Za-z0-9_-]+$/, "service names use letters, digits, - and _");
 
 /** A service a check needs. Placeholders: `{run_id}`, `{port_offset}`, `{port:<name>}`, `{port:<number>}`. */
@@ -234,6 +247,21 @@ export const RepoConfigSchema = z
     base_branch: z.string().default("main"),
     setup: z.string().default(""),
     checks: z.array(CheckSchema).default([]),
+    /**
+     * Justified gaps against the central tool baseline (`templates/baseline/`). `reason` is required.
+     * Adding an entry is a loosening (config_guard).
+     */
+    tool_exceptions: z.array(ToolExceptionSchema).default([]),
+    /**
+     * `require_tools`: a baseline scanner that is not on PATH fails the gate instead of skipping.
+     * Default false (a visible skip). Turning it off is a loosening (config_guard).
+     */
+    baseline: z
+      .object({
+        require_tools: z.boolean().default(false),
+      })
+      .strict()
+      .default({ require_tools: false }),
     env_command: z.string().default(""),
     tests: z
       .object({
@@ -403,6 +431,12 @@ export const RepoConfigSchema = z
   })
   .loose()
   .superRefine((cfg, ctx) => {
+    const exceptions = new Set<string>();
+    for (const entry of cfg.tool_exceptions) {
+      const key = `${entry.tool} ${entry.rule}`;
+      if (exceptions.has(key)) ctx.addIssue({ code: "custom", message: `duplicate tool exception: ${key}` });
+      exceptions.add(key);
+    }
     const names = new Set<string>();
     for (const check of cfg.checks) {
       if (names.has(check.name)) ctx.addIssue({ code: "custom", message: `duplicate check name: ${check.name}` });

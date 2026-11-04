@@ -38,4 +38,10 @@ describe("check selection", () => {
   it("no changed files: only path-less checks", () => {
     expect(names(selectChecks(checks, "full", []))).toEqual(["lint", "secrets"]);
   });
+
+  it("all: an empty diff still selects every check of the tier (tag and workflow_dispatch)", () => {
+    expect(names(selectChecks(checks, "full", [], { all: true }))).toEqual(["lint", "unit", "db", "secrets", "dotfiles"]);
+    expect(names(selectChecks(checks, "fast", [], { all: true }))).toEqual(["lint", "unit", "dotfiles"]);
+    expect(names(selectChecks(checks, "manual", [], { all: true }))).toEqual(["cloud"]);
+  });
 });

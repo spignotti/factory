@@ -13,7 +13,7 @@ import { type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAsse
 import type { HostSteps } from "../schemas/plan.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
-import { type GateReport, runGates } from "./gates.js";
+import { formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
@@ -74,6 +74,13 @@ export interface FinalizeOutput {
   pr: string | null;
   /** Whether the PR is (still) a draft; null without a PR. */
   draft: boolean | null;
+  /** Security gates that did not scan. Omitted when none were skipped. */
+  skipped_gates?: string[];
+}
+
+function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
+  const skipped_gates = skippedSecurityGates(gates?.checks ?? []);
+  return skipped_gates.length ? { skipped_gates } : {};
 }
 
 /**
@@ -201,7 +208,7 @@ export function renderPrBody(ctx: RunContext, v: {
       ...h.skipped.map((d) => `skipped (${h.package}): ${d}`),
       ...h.uncertain.map((d) => `uncertain (${h.package}): ${d}`),
     ])),
-    gates: v.gates ? v.gates.checks.map((c) => `- ${c.status === "pass" ? "✅" : c.status === "flaky" ? "⚠️" : "❌"} ${c.name} (${c.kind}${c.status === "flaky" ? ", flaky" : ""})`).join("\n") : "- not run",
+    gates: v.gates ? formatGateResults(v.gates.checks) : "- not run",
     review: list(input.findings.filter((f) => f.status !== "open").map((f) => `${f.id} ${f.severity}: ${f.status}`)),
     stats: [
       ctx.laneEscalation.length
@@ -417,12 +424,12 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft };
+      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
     }
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
   if (result !== "done") policy = "human_review";
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, result, reason, mergePolicy: policy, pr, draft };
+  return { ...out, result, reason, mergePolicy: policy, pr, draft, ...skippedField(gates) };
 }

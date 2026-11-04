@@ -205,6 +205,10 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(pr.body).toContain("| Data/migrations | no | none in this diff |");
     expect(pr.body).not.toMatch(/merge policy|Needs human review|## Mac install steps/);
     expect(pr.body).toMatch(/✅ unit/);
+    expect(pr.body).toContain("Skipped security gates: gitleaks, semgrep");
+    expect(pr.body).toMatch(/SKIPPED gitleaks is not on PATH/);
+    expect(r.result.skipped_gates).toEqual(["gitleaks", "semgrep"]);
+    expect(r.runner.calls.find((c) => c.role.startsWith("review"))?.prompt).toContain('"skipped_gates"');
     expect(pr.body).toMatch(/- implement: `opencode-go\/deepseek-v4.1-flash` ×1, 1000\/200, subscription/);
     expect(pr.body).toMatch(/- subscription tokens: \d+ in \/ \d+ out/);
     expect(pr.body).not.toMatch(/- cost \(metered providers\)/);
