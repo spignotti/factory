@@ -99,6 +99,12 @@
     "reason": {
       "type": "string"
     },
+    "skipped_gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "counted_lines": {
       "type": "integer",
       "minimum": 0,

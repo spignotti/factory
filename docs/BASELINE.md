@@ -18,6 +18,11 @@ The stub runs on pull requests, on tags `v*` (a release), and on `workflow_dispa
 does not run on pushes to the base branch: that commit was already checked as a PR, and a base
 commit with no check run makes a factory run execute the fast checks locally.
 
+A pull request selects checks whose paths match the diff. A tag push and `workflow_dispatch` pass
+`factory gates --select --all`: the tag is a commit already on the base, so a diff against
+`origin/main` is empty and would drop every path-scoped check. `--all` runs every check of the
+tier (`full` on a tag; the dispatch input, default `manual`, on a manual run).
+
 Dependabot must not edit the stub (a bump changes the hash). On the `github-actions` ecosystem:
 
 ```yaml
@@ -45,8 +50,11 @@ Vendor the files you need from `templates/baseline/` and point the tool at them.
 | trivy | `CRITICAL,HIGH`, `exit-code: 1`, `ignore-unfixed: true`. Every `.trivyignore` id needs a reason comment | CI only |
 | hadolint | `hadolint.yaml` | CI only |
 
-Factory run gates skip a scanner that is not on `PATH` and `factory doctor` warns (`baseline tools`).
-Install gitleaks and semgrep on the box. The skip is not a passing scan.
+Factory run gates skip a scanner that is not on `PATH`. The gate detail starts with `SKIPPED`, and
+the run's `result.json` (`skipped_gates`) and the PR gate list name those gates, so a reviewing
+bot sees them. `baseline.require_tools: true` in `.factory/repo.yaml` turns a missing binary into
+a failing gate. The default is `false`. Turning it off later is a config_guard loosening.
+`factory doctor` still warns (`baseline tools`). Install gitleaks and semgrep on the box.
 
 ## An exception
 

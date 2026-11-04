@@ -10,7 +10,7 @@ import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny } from "../schemas/plan.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema, LeanOutputSchema } from "../schemas/review.js";
-import type { GateReport } from "./gates.js";
+import { skippedSecurityGates, type GateReport } from "./gates.js";
 
 
 export interface ReviewerPlan {
@@ -101,6 +101,21 @@ interface Diffs {
   incremental: string;
 }
 
+function gateResultsJson(gates: GateReport, continued: boolean): string {
+  const skipped = skippedSecurityGates(gates.checks);
+  const skippedField = skipped.length ? { skipped_gates: skipped } : {};
+  if (continued) return JSON.stringify({ scope_report: gates.scope_report, ...skippedField }, null, 2);
+  return JSON.stringify({
+    checks: gates.checks.map((c) => ({
+      name: c.name,
+      status: c.status,
+      ...(c.output_tail.startsWith("SKIPPED") ? { detail: c.output_tail.split("\n")[0] } : {}),
+    })),
+    scope_report: gates.scope_report,
+    ...skippedField,
+  }, null, 2);
+}
+
 async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<string> {
   const continued = input.round > 1 && input.lastReviewedSha && s.reviewers.every((r) => reviewedBefore(ctx, r, input.round));
   if (!continued) {
@@ -109,7 +124,7 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
       taskBlock(ctx),
       asData("diff", await diffs.full()),
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
-      asData("gate_results", JSON.stringify({ checks: input.gates.checks.map((c) => ({ name: c.name, status: c.status })), scope_report: input.gates.scope_report }, null, 2)),
+      asData("gate_results", gateResultsJson(input.gates, false)),
       `Review rules:\n${rules}`,
       ...s.reviewers.map((r) => reviewerExtras(r, plan)),
       ctx.briefing ? `Recurring findings in this repo (check whether this diff repeats them):\n${asData("findings_briefing", ctx.briefing)}` : "",
@@ -122,7 +137,7 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
     `Round ${input.round}. Give a verdict for every prior finding below and report only new findings.`,
     priorBlock(input, s),
     asData("incremental_diff", diffs.incremental),
-    asData("gate_results", JSON.stringify({ scope_report: input.gates.scope_report }, null, 2)),
+    asData("gate_results", gateResultsJson(input.gates, true)),
     shapeOf(s),
   ].join("\n\n");
 }

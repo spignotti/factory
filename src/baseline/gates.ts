@@ -11,8 +11,8 @@ import { isNpmProject, isPnpmProject, isPythonProject, semgrepRulesDir } from ".
  *
  * The commands are not jailed. The shipped semgrep rules live in the factory install, which the
  * sandbox does not bind, and these scanners do not execute repository code (repo semgrep rules
- * stay in CI). They get PATH and HOME, not the repo's secrets. A missing binary is a skip, not a
- * red gate: doctor warns, and a box without the tool can still finish a run.
+ * stay in CI). They get PATH and HOME, not the repo's secrets. A missing binary is a skip whose
+ * detail starts with `SKIPPED` (listed on the run result). `baseline.require_tools` makes it fail.
  */
 
 const fail = (name: string, detail: string): BuiltinResult => ({ name, ok: false, detail });
@@ -106,6 +106,8 @@ export async function runBaselineGates(opts: {
   timeoutMs: number;
   secrets?: string[];
   rulesDir?: string;
+  /** Missing binary fails the gate. Default: a pass whose detail starts with `SKIPPED`. */
+  requireTools?: boolean;
   run?: (command: string) => Promise<ShResult>;
   binExists?: (bin: string) => Promise<boolean>;
 }): Promise<BuiltinResult[]> {
@@ -123,7 +125,8 @@ export async function runBaselineGates(opts: {
   const out: BuiltinResult[] = [];
   for (const gate of planned) {
     if (!(await binExists(gate.bin))) {
-      out.push(pass(gate.name, `skipped: ${gate.bin} is not on PATH (factory doctor warns; nothing was scanned)`));
+      const detail = `SKIPPED ${gate.bin} is not on PATH (factory doctor warns; nothing was scanned)`;
+      out.push(opts.requireTools ? fail(gate.name, `${detail}; baseline.require_tools is on`) : pass(gate.name, detail));
       continue;
     }
     const result = await run(gate.command);

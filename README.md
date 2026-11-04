@@ -550,7 +550,9 @@ GIFs; `factory doctor --repo .` checks both.
 selects the checks with the same code as a local run and runs each one (`factory gates --run`).
 It does not run on pushes to the base branch (the PR run already checked the merged tree; a base commit
 without check runs makes the factory run the fast checks locally). It does run on tags `v*` and on
-`workflow_dispatch`, so a release or a deploy gets the same checks. Only a newer push to the same PR
+`workflow_dispatch`. Those runs pass `factory gates --select --all` (every check of the tier): a
+release tag is a commit already on the base, so a diff against `origin/main` would select nothing
+path-scoped. Only a newer push to the same PR
 cancels a run, so no cancelled check marks a base commit red. The npx install of the pinned factory is
 cached per ref. The tool baseline those checks implement is [docs/BASELINE.md](docs/BASELINE.md): one
 stub, not a reusable workflow, because doctor hashes this file and branch protection requires `done`.

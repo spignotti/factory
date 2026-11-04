@@ -176,6 +176,7 @@ interface Outcome {
   pr: string | null;
   rounds: number;
   questions?: string[];
+  skipped_gates?: string[];
   branch: string | null;
   worktree: string | null;
 }
@@ -277,6 +278,7 @@ class RunFrame {
       reason: out.reason,
       ...(this.events.diffCount ?? {}),
       ...(out.questions ? { questions: out.questions } : {}),
+      ...(out.skipped_gates?.length ? { skipped_gates: out.skipped_gates } : {}),
       branch: out.branch,
       worktree: out.worktree,
       run_dir: this.runDir,
@@ -700,7 +702,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   st.pr_draft = fin.draft;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
-  f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds });
+  f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
 }
 
 /**

@@ -38,6 +38,16 @@ describe("factory gates CLI on the fixture repo", () => {
     expect(JSON.parse(manual.out)).toEqual(["cloud"]);
   });
 
+  it("a tag run with an empty diff selects every check of the tier when --all is set", async () => {
+    const repo = createFixtureRepo();
+    const filtered = await cli(["gates", "--select", "--tier", "full", "--repo", repo, "--base", "HEAD", "--json"]);
+    expect(filtered.code).toBe(0);
+    expect(JSON.parse(filtered.out)).toEqual(["syntax", "suite"]);
+    const all = await cli(["gates", "--select", "--all", "--tier", "full", "--repo", repo, "--base", "HEAD", "--json"]);
+    expect(all.code).toBe(0);
+    expect(JSON.parse(all.out)).toEqual(["syntax", "unit", "docs", "suite"]);
+  });
+
   it("in CI (CI set) local_only checks are not selected; locally they are", async () => {
     const repo = createFixtureRepo((c) => {
       (c.checks as Record<string, unknown>[]).push({ name: "hostdb", run: "true", tier: "fast", local_only: true });

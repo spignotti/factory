@@ -4,8 +4,11 @@
 name: factory
 # No run on pushes to the base branch: the PR run already checked the merged tree, and a base commit
 # without check runs makes the factory run the fast checks locally instead. Release tags and
-# workflow_dispatch (a deploy) run the same checks. One stub, not a reusable workflow: doctor hashes
-# this single file and branch protection requires one status, `done`. Draft PRs run too: a skipped
+# workflow_dispatch (a deploy) run the same checks. A pull request selects checks whose paths match
+# the diff. A tag and a manual run have no such diff: the tag is a commit already on the base, so
+# `factory gates --select --base origin/main` would keep only path-less checks. Those events pass
+# `--all` and run every check of the tier. One stub, not a reusable workflow: doctor hashes this
+# single file and branch protection requires one status, `done`. Draft PRs run too: a skipped
 # required check counts as passed, so skipping drafts would let a PR marked ready merge before its checks.
 on:
   pull_request:
@@ -46,10 +49,17 @@ jobs:
       - id: s
         env:
           TIER: ${{ inputs.tier || 'full' }}
-          # Tags have no base ref, and branch pushes are not a trigger. Pull requests use the PR base.
+          # Pull requests filter by the PR base. Tags and workflow_dispatch set ALL: a release tag
+          # points at a commit on the base, so a diff against origin/main is empty.
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'origin/main' }}
+          ALL: ${{ github.event_name != 'pull_request' }}
         run: |
-          checks=$($FACTORY gates --select --tier "$TIER" --base "$BASE" --json)
+          # --all: every check of the tier, no path filter. A tag or workflow_dispatch diff is empty.
+          if [ "$ALL" = true ]; then
+            checks=$($FACTORY gates --select --tier "$TIER" --all --json)
+          else
+            checks=$($FACTORY gates --select --tier "$TIER" --base "$BASE" --json)
+          fi
           echo "selected: $checks"
           echo "checks=$checks" >> "$GITHUB_OUTPUT"
           toolchains=$($FACTORY gates --toolchains --json)

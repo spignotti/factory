@@ -252,6 +252,16 @@ export const RepoConfigSchema = z
      * Adding an entry is a loosening (config_guard).
      */
     tool_exceptions: z.array(ToolExceptionSchema).default([]),
+    /**
+     * `require_tools`: a baseline scanner that is not on PATH fails the gate instead of skipping.
+     * Default false (a visible skip). Turning it off is a loosening (config_guard).
+     */
+    baseline: z
+      .object({
+        require_tools: z.boolean().default(false),
+      })
+      .strict()
+      .default({ require_tools: false }),
     env_command: z.string().default(""),
     tests: z
       .object({

@@ -5,6 +5,7 @@ import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { baselineConfigChecks, baselineGithubChecks, type BaselineCheck } from "../../src/baseline/doctor.js";
 import { planBaselineGates, runBaselineGates } from "../../src/baseline/gates.js";
+import { formatGateResults, skippedSecurityGates } from "../../src/steps/gates.js";
 import { baselineVersion, loadRuff, parseRuffToml, RUFF_BASELINE, semgrepRulesDir } from "../../src/baseline/spec.js";
 import { doctorCommand, type DoctorReport } from "../../src/commands/doctor.js";
 import { FakeGitHub } from "../../src/gh.js";
@@ -258,7 +259,34 @@ describe("baseline run gates", () => {
     });
     expect(ran).toEqual([]);
     expect(skipped.map((g) => g.ok)).toEqual([true, true]);
+    expect(skipped.every((g) => g.detail.startsWith("SKIPPED"))).toBe(true);
     expect(skipped.map((g) => g.detail).join("\n")).toMatch(/not on PATH/);
+
+    const required = await runBaselineGates({
+      cwd: tree(),
+      tier: "fast",
+      changed: ["src/app.py"],
+      baseSha: "abc1234",
+      toolchains: none,
+      timeoutMs: 1000,
+      requireTools: true,
+      binExists: async () => false,
+      run: async () => {
+        throw new Error("a missing binary must not run");
+      },
+    });
+    expect(required.map((g) => g.ok)).toEqual([false, false]);
+    expect(required.every((g) => g.detail.startsWith("SKIPPED"))).toBe(true);
+    const asCheck = (g: { name: string; ok: boolean; detail: string }) => ({
+      name: g.name,
+      status: g.ok ? ("pass" as const) : ("fail" as const),
+      output_tail: g.detail,
+      kind: "builtin" as const,
+      duration_ms: 0,
+    });
+    expect(skippedSecurityGates(skipped.map(asCheck))).toEqual(["gitleaks", "semgrep"]);
+    expect(skippedSecurityGates(required.map(asCheck))).toEqual([]);
+    expect(formatGateResults(skipped.map(asCheck))).toMatch(/^Skipped security gates: gitleaks, semgrep\n/);
 
     const failed = await runBaselineGates({
       cwd: tree(),

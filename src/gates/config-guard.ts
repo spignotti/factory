@@ -216,6 +216,7 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   const exKey = (e: { tool: string; rule: string }) => `${e.tool}:${e.rule}`;
   const added = a.tool_exceptions.filter((e) => !b.tool_exceptions.some((x) => exKey(x) === exKey(e)));
   if (added.length) out.push(`tool_exceptions added: ${added.map(exKey).join(", ")}`);
+  if (b.baseline.require_tools && !a.baseline.require_tools) out.push("baseline.require_tools turned off");
   return out;
 }
 
