@@ -42,7 +42,7 @@ describe("CI stub", () => {
     expect(wf.jobs.select!.steps.at(-1)!.run).toContain('"$ALL" = true');
     const steps = wf.jobs.check!.steps;
     const tc = (k: string) => `fromJson(needs.select.outputs.toolchains).${k}`;
-    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v4", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "actions/cache@v4", "run"]);
+    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v6", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "actions/cache@v4", "run"]);
     expect(steps[1]).toMatchObject({ if: tc("pnpm"), with: { version: `\${{ ${tc("pnpm_version")} }}` } });
     expect(steps[2]).toMatchObject({ with: { "node-version": `\${{ ${tc("node")} }}` } });
     expect(steps[3]).toMatchObject({ if: `${tc("python")} != ''`, with: { "python-version": `\${{ ${tc("python")} }}` } });
