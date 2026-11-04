@@ -1,5 +1,5 @@
 import { sh, tail } from "../exec.js";
-import { changedFiles, repoDiffStat, stageAll } from "../git.js";
+import { changedFiles, diffCountFields, diffTotals, repoDiffStat, stageAll } from "../git.js";
 import {
   type BuiltinResult,
   diffSize,
@@ -132,10 +132,14 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
 
   // A check killed at the deadline is not a red check: the run stops on the wall limit instead.
   checkDeadline(ctx);
+  const countTests = repo.limits.diff_count_tests;
+  const stat = await repoDiffStat(worktree, ctx.baseSha, repo, { countTests });
+  const diffReport = diffCountFields(diffTotals(stat), countTests);
+  if (diffReport) ctx.events.diffCount = diffReport;
   const builtins: BuiltinResult[] = [
     forbiddenPaths(changed, repo.limits.forbidden_paths),
     protectedPaths(plan, changed, repo.human_only_paths),
-    diffSize(await repoDiffStat(worktree, ctx.baseSha, repo), repo.limits.max_diff_lines),
+    diffSize(stat, repo.limits.max_diff_lines, { countTests }),
     testPresence(plan, packages, handoffs, changed, repo.tests.globs),
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),
@@ -171,7 +175,18 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   };
   writeJson(ctx, `gates-${report.n}.json`, report);
   for (const c of all) {
-    ctx.events.emit({ step: "gates", event: "gate_result", data: { n: report.n, tier, check: c.name, kind: c.kind, status: c.status } });
+    ctx.events.emit({
+      step: "gates",
+      event: "gate_result",
+      data: {
+        n: report.n,
+        tier,
+        check: c.name,
+        kind: c.kind,
+        status: c.status,
+        ...(c.name === "max_diff_lines" && diffReport ? diffReport : {}),
+      },
+    });
   }
   return report;
 }

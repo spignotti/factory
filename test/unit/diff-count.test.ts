@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { diffExclusion, diffStat, diffTotals, formatDiffTotals, looksBinary, parseNumstatZ, repoDiffStat } from "../../src/git.js";
+import { diffExclusion, diffStat, diffTotals, formatDiffTotals, linesCountingTests, looksBinary, parseNumstatZ, repoDiffStat } from "../../src/git.js";
 import { diffSize } from "../../src/gates/builtin.js";
 import { fastLaneEscalation } from "../../src/pipeline/lane.js";
 import { DEPENDENCY_GLOBS, LOCK_FILES } from "../../src/paths.js";
@@ -70,7 +70,7 @@ describe("diff line count: exclusions", () => {
     expect(stat.get("assets/untracked.png")).toEqual({ lines: 0, excluded: "binary" });
     expect(stat.get("gen/client.ts")).toEqual({ lines: 100, excluded: "diff_exclude" });
     const t = diffTotals(stat);
-    expect(t).toEqual({ counted: 50, excluded: 633, excludedFiles: ["gen/client.ts", "package-lock.json"], binaryFiles: 2 });
+    expect(t).toEqual({ counted: 50, excluded: 633, excludedFiles: ["gen/client.ts", "package-lock.json"], binaryFiles: 2, excludedTestLines: 0, excludedTestFiles: [] });
     expect(formatDiffTotals(t)).toBe("50 lines (+633 excluded: gen/client.ts, package-lock.json; 2 binary files)");
   });
 
@@ -103,6 +103,105 @@ describe("diff line count: exclusions", () => {
     expect(RepoConfigSchema.parse({}).limits.diff_exclude).toEqual([]);
     for (const g of ["**", "**/*", "*", "./**"]) expect(RepoConfigSchema.safeParse({ limits: { diff_exclude: [g] } }).success).toBe(false);
     expect(RepoConfigSchema.safeParse({ limits: { diff_exclude: ["dist/**"] } }).success).toBe(true);
+  });
+
+  it("schema: diff_count_tests defaults to true and is a boolean", () => {
+    expect(RepoConfigSchema.parse({}).limits.diff_count_tests).toBe(true);
+    expect(RepoConfigSchema.parse({ limits: { max_diff_lines: 10 } }).limits.diff_count_tests).toBe(true);
+    expect(RepoConfigSchema.parse({ limits: { diff_count_tests: false } }).limits.diff_count_tests).toBe(false);
+    expect(RepoConfigSchema.safeParse({ limits: { diff_count_tests: "false" } }).success).toBe(false);
+  });
+});
+
+describe("limits.diff_count_tests", () => {
+  const globs = ["**/*.test.ts"];
+
+  it("default (true): a mixed diff counts tests, docs, fixtures and production code", async () => {
+    const dir = repo();
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    write(dir, "src/app.ts", text(40));
+    write(dir, "docs/guide.md", text(6));
+    write(dir, "test/fixtures/data.json", text(8));
+    write(dir, "src/app.test.ts", text(20));
+    write(dir, "gen/a.test.ts", text(4));
+    const cfg = RepoConfigSchema.parse({ limits: { diff_exclude: ["gen/**"] }, tests: { globs } });
+    expect(cfg.limits.diff_count_tests).toBe(true);
+    const stat = await repoDiffStat(dir, base, cfg);
+    expect(stat.get("src/app.test.ts")).toEqual({ lines: 20 });
+    expect(stat.get("gen/a.test.ts")).toEqual({ lines: 4 });
+    expect(diffTotals(stat)).toMatchObject({ counted: 78, excluded: 0, excludedTestLines: 0 });
+    expect(diffSize(stat, 78).ok).toBe(true);
+    expect(diffSize(stat, 77).ok).toBe(false);
+  });
+
+  it("false: tests drop out of max_diff_lines; production, docs and fixtures outside the globs stay", async () => {
+    const dir = repo();
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    write(dir, "src/app.ts", text(40));
+    write(dir, "docs/guide.md", text(6));
+    write(dir, "fixtures/sample.json", text(8));
+    write(dir, "test/fixtures/data.json", text(3));
+    write(dir, "src/app.test.ts", text(20));
+    write(dir, "test/app.test.ts", text(12));
+    write(dir, "gen/a.test.ts", text(4));
+    write(dir, "gen/client.ts", text(9));
+    write(dir, "package-lock.json", text(10));
+    const cfg = RepoConfigSchema.parse({ limits: { diff_count_tests: false, diff_exclude: ["gen/**"] }, tests: { globs } });
+    const stat = await diffStat(dir, base, { exclude: cfg.limits.diff_exclude, testGlobs: cfg.tests.globs, countTests: cfg.limits.diff_count_tests });
+    expect(stat.get("src/app.ts")).toEqual({ lines: 40 });
+    expect(stat.get("docs/guide.md")).toEqual({ lines: 6 });
+    expect(stat.get("fixtures/sample.json")).toEqual({ lines: 8 });
+    expect(stat.get("test/fixtures/data.json")).toEqual({ lines: 3 });
+    expect(stat.get("src/app.test.ts")).toEqual({ lines: 20, excluded: "test" });
+    expect(stat.get("test/app.test.ts")).toEqual({ lines: 12, excluded: "test" });
+    // A test under diff_exclude is excluded as a test, not by diff_exclude.
+    expect(stat.get("gen/a.test.ts")).toEqual({ lines: 4, excluded: "test" });
+    expect(stat.get("gen/client.ts")).toEqual({ lines: 9, excluded: "diff_exclude" });
+    expect(stat.get("package-lock.json")).toEqual({ lines: 10, excluded: "lockfile" });
+    const t = diffTotals(stat);
+    expect(t).toMatchObject({
+      counted: 57,
+      excluded: 19,
+      excludedFiles: ["gen/client.ts", "package-lock.json"],
+      excludedTestLines: 36,
+      excludedTestFiles: ["gen/a.test.ts", "src/app.test.ts", "test/app.test.ts"],
+    });
+    expect(formatDiffTotals(t, { countTests: false })).toBe("57 lines (+36 test lines not counted; +19 excluded: gen/client.ts, package-lock.json)");
+    expect(diffSize(stat, 57, { countTests: false })).toMatchObject({ ok: true, detail: "57 lines (+36 test lines not counted; +19 excluded: gen/client.ts, package-lock.json)" });
+    expect(diffSize(stat, 56, { countTests: false })).toMatchObject({ ok: false, detail: "diff has 57 lines (+36 test lines not counted; +19 excluded: gen/client.ts, package-lock.json) > 56" });
+    expect(diffTotals(await repoDiffStat(dir, base, cfg, { countTests: false }))).toMatchObject({ counted: 57, excludedTestLines: 36 });
+  });
+
+  it("false with no test files still reports zero excluded test lines", () => {
+    const stat = new Map([["src/a.ts", { lines: 4 }]]);
+    expect(formatDiffTotals(diffTotals(stat), { countTests: false })).toBe("4 lines (+0 test lines not counted)");
+    expect(diffSize(stat, 4, { countTests: false }).detail).toBe("4 lines (+0 test lines not counted)");
+  });
+
+  it("fast lane and the line total used for risk still count tests when the option is false", async () => {
+    const dir = repo();
+    const baseSha = gitIn(dir, "rev-parse", "HEAD").trim();
+    write(dir, "src/a.ts", text(10));
+    write(dir, "test/a.test.ts", text(400));
+    const cfg = RepoConfigSchema.parse({ limits: { diff_count_tests: false }, tests: { globs }, fast_lane: { max_diff_lines: 50 } });
+    const reasons = await fastLaneEscalation({ worktree: dir, baseSha, repo: cfg });
+    expect(reasons).toContain("diff 410 lines > fast_lane.max_diff_lines 50");
+    const totals = diffTotals(await repoDiffStat(dir, baseSha, cfg, { countTests: false }));
+    expect(linesCountingTests(totals)).toBe(410);
+    expect(totals.counted).toBe(10);
+  });
+
+  it("moving source into a test path cannot hide the old lines", async () => {
+    const dir = repo();
+    write(dir, "src/big.ts", text(100));
+    commit(dir);
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    mkdirSync(join(dir, "test"), { recursive: true });
+    gitIn(dir, "mv", "src/big.ts", "test/big.test.ts");
+    const stat = await diffStat(dir, base, { testGlobs: globs, countTests: false });
+    expect(stat.get("src/big.ts")).toEqual({ lines: 100 });
+    expect(stat.get("test/big.test.ts")).toEqual({ lines: 100, excluded: "test" });
+    expect(diffTotals(stat)).toMatchObject({ counted: 100, excludedTestLines: 100 });
   });
 });
 

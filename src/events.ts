@@ -74,6 +74,11 @@ export class EventLog {
   readonly path: string;
   private readonly listeners: ((e: FactoryEvent) => void)[] = [];
   readonly totals = { tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+  /**
+   * Last max_diff_lines split when `limits.diff_count_tests` is false.
+   * Copied onto result.json. Unset keeps the historical result shape (tests still count).
+   */
+  diffCount?: { counted_lines: number; excluded_test_lines: number };
   private readonly byRole = new Map<string, RoleUsage>();
 
   constructor(
@@ -196,6 +201,10 @@ export const ResultSchema = z.object({
   /** USD of metered providers only; subscription usage (see profile `billing`) is reported in tokens. */
   cost_usd: z.number().min(0),
   reason: z.string(),
+  /** Lines counted toward `limits.max_diff_lines`. Set only when `limits.diff_count_tests` is false. */
+  counted_lines: z.number().int().min(0).optional(),
+  /** Test-file lines left out of that limit. Set only when `limits.diff_count_tests` is false. */
+  excluded_test_lines: z.number().int().min(0).optional(),
   questions: z.array(z.string()).optional(),
   /** Where to find the work (null until created); needed to fix and `factory resume` a run. */
   branch: z.string().nullable(),

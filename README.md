@@ -201,7 +201,7 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 20, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 20, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true }
 # limits.gate_timeout_minutes [20]: each gate check (and red-green proof) is killed after this unless the
 # check sets timeout_minutes; effective timeout is min(per-check or default, remaining max_wall_minutes).
 # Per-check timeout_minutes overrides the default. A timed-out check is not retried as flaky. Raising either
@@ -225,6 +225,12 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # always count, catch-all globs are rejected). The gate names what it left out:
 # "943 lines (+533 excluded: package-lock.json; 4 binary files)". Lockfiles still are dependency
 # changes for lane escalation and risk. Adding a diff_exclude entry is a loosening (config_guard).
+# limits.diff_count_tests [true]: set false when test coverage would otherwise force a higher
+# max_diff_lines. Files the test gates already classify as tests (`tests.globs`) are then left out of
+# limits.max_diff_lines only. Production code, docs and fixtures outside those globs still count.
+# fast_lane.max_diff_lines and merge.low_max_diff_lines still count test files, and diff_exclude is
+# unchanged (it still cannot drop a test file). The gate detail, the run log and result.json
+# (counted_lines, excluded_test_lines) report both numbers. Turning it off is a loosening (config_guard).
 ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: ["src/app/**"], pages: ["/"], devices: ["Desktop Chrome"] }
 # ui.auth logs the evaluator in before the session; credentials are secret names, never inline values. See Evaluate.
 verify:

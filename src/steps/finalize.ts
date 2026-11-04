@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { publishEvidence, evidenceUrl } from "../evaluate/evidence.js";
 import { criterionEvidence, type EvidenceLink, evaluationMarkdown } from "../evaluate/pr.js";
-import { baseRef, changedFiles, diffFiles, diffTotals, isAncestor, mergeRef, repoDiffStat, revParse } from "../git.js";
+import { baseRef, changedFiles, diffCountFields, diffFiles, diffTotals, isAncestor, linesCountingTests, mergeRef, repoDiffStat, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
@@ -322,7 +322,15 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
 
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
-  const diffLines = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo)).counted;
+  const countTests = ctx.repo.limits.diff_count_tests;
+  const totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
+  // Final tree, after a base merge: this is what result.json reports. Test lines still count for risk.
+  const diffLines = linesCountingTests(totals);
+  const diffReport = diffCountFields(totals, countTests);
+  if (diffReport) {
+    ctx.events.diffCount = diffReport;
+    ctx.events.emit({ step: "finalize", event: "progress", data: { ...diffReport } });
+  }
   const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.

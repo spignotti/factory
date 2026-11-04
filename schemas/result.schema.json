@@ -99,6 +99,16 @@
     "reason": {
       "type": "string"
     },
+    "counted_lines": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "excluded_test_lines": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "questions": {
       "type": "array",
       "items": {

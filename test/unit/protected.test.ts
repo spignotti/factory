@@ -103,6 +103,10 @@ limits: { forbidden_paths: [".env*"] }
     ]);
     expect(repoConfigLoosening(base, `${base}secrets: { provider: env_file, names: [X_TOKEN] }\n`)).toEqual(["secrets changed"]);
     expect(repoConfigLoosening(base, base.replace('[".env*"] }', '[".env*"], diff_exclude: ["dist/**"] }'))).toEqual(["limits.diff_exclude added: dist/**"]);
+    expect(repoConfigLoosening(base, base.replace('[".env*"] }', '[".env*"], diff_count_tests: false }'))).toEqual(["limits.diff_count_tests turned off"]);
+    const testsOff = base.replace('[".env*"] }', '[".env*"], diff_count_tests: false }');
+    expect(repoConfigLoosening(testsOff, testsOff)).toEqual([]);
+    expect(repoConfigLoosening(testsOff, base)).toEqual([]);
     const withEx = base.replace('[".env*"] }', '[".env*"], diff_exclude: ["dist/**", "gen/**"] }');
     expect(repoConfigLoosening(withEx, base)).toEqual([]);
     expect(repoConfigLoosening(withEx, withEx.replace('"gen/**"', '"gen/**", "out/**"'))).toEqual(["limits.diff_exclude added: out/**"]);

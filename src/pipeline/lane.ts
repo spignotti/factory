@@ -1,4 +1,4 @@
-import { changedFiles, diffTotals, repoDiffStat } from "../git.js";
+import { changedFiles, diffTotals, linesCountingTests, repoDiffStat } from "../git.js";
 import { DEPENDENCY_GLOBS, MIGRATION_GLOBS } from "../paths.js";
 import { isProtected, matchesAny } from "../schemas/plan.js";
 import type { RunContext } from "./context.js";
@@ -6,7 +6,9 @@ import type { RunContext } from "./context.js";
 /** Fast lane → standard lane triggers after implement, on the whole change since base. */
 export async function fastLaneEscalation(ctx: Pick<RunContext, "worktree" | "baseSha" | "repo">): Promise<string[]> {
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
-  const lines = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo)).counted;
+  // Test files count toward the fast-lane cap even when max_diff_lines leaves them out.
+  const stat = await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests: ctx.repo.limits.diff_count_tests });
+  const lines = linesCountingTests(diffTotals(stat));
   const reasons: string[] = [];
   const max = ctx.repo.fast_lane.max_diff_lines;
   if (lines > max) reasons.push(`diff ${lines} lines > fast_lane.max_diff_lines ${max}`);
