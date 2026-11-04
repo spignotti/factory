@@ -18,6 +18,8 @@ export const EVENT_TYPES = [
   "agent_finished",
   "agent_error",
   "model_retry",
+  // Same-model retry of a provider stream abort (the current agent call, not the whole run).
+  "step_retry",
   // Waiting for the per-repo lock (`--wait`).
   "queued",
   // Sandbox in effect for this run, with degradation warnings.

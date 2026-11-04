@@ -44,7 +44,7 @@ export interface RunState {
   lane?: Lane;
   lane_escalation?: string[];
   /**
-   * The run stopped (`needs_human`) on a transient provider error (timeout, dropped stream, capacity) after
+   * The run stopped (`needs_human`) on a transient provider error (timeout, dropped stream, stream abort, capacity) after
    * retries: `factory resume` discards the uncommitted agent leftovers instead of committing them as a human fix.
    */
   transient?: boolean;

@@ -29,6 +29,7 @@
         "agent_finished",
         "agent_error",
         "model_retry",
+        "step_retry",
         "queued",
         "sandbox",
         "service",

@@ -53,6 +53,11 @@ describe("error classification", () => {
     [new Error("socket hang up"), "network"],
     [new Error("terminated"), "network"],
     [new Error("read ECONNRESET"), "network"],
+    [new AgentError("Stream ended without finish_reason"), "stream"],
+    [new Error("premature EOF"), "stream"],
+    [new Error("unexpected EOF"), "stream"],
+    [new Error("connection reset during streaming"), "stream"],
+    [new Error("Error while streaming the response"), "stream"],
     [new AgentError("Request timed out."), "network"],
     [new AgentError("request timed out"), "network"],
     [new AgentError("Connection error."), "network"],
@@ -131,6 +136,88 @@ describe("fallback", () => {
     expect(res).toMatchObject({ text: "ok", model: "opencode-go/deepseek-v4.1-flash" });
     expect(slept).toEqual([100]);
     expect(runner.calls).toHaveLength(2);
+  });
+
+  it("retries a provider stream abort on the same model, then succeeds", async () => {
+    const { deps, slept, runner, read } = setup([
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "Stream ended without finish_reason" }, usage: { tokens_in: 2_500_000, tokens_out: 0, cost_usd: 1 } },
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", raw: "ok", usage: { tokens_in: 10, tokens_out: 1, cost_usd: 0 } },
+    ]);
+    const res = await callModel({ ...deps, tokenWarn: 1_000_000 }, "implement", { ...req("implement"), packageId: "P5" });
+    expect(res).toMatchObject({ text: "ok", model: "opencode-go/deepseek-v4.1-flash" });
+    expect(slept).toEqual([100]);
+    expect(runner.calls).toHaveLength(2);
+    expect(runner.calls.every((c) => c.model === "opencode-go/deepseek-v4.1-flash")).toBe(true);
+    const ev = read();
+    expect(ev.filter((e) => e.event === "step_retry")).toEqual([
+      expect.objectContaining({ data: { class: "stream", attempt: 1, max: 2, delay_ms: 100, package: "P5" } }),
+    ]);
+    expect(ev.filter((e) => e.event === "model_fallback")).toEqual([]);
+    expect(ev.find((e) => e.event === "agent_error")).toMatchObject({ data: { class: "stream" }, tokens_in: 2_500_000 });
+    const warning = ev.find((e) => e.data.warning === "step_tokens");
+    expect(warning).toMatchObject({ event: "progress", tokens_in: 0, data: { tokens_in: 2_500_000, threshold: 1_000_000 } });
+    // The warning must not double-count the call's tokens.
+    expect(deps.events.totals.tokens_in).toBe(2_500_010);
+  });
+
+  it("throws TransientAgentError when stream retries are exhausted", async () => {
+    const abort = { role: "plan_medium", error: { message: "Stream ended without finish_reason" } };
+    const { deps, slept, runner, read } = setup([abort, abort, abort]);
+    const err = await callModel(deps, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransientAgentError);
+    expect(err).toMatchObject({ errorClass: "stream", message: "provider stream aborted after 2 retries: Stream ended without finish_reason" });
+    expect(slept).toEqual([100, 200]);
+    expect(runner.calls).toHaveLength(3);
+    expect(read().filter((e) => e.event === "step_retry")).toHaveLength(2);
+  });
+
+  it("does not fall back to a capacity_only model after stream retries", async () => {
+    const abort = { message: "premature EOF" };
+    const { deps, runner } = setup([
+      ...Array.from({ length: 3 }, () => ({ role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: abort })),
+      ...Array.from({ length: 3 }, () => ({ role: "implement", model: "opencode-go/deepseek-v4-pro", error: abort })),
+      { role: "implement", model: "opencode-go/mimo-v2.6-flash", raw: "should-not-run" },
+    ]);
+    const err = await callModel(deps, "implement", req("implement")).catch((e: unknown) => e);
+    expect(err).toMatchObject({ errorClass: "stream", message: "provider stream aborted after 4 retries: premature EOF" });
+    expect(runner.calls.map((c) => c.model)).toEqual([
+      "opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4.1-flash",
+      "opencode-go/deepseek-v4-pro", "opencode-go/deepseek-v4-pro", "opencode-go/deepseek-v4-pro",
+    ]);
+  });
+
+  it("does not retry auth, limit, invalid output or other errors as stream aborts", async () => {
+    const auth = setup([{ role: "plan_medium", error: { message: "401 Unauthorized", status: 401 } }]);
+    await expect(callModel(auth.deps, "plan", req("plan_medium"))).rejects.toThrow(/Unauthorized/);
+    expect(auth.read().some((e) => e.event === "step_retry")).toBe(false);
+    expect(auth.runner.calls).toHaveLength(1);
+
+    const other = setup([{ role: "plan_medium", error: { message: "boom" } }]);
+    const err = await callModel(other.deps, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(TransientAgentError);
+    expect(other.read().some((e) => e.event === "step_retry")).toBe(false);
+
+    const bad = setup([]);
+    const runner = { run: async () => Promise.reject(new InvalidOutputError("handoff schema")) };
+    await expect(callModel({ ...bad.deps, runner }, "x", req("plan_high"))).rejects.toBeInstanceOf(InvalidOutputError);
+    expect(bad.read().some((e) => e.event === "step_retry")).toBe(false);
+
+    const limit = setup([
+      { role: "review_plan", error: { message: "rate limit", status: 429 } },
+      { role: "review_plan", raw: "ok" },
+    ]);
+    await callModel(limit.deps, "review", req("review_plan"));
+    expect(limit.slept).toEqual([]);
+    expect(limit.read().some((e) => e.event === "step_retry")).toBe(false);
+    expect(limit.runner.calls.map((c) => c.model)).toEqual(["openai/codex", "opencode-go/grok-4.7"]);
+  });
+
+  it("honours streamRetries 0", async () => {
+    const { deps, slept, runner } = setup([{ role: "plan_medium", error: { message: "unexpected EOF" } }]);
+    const err = await callModel({ ...deps, streamRetries: 0 }, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).toMatchObject({ errorClass: "stream", message: "provider stream aborted after 0 retries: unexpected EOF" });
+    expect(slept).toEqual([]);
+    expect(runner.calls).toHaveLength(1);
   });
 
   it("throws TransientAgentError when the chain gives up on a network error", async () => {

@@ -75,6 +75,7 @@ export async function implementerTurn(ctx: RunContext, step: string, turn: Sessi
       system: rolePrompt("implement", ctx.deps.prompts),
       prompt,
       sessionKey: turn.sessionKey,
+      packageId: turn.packageId,
     });
     const parsed = parseHandoff(res.text, turn.packageId);
     errors = parsed.ok ? (turn.validate?.(parsed.handoff) ?? []) : parsed.errors;

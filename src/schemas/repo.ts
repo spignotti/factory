@@ -339,6 +339,12 @@ export const RepoConfigSchema = z
         // `max_diff_lines` only. Fast-lane and merge line limits still count them. Default true.
         // Turning it off is a loosening (config_guard).
         diff_count_tests: z.boolean().default(true),
+        // Same-model retries after a provider stream abort (the current agent call only; earlier
+        // packages stay). 0 disables. Auth, quota and invalid output are not retried this way.
+        stream_retries: z.number().int().min(0).max(5).default(2),
+        // Progress warning when one agent call's tokens_in reaches this. Does not fail the call.
+        // 0 disables. A multi-million-token step is a common partner of a stream abort.
+        step_token_warn: z.number().int().min(0).default(1_000_000),
       })
       .default({
         max_diff_lines: 1500,
@@ -352,6 +358,8 @@ export const RepoConfigSchema = z
         forbidden_paths: [],
         diff_exclude: [],
         diff_count_tests: true,
+        stream_retries: 2,
+        step_token_warn: 1_000_000,
       }),
     services: z.array(ServiceSchema).default([]),
     ui: z

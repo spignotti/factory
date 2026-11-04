@@ -64,6 +64,22 @@ export function queuedFromEvents(events: FactoryEvent[]): { holder_run_id: strin
  * Check command still running, from the latest progress or heartbeat that names it.
  * A later `gate_result` or step boundary means nothing is in flight.
  */
+/** Stream-abort retry whose follow-up call has not finished yet. */
+export function currentStepRetry(events: FactoryEvent[]): { class: string; attempt: number; max: number; package: string | null } | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    if (e.event === "agent_finished" || e.event === "step_finished" || e.event === "run_finished") return null;
+    if (e.event !== "step_retry") continue;
+    return {
+      class: typeof e.data.class === "string" ? e.data.class : "stream",
+      attempt: typeof e.data.attempt === "number" ? e.data.attempt : 0,
+      max: typeof e.data.max === "number" ? e.data.max : 0,
+      package: typeof e.data.package === "string" ? e.data.package : null,
+    };
+  }
+  return null;
+}
+
 export function currentCheckName(events: FactoryEvent[]): string | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;

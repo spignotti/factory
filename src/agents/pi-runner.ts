@@ -19,6 +19,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { isolatedContextFiles } from "./context-files.js";
+import { isStreamAbort } from "./models.js";
 import { endpointViolation } from "./provider-guard.js";
 import { PathGuard } from "../sandbox/guard.js";
 import { type Jail, jailedCommand } from "../sandbox/sandbox.js";
@@ -161,7 +162,16 @@ export class PiRunner implements AgentRunner {
       return { text: session.getLastAssistantText() ?? "", usage };
     } catch (e) {
       const usage = e instanceof AgentError ? e.usage : diffUsage(statsUsage(session), kept.usageBefore);
-      if (isNew) session.dispose();
+      // A new session was never stored. A stream abort also drops a continued session: the provider
+      // closed it, and the retry (same session key) must start clean with the same prompt.
+      if (isNew || isStreamAbort(e)) {
+        if (key) this.sessions.delete(key);
+        try {
+          session.dispose();
+        } catch {
+          // The provider already closed the stream.
+        }
+      }
       if (e instanceof AgentError) throw e;
       throw new AgentError((e as Error).message, usage);
     } finally {

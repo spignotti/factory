@@ -63,13 +63,21 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, pending
   CI on the head is polled up to `limits.pr_ci_wait_minutes` and does not fail the run; red CI ends it `needs_human`.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
-  env allowlist and isolated `HOME`; capacity/network/limit/auth/invalid_output classification with same-model
+  env allowlist and isolated `HOME`; capacity/network/stream/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
   (a frozen box/VM is not counted as silence, `progress` event `suspended_ms`). Provider timeouts and dropped
   streams (`Request timed out.`, `Connection error.`, `terminated`, `ECONNRESET`, …) are `network` errors and
-  retried on the same model; a call that failed while the box was frozen gets up to two extra retries that do
-  not count as attempts (`model_retry` with `after_suspend`). When the chain gives up on a capacity/network
-  error the run ends `needs_human` (reason `transient …; factory resume <id>`), not `failed`. Every agent bash command
+  retried on the same model (`retry.attempts`). A provider that closes the token stream before a finish reason
+  (`Stream ended without finish_reason`, premature EOF, connection reset while streaming) is a `stream` error:
+  the same model is retried up to `limits.stream_retries` (default 2) with the profile backoff, recorded as
+  `step_retry` and shown by `factory status` while that call is still in flight. The retry is the current agent
+  call only (the implement package that was running); earlier packages stay committed. Auth, quota/limit,
+  invalid output and other errors are not retried this way. A call that failed while the box was frozen gets up
+  to two extra retries that do not count as attempts (`model_retry` with `after_suspend`). When the chain gives
+  up on a capacity/network/stream error the run ends `needs_human` (reason `transient …` or
+  `provider stream aborted after N retries: …; factory resume <id>`), not `failed`. One call whose `tokens_in`
+  reaches `limits.step_token_warn` (default 1_000_000; `0` disables) emits a `progress` warning
+  (`warning: step_tokens`) and still continues. Every agent bash command
   is killed after `limits.command_timeout_minutes` (default 10, also the maximum the model can ask for)
   and the model gets "Command timed out" back. Gate checks, base checks and the red-green proof are killed after
   `limits.gate_timeout_minutes` (default 10, 600s), a check's `timeout_s`, or `timeout_minutes`, capped by
@@ -204,7 +212,10 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true }
+limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true, stream_retries: 2, step_token_warn: 1000000 }
+# limits.stream_retries [2]: same-model retries after a provider stream abort (0–5; 0 = off). The current
+# agent call only. Auth, quota and invalid output are not retried. Exhausted retries end needs_human.
+# limits.step_token_warn [1000000]: progress warning when one call's tokens_in reaches this (0 = off).
 # limits.gate_timeout_minutes [10]: each gate check, base check and red-green proof is killed after this
 # (600s) unless the check sets timeout_s or timeout_minutes. timeout_s (seconds) wins over timeout_minutes.
 # tests.timeout_s caps the red-green command the same way. Effective timeout is min(that, remaining
