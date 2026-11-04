@@ -17,6 +17,10 @@ source of truth; this README is the reference for concepts, configuration and co
 6. **Minimal prompts.** `roles/*.md` are short, role-specific and the factory's only global agent
    instructions; repo facts live in the repo's `AGENTS.md`.
 7. **Evidence over feelings.** Prompt, profile or pipeline changes need an `eval` comparison.
+8. **Adapt to the repo, never the repo to the factory.** `factory adopt`, `factory doctor` and runs use the
+   repo's existing tools, layout and conventions (test runner, linter, formatter, folders) and never introduce
+   their own. If something is missing, the factory reports it or proposes it; it does not silently restructure
+   the repo.
 
 All models run through Pi; no Claude/Codex CLI, no production data. One run per repository unless the repo sets `concurrency.max_runs`.
 
