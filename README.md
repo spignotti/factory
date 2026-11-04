@@ -71,9 +71,12 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   not count as attempts (`model_retry` with `after_suspend`). When the chain gives up on a capacity/network
   error the run ends `needs_human` (reason `transient …; factory resume <id>`), not `failed`. Every agent bash command
   is killed after `limits.command_timeout_minutes` (default 10, also the maximum the model can ask for)
-  and the model gets "Command timed out" back. Gate checks and the red-green proof are killed after
-  `limits.gate_timeout_minutes` (default 20) or a check's `timeout_minutes`, whichever applies, capped by
-  the remaining wall budget; a timed-out check is recorded as `timeout` and is not retried as flaky.
+  and the model gets "Command timed out" back. Gate checks, base checks and the red-green proof are killed after
+  `limits.gate_timeout_minutes` (default 10, 600s), a check's `timeout_s`, or `timeout_minutes`, capped by
+  the remaining wall budget. The process tree is killed. A timed-out check is recorded as `timeout` (not a pass)
+  and is not retried as flaky. A red-green timeout on the base worktree is inconclusive: it is not treated as a
+  failing repro, and the run result says so. While a check runs, progress and heartbeat events name it so
+  `factory status` can show the current check.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
 - **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
@@ -192,7 +195,7 @@ services:                            # one instance per run; see Services
   - { name: stack, host: true, start: "…", stop: "…", ports: [5432], env_from: { command: "…", map: { DB_URL: DB_URL } } }
 env_command: ""                      # prefix for every check command (prefer secrets: below for secrets)
 secrets: { provider: env_file, names: [DATABASE_URL] }   # checks, services, ui only, never agents; see Secrets
-tests: { globs: ["tests/**"], run: "uv run pytest {files}" }   # run enables the red-green proof of bug plans
+tests: { globs: ["tests/**"], run: "uv run pytest {files}", timeout_s: 600 }   # run enables the red-green proof; timeout_s caps it
 sensitive_paths: ["src/auth/**"]     # security reviewer, fast-lane escalation, at least medium risk
 human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]   # changed only as declared protected_changes
 review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
@@ -201,12 +204,15 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 20, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true }
-# limits.gate_timeout_minutes [20]: each gate check (and red-green proof) is killed after this unless the
-# check sets timeout_minutes; effective timeout is min(per-check or default, remaining max_wall_minutes).
-# Per-check timeout_minutes overrides the default. A timed-out check is not retried as flaky. Raising either
-# limit is a loosening (config_guard); lowering is not. `factory adopt` sets timeout_minutes from measured
-# durations (5×, at least 5 min).
+limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true }
+# limits.gate_timeout_minutes [10]: each gate check, base check and red-green proof is killed after this
+# (600s) unless the check sets timeout_s or timeout_minutes. timeout_s (seconds) wins over timeout_minutes.
+# tests.timeout_s caps the red-green command the same way. Effective timeout is min(that, remaining
+# max_wall_minutes). The process tree is killed; the result is `timeout`, not a pass, and is not retried
+# as flaky. A timeout of the repro on the base worktree is inconclusive (not a red repro) and is named in
+# the run result. Progress and heartbeat events name the running check for `factory status`.
+# Raising a timeout is a loosening (config_guard); lowering is not. `factory adopt` sets timeout_minutes
+# from measured durations (5×, at least 5 min).
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
 # once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
 # limits.base_red_resume_hours [48]: a base_red caused by GitHub CI on the base commit is resumed (same run

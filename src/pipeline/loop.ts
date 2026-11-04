@@ -81,8 +81,17 @@ export async function fixStep(
       await commitAll(ctx.worktree, `fix: ${label === "finalize" ? "finalize gates" : `address review round ${label}`}`, gitAuthor(ctx));
       return { ok: true, gates };
     }
-    if (++state.gateFailures >= MAX_GATE_ATTEMPTS) return { ok: false, reason: `gates still red after ${MAX_GATE_ATTEMPTS} fix attempts` };
-    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${failureSummary(gates)}`;
+    if (++state.gateFailures >= MAX_GATE_ATTEMPTS) {
+      const timed = gates.checks.filter((c) => c.status === "timeout").map((c) => c.name);
+      const reason = timed.length
+        ? `gates timed out after ${MAX_GATE_ATTEMPTS} fix attempts (inconclusive): ${timed.join(", ")}`
+        : `gates still red after ${MAX_GATE_ATTEMPTS} fix attempts`;
+      return { ok: false, reason };
+    }
+    const timeoutNote = gates.checks.some((c) => c.status === "timeout")
+      ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
+      : "";
+    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(gates)}`;
   }
 }
 

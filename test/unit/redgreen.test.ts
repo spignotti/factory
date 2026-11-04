@@ -50,6 +50,30 @@ describe("red-green proof", () => {
 });
 
 describe("red-green proof environment", () => {
+  it("a hanging repro on base is a timeout and inconclusive, not red", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "test/max.test.js"), REPRO);
+    const seen: string[] = [];
+    const started = Date.now();
+    const r = await redGreenProof({
+      worktree: dir,
+      baseSha,
+      files: ["test/max.test.js"],
+      testCommand: "sleep 30",
+      gateTimeoutMinutes: 10,
+      timeoutS: 0.2,
+      heartbeatMs: 40,
+      env,
+      onCheck: (e) => seen.push(`${e.event}:${e.where}`),
+    });
+    expect(r).toMatchObject({ ok: false, inconclusive: true, timedOut: true, redOnBase: false, greenOnHead: false });
+    expect(r.detail).toMatch(/timed out on base/);
+    expect(r.detail).not.toMatch(/repro fails on base/);
+    expect(seen).toContain("progress:base");
+    expect(seen).toContain("heartbeat:base");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+
   it("runs setup in the base worktree; a failing setup is inconclusive, not a red base", async () => {
     const { dir, baseSha } = setup();
     writeFileSync(join(dir, "test/max.test.js"), REPRO);
