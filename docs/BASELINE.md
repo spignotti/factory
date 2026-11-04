@@ -50,6 +50,8 @@ Vendor the files you need from `templates/baseline/` and point the tool at them.
 | trivy | `CRITICAL,HIGH`, `exit-code: 1`, `ignore-unfixed: true`. Every `.trivyignore` id needs a reason comment | CI only |
 | hadolint | `hadolint.yaml` | CI only |
 
+The semgrep run gate receives changed paths that still exist in the worktree. A deleted path, and the old path of a rename, are not scan targets. When that list is empty the gate passes (`no scan needed`) and does not scan the repo. More than 200 remaining paths scans the worktree root instead of putting every path on the command line. Lockfiles and common binary assets are left off the list. shellcheck, hadolint and ruff stay CI checks; they are not factory file-list gates. Any later file-list gate uses the same existing-path filter.
+
 Factory run gates skip a scanner that is not on `PATH`. The gate detail starts with `SKIPPED`, and
 the run's `result.json` (`skipped_gates`) and the PR gate list name those gates, so a reviewing
 bot sees them. `baseline.require_tools: true` in `.factory/repo.yaml` turns a missing binary into

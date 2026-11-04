@@ -50,6 +50,12 @@
               "string",
               "null"
             ]
+          },
+          "check": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -61,7 +67,8 @@
           "pid",
           "minutes",
           "branch",
-          "pr"
+          "pr",
+          "check"
         ],
         "additionalProperties": false
       }
@@ -276,6 +283,12 @@
               "string",
               "null"
             ]
+          },
+          "check": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -288,7 +301,8 @@
           "minutes",
           "silent_minutes",
           "branch",
-          "pr"
+          "pr",
+          "check"
         ],
         "additionalProperties": false
       }

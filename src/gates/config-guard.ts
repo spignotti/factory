@@ -83,7 +83,7 @@ const PROSE = /\.(md|mdx|markdown|txt|rst)$/i;
 
 const sorted = (xs: string[]) => xs.map((x) => x.replace(/\s+/g, " ").trim()).sort().join("\n");
 
-/** Check fields that define what runs; `timeout_minutes` is handled separately in config_guard. */
+/** Check fields that define what runs; `timeout_s` and `timeout_minutes` are handled separately in config_guard. */
 const checkIdentity = (c: { name: string; run: string; tier: string; paths?: string[]; services?: string[]; local_only?: boolean }) => ({
   name: c.name,
   run: c.run,
@@ -93,7 +93,9 @@ const checkIdentity = (c: { name: string; run: string; tier: string; paths?: str
   local_only: c.local_only,
 });
 
-const effectiveCheckTimeoutMinutes = (cfg: RepoConfig, c: { timeout_minutes?: number }) => c.timeout_minutes ?? cfg.limits.gate_timeout_minutes;
+/** Effective wall-clock cap in seconds. `timeout_s` wins over `timeout_minutes` and the repo default. */
+const effectiveCheckTimeoutSeconds = (cfg: RepoConfig, c: { timeout_s?: number; timeout_minutes?: number }) =>
+  c.timeout_s ?? (c.timeout_minutes ?? cfg.limits.gate_timeout_minutes) * 60;
 
 /** Lines of the given TOML/INI sections. */
 function toolSections(text: string): string {
@@ -170,13 +172,19 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   for (const c of b.checks) {
     const now = a.checks.find((x) => x.name === c.name);
     if (!now) continue;
-    const beforeEff = effectiveCheckTimeoutMinutes(b, c);
-    const afterEff = effectiveCheckTimeoutMinutes(a, now);
+    const beforeEff = effectiveCheckTimeoutSeconds(b, c);
+    const afterEff = effectiveCheckTimeoutSeconds(a, now);
     if (afterEff <= beforeEff) continue;
-    const explicit = c.timeout_minutes !== undefined || now.timeout_minutes !== undefined;
+    const explicit =
+      c.timeout_s !== undefined || now.timeout_s !== undefined || c.timeout_minutes !== undefined || now.timeout_minutes !== undefined;
     if (explicit || a.limits.gate_timeout_minutes === b.limits.gate_timeout_minutes) {
       out.push(`check ${c.name} timeout raised`);
     }
+  }
+  const testTimeoutS = (cfg: RepoConfig) => cfg.tests.timeout_s ?? cfg.limits.gate_timeout_minutes * 60;
+  if (testTimeoutS(a) > testTimeoutS(b)) {
+    const explicit = a.tests.timeout_s !== undefined || b.tests.timeout_s !== undefined;
+    if (explicit || a.limits.gate_timeout_minutes === b.limits.gate_timeout_minutes) out.push("tests.timeout_s raised");
   }
   removed("human_only_paths", b.human_only_paths, a.human_only_paths);
   removed("sensitive_paths", b.sensitive_paths, a.sensitive_paths);

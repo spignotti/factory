@@ -60,6 +60,21 @@ export function queuedFromEvents(events: FactoryEvent[]): { holder_run_id: strin
   };
 }
 
+/**
+ * Check command still running, from the latest progress or heartbeat that names it.
+ * A later `gate_result` or step boundary means nothing is in flight.
+ */
+export function currentCheckName(events: FactoryEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    if (e.event === "gate_result" || e.event === "step_finished" || e.event === "step_started") return null;
+    if ((e.event === "progress" || e.event === "heartbeat") && e.data.phase === "running" && typeof e.data.check === "string" && e.data.check) {
+      return e.data.check;
+    }
+  }
+  return null;
+}
+
 export function lastEventMs(events: FactoryEvent[]): number | undefined {
   const last = events.at(-1)?.ts;
   return last ? Date.parse(last) : undefined;

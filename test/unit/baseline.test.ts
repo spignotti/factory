@@ -5,6 +5,8 @@ import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { baselineConfigChecks, baselineGithubChecks, type BaselineCheck } from "../../src/baseline/doctor.js";
 import { planBaselineGates, runBaselineGates } from "../../src/baseline/gates.js";
+import { changedFiles } from "../../src/git.js";
+import { createFixtureRepo, gitIn } from "../helpers/repo.js";
 import { formatGateResults, skippedSecurityGates } from "../../src/steps/gates.js";
 import { baselineVersion, loadRuff, parseRuffToml, RUFF_BASELINE, semgrepRulesDir } from "../../src/baseline/spec.js";
 import { doctorCommand, githubChecks, type DoctorReport } from "../../src/commands/doctor.js";
@@ -369,7 +371,13 @@ describe("doctor baseline checks", () => {
 });
 
 describe("baseline run gates", () => {
-  const dir = () => tree({ "pyproject.toml": "[project]\nname='a'\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+  const dir = () =>
+    tree({
+      "pyproject.toml": "[project]\nname='a'\n",
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "src/app.py": "print('ok')\n",
+      ".github/workflows/ci.yml": "name: ci\n",
+    });
 
   it("fast scans the diff with shipped semgrep rules; full adds audits and workflow linters", () => {
     const fast = planBaselineGates({ tier: "fast", changed: ["src/app.py", "pnpm-lock.yaml"], baseSha: "abc1234", dir: dir(), toolchains: none });
@@ -399,16 +407,106 @@ describe("baseline run gates", () => {
     expect(full.find((g) => g.name === "pnpm-audit")!.command).toContain("--audit-level high");
   });
 
-  it("skips semgrep when nothing scannable changed, and does not run audits on the fast tier", () => {
-    const planned = planBaselineGates({ tier: "fast", changed: ["pnpm-lock.yaml"], baseSha: "abc1234", dir: tree(), toolchains: none });
-    expect(Array.isArray(planned) ? planned.map((g) => g.name) : planned).toEqual(["gitleaks"]);
+  it("passes semgrep without scanning when nothing scannable remains, and does not run audits on the fast tier", () => {
+    const planned = planBaselineGates({
+      tier: "fast",
+      changed: ["pnpm-lock.yaml"],
+      baseSha: "abc1234",
+      dir: tree({ "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" }),
+      toolchains: none,
+    });
+    expect(Array.isArray(planned) ? planned.map((g) => g.name) : planned).toEqual(["gitleaks", "semgrep"]);
+    if (!Array.isArray(planned)) throw new Error("expected a plan");
+    expect(planned[1]).toMatchObject({ command: "", passDetail: "no scan needed" });
     expect(planBaselineGates({ tier: "fast", changed: ["src/app.py"], baseSha: "not a sha", dir: tree(), toolchains: none })).toEqual({ error: expect.stringMatching(/sha/) });
+  });
+
+  it("scans the worktree root only above 200 existing paths, never when the list is empty", () => {
+    const files: Record<string, string> = {};
+    const changed: string[] = [];
+    for (let i = 0; i < 201; i++) {
+      const path = `pkg/f${i}.py`;
+      files[path] = "x = 1\n";
+      changed.push(path);
+    }
+    const many = planBaselineGates({ tier: "fast", changed, baseSha: "abc1234", dir: tree(files), toolchains: none });
+    if (!Array.isArray(many)) throw new Error("expected a plan");
+    expect(many[1]!.command).toMatch(/ '\.'$/);
+    expect(many[1]!.command).not.toContain("pkg/f0.py");
+
+    const gone = planBaselineGates({ tier: "fast", changed: ["src/missing.py", "also/gone.ts"], baseSha: "abc1234", dir: tree(), toolchains: none });
+    if (!Array.isArray(gone)) throw new Error("expected a plan");
+    expect(gone[1]).toMatchObject({ command: "", passDetail: "no scan needed" });
+  });
+
+  it("drops deleted paths, keeps an added file, and scans only the new path of a rename", async () => {
+    const deleted = createFixtureRepo();
+    const base = gitIn(deleted, "rev-parse", "HEAD").trim();
+    gitIn(deleted, "rm", "-q", "src/math.js");
+    const deletedChanged = await changedFiles(deleted, base);
+    expect(deletedChanged).toContain("src/math.js");
+    const deletionOnly = planBaselineGates({ tier: "fast", changed: deletedChanged, baseSha: base, dir: deleted, toolchains: none });
+    if (!Array.isArray(deletionOnly)) throw new Error("expected a plan");
+    expect(deletionOnly[1]).toMatchObject({ command: "", passDetail: "no scan needed" });
+    const ran: string[] = [];
+    const deletionRun = await runBaselineGates({
+      cwd: deleted,
+      tier: "fast",
+      changed: deletedChanged,
+      baseSha: base,
+      toolchains: none,
+      timeoutMs: 1000,
+      binExists: async () => true,
+      run: async (command) => {
+        ran.push(command);
+        return { code: 0, output: "", durationMs: 1 };
+      },
+    });
+    expect(ran.some((command) => command.startsWith("semgrep"))).toBe(false);
+    expect(deletionRun.find((g) => g.name === "semgrep")).toMatchObject({ ok: true, detail: "no scan needed" });
+
+    const mixed = createFixtureRepo();
+    const mixedBase = gitIn(mixed, "rev-parse", "HEAD").trim();
+    gitIn(mixed, "rm", "-q", "src/math.js");
+    mkdirSync(join(mixed, "src"), { recursive: true });
+    writeFileSync(join(mixed, "src/extra.py"), "print('new')\n");
+    const mixedChanged = await changedFiles(mixed, mixedBase);
+    expect(mixedChanged).toEqual(expect.arrayContaining(["src/math.js", "src/extra.py"]));
+    const mixedPlan = planBaselineGates({ tier: "fast", changed: mixedChanged, baseSha: mixedBase, dir: mixed, toolchains: none });
+    if (!Array.isArray(mixedPlan)) throw new Error("expected a plan");
+    expect(mixedPlan[1]!.command).toContain("src/extra.py");
+    expect(mixedPlan[1]!.command).not.toContain("src/math.js");
+    expect(mixedPlan[1]!.command).not.toMatch(/ '\.'$/);
+
+    const renamed = createFixtureRepo();
+    const renameBase = gitIn(renamed, "rev-parse", "HEAD").trim();
+    gitIn(renamed, "mv", "src/math.js", "src/arith.js");
+    const renameChanged = await changedFiles(renamed, renameBase);
+    expect(renameChanged).toEqual(expect.arrayContaining(["src/math.js", "src/arith.js"]));
+    const renamePlan = planBaselineGates({ tier: "fast", changed: renameChanged, baseSha: renameBase, dir: renamed, toolchains: none });
+    if (!Array.isArray(renamePlan)) throw new Error("expected a plan");
+    expect(renamePlan[1]!.command).toContain("src/arith.js");
+    expect(renamePlan[1]!.command).not.toContain("src/math.js");
+  });
+
+  it("does not point semgrep at a path outside the worktree", () => {
+    const outside = join(tmpdir(), `factory-outside-${process.pid}.py`);
+    writeFileSync(outside, "x = 1\n");
+    const planned = planBaselineGates({
+      tier: "fast",
+      changed: [outside, "../etc/passwd"],
+      baseSha: "abc1234",
+      dir: tree({ "src/app.py": "print('ok')\n" }),
+      toolchains: none,
+    });
+    if (!Array.isArray(planned)) throw new Error("expected a plan");
+    expect(planned[1]).toMatchObject({ command: "", passDetail: "no scan needed" });
   });
 
   it("a missing binary skips; a finding fails and is redacted; success passes", async () => {
     const ran: string[] = [];
     const skipped = await runBaselineGates({
-      cwd: tree(),
+      cwd: tree({ "src/app.py": "x = 1\n" }),
       tier: "fast",
       changed: ["src/app.py"],
       baseSha: "abc1234",
@@ -426,7 +524,7 @@ describe("baseline run gates", () => {
     expect(skipped.map((g) => g.detail).join("\n")).toMatch(/not on PATH/);
 
     const required = await runBaselineGates({
-      cwd: tree(),
+      cwd: tree({ "src/app.py": "x = 1\n" }),
       tier: "fast",
       changed: ["src/app.py"],
       baseSha: "abc1234",
@@ -452,7 +550,7 @@ describe("baseline run gates", () => {
     expect(formatGateResults(skipped.map(asCheck))).toMatch(/^Skipped security gates: gitleaks, semgrep\n/);
 
     const failed = await runBaselineGates({
-      cwd: tree(),
+      cwd: tree({ "src/app.py": "x = 1\n" }),
       tier: "fast",
       changed: ["src/app.py"],
       baseSha: "abc1234",
@@ -466,6 +564,7 @@ describe("baseline run gates", () => {
     expect(failed.map((g) => g.detail).join("\n")).not.toContain("super-secret-value");
     expect(failed[0]!.detail).toContain("[redacted]");
 
+    const passedRan: string[] = [];
     const passed = await runBaselineGates({
       cwd: tree(),
       tier: "fast",
@@ -474,9 +573,16 @@ describe("baseline run gates", () => {
       toolchains: none,
       timeoutMs: 1000,
       binExists: async () => true,
-      run: async () => ({ code: 0, output: "", durationMs: 1 }),
+      run: async (command) => {
+        passedRan.push(command);
+        return { code: 0, output: "", durationMs: 1 };
+      },
     });
-    expect(passed).toEqual([{ name: "gitleaks", ok: true, detail: "" }]);
+    expect(passed).toEqual([
+      { name: "gitleaks", ok: true, detail: "" },
+      { name: "semgrep", ok: true, detail: "no scan needed" },
+    ]);
+    expect(passedRan.some((command) => command.startsWith("semgrep"))).toBe(false);
   });
 });
 

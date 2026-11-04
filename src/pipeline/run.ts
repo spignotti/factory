@@ -14,7 +14,7 @@ import { loadRepoConfig, parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } fr
 import { withRepoModels } from "../config.js";
 import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from "../memory.js";
 import { finalize, syncBase } from "../steps/finalize.js";
-import { type GateReport, runChecks, runGates } from "../steps/gates.js";
+import { baseCheckOutcome, type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
 import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
 import { planStep } from "../steps/plan.js";
@@ -508,11 +508,20 @@ async function beginWork(
   }
   if (ciStatus === "none") {
     const fast = repo.checks.filter((c) => c.tier === "fast");
-    const results = await runChecks(fast, { cwd: worktree, env: commandEnv(ctx), envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline, jail: jailFor(ctx, worktree), services });
+    const results = await runChecks(fast, {
+      cwd: worktree,
+      env: commandEnv(ctx),
+      envCommand: repo.env_command,
+      gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
+      deadline,
+      jail: jailFor(ctx, worktree),
+      services,
+      onCheck: (e) => events.emit({ step: "intake", event: e.event, data: { check: e.check, phase: "running", base: true } }),
+    });
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
-    const red = results.filter((r) => r.status === "fail").map((r) => r.name);
-    if (red.length) return f.set({ result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` });
+    const stop = baseCheckOutcome(results);
+    if (stop) return f.set(stop);
   }
   await advance(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
 }
