@@ -3,10 +3,14 @@
 # Render a new one with `factory ci-stub --ref <tag>`; bumping the ref is a deliberate PR.
 name: factory
 # No run on pushes to the base branch: the PR run already checked the merged tree, and a base commit
-# without check runs makes the factory run the fast checks locally instead. Draft PRs run too: a skipped
+# without check runs makes the factory run the fast checks locally instead. Release tags and
+# workflow_dispatch (a deploy) run the same checks. One stub, not a reusable workflow: doctor hashes
+# this single file and branch protection requires one status, `done`. Draft PRs run too: a skipped
 # required check counts as passed, so skipping drafts would let a PR marked ready merge before its checks.
 on:
   pull_request:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tier:
@@ -42,7 +46,8 @@ jobs:
       - id: s
         env:
           TIER: ${{ inputs.tier || 'full' }}
-          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'origin/main' }}
+          # Tags have no base ref, and branch pushes are not a trigger. Pull requests use the PR base.
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'origin/main' }}
         run: |
           checks=$($FACTORY gates --select --tier "$TIER" --base "$BASE" --json)
           echo "selected: $checks"

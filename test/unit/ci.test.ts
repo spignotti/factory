@@ -16,9 +16,10 @@ const write = (repo: string, path: string, text: string) => {
 describe("CI stub", () => {
   it("template: every PR, select → check matrix → done; done is red when selection failed", () => {
     const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; concurrency: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
-    // no run on pushes to the base branch; no branch filter: every PR
-    expect(Object.keys(wf.on)).toEqual(["pull_request", "workflow_dispatch"]);
+    // no run on pushes to the base branch; tags and manual runs do; no branch filter: every PR
+    expect(Object.keys(wf.on)).toEqual(["pull_request", "push", "workflow_dispatch"]);
     expect(wf.on.pull_request).toBeNull();
+    expect(wf.on.push).toEqual({ tags: ["v*"] });
     // only a newer push to the same PR cancels a run (a cancelled check on a commit reads as red)
     expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
     expect(Object.keys(wf.jobs)).toEqual(["select", "check", "done"]);

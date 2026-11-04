@@ -6,7 +6,9 @@ import { asset } from "./prompts.js";
 
 /**
  * CI stub: `.github/workflows/factory.yml` is `templates/ci/factory.yml` with the pinned factory
- * ref filled in, identical in every repo. `doctor` compares hashes.
+ * ref filled in, identical in every repo. `doctor` compares hashes. Pull requests, release tags
+ * and workflow_dispatch run it; pushes to the base branch do not. One file, not a reusable
+ * workflow, so branch protection has a single required status (`done`).
  */
 export const CI_STUB_PATH = ".github/workflows/factory.yml";
 /**

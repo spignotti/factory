@@ -1,0 +1,5 @@
+# factory-baseline-version: 1
+# Copy to the repo root as .shellcheckrc.
+# The CI check is: shellcheck -S style -x
+external-sources=true
+severity=style

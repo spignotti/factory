@@ -85,7 +85,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
-| `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, disk/inodes |
+| `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
 | `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
@@ -549,9 +549,11 @@ GIFs; `factory doctor --repo .` checks both.
 `factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
 selects the checks with the same code as a local run and runs each one (`factory gates --run`).
 It does not run on pushes to the base branch (the PR run already checked the merged tree; a base commit
-without check runs makes the factory run the fast checks locally), and only a newer push to the same PR
+without check runs makes the factory run the fast checks locally). It does run on tags `v*` and on
+`workflow_dispatch`, so a release or a deploy gets the same checks. Only a newer push to the same PR
 cancels a run, so no cancelled check marks a base commit red. The npx install of the pinned factory is
-cached per ref.
+cached per ref. The tool baseline those checks implement is [docs/BASELINE.md](docs/BASELINE.md): one
+stub, not a reusable workflow, because doctor hashes this file and branch protection requires `done`.
 
 **Required status check:** `done`, the stub's last job. GitHub Actions reports a check run under its job
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub

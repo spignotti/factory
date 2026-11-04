@@ -12,9 +12,11 @@ import {
   testPresence,
 } from "../gates/builtin.js";
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
+import { runBaselineGates } from "../baseline/gates.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
 import { gateCheckTimeoutMs, shTimedOut } from "../gates/timeout.js";
+import { resolveToolchains } from "../toolchains.js";
 import { topoOrder } from "../pipeline/dag.js";
 import type { Deadline } from "../pipeline/budget.js";
 import { checkDeadline, commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
@@ -144,6 +146,15 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),
     configGuard({ plan, packages, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
+    ...(await runBaselineGates({
+      cwd: worktree,
+      tier,
+      changed,
+      baseSha: ctx.baseSha,
+      toolchains: resolveToolchains(worktree, repo).toolchains,
+      timeoutMs: gateCheckTimeoutMs({ gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline: ctx.deadline }) ?? repo.limits.gate_timeout_minutes * 60_000,
+      secrets: ctx.secrets?.redact,
+    })),
   ];
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];

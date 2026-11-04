@@ -43,6 +43,9 @@ describe("config guard: what counts", () => {
     expect(configChange("package.json", '{"jest":{"coverageThreshold":{"global":{"lines":80}}}}', '{"jest":{"coverageThreshold":{"global":{"lines":10}}}}')).toBeDefined();
     expect(configChange("package.json", '{"version":"1"}', '{"version":"2"}')).toBeUndefined();
     expect(configChange("src/app.ts", "a", "b")).toBeUndefined();
+    for (const f of [".semgrep/rules.yml", ".gitleaks.toml", ".gitleaksignore", ".shellcheckrc", ".trivyignore", ".hadolint.yaml"]) {
+      expect(configChange(f, "a", "b")).toBe("security tool config changed");
+    }
   });
 
   it("suppressions on added lines only", () => {
@@ -69,6 +72,30 @@ describe("config guard: what counts", () => {
       ["src/b.ts", "eslint-disable"],
       ["src/b.ts", "@ts-expect-error"],
       ["src/b.ts", "biome-ignore"],
+    ]);
+  });
+
+  it("flags security suppressions on added lines", () => {
+    const diff = [
+      "--- a/src/a.py",
+      "+++ b/src/a.py",
+      "+x = eval(s)  # nosemgrep",
+      "+token = 'x'  # gitleaks:allow",
+      "+# nosec B603",
+      "+y = 1  # pragma: no cover",
+      "--- a/script.sh",
+      "+++ b/script.sh",
+      "+# shellcheck disable=SC2086",
+      "--- a/docs/note.md",
+      "+++ b/docs/note.md",
+      "+Do not add `# nosemgrep` or `# nosec` in prose.",
+    ].join("\n");
+    expect(addedSuppressions(diff).map((s) => [s.file, s.marker])).toEqual([
+      ["src/a.py", "nosemgrep"],
+      ["src/a.py", "gitleaks:allow"],
+      ["src/a.py", "# nosec"],
+      ["src/a.py", "pragma: no cover"],
+      ["script.sh", "# shellcheck disable"],
     ]);
   });
 });

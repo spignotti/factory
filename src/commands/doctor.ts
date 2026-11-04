@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ancestorContextFiles, PI_CONTEXT_NAMES } from "../agents/context-files.js";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
+import { baselineConfigChecks, baselineGithubChecks, probeBaselineTools } from "../baseline/doctor.js";
 import { ciStubCheck, defaultRef, LEGACY_REQUIRED_CHECK, otherPrWorkflows, REQUIRED_CHECK } from "../ci.js";
 import { describeToolchains, resolveToolchains } from "../toolchains.js";
 import { GhCli, type GitHub } from "../gh.js";
@@ -271,6 +272,7 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   } else if (s.branch_protected && !required.includes(REQUIRED_CHECK)) {
     checks.push({ name: "branch protection", status: "info", detail: `${repo.base_branch} is protected; "${REQUIRED_CHECK}" is not a required check yet` });
   }
+  checks.push(...baselineGithubChecks(repoDir, s));
   return checks;
 }
 
@@ -281,7 +283,7 @@ export function ciChecks(repoDir: string, repo: RepoConfig, currentRef = default
   const { toolchains, notes } = resolveToolchains(repoDir, repo);
   checks.push({ name: "ci toolchains", status: notes.length ? "warn" : "ok", detail: `${describeToolchains(toolchains)} (${repo.ci?.toolchains ? "repo.yaml ci.toolchains + detected" : "detected"})${notes.length ? `; ${notes.join("; ")}` : ""}` });
   if (repo.base_branch !== "main") {
-    checks.push({ name: "ci stub", status: "warn", detail: `base_branch is ${repo.base_branch}; the stub's push trigger and default base are main` });
+    checks.push({ name: "ci stub", status: "warn", detail: `base_branch is ${repo.base_branch}; tag runs and the default base use origin/main` });
   }
   const others = otherPrWorkflows(repoDir);
   if (others.length) {
@@ -543,6 +545,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       const repo = loadRepoConfig(repoDir);
       checks.push(concurrencyCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
+      checks.push(...baselineConfigChecks(repoDir, repo, await probeBaselineTools()));
       checks.push(...serviceConfigChecks(repo));
       const sec = await secretsChecks(repoDir, repo, opts.factoryHome);
       checks.push(...sec.checks);

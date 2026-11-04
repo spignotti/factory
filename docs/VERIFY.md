@@ -52,6 +52,12 @@ Unverified (needs a real provider):
 
 ## GitHub (`src/gh.ts`)
 
+- `repoSettings` reads `security_and_analysis.secret_scanning.status`,
+  `secret_scanning_push_protection.status`, and `required_status_checks.strict` (plus check contexts).
+  UNVERIFIED against a live repository: non-admin tokens omit `security_and_analysis`, and doctor then
+  warns on public repos instead of failing. The jq was checked against sample JSON only.
+- Factory full gates invoke `zizmor --offline`. UNVERIFIED against a current zizmor binary (the flag is
+  the documented switch that skips the GitHub API). Tests inject the command and do not spawn it.
 - `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue`, `updatePr`, `markReady` and
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).

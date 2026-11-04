@@ -114,6 +114,10 @@ limits: { forbidden_paths: [".env*"] }
     expect(repoConfigLoosening(base, undefined)).toEqual(["repo.yaml deleted"]);
     expect(repoConfigLoosening(base, "checks: 3\n")[0]).toMatch(/^repo\.yaml no longer valid/);
     expect(repoConfigLoosening(base, `${base}concurrency: { max_runs: 2 }\n`)).toEqual(["concurrency.max_runs raised"]);
+    const exception = `${base}tool_exceptions:\n  - { tool: ruff, rule: S, reason: "legacy assertions" }\n`;
+    expect(repoConfigLoosening(base, exception)).toEqual(["tool_exceptions added: ruff:S"]);
+    expect(repoConfigLoosening(exception, exception.replace("legacy assertions", "legacy assertions in tests"))).toEqual([]);
+    expect(repoConfigLoosening(exception, base)).toEqual([]);
     const exclusive = `${base}concurrency:\n  exclusive_paths: ["supabase/migrations/**"]\n`;
     expect(repoConfigLoosening(exclusive, base)).toEqual(["concurrency.exclusive_paths removed: supabase/migrations/**"]);
     expect(repoConfigLoosening(base, exclusive)).toEqual([]);

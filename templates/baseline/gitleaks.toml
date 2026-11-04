@@ -1,0 +1,12 @@
+# factory-baseline-version: 1
+# Copy to the repo root as .gitleaks.toml. Default rules stay on.
+# Every allowlist entry is content-bound (a regex of the secret text) and has a description.
+# A path-only allowlist hides whole files; the config guard treats this file as a loosening.
+
+[extend]
+useDefault = true
+
+# [[allowlists]]
+# description = "docs example token, not a credential"
+# regexTarget = "match"
+# regexes = ['''example-factory-baseline-token''']

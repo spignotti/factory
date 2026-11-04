@@ -1,0 +1,32 @@
+# factory-baseline-version: 1
+# Offline stand-in for the registry rulesets factory runs use. CI still uses the registry
+# (p/default or p/python, p/owasp-top-ten, p/secrets). These files never contact the network.
+rules:
+  - id: factory.baseline.python-eval
+    languages: [python]
+    severity: ERROR
+    message: eval executes arbitrary code
+    metadata:
+      category: security
+      cwe: "CWE-95"
+      owasp: "A03:2021-Injection"
+    pattern: eval(...)
+  - id: factory.baseline.python-shell
+    languages: [python]
+    severity: ERROR
+    message: subprocess with shell=True passes the command through a shell
+    metadata:
+      category: security
+      cwe: "CWE-78"
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.$FUNC(..., shell=True, ...)
+          - pattern: subprocess.$FUNC(shell=True, ...)
+  - id: factory.baseline.js-eval
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: eval executes arbitrary code
+    metadata:
+      category: security
+      cwe: "CWE-95"
+    pattern: eval(...)
