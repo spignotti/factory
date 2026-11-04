@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v4
       # Toolchains from `factory gates --toolchains`: repo.yaml ci.toolchains, else detected from the repo's files.
       - if: fromJson(needs.select.outputs.toolchains).pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: ${{ fromJson(needs.select.outputs.toolchains).pnpm_version }}
       - uses: actions/setup-node@v4
