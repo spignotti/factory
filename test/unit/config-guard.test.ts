@@ -114,7 +114,20 @@ describe("config guard: scope", () => {
 
   it("passes when the package lists the config file and names the suppression", () => {
     expect(configGuard({ plan: plan(["ruff.toml", "src/a.py"], "Enable rule F401 in ruff.toml; the re-export needs a noqa"), packages: ["P1"], configChanges: changes, suppressions: sup }).ok).toBe(true);
-    expect(configGuard({ plan: plan(["src/a.py"]), packages: ["P1"], configChanges: [], suppressions: [] }).ok).toBe(true);
+    const clean = configGuard({ plan: plan(["src/a.py"]), packages: ["P1"], configChanges: [], suppressions: [] });
+    expect(clean).toMatchObject({ ok: true, detail: "" });
+  });
+
+  it("treats a red_green exemption as a loosening that needs a stated reason", () => {
+    const exempt = (reason?: string) => ({ ...plan(["src/a.py"]), red_green: "not_applicable" as const, ...(reason ? { red_green_reason: reason } : {}) });
+    const missing = configGuard({ plan: exempt(), packages: ["P1"], configChanges: [], suppressions: [] });
+    expect(missing.ok).toBe(false);
+    expect(missing.detail).toContain("red_green exemption is a loosening and needs red_green_reason");
+    const justified = configGuard({ plan: exempt("stabilizing a flaky test"), packages: ["P1"], configChanges: [], suppressions: [] });
+    expect(justified.ok).toBe(true);
+    expect(justified.detail).toBe("loosening: red_green not_applicable — stabilizing a flaky test");
+    const labeled = configGuard({ plan: { ...plan(["src/a.py"]), red_green_reason: "issue label" }, packages: ["P1"], configChanges: [], suppressions: [], labels: ["factory:red-green-not-applicable"] });
+    expect(labeled).toMatchObject({ ok: true, detail: "loosening: red_green not_applicable — issue label" });
   });
 
   it("collects both from a worktree against the base (new files included once staged)", async () => {

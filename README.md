@@ -34,11 +34,18 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   → `needs_input`; per-repo lock (`concurrency.max_runs`, default 1; `--wait` queues on a full slot or on overlapping plans); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
   `factory/<task>-<slug>` (with `-<run id>-s<slot>` when `max_runs` is above 1).
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
-  bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity). The planner
-  reads the repo's `AGENTS.md` at the base commit.
+  bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity, and a scope check that
+  warns the plan reviewer when the plan says "only" a path the task does not). The planner reads the repo's
+  `AGENTS.md` at the base commit. `plan_normalize` retries once with the zod paths and the JSON schema of the failing
+  fields (the first prompt does not include that schema) before the run falls back to the planner; the progress
+  event lists both attempts.
 - **Implement** (`src/steps/implement.ts`): DAG order, fresh session per package, handoff validation with one
   re-prompt, fast gates with the failure tail back into the same session (max 3), factory commits,
-  cascade-skip. Bug plans prove the repro red on base and green after the fix.
+  cascade-skip. Bug plans prove the repro red on base and green after the fix. A plan opts out only with
+  `red_green: not_applicable` and `red_green_reason`, or the issue label `factory:red-green-not-applicable` plus that
+  reason (test-stabilization, where the repro cannot fail on base). That opt-out is a loosening: the reason is required,
+  and the gate result, config guard and PR body name it. The plan reviewer must justify it. Without the field and the
+  label, the proof is unchanged.
 - **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, flaky re-run, built-ins
   (forbidden paths, diff size, test presence, evidence, guide update, scope report, red-green proof, config
   guard). The config guard fails the gates when the change loosens lint/type/format/test-runner config

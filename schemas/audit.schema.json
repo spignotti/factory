@@ -322,6 +322,17 @@
                           "rollback"
                         ],
                         "additionalProperties": false
+                      },
+                      "red_green": {
+                        "type": "string",
+                        "enum": [
+                          "required",
+                          "not_applicable"
+                        ]
+                      },
+                      "red_green_reason": {
+                        "type": "string",
+                        "minLength": 1
                       }
                     },
                     "required": [

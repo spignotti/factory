@@ -693,6 +693,11 @@ ${fixed}` } };
     expect(r.result.result).toBe("done");
     expect(r.runner.calls.map((c) => c.role).slice(0, 3)).toEqual(["plan_normalize", "plan_normalize", "plan_medium"]);
     expect(r.runner.calls[1]?.prompt).toContain("A2: source_quote not found in task text");
+    const attempts = eventsOf(r, "progress").filter((e) => e.role === "plan_normalize" && Array.isArray(e.data.attempts));
+    expect(attempts.at(-1)?.data.attempts).toEqual([
+      expect.objectContaining({ n: 1, ok: false }),
+      expect.objectContaining({ n: 2, ok: false }),
+    ]);
     expect(JSON.parse(r.file("plan.json")).acceptance).toHaveLength(1);
   });
 
@@ -706,6 +711,30 @@ ${fixed}` } };
     const r = await runScenario({ script: "needs-input.json" });
     expect(r.result).toMatchObject({ result: "needs_input", questions: ["Should multiply accept more than two arguments?"], pr: null });
     expect(r.resultFile.questions).toEqual(r.result.questions);
+  });
+
+  it("red_green not_applicable is opt-in: the proof is skipped, and the PR and gate name the loosening", async () => {
+    const r = await runScenario({ script: "bug-stabilize.json", task: "max-bug.md" });
+    expect(r.result).toMatchObject({ result: "done", type: "bug" });
+    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
+    const gates = JSON.parse(r.file("gates-1.json"));
+    expect(gates.checks.find((c: { name: string }) => c.name === "red_green")).toMatchObject({
+      status: "pass",
+      output_tail: expect.stringContaining("EXEMPT not_applicable (loosening):"),
+    });
+    expect(gates.checks.find((c: { name: string }) => c.name === "config_guard").output_tail).toContain("loosening: red_green not_applicable");
+    expect(gates.repro_red_on_base).toBeUndefined();
+    const body = r.github.prs[0]?.body ?? "";
+    expect(body).toContain("## Risk & Security");
+    expect(body).toContain("EXEMPT not_applicable (loosening):");
+    expect(body).toContain("loosening: red_green not_applicable");
+    const review = r.runner.calls.find((c) => c.role === "review_plan");
+    expect(review?.prompt).toContain("restricts to only test/max.test.js, which the task text does not say");
+    expect(review?.prompt).toContain("red_green loosening: not_applicable");
+    expect(review?.prompt).toContain("EXEMPT not_applicable (loosening):");
+    expect(review?.system).toContain("must not be stricter than the task");
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.plan_checks).toEqual(expect.stringContaining("only test/max.test.js"));
+    expect(eventsOf(r, "gate_result").find((e) => e.data.check === "red_green")?.data.detail).toEqual(expect.stringContaining("EXEMPT not_applicable"));
   });
 
   it("bug flow: repro red on base and green on HEAD", async () => {

@@ -8,9 +8,14 @@ import { acquireRepoLock, repoLockHolder, repoLockPath, waitForRepoLock } from "
 import { validateResponses } from "../../src/pipeline/loop.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
+import { FakeRunner, type FakeStep } from "../../src/agents/fake-runner.js";
+import { EventLog, type FactoryEvent } from "../../src/events.js";
+import { loadProfile } from "../../src/schemas/profile.js";
+import { parseRepoConfig } from "../../src/schemas/repo.js";
 import { costLines } from "../../src/steps/finalize.js";
+import { formatGateResults } from "../../src/steps/gates.js";
 import { handoffShape, parseHandoff } from "../../src/steps/implement.js";
-import { extractPlanBlock, readTask, resolvePlanEffort } from "../../src/steps/intake.js";
+import { extractPlanBlock, obtainFastPlan, obtainPlan, readTask, resolvePlanEffort } from "../../src/steps/intake.js";
 
 describe("intake helpers", () => {
   it("plan effort: flag, then issue label, then high", () => {
@@ -125,6 +130,107 @@ describe("PR cost lines", () => {
       "- cost (metered providers): $0.2500",
     ]);
     expect(costLines([])).toEqual(["- cost (metered providers): $0.0000"]);
+  });
+});
+
+const MULTIPLY = "# Add a multiply function\n\nAdd a multiply function to src/math.js.\nmultiply(2, 3) returns 6.\n";
+
+const schemaInvalid = {
+  version: 1,
+  type: "feature",
+  goal: "Add a multiply function",
+  packages: [{ title: "multiply", files: ["src/math.js"] }],
+  acceptance: ["multiply(2, 3) returns 6"],
+};
+
+const faithful = {
+  version: 1,
+  type: "feature",
+  goal: "Add a multiply function",
+  context: "",
+  packages: [{ id: "P1", title: "multiply", files: ["src/math.js"], source_quote: "Add a multiply function to src/math.js." }],
+  acceptance: [{ id: "A1", package: "P1", text: "multiply(2, 3) returns 6", verify: "test", kind: "behavior", source_quote: "multiply(2, 3) returns 6." }],
+  out_of_scope: [],
+};
+
+function intake(steps: FakeStep[]) {
+  const dir = mkdtempSync(join(tmpdir(), "intake-"));
+  const events = new EventLog(dir, "r");
+  const seen: FactoryEvent[] = [];
+  events.onEvent((e) => seen.push(e));
+  const runner = new FakeRunner(steps);
+  const ctx = {
+    deps: {
+      runner,
+      github: new FakeGitHub(),
+      profile: loadProfile(join(import.meta.dirname, "../fixtures/profile.yaml")),
+      factoryHome: dir,
+      parentEnv: { PATH: process.env.PATH ?? "" },
+      sleep: async () => {},
+      now: () => Date.now(),
+      watchdogPollMs: 60_000,
+    },
+    repo: parseRepoConfig(""),
+    agentHome: dir,
+    events,
+    task: { ref: "t", title: "Add a multiply function", text: MULTIPLY, labels: [] as string[] },
+    repoDir: dir,
+    deadline: { at: Date.now() + 3_600_000 },
+  };
+  return { ctx, runner, seen };
+}
+
+describe("plan_normalize schema retry", () => {
+  it("feeds zod errors back once and records both attempts", async () => {
+    const { ctx, runner, seen } = intake([
+      { role: "plan_normalize", output: schemaInvalid },
+      { role: "plan_normalize", output: faithful },
+    ]);
+    const out = await obtainPlan(ctx, "none");
+    expect(out.kind).toBe("plan");
+    expect(runner.calls.map((c) => c.role)).toEqual(["plan_normalize", "plan_normalize"]);
+    expect(runner.calls[0]?.prompt).not.toContain("JSON schema for the failing fields:");
+    expect(runner.calls[0]?.prompt).toContain("plan schema shape");
+    expect(runner.calls[1]?.prompt).toMatch(/acceptance\.0:.*expected object, received string/);
+    expect(runner.calls[1]?.prompt).toContain("Return only one ```json block and no other text.");
+    expect(runner.calls[1]?.prompt).toContain("acceptance[]:");
+    expect(runner.calls[1]?.prompt).toContain('"verify"');
+    const attempts = seen.filter((e) => e.role === "plan_normalize" && e.data.attempts).map((e) => e.data.attempts);
+    expect(attempts.at(-1)).toEqual([
+      expect.objectContaining({ n: 1, ok: false, errors: expect.arrayContaining([expect.stringMatching(/acceptance\.0:.*expected object, received string/)]) }),
+      { n: 2, ok: true },
+    ]);
+  });
+
+  it("falls back only after the retry is also invalid, and the event lists both failures", async () => {
+    const { ctx, runner, seen } = intake([
+      { role: "plan_normalize", output: schemaInvalid },
+      { role: "plan_normalize", output: schemaInvalid },
+    ]);
+    const fast = await obtainFastPlan(ctx);
+    expect(fast.kind).toBe("escalate");
+    if (fast.kind === "escalate") expect(fast.reason).toMatch(/^plan_normalize output invalid/);
+    expect(runner.calls).toHaveLength(2);
+    const last = seen.filter((e) => Array.isArray(e.data.attempts)).at(-1);
+    expect(last?.data.attempts).toEqual([
+      expect.objectContaining({ n: 1, ok: false }),
+      expect.objectContaining({ n: 2, ok: false }),
+    ]);
+  });
+});
+
+describe("gate result lines", () => {
+  const row = (name: string, output_tail: string) => ({ name, kind: "builtin" as const, status: "pass" as const, duration_ms: 0, output_tail });
+
+  it("shows a red_green exemption and leaves an ordinary proof detail off the line", () => {
+    expect(formatGateResults([
+      row("red_green", "EXEMPT not_applicable (loosening): stabilizing a flaky test"),
+      row("config_guard", "loosening: red_green not_applicable — stabilizing a flaky test"),
+    ])).toBe([
+      "- ✅ red_green (builtin): EXEMPT not_applicable (loosening): stabilizing a flaky test",
+      "- ✅ config_guard (builtin): loosening: red_green not_applicable — stabilizing a flaky test",
+    ].join("\n"));
+    expect(formatGateResults([row("red_green", "repro fails on base\nrepro passes on HEAD")])).toBe("- ✅ red_green (builtin)");
   });
 });
 

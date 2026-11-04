@@ -4,7 +4,7 @@ import { extractJson } from "../agents/runner.js";
 import type { GitHub } from "../gh.js";
 import { type AgentCall, callAgent, type RunContext, type Task } from "../pipeline/context.js";
 import { asData, rolePrompt } from "../prompts.js";
-import { type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
+import { normalizeRetryNote, type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import { planStep } from "./plan.js";
 
 export type PlanEffort = "none" | "medium" | "high";
@@ -56,10 +56,13 @@ export type PlanOutcome =
 
 type IntakeContext = Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "task" | "repoDir" | "deadline">;
 
-/** `plan_normalize`: translate the text without adding content. Every quote is checked in code. */
+type NormalizeAttempt = { n: number; ok: boolean; errors?: string[] };
+
+/** `plan_normalize`: translate the text without adding content. Every quote is checked in code. One retry gets the schema errors; the event lists both attempts. */
 async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "invalid"; errors: string[] }> {
+  const attempts: NormalizeAttempt[] = [];
   let errors: string[] = [];
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let n = 1; n <= 2; n++) {
     const call: AgentCall = {
       role: "plan_normalize",
       cwd: ctx.repoDir,
@@ -67,18 +70,25 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
       system: rolePrompt("plan_normalize", ctx.deps.prompts),
       prompt: [
         asData("task", ctx.task.text),
-        "Return only plan.json (plan schema shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",
-        errors.length ? `Your previous output was rejected:\n- ${errors.join("\n- ")}` : "",
+        ctx.task.labels.length ? `Issue labels: ${ctx.task.labels.join(", ")}` : "",
+        errors.length
+          ? normalizeRetryNote(errors)
+          : "Return only plan.json (plan schema shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",
       ].filter(Boolean).join("\n\n"),
     };
     const res = await callAgent(ctx, "intake", call);
     const json = extractJson(res.text);
     const questions = QuestionsSchema.safeParse(json);
     if (questions.success) return { kind: "needs_input", questions: questions.data.questions };
-    const v = validatePlan(json, { repo: ctx.repo, sourceText: ctx.task.text });
-    if (v.ok) return { kind: "plan", plan: v.plan, source: "plan_normalize" };
+    const v = validatePlan(json, { repo: ctx.repo, sourceText: ctx.task.text, labels: ctx.task.labels });
+    if (v.ok) {
+      attempts.push({ n, ok: true });
+      ctx.events.emit({ step: "intake", event: "progress", role: "plan_normalize", data: { attempts } });
+      return { kind: "plan", plan: v.plan, source: "plan_normalize" };
+    }
     errors = json === undefined ? ["no JSON object in output"] : v.errors;
-    ctx.events.emit({ step: "intake", event: "progress", role: "plan_normalize", data: { rejected: errors } });
+    attempts.push({ n, ok: false, errors });
+    ctx.events.emit({ step: "intake", event: "progress", role: "plan_normalize", data: { attempt: n, rejected: errors, attempts } });
   }
   return { kind: "invalid", errors };
 }
@@ -90,7 +100,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
 export async function obtainFastPlan(ctx: IntakeContext): Promise<PlanOutcome | { kind: "escalate"; reason: string }> {
   const block = extractPlanBlock(ctx.task.text);
   if (block !== undefined) {
-    const v = validatePlan(block, { repo: ctx.repo });
+    const v = validatePlan(block, { repo: ctx.repo, labels: ctx.task.labels });
     if (v.ok) return { kind: "plan", plan: v.plan, source: "block" };
   }
   const n = await normalize(ctx);
@@ -101,7 +111,7 @@ export async function obtainFastPlan(ctx: IntakeContext): Promise<PlanOutcome | 
 export async function obtainPlan(ctx: IntakeContext, effort: PlanEffort): Promise<PlanOutcome> {
   const block = extractPlanBlock(ctx.task.text);
   if (block !== undefined) {
-    const v = validatePlan(block, { repo: ctx.repo });
+    const v = validatePlan(block, { repo: ctx.repo, labels: ctx.task.labels });
     if (v.ok) return { kind: "plan", plan: v.plan, source: "block" };
   }
   let level: "medium" | "high" = effort === "medium" ? "medium" : "high";

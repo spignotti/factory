@@ -14,6 +14,7 @@ import {
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { runBaselineGates } from "../baseline/gates.js";
 import { redGreenProof } from "../gates/redgreen.js";
+import { RED_GREEN_NEEDS_REASON, redGreenDecision, redGreenExemptDetail } from "../schemas/plan.js";
 import { selectChecks } from "../gates/select.js";
 import { gateCheckTimeoutMs, shTimedOut, watchCheck, type CheckPulse } from "../gates/timeout.js";
 import { resolveToolchains } from "../toolchains.js";
@@ -125,6 +126,13 @@ const fromBuiltin = (b: BuiltinResult): CheckResult => ({
   ...(b.timedOut ? { timed_out: true } : {}),
 });
 
+/** First line of a gate detail the PR body should show (skipped scanners, red-green exemption). */
+export function visibleGateDetail(output: string): string {
+  const head = output.split("\n")[0]?.trim() ?? "";
+  if (head.startsWith("SKIPPED") || head.startsWith("EXEMPT") || head.startsWith("loosening:")) return head;
+  return "";
+}
+
 /** Fast checks on a base commit: a timeout is inconclusive, a real failure is `base_red`. */
 export function baseCheckOutcome(results: CheckResult[]): { result: "base_red" | "needs_human"; reason: string } | undefined {
   const timed = results.filter((r) => r.status === "timeout").map((r) => r.name);
@@ -181,7 +189,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     testPresence(plan, packages, handoffs, changed, repo.tests.globs),
     evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
     guideUpdate(plan, packages, changed, repo),
-    configGuard({ plan, packages, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
+    configGuard({ plan, packages, labels: ctx.task.labels, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
     ...(await runBaselineGates({
       cwd: worktree,
       tier,
@@ -197,22 +205,29 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];
   if (plan.type === "bug" && first && packages.includes(first.id)) {
-    const proof = await redGreenProof({
-      worktree,
-      baseSha: ctx.baseSha,
-      files: reproFiles(plan, handoffs),
-      testCommand: repo.tests.run,
-      setup: repo.setup,
-      env,
-      gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
-      timeoutS: repo.tests.timeout_s,
-      deadline: ctx.deadline,
-      jail: (cwd) => jailFor(ctx, cwd),
-      onCheck,
-    });
-    checkDeadline(ctx);
-    reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
-    builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail, timedOut: proof.timedOut });
+    const decision = redGreenDecision(plan, ctx.task.labels);
+    if (decision.kind === "exempt") {
+      builtins.push({ name: "red_green", ok: true, detail: redGreenExemptDetail(decision.reason) });
+    } else if (decision.kind === "missing_reason") {
+      builtins.push({ name: "red_green", ok: false, detail: `loosening: ${RED_GREEN_NEEDS_REASON}` });
+    } else {
+      const proof = await redGreenProof({
+        worktree,
+        baseSha: ctx.baseSha,
+        files: reproFiles(plan, handoffs),
+        testCommand: repo.tests.run,
+        setup: repo.setup,
+        env,
+        gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
+        timeoutS: repo.tests.timeout_s,
+        deadline: ctx.deadline,
+        jail: (cwd) => jailFor(ctx, cwd),
+        onCheck,
+      });
+      checkDeadline(ctx);
+      reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
+      builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail, timedOut: proof.timedOut });
+    }
   }
   const all = [...checks, ...builtins.map(fromBuiltin)];
   const report: GateReport = {
@@ -226,6 +241,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   };
   writeJson(ctx, `gates-${report.n}.json`, report);
   for (const c of all) {
+    const detail = visibleGateDetail(c.output_tail);
     ctx.events.emit({
       step: "gates",
       event: "gate_result",
@@ -236,6 +252,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         kind: c.kind,
         status: c.status,
         ...(c.name === "max_diff_lines" && diffReport ? diffReport : {}),
+        ...(detail ? { detail } : {}),
       },
     });
   }
@@ -256,7 +273,8 @@ export function formatGateResults(checks: CheckResult[]): string {
   const lines = checks.map((c) => {
     const mark = c.status === "pass" ? "✅" : c.status === "flaky" ? "⚠️" : c.status === "timeout" ? "⏱️" : "❌";
     const flaky = c.status === "flaky" ? ", flaky" : c.status === "timeout" ? ", timed out" : "";
-    const detail = c.output_tail.startsWith("SKIPPED") ? `: ${c.output_tail.split("\n")[0]}` : "";
+    const shown = visibleGateDetail(c.output_tail);
+    const detail = shown ? `: ${shown}` : "";
     return `- ${mark} ${c.name} (${c.kind}${flaky})${detail}`;
   });
   if (skipped.length) lines.unshift(`Skipped security gates: ${skipped.join(", ")}`);
