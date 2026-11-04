@@ -13,6 +13,8 @@ export const StatusReportSchema = z.strictObject({
     z.strictObject({
       run_id: z.string(), repo: z.string(), task: z.string(), step: z.string(), lane: z.enum(["standard", "fast"]),
       pid: z.number().int(), minutes: z.number(), branch: nullableStr, pr: nullableStr,
+      /** Sandboxed check in flight (`null` when the run is not inside a check). */
+      check: z.string().nullable(),
     }),
   ),
   waiting: z.array(
@@ -33,6 +35,7 @@ export const StatusReportSchema = z.strictObject({
     z.strictObject({
       run_id: z.string(), repo: z.string(), task: z.string(), step: z.string(), lane: z.enum(["standard", "fast"]),
       pid: z.number().int(), minutes: z.number(), silent_minutes: z.number(), branch: nullableStr, pr: nullableStr,
+      check: z.string().nullable(),
     }),
   ),
   prs: z.array(

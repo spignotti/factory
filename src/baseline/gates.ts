@@ -2,6 +2,7 @@ import { tmpdir } from "node:os";
 import { redact } from "../events.js";
 import { sh, type ShResult } from "../exec.js";
 import type { BuiltinResult } from "../gates/builtin.js";
+import { watchCheck, type CheckPulse } from "../gates/timeout.js";
 import type { Toolchains } from "../toolchains.js";
 import { isNpmProject, isPnpmProject, isPythonProject, semgrepRulesDir } from "./spec.js";
 
@@ -110,6 +111,9 @@ export async function runBaselineGates(opts: {
   requireTools?: boolean;
   run?: (command: string) => Promise<ShResult>;
   binExists?: (bin: string) => Promise<boolean>;
+  /** Progress and heartbeat while a scanner command is running. */
+  onCheck?: (e: CheckPulse) => void;
+  heartbeatMs?: number;
 }): Promise<BuiltinResult[]> {
   const planned = planBaselineGates({
     tier: opts.tier,
@@ -129,7 +133,7 @@ export async function runBaselineGates(opts: {
       out.push(opts.requireTools ? fail(gate.name, `${detail}; baseline.require_tools is on`) : pass(gate.name, detail));
       continue;
     }
-    const result = await run(gate.command);
+    const result = await watchCheck(gate.name, () => run(gate.command), { onCheck: opts.onCheck, heartbeatMs: opts.heartbeatMs });
     const detail = redact(result.output.trim(), opts.secrets ?? []).slice(-2000);
     if (result.output.includes("[factory] timed out after ")) {
       out.push(fail(gate.name, detail || "timed out"));

@@ -106,7 +106,14 @@ export async function syncBase(ctx: RunContext, step = "finalize"): Promise<{ ok
   const gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
   return gates.green
     ? { ok: true, reason: "", gates }
-    : { ok: false, reason: `base ${ctx.repo.base_branch} moved: gates red after merging it`, gates };
+    : { ok: false, reason: baseSyncFailureReason(ctx.repo.base_branch, gates), gates };
+}
+
+/** Why a post-merge gate run did not go green. A timeout is named as inconclusive, not as a red base. */
+export function baseSyncFailureReason(branch: string, gates: GateReport): string {
+  const timed = gates.checks.filter((c) => c.status === "timeout").map((c) => c.name);
+  if (timed.length) return `base ${branch} moved: ${timed.join(", ")} timed out (inconclusive, not a red result)`;
+  return `base ${branch} moved: gates red after merging it`;
 }
 
 /**

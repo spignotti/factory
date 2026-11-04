@@ -7,7 +7,7 @@ import { type PackageStatus, runInDagOrder } from "../pipeline/dag.js";
 import { asData, taskBlock, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
 import type { Package } from "../schemas/plan.js";
-import { failureSummary, type GateReport, runGates } from "./gates.js";
+import { failureSummary, gateAttemptReason, type GateReport, runGates } from "./gates.js";
 
 export const MAX_GATE_ATTEMPTS = 3;
 
@@ -163,8 +163,11 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
         ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "done", attempts: attempt } });
         return true;
       }
-      reason = `fast gates red after ${attempt} attempt(s)`;
-      prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${failureSummary(report)}\n\n${handoffShape(ctx, pkg.id)}`;
+      reason = gateAttemptReason(attempt, report);
+      const timeoutNote = report.checks.some((c) => c.status === "timeout")
+        ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
+        : "";
+      prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(report)}\n\n${handoffShape(ctx, pkg.id)}`;
     }
     failures[pkg.id] = reason;
     const firstOfBug = ctx.plan.type === "bug" && done.length === 0;

@@ -14,7 +14,12 @@ export const CheckSchema = z.object({
   name: z.string().min(1),
   run: z.string().min(1),
   tier: TierSchema,
-  /** Killed after this many minutes (default `limits.gate_timeout_minutes`, capped by remaining wall time). */
+  /**
+   * Wall-clock cap in seconds. Overrides `timeout_minutes` and `limits.gate_timeout_minutes`.
+   * The process tree is killed and the check is `timeout`, not a pass.
+   */
+  timeout_s: z.number().positive().optional(),
+  /** Killed after this many minutes when `timeout_s` is unset (default `limits.gate_timeout_minutes`). */
   timeout_minutes: z.number().positive().optional(),
   paths: z.array(z.string()).optional(),
   services: z.array(z.string()).optional(),
@@ -269,6 +274,11 @@ export const RepoConfigSchema = z
         // Command that runs specific test files; `{files}` is replaced by the space-separated paths.
         // Used for the red-green proof of bug plans.
         run: z.string().optional(),
+        /**
+         * Wall-clock cap for that command (base worktree and HEAD). Unset uses
+         * `limits.gate_timeout_minutes`. A timeout on base is inconclusive, not a red repro.
+         */
+        timeout_s: z.number().positive().optional(),
       })
       .default({ globs: [] }),
     sensitive_paths: z.array(z.string()).default([]),
@@ -307,8 +317,9 @@ export const RepoConfigSchema = z
         // Per agent bash command: killed after this, the model gets "Command timed out" and goes on.
         // Below stall_minutes, so a hung command (dev server, watch mode) ends before the watchdog.
         command_timeout_minutes: z.number().positive().default(10),
-        // Per gate check (and red-green proof): killed after this unless the check sets timeout_minutes.
-        gate_timeout_minutes: z.number().positive().default(20),
+        // Per gate check, base check and red-green proof: killed after this (600s) unless the check
+        // sets timeout_s or timeout_minutes. Capped by the remaining wall budget.
+        gate_timeout_minutes: z.number().positive().default(10),
         // CI on the base commit still running at the base check: wait up to this long for it to settle
         // (0 = no wait). Only red, or still pending after the wait, ends the run as base_red.
         base_ci_wait_minutes: z.number().min(0).max(120).default(20),
@@ -334,7 +345,7 @@ export const RepoConfigSchema = z
         max_wall_minutes: 240,
         stall_minutes: 15,
         command_timeout_minutes: 10,
-        gate_timeout_minutes: 20,
+        gate_timeout_minutes: 10,
         base_ci_wait_minutes: 20,
         base_red_resume_hours: 48,
         pr_ci_wait_minutes: 20,
