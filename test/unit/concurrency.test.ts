@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { concurrencyCheck } from "../../src/commands/doctor.js";
-import { acquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
+import { acquireRepoLock, acquireRepoLockWithRetry, attemptAcquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
+import { needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
 import { claimsConflict, pathsOverlap, touchesExclusive } from "../../src/pipeline/overlap.js";
 import { riskReasonLine, securityRows } from "../../src/pipeline/risk.js";
 import { validatePlan } from "../../src/schemas/plan.js";
@@ -197,5 +199,72 @@ describe("risk and host steps", () => {
     expect(concurrencyCheck(repo)).toEqual({ name: "concurrency", status: "ok", detail: "max_runs 1" });
     const parallel = parseRepoConfig("concurrency: { max_runs: 2 }\n");
     expect(concurrencyCheck(parallel).detail).toBe("max_runs 2; exclusive_paths (none)");
+  });
+
+  it("needsConcurrencyPathClaim when max_runs>1 or exclusive_paths set", () => {
+    expect(needsConcurrencyPathClaim(parseRepoConfig(""))).toBe(false);
+    expect(needsConcurrencyPathClaim(parseRepoConfig("concurrency: { max_runs: 2 }\n"))).toBe(true);
+    expect(needsConcurrencyPathClaim(parseRepoConfig('concurrency: { exclusive_paths: ["a/**"] }\n'))).toBe(true);
+  });
+
+  it("parallel slot acquires retry through brief alloc guard contention", async () => {
+    const dir = home();
+    const n = 12;
+    const held = await Promise.all(
+      Array.from({ length: n }, (_, i) => acquireRepoLockWithRetry(dir, REPO, `run-${i}`, { maxRuns: n })),
+    );
+    expect(held.every(Boolean)).toBe(true);
+    for (const r of held) r!();
+  });
+
+  it("attemptAcquire distinguishes a full repo from a busy alloc guard", () => {
+    const dir = home();
+    const a = acquireRepoLock(dir, REPO, "a", { maxRuns: 1 })!;
+    expect(attemptAcquireRepoLock(dir, REPO, "b", { maxRuns: 1 })).toEqual({ status: "unavailable" });
+    a();
+    expect(attemptAcquireRepoLock(dir, REPO, "b", { maxRuns: 1 }).status).toBe("acquired");
+  });
+
+  describe("alloc guard (NB1/NB2)", () => {
+    const guardOf = (dir: string) => join(dir, "locks", `${lockRepoKey(REPO)}.alloc`);
+    const withGuard = (dir: string, pid: number, ageMs = 0) => {
+      mkdirSync(join(dir, "locks"), { recursive: true });
+      writeFileSync(guardOf(dir), String(pid));
+      if (ageMs) {
+        const t = (Date.now() - ageMs) / 1000;
+        utimesSync(guardOf(dir), t, t);
+      }
+    };
+
+    it("a fresh guard of another live process is alloc_busy and stays untouched; retry succeeds once it is released", async () => {
+      const child = spawn("sleep", ["30"], { stdio: "ignore" });
+      try {
+        const dir = home();
+        withGuard(dir, child.pid!);
+        expect(attemptAcquireRepoLock(dir, REPO, "a", { maxRuns: 2 })).toEqual({ status: "alloc_busy" });
+        expect(readFileSync(guardOf(dir), "utf8")).toBe(String(child.pid));
+        setTimeout(() => rmSync(guardOf(dir), { force: true }), 30);
+        const rel = await acquireRepoLockWithRetry(dir, REPO, "a", { maxRuns: 2 });
+        expect(rel).toBeTypeOf("function");
+        rel!();
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("a guard of a dead process or older than 10 s is taken over", () => {
+      const dead = home();
+      withGuard(dead, 999_999_999);
+      const a = acquireRepoLock(dead, REPO, "a", { maxRuns: 2 });
+      expect(a).toBeTypeOf("function");
+      a!();
+      const old = home();
+      withGuard(old, process.pid === 1 ? 2 : 1, 60_000);
+      const b = acquireRepoLock(old, REPO, "b", { maxRuns: 2 });
+      expect(b).toBeTypeOf("function");
+      b!();
+      // released guard and no .stale leftovers
+      expect(readdirSync(join(old, "locks")).filter((n) => n.endsWith(".alloc") || n.endsWith(".stale"))).toEqual([]);
+    });
   });
 });

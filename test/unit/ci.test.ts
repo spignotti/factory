@@ -15,9 +15,12 @@ const write = (repo: string, path: string, text: string) => {
 
 describe("CI stub", () => {
   it("template: every PR, select → check matrix → done; done is red when selection failed", () => {
-    const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
-    expect(Object.keys(wf.on)).toEqual(["pull_request", "push", "workflow_dispatch"]);
-    expect(wf.on.pull_request).toBeNull(); // no branch filter: every PR
+    const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; concurrency: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
+    // no run on pushes to the base branch; no branch filter: every PR
+    expect(Object.keys(wf.on)).toEqual(["pull_request", "workflow_dispatch"]);
+    expect(wf.on.pull_request).toBeNull();
+    // only a newer push to the same PR cancels a run (a cancelled check on a commit reads as red)
+    expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
     expect(Object.keys(wf.jobs)).toEqual(["select", "check", "done"]);
     expect(wf.env.FACTORY).toBe("npx -y github:spignotti/factory#v1.2.3");
     const done = wf.jobs.done!;
@@ -35,12 +38,15 @@ describe("CI stub", () => {
     expect(wf.jobs.select!.steps.at(-1)!.run).toContain("$FACTORY gates --toolchains --json");
     const steps = wf.jobs.check!.steps;
     const tc = (k: string) => `fromJson(needs.select.outputs.toolchains).${k}`;
-    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v4", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "run"]);
+    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v4", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "actions/cache@v4", "run"]);
     expect(steps[1]).toMatchObject({ if: tc("pnpm"), with: { version: `\${{ ${tc("pnpm_version")} }}` } });
     expect(steps[2]).toMatchObject({ with: { "node-version": `\${{ ${tc("node")} }}` } });
     expect(steps[3]).toMatchObject({ if: `${tc("python")} != ''`, with: { "python-version": `\${{ ${tc("python")} }}` } });
     expect(steps[4]).toMatchObject({ if: tc("uv"), with: { version: `\${{ ${tc("uv_version")} }}` } });
-    expect(steps[5]!.run).toBe('$FACTORY gates --run "$CHECK"');
+    // the npx install of the pinned factory is cached per ref, in select and in every check
+    expect(steps[5]).toMatchObject({ with: { path: "~/.npm/_npx", key: "factory-npx-${{ runner.os }}-${{ env.FACTORY }}" } });
+    expect(wf.jobs.select!.steps.some((s) => s.uses === "actions/cache@v4")).toBe(true);
+    expect(steps[6]!.run).toBe('$FACTORY gates --run "$CHECK"');
     // the required status is the job name GitHub Actions reports
     expect(Object.keys(wf.jobs)).toContain("done");
     expect(renderCiStub("v1.2.3")).not.toContain("factory / done");
@@ -87,7 +93,7 @@ describe("CI stub", () => {
     expect(await main(["ci-stub"], { out: (s) => void (pinned += s), err: () => {} })).toBe(0);
     const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
     expect(pinned).toBe(renderCiStub(`v${version}`)); // default pin: this factory's release tag
-    expect(defaultRef()).toBe("v0.3.0");
+    expect(defaultRef()).toBe(`v${version}`); // follows package.json, so a release PR needs no test edit
   });
 });
 

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 /** `diff_exclude` globs that would switch the diff limits off entirely. */
 const CATCH_ALL = new Set(["*", "**", "**/*", "**/**", "*/**"]);
-import { DocsLookupSchema, RoleOverridesSchema } from "./profile.js";
+import { DocsLookupSchema, RoleOverridesSchema, THINKING_LEVELS } from "./profile.js";
 
 export const TierSchema = z.enum(["fast", "full", "manual"]);
 export type Tier = z.infer<typeof TierSchema>;
@@ -14,6 +14,8 @@ export const CheckSchema = z.object({
   name: z.string().min(1),
   run: z.string().min(1),
   tier: TierSchema,
+  /** Killed after this many minutes (default `limits.gate_timeout_minutes`, capped by remaining wall time). */
+  timeout_minutes: z.number().positive().optional(),
   paths: z.array(z.string()).optional(),
   services: z.array(z.string()).optional(),
   /**
@@ -96,9 +98,64 @@ export const SecretsSchema = z.discriminatedUnion("provider", [
 ]);
 export type SecretsConfig = z.infer<typeof SecretsSchema>;
 
-/** Default and upper bound of proposals per harden ticket. */
+/** Default and upper bound of proposals per harden or audit ticket. */
 export const DEFAULT_MAX_PROPOSALS = 5;
 export const MAX_PROPOSALS_LIMIT = 10;
+
+/** Dimensions `factory audit` can judge. A repo enables a subset in `audit.types`. */
+export const AUDIT_TYPES = ["security", "performance", "refactor", "simplify"] as const;
+export const AuditTypeSchema = z.enum(AUDIT_TYPES);
+export type AuditType = z.infer<typeof AuditTypeSchema>;
+
+/** Reasoning level per audit type when `audit.thinking` omits a key. */
+export const DEFAULT_AUDIT_THINKING = {
+  security: "high",
+  performance: "high",
+  refactor: "medium",
+  simplify: "medium",
+} as const;
+
+const AuditThinkingSchema = z
+  .object({
+    security: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.security),
+    performance: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.performance),
+    refactor: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.refactor),
+    simplify: z.enum(THINKING_LEVELS).default(DEFAULT_AUDIT_THINKING.simplify),
+  })
+  .strict()
+  .default({ ...DEFAULT_AUDIT_THINKING });
+
+/** Upper bound of one `audit.focus.<type>` note, after a bullet list is joined. */
+export const AUDIT_FOCUS_MAX = 2_000;
+
+/**
+ * `audit.focus.<type>`: a short string, or a list of bullet points joined into one.
+ * Empty and unknown keys are rejected. The result is what that type's prompt receives.
+ */
+function auditFocusText(v: unknown): unknown {
+  if (typeof v === "string") return v.trim();
+  if (!Array.isArray(v)) return v;
+  const lines: string[] = [];
+  for (const item of v) {
+    if (typeof item !== "string") return v;
+    const text = item.trim();
+    if (!text) return v;
+    lines.push(text.startsWith("- ") ? text : `- ${text}`);
+  }
+  return lines.join("\n");
+}
+
+const AuditFocusTextSchema = z.preprocess(auditFocusText, z.string().min(1).max(AUDIT_FOCUS_MAX));
+
+const AuditFocusSchema = z
+  .object({
+    security: AuditFocusTextSchema.optional(),
+    performance: AuditFocusTextSchema.optional(),
+    refactor: AuditFocusTextSchema.optional(),
+    simplify: AuditFocusTextSchema.optional(),
+  })
+  .strict()
+  .default({});
 
 const ToolchainVersionSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._*/+-]{0,39}$/, "toolchain versions use letters, digits and . _ * / + -");
 
@@ -222,6 +279,8 @@ export const RepoConfigSchema = z
         // Per agent bash command: killed after this, the model gets "Command timed out" and goes on.
         // Below stall_minutes, so a hung command (dev server, watch mode) ends before the watchdog.
         command_timeout_minutes: z.number().positive().default(10),
+        // Per gate check (and red-green proof): killed after this unless the check sets timeout_minutes.
+        gate_timeout_minutes: z.number().positive().default(20),
         // CI on the base commit still running at the base check: wait up to this long for it to settle
         // (0 = no wait). Only red, or still pending after the wait, ends the run as base_red.
         base_ci_wait_minutes: z.number().min(0).max(120).default(20),
@@ -243,6 +302,7 @@ export const RepoConfigSchema = z
         max_wall_minutes: 240,
         stall_minutes: 15,
         command_timeout_minutes: 10,
+        gate_timeout_minutes: 20,
         base_ci_wait_minutes: 20,
         base_red_resume_hours: 48,
         pr_ci_wait_minutes: 20,
@@ -280,6 +340,20 @@ export const RepoConfigSchema = z
     harden: z
       .object({ max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS) })
       .default({ max_proposals: DEFAULT_MAX_PROPOSALS }),
+    /**
+     * `factory audit`. Absent (the default): no types are enabled and the command refuses without a model call.
+     * `thinking` overrides the role chain's thinking level for that type. `--max` overrides `max_proposals`.
+     * `focus.<type>` is an optional note injected only into that type's prompt. No secrets or customer data.
+     */
+    audit: z
+      .object({
+        types: z.array(AuditTypeSchema).default([]),
+        max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS),
+        thinking: AuditThinkingSchema,
+        focus: AuditFocusSchema,
+      })
+      .strict()
+      .default({ types: [], max_proposals: DEFAULT_MAX_PROPOSALS, thinking: { ...DEFAULT_AUDIT_THINKING }, focus: {} }),
     git: z
       .object({ author: z.string().default("factory"), email: z.string().optional() })
       .default({ author: "factory" }),

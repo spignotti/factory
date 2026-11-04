@@ -61,6 +61,9 @@ export function parseLayer(name: LayerName, source: string, text: string): Layer
       throw new ConfigError(`${name} profile ${source}: ${key} can only be set in the built-in or user profile (${userProfilePathHint})`);
     }
   }
+  if (parsed.data.gc !== undefined && name !== "built-in" && name !== "user") {
+    throw new ConfigError(`${name} profile ${source}: gc can only be set in the built-in or user profile (${userProfilePathHint})`);
+  }
   return { name, source, data: parsed.data };
 }
 

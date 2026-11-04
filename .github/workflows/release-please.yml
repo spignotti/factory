@@ -1,0 +1,28 @@
+# Release Please (pm point 251): keeps one release PR open that bumps package.json and CHANGELOG.md
+# from the conventional-commit squash titles on main. Merging that PR (a human, per the merge matrix)
+# makes this workflow tag v<version> and publish the GitHub release. It never deploys: the box deploy
+# (scripts/deploy-self.sh) follows main commits, not tags.
+# Pushes made with GITHUB_TOKEN start no workflows, so the release PR gets no `pull_request` CI and the
+# new tag no tag CI run: start `ci` by hand (`gh workflow run ci.yml --ref <release branch>`) before merging.
+name: release-please
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

@@ -119,7 +119,7 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   });
   let results: CheckResult[];
   try {
-    results = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, services });
+    results = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, services });
     const hide = [...secretValues, ...services.redactValues].sort((a, b) => b.length - a.length);
     results = results.map((r) => (hide.length && r.output_tail ? { ...r, output_tail: redact(r.output_tail, hide) } : r));
   } catch (e) {
@@ -131,7 +131,7 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   } finally {
     await services.stopAll();
   }
-  const green = results.every((r) => r.status !== "fail");
+  const green = results.every((r) => r.status !== "fail" && r.status !== "timeout");
   if (opts.json) io.out(JSON.stringify({ green, checks: results }) + "\n");
   else for (const r of results) io.out(`${r.status.padEnd(5)} ${r.name}${r.output_tail ? "\n" + r.output_tail : ""}\n`);
   return green ? 0 : 1;

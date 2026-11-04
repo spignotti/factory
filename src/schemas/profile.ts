@@ -79,6 +79,10 @@ export const PROFILE_ROLES = [
   "evaluate",
   "pr_writer",
   "harden",
+  "audit_security",
+  "audit_performance",
+  "audit_refactor",
+  "audit_simplify",
 ] as const;
 export type ProfileRole = (typeof PROFILE_ROLES)[number];
 
@@ -158,9 +162,23 @@ export const DEFAULT_DOCS_STEPS: DocsStep[] = ["plan", "implement", "fix"];
 export const DocsLookupSchema = z.object({ roles: z.array(z.enum(DOCS_STEPS)) }).strict();
 export type DocsLookup = z.infer<typeof DocsLookupSchema>;
 
+const GcRetentionLayerSchema = z
+  .object({
+    dry_run: z.boolean().optional(),
+    home_hours: z.number().min(0).optional(),
+    worktree_failed_days: z.number().min(0).optional(),
+    worktree_resume_days: z.number().min(0).optional(),
+    metadata_days: z.number().min(0).optional(),
+    metadata_failed_days: z.number().min(0).optional(),
+    metadata_min_per_repo: z.number().int().min(0).optional(),
+    archive_tarball_days: z.number().min(0).optional(),
+  })
+  .strict();
+
 export const ProfileSchema = z
   .object({
     roles: RolesSchema,
+    gc: z.object({ retention: GcRetentionLayerSchema.optional() }).optional(),
     providers: ProvidersSchema.default(DEFAULT_PROVIDERS),
     /** Billing kind per provider (subscription → tokens in reports, metered → USD). */
     billing: BillingSchema.default({ ...DEFAULT_BILLING }),
@@ -208,6 +226,7 @@ export type RoleOverrides = z.infer<typeof RoleOverridesSchema>;
 export const ProfileLayerSchema = z
   .object({
     roles: RoleOverridesSchema.optional(),
+    gc: z.object({ retention: GcRetentionLayerSchema.optional() }).optional(),
     retry: RetrySchema.partial().optional(),
     env: z.record(z.string(), z.array(z.string())).optional(),
     providers: ProvidersSchema.partial().optional(),

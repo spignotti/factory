@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { OpenAuditTicketSchema } from "./proposal.js";
 
 /**
  * Output contracts of `status`, `stats`, `gc` and `doctor` (`--json`). Strict: a field added in code
@@ -21,12 +22,27 @@ export const StatusReportSchema = z.strictObject({
     }),
   ),
   interrupted: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), step: z.string() })),
+  queued: z.array(
+    z.strictObject({
+      run_id: z.string(), repo: z.string(), task: z.string(), holder_run_id: nullableStr, holder_pid: z.number().int().nullable(),
+      minutes: z.number(),
+    }),
+  ),
+  orphaned: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), step: z.string() })),
+  stalled: z.array(
+    z.strictObject({
+      run_id: z.string(), repo: z.string(), task: z.string(), step: z.string(), lane: z.enum(["standard", "fast"]),
+      pid: z.number().int(), minutes: z.number(), silent_minutes: z.number(), branch: nullableStr, pr: nullableStr,
+    }),
+  ),
   prs: z.array(
     z.strictObject({
       run_id: z.string(), repo: z.string(), task: z.string(), pr: z.string(), state: z.enum(["open", "unknown"]), draft: z.boolean().nullable(),
       merge_policy: nullableStr, risk: nullableStr, result: nullableStr, error: z.string().optional(),
     }),
   ),
+  /** Open audit proposals, one row per proposal, across every repo in `$FACTORY_HOME`. */
+  audit_tickets: z.array(OpenAuditTicketSchema),
 });
 
 const quantiles = z.strictObject({ median: z.number().nullable(), p90: z.number().nullable() });
@@ -69,6 +85,8 @@ export const StatsReportSchema = z.strictObject({
   current: StatsPeriodSchema,
   previous: StatsPeriodSchema,
   delta: z.strictObject({ runs: z.number().int(), done_rate: z.number().nullable(), cost_usd: z.number(), subscription_tokens: z.number(), median_rounds: z.number().nullable() }),
+  /** Open audit proposals. With `--repo`, only that repository. */
+  audit_tickets: z.array(OpenAuditTicketSchema),
 });
 
 export const GcReportSchema = z.strictObject({
@@ -87,8 +105,18 @@ export const GcReportSchema = z.strictObject({
   evidence: z.array(z.strictObject({ repo: z.string(), removed: z.array(z.string()), note: z.string().optional() })).default([]),
   // needs_input left unanswered for the working-day timeout: abandoned, lock released, worktree removed.
   abandoned: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), reason: z.string(), notified: z.boolean() })).default([]),
-  // Run directories past the archive retention, reduced to the result summary and logs.
-  archived: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), removed: z.array(z.string()) })).default([]),
+  /** Sandbox agent homes removed from terminal runs. */
+  home_removed: z
+    .array(z.strictObject({ run_id: z.string(), repo: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
+    .default([]),
+  /** Run metadata moved to `$FACTORY_HOME/archive/runs/<id>.tar.gz`. */
+  metadata_moved: z
+    .array(z.strictObject({ run_id: z.string(), repo: z.string(), tarball: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
+    .default([]),
+  /** Purged paths under `$FACTORY_HOME/archive/runs`. */
+  archive_purged: z.array(z.strictObject({ path: z.string(), bytes: z.number().int().min(0), reason: z.string() })).default([]),
+  worktree_pruned: z.array(z.strictObject({ repo: z.string() })).default([]),
+  log_path: z.string().optional(),
 });
 
 export const DoctorReportSchema = z.strictObject({

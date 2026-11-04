@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { defaultRef, renderCiStub } from "./ci.js";
 
@@ -17,8 +17,9 @@ import { autoGc, gcCommand } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
+import { auditCommand } from "./commands/audit.js";
 import { hardenCommand } from "./commands/harden.js";
-import { MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
+import { AUDIT_TYPES, type AuditType, MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { isBaseRedWaiting, resumeFactory, runFactory, sweepBaseRed } from "./pipeline/run.js";
@@ -27,14 +28,18 @@ import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
 import { asset } from "./prompts.js";
-import { notifyTest, flushNotifyOutbox } from "./notify.js";
+import { notifyTest, flushNotifyOutbox, requireNotifyHook, requireNotifyTarget } from "./notify.js";
 
 const USAGE = `usage:
   factory --version
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
               [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
-  factory resume <run-id> [--wait] [--no-pr] [--profile <file>]
+              [--notify <target>] [--no-notify]
+              (refuse to start without a notify hook for the repo unless --no-notify;
+               --notify names a targets: entry in notify.yaml, stored on the run)
+  factory resume <run-id> [--wait] [--no-pr] [--profile <file>] [--notify <target>]
+              (--notify overrides the target stored on the run; omitted reuses it)
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
   factory abandon <run-id> [--json]
               (marks the run abandoned, releases a stale lock, removes its worktree; result and logs stay)
@@ -47,10 +52,10 @@ const USAGE = `usage:
               (running, waiting for a human, interrupted runs; open factory PRs)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one)
-  factory gc [--dry-run] [--force] [--retention-days N] [--strip-after-hours N] [--archive-days N] [--json]
+  factory gc [--dry-run] [--scheduled] [--force] [--retention-days N] [--strip-after-hours N] [--archive-days N] [--json]
               (worktree and branch of merged/closed PRs; needs_input unanswered for 2 working days
                (Mon-Fri, Europe/Berlin) is abandoned and the owner notified; run dirs idle for
-               --archive-days (default 14) keep the result summary and logs; a base_red run whose
+               --archive-days (default 90) overrides metadata tarball retention; use factory gc --scheduled for cron (see docs/GC_RETENTION.md)
                base CI is green again is resumed, within limits.base_red_resume_hours)
   factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--repo <path>] [--json]
               (--run starts the services its checks need; with CI set, local_only checks are not selected;
@@ -69,8 +74,14 @@ const USAGE = `usage:
               (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
                $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
                default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
-  factory notify test <owner/name>
-              (one test POST to the repo's webhook from $FACTORY_HOME/notify.yaml; doctor lists the configured repos)
+  factory audit --repo <path> --type security|performance|refactor|simplify [--max <1-10>] [--profile <file>] [--json]
+              (one read-only session; ticket proposals/<date>-audit-<type>.json with up to --max
+               (repo.yaml audit.max_proposals, default 5) ranked plans when --type is listed in audit.types;
+               otherwise exit 1 and no model call; audit.focus.<type> is an optional note added only to
+               that type's prompt; each plan is its own run/PR)
+  factory notify test <owner/name> [--target <name>]
+              (one test POST to the repo's webhook, or to a named target, from $FACTORY_HOME/notify.yaml;
+               doctor lists configured repos and target names, never URLs)
   factory notify flush [--json]
               (retry pending notifications from $FACTORY_HOME/outbox/; also runs at the start of every run and resume)
   factory ci-stub [--ref <tag>]
@@ -267,6 +278,33 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         await runner.close();
       }
     }
+    if (command === "audit") {
+      const { values } = parseArgs({
+        args: rest,
+        options: { repo: { type: "string" }, type: { type: "string" }, max: { type: "string" }, profile: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      const max = values.max === undefined ? undefined : Number(values.max);
+      const typeOk = values.type !== undefined && (AUDIT_TYPES as readonly string[]).includes(values.type);
+      if (!values.repo || !typeOk || (max !== undefined && !(Number.isInteger(max) && max >= 1 && max <= MAX_PROPOSALS_LIMIT))) {
+        io.err(USAGE);
+        return 2;
+      }
+      const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
+      const runner = new PiRunner(join(factoryHome, "pi"));
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      try {
+        return await auditCommand(
+          { repo: values.repo, type: values.type as AuditType, json: values.json, ...(max ? { max } : {}) },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
+          io,
+        );
+      } finally {
+        uninstall();
+        await runner.close();
+      }
+    }
     if (command === "ci-stub") {
       const { values } = parseArgs({ args: rest, options: { ref: { type: "string" } } });
       io.out(renderCiStub(values.ref ?? defaultRef()));
@@ -300,12 +338,21 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         }
         return report.remaining > 0 || report.failed > 0 ? 1 : 0;
       }
-      const [repo, ...extra] = subRest;
-      if (sub !== "test" || !repo || extra.length) {
+      if (sub !== "test") {
         io.err(USAGE);
         return 2;
       }
-      const r = await notifyTest(repo, { factoryHome: factoryHomeOf() });
+      const { values, positionals } = parseArgs({
+        args: subRest,
+        allowPositionals: true,
+        options: { target: { type: "string" } },
+      });
+      const repo = positionals[0];
+      if (!repo || positionals.length !== 1) {
+        io.err(USAGE);
+        return 2;
+      }
+      const r = await notifyTest(repo, { factoryHome: factoryHomeOf(), notifyTarget: values.target });
       (r.ok ? io.out : io.err)(`${r.ok ? "" : "factory: "}${r.message}\n`);
       return r.ok ? 0 : 1;
     }
@@ -340,6 +387,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         args: rest,
         options: {
           "dry-run": { type: "boolean", default: false },
+          scheduled: { type: "boolean", default: false },
           force: { type: "boolean", default: false },
           "retention-days": { type: "string" },
           "strip-after-hours": { type: "string" },
@@ -359,6 +407,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           factoryHome,
           github: new GhCli(),
           dryRun: values["dry-run"],
+          scheduled: values.scheduled,
           force: values.force,
           retentionDays: num("retention-days", values["retention-days"]),
           stripAfterHours: num("strip-after-hours", values["strip-after-hours"]),
@@ -383,6 +432,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           "plan-effort": { type: "string" },
           "no-pr": { type: "boolean", default: false },
           wait: { type: "boolean", default: false },
+          "no-notify": { type: "boolean", default: false },
+          notify: { type: "string" },
           profile: { type: "string" },
         },
       });
@@ -394,6 +445,20 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
       if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = factoryHomeOf();
+      if (values.notify !== undefined) {
+        const named = await requireNotifyTarget(factoryHome, values.notify);
+        if (!named.ok) {
+          io.err(`factory: ${named.message}\n`);
+          return 2;
+        }
+      }
+      if (!values["no-notify"]) {
+        const hook = await requireNotifyHook(factoryHome, resolve(values.repo));
+        if (!hook.ok) {
+          io.err(`factory: ${hook.message}\n`);
+          return 2;
+        }
+      }
       // Best effort, bounded, never fails the run; FACTORY_NO_AUTO_GC=1 turns it off.
       if (process.env.FACTORY_NO_AUTO_GC !== "1") await autoGc({ factoryHome, github: new GhCli(), log: io.err });
       await sweepBaseRedRuns(factoryHome, io);
@@ -412,8 +477,18 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             planEffort: effort as "none" | "medium" | "high" | undefined,
             noPr: values["no-pr"],
             wait: values.wait,
+            notifyTarget: values.notify,
           },
-          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
+          {
+            runner,
+            github: new GhCli(),
+            profile,
+            sandbox: sandboxFor(profile, io),
+            factoryHome,
+            signal: controller.signal,
+            docs: Context7Client.fromEnv(process.env),
+            noNotify: values["no-notify"],
+          },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);
@@ -429,6 +504,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         options: {
           wait: { type: "boolean", default: false },
           "no-pr": { type: "boolean" },
+          notify: { type: "string" },
           profile: { type: "string" },
         },
       });
@@ -437,6 +513,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         return 2;
       }
       const factoryHome = factoryHomeOf();
+      if (values.notify !== undefined) {
+        const named = await requireNotifyTarget(factoryHome, values.notify);
+        if (!named.ok) {
+          io.err(`factory: ${named.message}\n`);
+          return 2;
+        }
+      }
       const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
       const runner = new PiRunner(join(factoryHome, "pi"));
       const controller = new AbortController();
@@ -444,7 +527,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       try {
         const result = await resumeFactory(
           positionals[0]!,
-          { wait: values.wait, noPr: values["no-pr"] },
+          { wait: values.wait, noPr: values["no-pr"], notifyTarget: values.notify },
           { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
         );
         io.out(JSON.stringify(result) + "\n");

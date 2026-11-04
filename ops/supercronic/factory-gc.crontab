@@ -1,0 +1,4 @@
+# Daily factory gc (supercronic). Uses profile `gc.retention.dry_run` until you flip it after log review.
+# Install on the box: own supercronic program under supervisord, see docs/GC_RETENTION.md "Scheduling".
+# --scheduled never forces and applies gc.retention.dry_run; gc.log gets one JSON line per run.
+30 4 * * * /bin/sh -lc 'FACTORY_HOME=${FACTORY_HOME:-$HOME/.factory} exec "$HOME/.local/bin/factory" gc --scheduled --json >>"$FACTORY_HOME/gc.cron.log" 2>&1'

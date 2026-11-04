@@ -22,7 +22,7 @@ describe("red-green proof", () => {
     const { dir, baseSha } = setup();
     writeFileSync(join(dir, "test/max.test.js"), REPRO);
     writeFileSync(join(dir, "src/math.js"), "export const sum = (a, b) => a + b;\nexport const max = (a, b) => (a > b ? a : b);\n");
-    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", env });
+    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", gateTimeoutMinutes: 20, env });
     expect(r).toMatchObject({ ok: true, redOnBase: true, greenOnHead: true });
     expect(gitIn(dir, "worktree", "list").trim().split("\n")).toHaveLength(1);
   });
@@ -30,7 +30,7 @@ describe("red-green proof", () => {
   it("rejects a repro that passes on base", async () => {
     const { dir, baseSha } = setup();
     writeFileSync(join(dir, "test/sum2.test.js"), `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { sum } from "../src/math.js";\ntest("s", () => assert.equal(sum(2, 2), 4));\n`);
-    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/sum2.test.js"], testCommand: "node --test {files}", env });
+    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/sum2.test.js"], testCommand: "node --test {files}", gateTimeoutMinutes: 20, env });
     expect(r).toMatchObject({ ok: false, redOnBase: false, greenOnHead: true });
     expect(r.detail).toMatch(/does not reproduce/);
   });
@@ -38,14 +38,14 @@ describe("red-green proof", () => {
   it("rejects a repro that still fails on HEAD", async () => {
     const { dir, baseSha } = setup();
     writeFileSync(join(dir, "test/max.test.js"), REPRO);
-    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", env });
+    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", gateTimeoutMinutes: 20, env });
     expect(r).toMatchObject({ ok: false, redOnBase: true, greenOnHead: false });
   });
 
   it("rejects missing repro evidence or test command", async () => {
     const { dir, baseSha } = setup();
-    expect(await redGreenProof({ worktree: dir, baseSha, files: [], testCommand: "x", env })).toMatchObject({ ok: false, inconclusive: true });
-    expect((await redGreenProof({ worktree: dir, baseSha, files: ["a"], testCommand: undefined, env })).ok).toBe(false);
+    expect(await redGreenProof({ worktree: dir, baseSha, files: [], testCommand: "x", gateTimeoutMinutes: 20, env })).toMatchObject({ ok: false, inconclusive: true });
+    expect((await redGreenProof({ worktree: dir, baseSha, files: ["a"], testCommand: undefined, gateTimeoutMinutes: 20, env })).ok).toBe(false);
   });
 });
 
@@ -53,7 +53,7 @@ describe("red-green proof environment", () => {
   it("runs setup in the base worktree; a failing setup is inconclusive, not a red base", async () => {
     const { dir, baseSha } = setup();
     writeFileSync(join(dir, "test/max.test.js"), REPRO);
-    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", setup: "exit 3", env });
+    const r = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", setup: "exit 3", gateTimeoutMinutes: 20, env });
     expect(r).toMatchObject({ ok: false, inconclusive: true, redOnBase: false });
     expect(r.detail).toMatch(/setup failed/);
   });

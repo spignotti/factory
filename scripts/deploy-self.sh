@@ -3,7 +3,7 @@
 #
 #   deploy-self.sh once     check origin/main once; build + switch when it moved (default).
 #                           Prints one `deploy: <result> …` line; exit 0 deployed/up_to_date,
-#                           1 error/build_failed, 3 deferred (a run is active) or busy
+#                           1 error/build_failed, 3 busy (another deploy holds the lock)
 #   deploy-self.sh daemon   loop: `once` every FACTORY_DEPLOY_INTERVAL seconds (singleton)
 #   deploy-self.sh ensure   start the daemon in the background unless it already runs
 #   deploy-self.sh status   print the state JSON
@@ -17,11 +17,13 @@
 #
 # A release is built (pnpm install --frozen-lockfile, pnpm build) and smoke-tested
 # (./dist/cli.js --version, run through its shebang) in its own directory; a failed build changes nothing. The switch
-# (rename of the `current` and bin symlinks) only happens when no factory run holds a live lock
-# and no factory process runs; otherwise the next tick retries. Running processes are unaffected
-# either way: node resolves the entry symlink to its real path, so a run started from release A
-# keeps loading A's files after `current` points at B. Old releases (beyond the newest
-# FACTORY_DEPLOY_KEEP) are pruned only while nothing runs.
+# (rename of the `current`, bin and lib symlinks) happens as soon as that succeeds, even while factory
+# runs are active. Running processes are unaffected: node resolves the entry symlink to its real path,
+# so a run started from release A keeps loading A's files after `current` points at B. Old releases
+# (beyond the newest FACTORY_DEPLOY_KEEP) are pruned on each check, including while runs are active,
+# except a release a running process still names (command line or working directory) or that a live
+# lock's process still has open. Those stay until a later check sees them unused. When a live lock's
+# process cannot be inspected, nothing is pruned.
 set -euo pipefail
 
 SRC=${FACTORY_DEPLOY_SRC:-$HOME/.local/share/factory}
@@ -34,8 +36,10 @@ BRANCH=${FACTORY_DEPLOY_BRANCH:-main}
 KEEP=${FACTORY_DEPLOY_KEEP:-3}
 INTERVAL=${FACTORY_DEPLOY_INTERVAL:-300}
 BUILD=${FACTORY_DEPLOY_BUILD:-pnpm install --frozen-lockfile && pnpm build}
-# Factory processes that block a switch (entry via the bin link or any release/checkout dist).
-PROC_RE=${FACTORY_DEPLOY_PROC_RE:-(\.local/bin/factory|factory-releases/[^ ]*/scripts/factory|factory-releases/[^ ]*/dist/cli\.js|share/factory/dist/cli\.js)( |$)}
+# Filled by collect_in_use: releases a process or live lock still uses, and why prune must wait.
+IN_USE=""
+PRUNE_BLOCK_REASON=""
+REL_REAL=""
 
 resolve_node_sh() {
   if [ -n "${FACTORY_RESOLVE_NODE:-}" ] && [ -f "$FACTORY_RESOLVE_NODE" ]; then printf '%s' "$FACTORY_RESOLVE_NODE"; return; fi
@@ -70,7 +74,7 @@ state() {
   printf '%s' "$json" | jq "${args[@]}" "$filter" >"$STATE.tmp" && mv -f "$STATE.tmp" "$STATE"
 }
 
-# One summary line on stdout per `once`; exit codes: 0 deployed/up_to_date, 1 error/build_failed, 3 deferred/busy.
+# One summary line on stdout per `once`; exit codes: 0 deployed/up_to_date, 1 error/build_failed, 3 busy.
 result() { printf 'deploy: %s\n' "$*"; }
 
 die() {
@@ -100,18 +104,6 @@ live_locks() {
     pid=$(head -n1 "$f" 2>/dev/null || true)
     if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then echo "$(basename "$f"):$pid"; fi
   done
-}
-
-factory_procs() {
-  pgrep -f -- "$PROC_RE" 2>/dev/null | grep -vx "$$" || true
-}
-
-# Prints why a switch must wait, or nothing when idle.
-busy_reason() {
-  local locks procs
-  locks=$(live_locks | tr '\n' ' ')
-  procs=$(factory_procs | tr '\n' ' ')
-  if [ -n "$locks" ]; then echo "live locks: $locks"; elif [ -n "$procs" ]; then echo "factory processes: $procs"; fi
 }
 
 current_sha() {
@@ -149,22 +141,149 @@ build_release() {
   printf '%s\n' "$v" >"$dir/.deploy-ok"
 }
 
+# Release sha when $1 is a path inside a built release directory, else nothing.
+path_sha() {
+  local path=$1 prefix rest sha
+  [ -n "$path" ] || return 0
+  for prefix in "$REL" "$REL_REAL"; do
+    [ -n "$prefix" ] || continue
+    case "$path" in
+      "$prefix"/*)
+        rest=${path#"$prefix"/}
+        sha=${rest%%/*}
+        if [[ "$sha" =~ ^[0-9a-f]{12}$ ]]; then printf '%s\n' "$sha"; fi
+        ;;
+    esac
+  done
+}
+
+add_in_use() {
+  local sha=$1
+  [[ "$sha" =~ ^[0-9a-f]{12}$ ]] || return 0
+  if [ -n "$IN_USE" ] && grep -qx "$sha" <<<"$IN_USE"; then return 0; fi
+  IN_USE="${IN_USE:+$IN_USE$'\n'}$sha"
+}
+
+scan_cmdline() {
+  local cmdf=$1 arg sha
+  [ -r "$cmdf" ] || return 0
+  while IFS= read -r -d '' arg || [ -n "${arg:-}" ]; do
+    [ -n "${arg:-}" ] || continue
+    while IFS= read -r sha; do
+      add_in_use "$sha"
+    done < <(path_sha "$arg")
+  done < <(cat "$cmdf" 2>/dev/null || true)
+}
+
+# /proc/<pid>/cwd is the directory inode, so a process that entered a release stays visible after the symlink moves.
+scan_cwd() {
+  local pid=$1 cwd sha
+  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+  [ -n "$cwd" ] || return 0
+  while IFS= read -r sha; do
+    add_in_use "$sha"
+  done < <(path_sha "$cwd")
+}
+
+scan_fds() {
+  local pid=$1 fd target sha
+  for fd in "/proc/$pid/fd"/*; do
+    [ -L "$fd" ] || continue
+    target=$(readlink "$fd" 2>/dev/null || true)
+    [ -n "$target" ] || continue
+    while IFS= read -r sha; do
+      add_in_use "$sha"
+    done < <(path_sha "$target")
+  done
+}
+
+# Populates IN_USE. Sets PRUNE_BLOCK_REASON when a live lock's process cannot be inspected:
+# pruning then would risk deleting the release that run still uses.
+collect_in_use() {
+  local cmdf pid line
+  IN_USE=""
+  PRUNE_BLOCK_REASON=""
+  REL_REAL=$(readlink -f "$REL" 2>/dev/null || true)
+  [ "$REL_REAL" = "$REL" ] && REL_REAL=""
+  if [ ! -d /proc ]; then
+    PRUNE_BLOCK_REASON="/proc unavailable"
+    return 0
+  fi
+  for cmdf in /proc/[0-9]*/cmdline; do
+    [ -e "$cmdf" ] || continue
+    scan_cmdline "$cmdf"
+    pid=${cmdf#/proc/}
+    pid=${pid%/cmdline}
+    scan_cwd "$pid"
+  done
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    pid=${line##*:}
+    # /proc files report size 0, so test the content, not `-s`.
+    if [ ! -r "/proc/$pid/cmdline" ] || [ -z "$(tr -d '\0' <"/proc/$pid/cmdline" 2>/dev/null | head -c1)" ]; then
+      PRUNE_BLOCK_REASON="live lock ${line%%:*} pid $pid cmdline unreadable"
+      return 0
+    fi
+    if ! readlink "/proc/$pid/cwd" >/dev/null 2>&1; then
+      PRUNE_BLOCK_REASON="live lock ${line%%:*} pid $pid cwd unreadable"
+      return 0
+    fi
+    if [ ! -d "/proc/$pid/fd" ] || [ ! -x "/proc/$pid/fd" ]; then
+      PRUNE_BLOCK_REASON="live lock ${line%%:*} pid $pid fd directory unreadable"
+      return 0
+    fi
+    scan_cmdline "/proc/$pid/cmdline"
+    scan_cwd "$pid"
+    scan_fds "$pid"
+  done < <(live_locks)
+  if [ -n "$IN_USE" ]; then IN_USE=$(printf '%s\n' "$IN_USE" | sed '/^$/d' | sort -u); fi
+}
+
+# Shas still in use, omitting $1 (the release just switched to). "none" when nothing else is.
+in_use_note() {
+  local skip=${1:-} line out=""
+  if [ -n "$PRUNE_BLOCK_REASON" ]; then
+    printf '%s' "unknown ($PRUNE_BLOCK_REASON)"
+    return 0
+  fi
+  if [ -n "$IN_USE" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      [ -n "$skip" ] && [ "$line" = "$skip" ] && continue
+      out="${out:+$out }$line"
+    done <<<"$IN_USE"
+  fi
+  printf '%s' "${out:-none}"
+}
+
 prune() {
-  local cur keep_list d name
+  local cur keep_list d name kept_extra=""
+  collect_in_use
+  if [ -n "$PRUNE_BLOCK_REASON" ]; then
+    log "prune skipped ($PRUNE_BLOCK_REASON)"
+    return 0
+  fi
   cur=$(current_sha)
   # `current` plus the newest KEEP-1 other built releases (by build time) stay.
   keep_list=$(find "$REL" -mindepth 2 -maxdepth 2 -name .deploy-ok -printf '%T@ %h\n' | sort -rn \
     | while read -r _ d; do name=$(basename "$d"); [ "$name" != "$cur" ] && echo "$name"; done | head -n "$((KEEP - 1))" || true)
   for d in "$REL"/*/; do
+    [ -d "$d" ] || continue
     name=$(basename "$d")
     [ "$name" = current ] && continue
     [ "$name" = "$cur" ] && continue
-    grep -qx "$name" <<<"$keep_list" && continue
+    [ -n "$keep_list" ] && grep -qx "$name" <<<"$keep_list" && continue
+    if [ -n "$IN_USE" ] && grep -qx "$name" <<<"$IN_USE"; then
+      kept_extra="${kept_extra:+$kept_extra }$name"
+      continue
+    fi
     [ -e "$d/.deploy-ok" ] || [ -e "$d/.git" ] || continue
     log "pruning release $name"
     git -C "$SRC" worktree remove --force "$d" >>"$LOG" 2>&1 || rm -rf "$d"
   done
   git -C "$SRC" worktree prune
+  if [ -n "$kept_extra" ]; then log "left in-use releases: $kept_extra"; fi
+  return 0
 }
 
 once() {
@@ -173,7 +292,7 @@ once() {
   flock -n 9 || { log "another deploy is running; skipping"; result "busy: another deploy is running"; return 3; }
   [ -d "$SRC/.git" ] || die "source clone $SRC missing (git clone https://github.com/spignotti/factory.git $SRC)"
 
-  local remote_sha cur reason
+  local remote_sha cur
   remote_sha=$(git -C "$SRC" ls-remote "$REMOTE" "refs/heads/$BRANCH" | cut -f1) || die "git ls-remote $REMOTE $BRANCH failed"
   [ -n "$remote_sha" ] || die "no refs/heads/$BRANCH on $REMOTE"
   remote_sha=${remote_sha:0:12}
@@ -181,6 +300,8 @@ once() {
   state "last_check=$(date -Iseconds)" "remote_sha=$remote_sha" "current=$cur"
 
   if [ "$cur" = "$remote_sha" ] && [ "$(readlink "$BIN" 2>/dev/null)" = "$REL/current/scripts/factory" ]; then
+    # A release kept for a run that has since exited is removed on this check, not only on the next switch.
+    prune
     state "last_result=up_to_date"
     result "up_to_date $cur ($(cat "$REL/$cur/.deploy-ok" 2>/dev/null))"
     return 0
@@ -193,14 +314,6 @@ once() {
     return 1
   fi
 
-  reason=$(busy_reason)
-  if [ -n "$reason" ]; then
-    log "release $remote_sha ready, switch deferred ($reason)"
-    state "last_result=deferred" "pending=$remote_sha" "deferred_reason=$reason"
-    result "deferred $remote_sha built, not switched ($reason); current stays ${cur:-none}"
-    return 3
-  fi
-
   swap_link "$remote_sha" "$REL/current"
   swap_link "$REL/current/scripts/factory" "$BIN"
   [ -z "$LIB_LINK" ] || swap_link "$REL/current" "$LIB_LINK"
@@ -211,7 +324,8 @@ once() {
   if [ -f "$REL/current/scripts/resolve-node.sh" ]; then
     cp "$REL/current/scripts/resolve-node.sh" "$REL/resolve-node.sh.tmp" && mv -f "$REL/resolve-node.sh.tmp" "$REL/resolve-node.sh"
   fi
-  log "switched current ${cur:-none} -> $remote_sha ($(cat "$REL/$remote_sha/.deploy-ok"))"
+  collect_in_use
+  log "switched current ${cur:-none} -> $remote_sha ($(cat "$REL/$remote_sha/.deploy-ok")); in-use releases left in place: $(in_use_note "$remote_sha")"
   state "last_result=deployed" "previous=$cur" "current=$remote_sha" "deployed_at=$(date -Iseconds)" "version=$(cat "$REL/$remote_sha/.deploy-ok")" "pending=" "last_error="
   result "deployed ${cur:-none} -> $remote_sha ($(cat "$REL/$remote_sha/.deploy-ok"))"
   prune

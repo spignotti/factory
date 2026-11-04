@@ -2,10 +2,11 @@
 # `factory doctor --repo .` compares this file's hash with the template for the pinned ref.
 # Render a new one with `factory ci-stub --ref <tag>`; bumping the ref is a deliberate PR.
 name: factory
+# No run on pushes to the base branch: the PR run already checked the merged tree, and a base commit
+# without check runs makes the factory run the fast checks locally instead. Draft PRs run too: a skipped
+# required check counts as passed, so skipping drafts would let a PR marked ready merge before its checks.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       tier:
@@ -13,9 +14,11 @@ on:
         default: manual
 permissions:
   contents: read
+# Only a newer push to the same PR cancels a run; a manual run is never cancelled (the factory counts a
+# cancelled check on a commit as red).
 concurrency:
   group: factory-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   FACTORY: "npx -y github:spignotti/factory#@FACTORY_REF@"
 jobs:
@@ -31,6 +34,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # The npx install of the pinned factory (git clone + build) is cached per pinned ref.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm/_npx
+          key: factory-npx-${{ runner.os }}-${{ env.FACTORY }}
       - id: s
         env:
           TIER: ${{ inputs.tier || 'full' }}
@@ -68,6 +76,10 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           version: ${{ fromJson(needs.select.outputs.toolchains).uv_version }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm/_npx
+          key: factory-npx-${{ runner.os }}-${{ env.FACTORY }}
       - env:
           CHECK: ${{ matrix.check }}
         run: $FACTORY gates --run "$CHECK"

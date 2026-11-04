@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { loadMemory, memoryDir, updateMemory } from "../../src/memory.js";
 import { listProposals, nextProposalId, type ProposalDraft, proposalsDir, saveProposal, writeProposal } from "../../src/proposals.js";
 import { type Proposal, ProposalSchema } from "../../src/schemas/proposal.js";
+import type { AuditType } from "../../src/schemas/repo.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 
 const REPO = "github.com/acme/app";
@@ -20,7 +21,7 @@ const plan = {
   resolves_findings: ["k1"],
 };
 
-function ticket(id: string, kind: Proposal["kind"] = "harden", n = 1): ProposalDraft {
+function ticket(id: string, kind: Proposal["kind"] = "harden", n = 1, type?: AuditType): ProposalDraft {
   return {
     version: 1,
     kind,
@@ -29,6 +30,7 @@ function ticket(id: string, kind: Proposal["kind"] = "harden", n = 1): ProposalD
     created_at: "2026-10-29T10:00:00.000Z",
     proposals: Array.from({ length: n }, (_, i) => ({
       status: "open" as const,
+      ...(type ? { type } : {}),
       rationale: `reason ${i + 1}`,
       plan: { ...plan, goal: `${plan.goal} ${i + 1}`, resolves_findings: [`k${i + 1}`] } as Proposal["proposals"][number]["plan"],
       references: { findings: [`k${i + 1}`], checklist: [] },
@@ -59,6 +61,10 @@ describe("proposal store", () => {
     writeProposal(home, ticket("2026-10-29"));
     expect(nextProposalId(dir, "2026-10-29", "harden")).toBe("2026-10-29-2");
     expect(nextProposalId(dir, "2026-10-29", "adopt")).toBe("2026-10-29-adopt");
+    expect(nextProposalId(dir, "2026-10-29", "audit", "security")).toBe("2026-10-29-audit-security");
+    writeProposal(home, ticket("2026-10-29-audit-security", "audit", 1, "security"));
+    expect(nextProposalId(dir, "2026-10-29", "audit", "security")).toBe("2026-10-29-audit-security-2");
+    expect(() => nextProposalId(dir, "2026-10-29", "audit")).toThrow(/type/);
   });
 
   it("skips unreadable files; rejects unknown fields, empty lists and wrong ranks or ids", () => {
@@ -71,6 +77,10 @@ describe("proposal store", () => {
     expect(ProposalSchema.safeParse({ ...t, proposals: [] }).success).toBe(false);
     expect(ProposalSchema.safeParse({ ...t, proposals: [t.proposals[1], t.proposals[0]] }).success).toBe(false);
     expect(ProposalSchema.safeParse({ ...t, proposals: [{ ...t.proposals[0], id: "x.1" }, t.proposals[1]] }).success).toBe(false);
+    const audit = writeProposal(home, ticket("2026-11-01-audit-security", "audit", 1, "security"));
+    expect(ProposalSchema.safeParse(audit).success).toBe(true);
+    expect(ProposalSchema.safeParse({ ...audit, proposals: [{ ...audit.proposals[0], type: undefined }] }).success).toBe(false);
+    expect(ProposalSchema.safeParse({ ...t, proposals: t.proposals.map((p) => ({ ...p, type: "security" })) }).success).toBe(false);
   });
 });
 
@@ -80,6 +90,43 @@ describe("repo.yaml harden.max_proposals", () => {
     expect(parseRepoConfig("harden: { max_proposals: 2 }\n").harden.max_proposals).toBe(2);
     expect(() => parseRepoConfig("harden: { max_proposals: 11 }\n")).toThrow();
     expect(() => parseRepoConfig("harden: { max_proposals: 0 }\n")).toThrow();
+  });
+});
+
+describe("repo.yaml audit", () => {
+  it("enables no types until configured, and defaults thinking and max_proposals", () => {
+    expect(parseRepoConfig("checks: []\n").audit).toEqual({
+      types: [],
+      max_proposals: 5,
+      thinking: { security: "high", performance: "high", refactor: "medium", simplify: "medium" },
+      focus: {},
+    });
+    const partial = parseRepoConfig("audit: { types: [security], thinking: { security: xhigh } }\n").audit;
+    expect(partial.types).toEqual(["security"]);
+    expect(partial.focus).toEqual({});
+    expect(partial.thinking).toMatchObject({ security: "xhigh", performance: "high", refactor: "medium", simplify: "medium" });
+    expect(() => parseRepoConfig("audit: { types: [lint] }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { max_proposals: 11 }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { extra: true }\n")).toThrow();
+  });
+
+  it("accepts audit.focus per type and rejects unknown keys, empty notes and overlong text", () => {
+    const note = "Privacy and GDPR: personal data in logs, fixtures, exports and retention.";
+    const cfg = parseRepoConfig(`audit:
+  types: [security]
+  focus:
+    security: ${JSON.stringify(note)}
+    performance:
+      - slow queries
+      - "- already a bullet"
+`).audit;
+    expect(cfg.focus).toEqual({ security: note, performance: "- slow queries\n- already a bullet" });
+    expect(cfg.focus.refactor).toBeUndefined();
+    expect(() => parseRepoConfig("audit: { focus: { lint: nope } }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { focus: { security: '' } }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { focus: { security: ['', 'x'] } }\n")).toThrow();
+    expect(() => parseRepoConfig("audit: { focus: { security: [] } }\n")).toThrow();
+    expect(() => parseRepoConfig(`audit: { focus: { security: ${JSON.stringify("x".repeat(2001))} } }\n`)).toThrow();
   });
 });
 

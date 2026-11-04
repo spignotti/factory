@@ -24,6 +24,7 @@ let env: NodeJS.ProcessEnv;
 let rel: string;
 let bin: string;
 let fhome: string;
+let kids: ReturnType<typeof spawn>[] = [];
 
 function commit(version: string, extra: Record<string, string> = {}): string {
   writeFileSync(join(upstream, "VERSION"), version);
@@ -47,8 +48,38 @@ const state = () => JSON.parse(readFileSync(join(rel, "state.json"), "utf8")) as
 // runs the bin link itself (shebang + exec bit), like a shell does
 const runBin = (...args: string[]) => execFileSync(bin, args, { encoding: "utf8" }).trim();
 const releases = () => readdirSync(rel).filter((n) => /^[0-9a-f]{12}$/.test(n));
+const logText = () => readFileSync(join(rel, "deploy.log"), "utf8");
+const hold = (child: ReturnType<typeof spawn>) => {
+  kids.push(child);
+  return child;
+};
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The factory launcher execs node on the same pid; wait until that command line names the release. */
+async function waitForCmdline(pid: number, needle: string): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    try {
+      if (readFileSync(`/proc/${pid}/cmdline`).includes(needle)) return;
+    } catch {
+      // process not visible yet
+    }
+    await sleep(50);
+  }
+  throw new Error(`pid ${pid} cmdline never contained ${needle}`);
+}
+async function waitForCwd(pid: number, dir: string): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    try {
+      if (readlinkSync(`/proc/${pid}/cwd`) === dir) return;
+    } catch {
+      // process not visible yet
+    }
+    await sleep(50);
+  }
+  throw new Error(`pid ${pid} cwd never became ${dir}`);
+}
 
 beforeEach(() => {
+  kids = [];
   tmp = mkdtempSync(join(tmpdir(), "deploy-self-"));
   upstream = join(tmp, "upstream");
   mkdirSync(upstream);
@@ -69,11 +100,13 @@ beforeEach(() => {
     FACTORY_DEPLOY_LIB_LINK: join(tmp, "lib", "node_modules", "factory"),
     FACTORY_HOME: fhome,
     FACTORY_DEPLOY_BUILD: BUILD,
-    FACTORY_DEPLOY_PROC_RE: `(${tmp}/bin/factory|${tmp}/releases/[^ ]*/dist/cli\\.js)( |$)`,
   };
 });
 
-afterEach(() => rmSync(tmp, { recursive: true, force: true }));
+afterEach(() => {
+  for (const p of kids) if (p.exitCode === null) p.kill();
+  rmSync(tmp, { recursive: true, force: true });
+});
 
 describe("scripts/deploy-self.sh", () => {
   it("builds the first release, links current and the bin, and is idempotent", () => {
@@ -104,43 +137,84 @@ describe("scripts/deploy-self.sh", () => {
     expect(state()).toMatchObject({ last_result: "build_failed", failed_sha: b, current: a });
   });
 
-  it("defers the switch while a factory run holds a live lock", () => {
-    const a = git(upstream, "rev-parse", "HEAD").slice(0, 12);
+  it("switches while an unrelated live lock is held", () => {
     deploy();
     const b = commit("1.0.0-b");
     mkdirSync(join(fhome, "locks"), { recursive: true });
     writeFileSync(join(fhome, "locks", "repo.lock"), `${process.pid}\nrun-1`);
     const d = deploy();
-    expect(d.status).toBe(3);
-    expect(d.stdout).toMatch(/^deploy: deferred /);
-    expect(state()).toMatchObject({ last_result: "deferred", pending: b });
-    expect(readlinkSync(join(rel, "current"))).toBe(a);
-    // a stale lock (dead pid) does not block
-    writeFileSync(join(fhome, "locks", "repo.lock"), `999999999\nrun-1`);
-    expect(deploy().status).toBe(0);
+    expect(d.status, d.stderr).toBe(0);
+    expect(d.stdout).toMatch(/^deploy: deployed /);
+    expect(state()).toMatchObject({ last_result: "deployed", current: b, pending: "" });
     expect(readlinkSync(join(rel, "current"))).toBe(b);
     expect(runBin("--version")).toBe("1.0.0-b");
+    // a stale lock (dead pid) does not change the result
+    writeFileSync(join(fhome, "locks", "repo.lock"), `999999999\nrun-1`);
+    expect(deploy().stdout).toMatch(/^deploy: up_to_date /);
   });
 
-  it("defers the switch while a factory process runs", async () => {
+  it("switches while a process runs on the old release and prunes it only after exit", async () => {
     deploy();
-    commit("1.0.0-b");
-    const p = spawn(bin, ["late", "1500"]);
-    await new Promise((r) => setTimeout(r, 200));
-    expect(deploy().status).toBe(3);
-    expect(state().last_result).toBe("deferred");
+    const a = readlinkSync(join(rel, "current"));
+    const p = hold(spawn(bin, ["late", "60000"], { stdio: "ignore" }));
+    await waitForCmdline(p.pid!, join(rel, a));
+    let last = "";
+    for (const v of ["b", "c", "d"]) {
+      last = commit(`1.0.0-${v}`);
+      const r = deploy();
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/^deploy: deployed /);
+    }
+    expect(readlinkSync(join(rel, "current"))).toBe(last);
+    expect(runBin("--version")).toBe("1.0.0-d");
+    expect(releases()).toContain(a);
+    expect(logText()).toMatch(new RegExp(`in-use releases left in place:.*\\b${a}\\b`));
+    p.kill();
     await new Promise((r) => p.on("exit", r));
+    const again = deploy();
+    expect(again.status, again.stderr).toBe(0);
+    expect(again.stdout).toMatch(/^deploy: up_to_date /);
+    expect(releases()).not.toContain(a);
+    expect(releases()).toHaveLength(3);
+    expect(logText()).toMatch(new RegExp(`pruning release ${a}`));
+  });
+
+  it("keeps a release a live lock's process was started from, then prunes it", async () => {
+    deploy();
+    const a = readlinkSync(join(rel, "current"));
+    // Command line does not name the release; the working directory does. The lock makes that process a run.
+    const p = hold(spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: join(rel, a), stdio: "ignore" }));
+    await waitForCwd(p.pid!, join(rel, a));
+    mkdirSync(join(fhome, "locks"), { recursive: true });
+    writeFileSync(join(fhome, "locks", "repo.lock"), `${p.pid}\nrun-1`);
+    let last = "";
+    const shas: string[] = [];
+    for (const v of ["b", "c", "d", "e"]) {
+      last = commit(`1.0.0-${v}`);
+      shas.push(last);
+      expect(deploy().status).toBe(0);
+    }
+    expect(readlinkSync(join(rel, "current"))).toBe(last);
+    expect(releases()).toContain(a);
+    // A live lock whose process is readable does not block pruning of unused releases (/proc reports size 0).
+    expect(logText()).not.toMatch(/prune skipped/);
+    expect(releases()).not.toContain(shas[0]);
+    p.kill();
+    await new Promise((r) => p.on("exit", r));
+    // The lock file is still there; its pid is dead, so it no longer protects the release.
+    expect(deploy().status).toBe(0);
+    expect(releases()).not.toContain(a);
+    expect(releases()).toHaveLength(3);
   });
 
   it("leaves a process started on the old release on its files after the switch", async () => {
     deploy();
     commit("1.0.0-b");
-    const p = spawn(bin, ["late", "1500"], { stdio: ["ignore", "pipe", "inherit"] });
+    const p = hold(spawn(bin, ["late", "1500"], { stdio: ["ignore", "pipe", "inherit"] }));
     let out = "";
-    p.stdout.on("data", (d) => (out += d));
-    await new Promise((r) => setTimeout(r, 300));
-    // switch while it runs (process detection disabled for this check)
-    expect(deploy("once", { FACTORY_DEPLOY_PROC_RE: "^no-such-process$" }).status).toBe(0);
+    p.stdout!.on("data", (d) => (out += d));
+    await waitForCmdline(p.pid!, join(realpathSync(rel)));
+    expect(deploy().status).toBe(0);
     expect(runBin("--version")).toBe("1.0.0-b");
     await new Promise((r) => p.on("exit", r));
     expect(out.trim()).toBe("1.0.0-a");

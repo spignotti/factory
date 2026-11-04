@@ -193,7 +193,7 @@ describe("Services on the host (no sandbox)", () => {
     const cwd = mkdtempSync(join(tmpdir(), "svc-wt-"));
     const repo = repoWith(WEB);
     const { svc, events, logDir } = services(repo, cwd);
-    const results = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", services: svc });
+    const results = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", gateTimeoutMinutes: 20, services: svc });
     expect(results.map((r) => [r.name, r.status])).toEqual([["web-test", "pass"], ["plain", "pass"]]);
     const port = Number((events.find((e) => e.action === "ports")!.data.ports as Record<string, number>).web);
     expect(port).toBeGreaterThanOrEqual(20100);
@@ -215,7 +215,7 @@ checks:
   - { name: b, run: "true", tier: fast, services: [bad] }
 `);
     const { svc } = services(repo, cwd);
-    const err = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", services: svc }).catch((e: Error) => e);
+    const err = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", gateTimeoutMinutes: 20, services: svc }).catch((e: Error) => e);
     expect(err).toBeInstanceOf(EnvMissing);
     expect((err as Error).message).toMatch(/env_missing: service bad exited with code 3[\s\S]*boom-detail/);
     await svc.stopAll();
@@ -230,7 +230,7 @@ checks:
     const { svc, events } = services(repo, cwd, undefined, (v) => void secrets.push(...v));
     const svc2 = new Services(repo, { runId: "r-base", logDir: join(cwd, "logs2"), cwd, env: { PATH: process.env.PATH! }, factoryHome: home(), pollMs: 100 });
     try {
-      const results = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", services: svc });
+      const results = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", gateTimeoutMinutes: 20, services: svc });
       expect(results[0]).toMatchObject({ name: "db-test", status: "pass" });
       expect(events.map((e) => e.action)).toEqual(["service_starting", "service_env", "service_ready"]);
       expect(events[0]!.data.ports).toEqual([port]);
@@ -251,7 +251,7 @@ checks:
 
   it("a check needing services without a service manager is env_missing", async () => {
     const repo = repoWith(WEB);
-    await expect(runChecks(repo.checks, { cwd: tmpdir(), env: {}, envCommand: "" })).rejects.toThrow(/needs services web/);
+    await expect(runChecks(repo.checks, { cwd: tmpdir(), env: {}, envCommand: "", gateTimeoutMinutes: 20 })).rejects.toThrow(/needs services web/);
   });
 });
 
@@ -269,12 +269,12 @@ describe.skipIf(!real)("Services in the sandbox (bwrap + pasta)", () => {
     const jail: Jail = { sandbox: real!, rw: [cwd], ro: [] };
     const { svc, events } = services(repo, cwd, jail);
     try {
-      const results = await runChecks(repo.checks.slice(0, 1), { cwd, env: { PATH: process.env.PATH! }, envCommand: "", services: svc, jail });
+      const results = await runChecks(repo.checks.slice(0, 1), { cwd, env: { PATH: process.env.PATH! }, envCommand: "", gateTimeoutMinutes: 20, services: svc, jail });
       expect(results[0]).toMatchObject({ name: "web-test", status: "pass" });
       expect(events.find((e) => e.action === "service_starting")!.data.sandboxed).toBe(true);
       // without the forward, a jailed check cannot reach it
       const blind = await runChecks([{ ...repo.checks[0]!, services: undefined }], {
-        cwd, env: { PATH: process.env.PATH!, WEB_URL: (await svc.envOf(["web"])).WEB_URL! }, envCommand: "", jail,
+        cwd, env: { PATH: process.env.PATH!, WEB_URL: (await svc.envOf(["web"])).WEB_URL! }, envCommand: "", gateTimeoutMinutes: 20, jail,
       });
       expect(blind[0]!.status).toBe("fail");
     } finally {
@@ -289,12 +289,12 @@ describe.skipIf(!real)("Services in the sandbox (bwrap + pasta)", () => {
     const jail: Jail = { sandbox: real!, rw: [cwd], ro: [] };
     const { svc, events, logDir } = services(repo, cwd, jail);
     try {
-      const results = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", services: svc, jail });
+      const results = await runChecks(repo.checks, { cwd, env: { PATH: process.env.PATH! }, envCommand: "", gateTimeoutMinutes: 20, services: svc, jail });
       expect(results[0]).toMatchObject({ name: "db-test", status: "pass" });
       expect(events.find((e) => e.action === "service_starting")!.data.sandboxed).toBe(false);
       // like an agent: same jail, no forwards, the URL known but not the key
       const blind = await runChecks([{ ...repo.checks[0]!, run: FETCH, services: undefined }], {
-        cwd, env: { PATH: process.env.PATH!, WEB_URL: `http://127.0.0.1:${port}/` }, envCommand: "", jail,
+        cwd, env: { PATH: process.env.PATH!, WEB_URL: `http://127.0.0.1:${port}/` }, envCommand: "", gateTimeoutMinutes: 20, jail,
       });
       expect(blind[0]!.status).toBe("fail");
       expect(readFileSync(join(logDir, "db.log"), "utf8")).not.toContain("host-key-value-123");

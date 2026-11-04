@@ -16,3 +16,7 @@ roles:
   evaluate:          [{ model: openai/gpt-6-luna, thinking: medium }]
   pr_writer:         [{ model: opencode-go/deepseek-v4.1-flash }]
   harden:            [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  audit_security:    [{ model: openai/gpt-6.1-sol, thinking: high }]
+  audit_performance: [{ model: openai/gpt-6.1-sol, thinking: high }]
+  audit_refactor:    [{ model: openai/gpt-6.1-sol, thinking: medium }]
+  audit_simplify:    [{ model: openai/gpt-6.1-sol, thinking: medium }]

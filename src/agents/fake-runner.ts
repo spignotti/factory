@@ -39,6 +39,7 @@ export interface FakeCall {
   tools: string;
   cwd: string;
   env: Record<string, string>;
+  system: string;
   prompt: string;
   sessionKey?: string;
   /** Names of the factory-process tools (browser, docs_lookup) the call had. */
@@ -101,6 +102,7 @@ export class FakeRunner implements AgentRunner {
       tools: req.tools,
       cwd: req.cwd,
       env: { ...req.env },
+      system: req.system,
       prompt: req.prompt,
       sessionKey: req.sessionKey,
       factoryTools: [req.browser, req.docs].flatMap((t) => t?.specs.map((s) => s.name) ?? []),

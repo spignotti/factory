@@ -14,6 +14,7 @@ import {
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { redGreenProof } from "../gates/redgreen.js";
 import { selectChecks } from "../gates/select.js";
+import { gateCheckTimeoutMs, shTimedOut } from "../gates/timeout.js";
 import { topoOrder } from "../pipeline/dag.js";
 import type { Deadline } from "../pipeline/budget.js";
 import { checkDeadline, commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
@@ -24,9 +25,10 @@ import type { Check, Tier } from "../schemas/repo.js";
 export interface CheckResult {
   name: string;
   kind: "check" | "builtin";
-  status: "pass" | "fail" | "flaky";
+  status: "pass" | "fail" | "flaky" | "timeout";
   duration_ms: number;
   output_tail: string;
+  timed_out?: boolean;
 }
 
 export interface GateReport {
@@ -51,9 +53,17 @@ export function withEnvCommand(run: string, envCommand: string): string {
  */
 export async function runChecks(
   checks: Check[],
-  opts: { cwd: string; env: Record<string, string>; envCommand: string; deadline?: Deadline; jail?: Jail; services?: Services },
+  opts: {
+    cwd: string;
+    env: Record<string, string>;
+    envCommand: string;
+    gateTimeoutMinutes: number;
+    deadline?: Deadline;
+    jail?: Jail;
+    services?: Services;
+  },
 ): Promise<CheckResult[]> {
-  const timeout = () => (opts.deadline === undefined ? undefined : Math.max(1000, opts.deadline.at - Date.now()));
+  const timeoutMs = (check: Check) => gateCheckTimeoutMs({ check, gateTimeoutMinutes: opts.gateTimeoutMinutes, deadline: opts.deadline });
   const results: CheckResult[] = [];
   for (const check of checks) {
     const needs = check.services ?? [];
@@ -69,14 +79,25 @@ export async function runChecks(
       throw new EnvMissing(`check ${check.name} needs services ${needs.join(", ")} but none are configured for this call`);
     }
     const cmd = withEnvCommand(run, opts.envCommand);
-    let r = await sh(cmd, { cwd: opts.cwd, env, timeoutMs: timeout(), jail });
-    let status: CheckResult["status"] = r.code === 0 ? "pass" : "fail";
+    let r = await sh(cmd, { cwd: opts.cwd, env, timeoutMs: timeoutMs(check), jail });
+    let status: CheckResult["status"] = r.code === 0 ? "pass" : shTimedOut(r) ? "timeout" : "fail";
     if (status === "fail") {
-      const again = await sh(cmd, { cwd: opts.cwd, env, timeoutMs: timeout(), jail });
+      const again = await sh(cmd, { cwd: opts.cwd, env, timeoutMs: timeoutMs(check), jail });
       if (again.code === 0) status = "flaky";
-      else r = again;
+      else {
+        r = again;
+        status = shTimedOut(r) ? "timeout" : "fail";
+      }
     }
-    results.push({ name: check.name, kind: "check", status, duration_ms: r.durationMs, output_tail: status === "pass" ? "" : tail(r.output) });
+    const timed_out = status === "timeout";
+    results.push({
+      name: check.name,
+      kind: "check",
+      status,
+      duration_ms: r.durationMs,
+      output_tail: status === "pass" ? "" : tail(r.output),
+      ...(timed_out ? { timed_out: true } : {}),
+    });
   }
   return results;
 }
@@ -103,6 +124,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     cwd: worktree,
     env,
     envCommand: repo.env_command,
+    gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
     deadline: ctx.deadline,
     jail: jailFor(ctx, worktree),
     services: ctx.services,
@@ -129,6 +151,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       testCommand: repo.tests.run,
       setup: repo.setup,
       env,
+      gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
       deadline: ctx.deadline,
       jail: (cwd) => jailFor(ctx, cwd),
     });
@@ -140,7 +163,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const report: GateReport = {
     n: ++ctx.gateCount,
     tier,
-    green: all.every((c) => c.status !== "fail"),
+    green: all.every((c) => c.status !== "fail" && c.status !== "timeout"),
     changed_files: changed,
     checks: all,
     scope_report: scopeReport(plan, changed),
@@ -156,7 +179,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
 /** Failure tail handed back to the implementer. */
 export function failureSummary(report: GateReport): string {
   return report.checks
-    .filter((c) => c.status === "fail")
-    .map((c) => `### ${c.name} (${c.kind})\n${c.output_tail}`)
+    .filter((c) => c.status === "fail" || c.status === "timeout")
+    .map((c) => `### ${c.name} (${c.kind})${c.status === "timeout" ? " [timed out]" : ""}\n${c.output_tail}`)
     .join("\n\n");
 }

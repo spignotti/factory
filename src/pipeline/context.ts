@@ -44,6 +44,13 @@ export interface RunDeps {
   notifyFetch?: Fetch;
   /** Backoff between notification attempts (tests: short). */
   notifyBackoffMs?: number[];
+  /** `factory run --no-notify`: skip the run-end webhook and the outbox. */
+  noNotify?: boolean;
+  /**
+   * `factory run --notify <target>` for this process. Used when `state.json` does not exist yet
+   * (a lock before intake finished). Later sends read `notify_target` from the run state.
+   */
+  notifyTarget?: string;
   /** Poll interval while CI on the base commit is pending (default 30 s). */
   baseCiPollMs?: number;
 }
@@ -89,6 +96,10 @@ export interface RunContext {
   secrets?: ResolvedSecrets;
   /** Repo lock slot (0-based). Port allocation prefers slot + 1. */
   lockSlot?: number;
+  /** Checkout `concurrency.max_runs` for path-claim refresh at finalize. */
+  maxRuns?: number;
+  /** Whether `--wait` was set at intake. */
+  wait?: boolean;
 }
 
 export type Lane = "standard" | "fast";

@@ -12,7 +12,7 @@ source of truth; this README is the reference for concepts, configuration and co
    verified in code.
 3. **Checks in CI, judgment in review.** Lint, types, tests, scanners and recorded flows are checks; LLM
    review covers plan fidelity, simplicity, impact and security reasoning.
-4. **Ratchet toward determinism.** Recurring findings and checklist items become checks (`factory harden`).
+4. **Ratchet toward determinism.** Recurring findings and checklist items become checks (`factory harden`). Security, performance and structure are judged on demand (`factory audit`).
 5. **Tests prove criteria.** Every test proves an acceptance criterion the plan names.
 6. **Minimal prompts.** `roles/*.md` are short, role-specific and the factory's only global agent
    instructions; repo facts live in the repo's `AGENTS.md`.
@@ -71,7 +71,9 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   not count as attempts (`model_retry` with `after_suspend`). When the chain gives up on a capacity/network
   error the run ends `needs_human` (reason `transient …; factory resume <id>`), not `failed`. Every agent bash command
   is killed after `limits.command_timeout_minutes` (default 10, also the maximum the model can ask for)
-  and the model gets "Command timed out" back.
+  and the model gets "Command timed out" back. Gate checks and the red-green proof are killed after
+  `limits.gate_timeout_minutes` (default 20) or a check's `timeout_minutes`, whichever applies, capped by
+  the remaining wall budget; a timed-out check is recorded as `timeout` and is not retried as flaky.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
 - **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
@@ -80,17 +82,18 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 | Command | Purpose |
 | --- | --- |
-| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`) |
+| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, disk/inodes |
-| `factory status` / `stats` / `gc` | runs and PRs, period stats, cleanup |
+| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
+| `factory audit --repo <p> --type <t>` | one read-only audit → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>]` | print the CI workflow |
-| `factory notify test <owner/name>` | send a test ping to the repo's bot webhook (see [docs/BOTS.md](docs/BOTS.md)) |
+| `factory notify test <owner/name> [--target <name>]` | send a test ping to the repo hook or a named target (see [docs/BOTS.md](docs/BOTS.md)) |
 | `factory notify flush` | retry pending run-end notifications from `~/.factory/outbox/` (also at run/resume start) |
 | `factory --version` | package version (plus the commit for a checkout install) |
 
@@ -114,9 +117,13 @@ HEAD) counts as pushed, and an open PR on the run's branch at HEAD is adopted an
 
 ## Notify (bots)
 
-On every `run_finished` (also after `resume`) the factory POSTs `{run_id, repo, result, reason, pr,
-finished_at}` to the webhook routine of the bot that owns the repo, configured in `~/.factory/notify.yaml`
-(`0600`, hidden from agents inside a run; each bot writes its own entry). Retries with backoff; a failed notification is logged and never fails the run.
+On every `run_finished` (also after `resume`, `abandon` and a `gc` abandon) the factory POSTs `{run_id, repo, result, reason, pr,
+finished_at}` to the webhook of the bot that started the run. `factory run --notify <target>` stores that
+name on the run (`notify_target` in `state.json`) and POSTs to `targets.<name>` in `~/.factory/notify.yaml`,
+adding `"target"` to the body. Without `--notify`, the repo's `repos:` hook is used as before. The file is
+`0600` and hidden from agents inside a run; each bot writes its own entry. A removed target falls back to the
+repo hook. Retries with backoff; a failed notification is logged and never fails the run. URLs and keys are
+never written to events, state, the outbox, status, doctor output or the PR.
 A background shell that ends does not wake a bot; this hook does. Setup, payload, routine prompt and the
 onboarding checklist: [docs/BOTS.md](docs/BOTS.md).
 
@@ -132,10 +139,12 @@ npx github:spignotti/factory#<tag> run --repo <path> --issue 12
 On a long-lived box, `scripts/deploy-self.sh` keeps an installed CLI on the newest `main` commit:
 each new commit is built in its own release directory (`~/.local/share/factory-releases/<sha>`,
 `pnpm install --frozen-lockfile`, `pnpm build`, smoke test `./dist/cli.js --version`), then the
-`current` and `~/.local/bin/factory` links are renamed over atomically. A failed build changes nothing;
-the switch waits while a factory run holds a live lock or a factory process runs; running processes keep
-their release (node runs the entry's real path); the newest 3 releases are kept. `deploy-self.sh once` checks
-once (`git ls-remote`; one `deploy: <result>` line, exit 0 deployed/up to date, 1 error/build failed, 3 deferred),
+`current` and `~/.local/bin/factory` links are renamed over atomically, including while factory runs
+are active. A failed build changes nothing. Running processes keep their release (node runs the entry's
+real path). The newest 3 releases are kept; a release a running process still has on its command line or
+as its working directory, or that a live lock's process still has open, is kept as well and pruned on a
+later check once it is unused. `deploy-self.sh once` checks once (`git ls-remote`; one `deploy: <result>`
+line, exit 0 deployed/up to date, 1 error/build failed, 3 busy when another deploy holds the lock),
 `ensure` starts a background loop (every 5 min) unless one runs, `status` prints
 `state.json`; the log is `deploy.log` next to it. It needs `node`, `git`, `jq`, `flock` and a source clone in
 `~/.local/share/factory` (paths and the interval via `FACTORY_DEPLOY_*` / `FACTORY_RELEASES`). Node is resolved like
@@ -192,7 +201,12 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
   low_max_diff_lines: 300            # larger diffs are at least medium
-limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 20, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"] }
+# limits.gate_timeout_minutes [20]: each gate check (and red-green proof) is killed after this unless the
+# check sets timeout_minutes; effective timeout is min(per-check or default, remaining max_wall_minutes).
+# Per-check timeout_minutes overrides the default. A timed-out check is not retried as flaky. Raising either
+# limit is a loosening (config_guard); lowering is not. `factory adopt` sets timeout_minutes from measured
+# durations (5×, at least 5 min).
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
 # once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
 # limits.base_red_resume_hours [48]: a base_red caused by GitHub CI on the base commit is resumed (same run
@@ -217,6 +231,12 @@ verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]
   run: "uv run pytest {files}"       # runs recorded flows [tests.run]
 harden: { max_proposals: 5 }
+audit:                              # absent: no types enabled, `factory audit` refuses without a model call
+  types: [security, performance, refactor, simplify]
+  max_proposals: 5                 # 1..10; --max overrides
+  thinking: { security: high, performance: high, refactor: medium, simplify: medium }
+  focus:                           # optional; one note per type, injected only into that type's prompt
+    security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 git: { author: factory, email: "…" }
 agent_env: []                        # extra env var names for agent tools and checks
 docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
@@ -522,6 +542,10 @@ GIFs; `factory doctor --repo .` checks both.
 
 `factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
 selects the checks with the same code as a local run and runs each one (`factory gates --run`).
+It does not run on pushes to the base branch (the PR run already checked the merged tree; a base commit
+without check runs makes the factory run the fast checks locally), and only a newer push to the same PR
+cancels a run, so no cancelled check marks a base commit red. The npx install of the pinned factory is
+cached per ref.
 
 **Required status check:** `done`, the stub's last job. GitHub Actions reports a check run under its job
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub
@@ -603,6 +627,45 @@ proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>
    `protected_changes` (see [Protected config](#protected-config)). Each proposal is its own run and PR:
    `factory run --plan <dir>/<date>.<rank>.plan.json`.
 
+## Audit
+
+`factory audit --repo <path> --type security|performance|refactor|simplify` judges the repository against its
+purpose in one dimension and writes a ranked list of proposals. It does not schedule itself and it does not
+start the runs. A type runs only when it is listed in `audit.types`. With no `audit` block every type is
+refused (exit 1, no model call).
+
+The session is read-only (the same tools as harden's ticket step). Roles `audit_security`,
+`audit_performance`, `audit_refactor` and `audit_simplify` default to the strongest plan chain (`plan_high`'s
+model) and are overridden by the profile layers like every other role, including `models:` in repo.yaml.
+`audit.thinking` sets the reasoning level for that call (default high for security and performance, medium
+for refactor and simplify) and replaces the thinking level on the chain. One call, one type.
+
+The model sees open findings from memory, the latest `metrics.jsonl` line, and — for `performance` only —
+harden's CI audit. There is no fixed checklist. `audit.focus.<type>` is an optional short note for that
+dimension only (a string, or a list of bullet points, at most 2000 characters once joined). It is added to
+that type's prompt as data and to no other prompt; the role prompt stays the same. The note says what to
+weigh, it does not add a checklist. A security audit can be pointed at privacy and GDPR — personal data in
+logs, fixtures, exports and retention — without changing performance, refactor or simplify. Leave `focus`
+out and the prompt is unchanged. Do not put secrets or customer data in it.
+
+Output reuses the proposal pipeline: ticket
+`proposals/<date>-audit-<type>.json`, plan files `<date>-audit-<type>.<rank>.plan.json`, the same plan
+validation (one retry; overlapping or invalid proposals are dropped and listed), and the same lifecycle
+(a later `factory audit` or `factory harden` marks a proposal `resolved` when its factory PR merges, or
+`dropped` when the PR is closed or the ticket goes stale). A proposal may change `.factory/` or CI files
+only as declared `protected_changes`. Findings it names become `proposed`.
+
+```bash
+factory audit --repo <path> --type security
+factory run --repo <path> --plan <plan_path>
+```
+
+`--json` matches `schemas/audit.schema.json`. `factory status` and `factory stats` list open audit tickets
+per repository (`stats --repo` limits the list to that repo).
+
+A practical rhythm, run by the repo's bot (see [docs/BOTS.md](docs/BOTS.md#audit)): security and performance
+weekly, alongside harden; refactor and simplify monthly. Only enabled types.
+
 ## Evals and experiments
 
 ```
@@ -651,26 +714,26 @@ API key for OpenCode Go).
 ## Status, stats, cleanup
 
 ```
-factory status [--json]                     # running, waiting for you, interrupted; open factory PRs
-factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days
-factory gc [--dry-run] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 14]
+factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
+factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
+factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 90] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
 
-What `gc` cleans:
+What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
-- **No PR** (failed, needs_input, needs_human, interrupted) and idle for `--retention-days` (default 7): the worktree only; the branch and its commits stay, the run can no longer be resumed.
+- **No PR** (failed, needs_input, needs_human, interrupted): worktree after 7 idle days (failed) or 14 days (needs_input / needs_human / base_red); branch kept unless unpushed commits block removal.
 - **PR open, run finished,** idle for `--strip-after-hours` (default 12): only `node_modules`, `.venv` and `.nox` at the worktree root.
 - **needs_input** with no answer for 2 working days (Mon–Fri, Europe/Berlin, from `state.updated_at`): the run is abandoned (worktree removed, result and logs kept) and the repo's notify hook is POSTed so the bot can tell the owner. A live lock is left alone.
-- **Archive:** run directories idle for `--archive-days` (default 14) keep `result.json`, `pr.md`, `events.jsonl`, `state.json` and `*.log`. Worktree copies (removed even when dirty), agent homes and intermediate artifacts are deleted. `state.json` stays so a later gc can still delete the `factory/*` branch once the PR merges. Active runs are not touched: a live lock, no result yet, `needs_human` / `needs_input`, a resumable `failed`, or a GitHub-CI `base_red` still inside `base_red_resume_hours`.
+- **Sandbox home/** on terminal runs after 24 h idle; **metadata** tarballed to `$FACTORY_HOME/archive/runs/` after 90 d (180 d for failed), keeping the newest 20 runs per repo; **archive/runs** tarballs dropped after 180 d. Protected: active runs; needs_input / needs_human / base_red idle &lt; 14 d; locks; unpushed commits; dirty worktrees (no `--force` on `--scheduled`).
 
 `factory abandon <run-id>` does the same abandon by hand (stale lock released; a process that is still running must be stopped first). The branch is kept. `factory resume` refuses an abandoned run.
 
 A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume. Local fast checks that failed on the base are not resumed. The daily cron below is the timer when nothing else starts a run.
 
-Runs of a repository are skipped while any of its lock slots is held, and a worktree with uncommitted changes needs `--force` (archive retention of a finished run removes that worktree anyway). `gc` and archive take every slot before touching the repo, so a new run cannot start mid-cleanup.
+Runs of a repository are skipped while any of its lock slots is held, and a worktree with uncommitted changes needs `--force`. `gc` takes every slot before touching the repo, so a new run cannot start mid-cleanup. When deploy-self holds its deploy lock, gc skips deletions.
 `factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The base_red resume sweep still runs.
-Evidence pruning (30 days) runs only with an explicit `factory gc`; for a daily cleanup add e.g. `0 4 * * * factory gc` to cron.
+Evidence pruning (30 days) runs only with an explicit `factory gc`. Schedule daily cleanup with supercronic, e.g. `factory gc --scheduled` (see [ops/supercronic/factory-gc.crontab](ops/supercronic/factory-gc.crontab)); `gc.retention.dry_run` in `$FACTORY_HOME/profile.yaml` defaults to true until you flip it after reviewing `$FACTORY_HOME/gc.log`.
 `factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.
 
 ## JSON contracts
@@ -679,6 +742,19 @@ Machine-readable outputs have JSON Schemas in [`schemas/`](schemas/): `result.js
 `status`, `stats`, `gc` and `doctor` with `--json`, the findings memory, the reviewer outputs, eval tasks,
 eval profiles, eval result lines and the experiment verdict. They are
 generated from the zod schemas in code (`pnpm schemas`); a test keeps them in sync.
+
+## Releases
+
+Versions and tags come from [Release Please](https://github.com/googleapis/release-please)
+(`.github/workflows/release-please.yml`, `release-please-config.json`, `.release-please-manifest.json`).
+On every push to `main` it updates one release PR (`chore: release <version>`) that bumps `package.json`
+and `CHANGELOG.md` from the conventional-commit squash titles since the last tag (`feat` → minor and
+`fix` → patch while below 1.0; `docs`, `ci`, `chore` and `test` alone cut no release). A human merges the
+release PR per the merge matrix; the workflow then tags `v<version>` and publishes the GitHub release.
+Tags are what `factory ci-stub --ref` and `adopt --ref` pin. The box deploy is separate: `deploy-self.sh`
+builds every new `main` commit (a merged release PR is just one more), never a tag.
+The release PR and the tag are pushed with `GITHUB_TOKEN`, which starts no workflows: run
+`gh workflow run ci.yml --ref <release-branch>` so the required `check` reports before the merge.
 
 ## Development
 
