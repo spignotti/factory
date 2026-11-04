@@ -123,6 +123,59 @@ function securityFlag(value: string | undefined): boolean | null {
   return null;
 }
 
+export interface BranchRules {
+  /** A `required_status_checks` rule applies to the branch. */
+  present: boolean;
+  contexts: string[];
+  /** `strict_required_status_checks_policy`. Null when the rule omits it. True wins across rules. */
+  strict: boolean | null;
+}
+
+/** `GET /repos/{owner}/{repo}/rules/branches/{branch}` payload. Non-arrays are ignored. */
+export function parseBranchRules(payload: unknown): BranchRules {
+  if (!Array.isArray(payload)) return { present: false, contexts: [], strict: null };
+  let present = false;
+  const contexts: string[] = [];
+  let strict: boolean | null = null;
+  for (const rule of payload) {
+    if (!rule || typeof rule !== "object" || (rule as { type?: unknown }).type !== "required_status_checks") continue;
+    present = true;
+    const params = (rule as { parameters?: unknown }).parameters;
+    if (!params || typeof params !== "object") continue;
+    const row = params as { required_status_checks?: unknown; strict_required_status_checks_policy?: unknown };
+    if (Array.isArray(row.required_status_checks)) {
+      for (const check of row.required_status_checks) {
+        const context = typeof check === "string" ? check : check && typeof check === "object" ? (check as { context?: unknown }).context : undefined;
+        if (typeof context === "string" && context.trim()) contexts.push(context.trim());
+      }
+    }
+    if (row.strict_required_status_checks_policy === true) strict = true;
+    else if (row.strict_required_status_checks_policy === false && strict !== true) strict = false;
+  }
+  return { present, contexts: [...new Set(contexts)], strict };
+}
+
+/**
+ * Classic branch protection does not carry ruleset status checks. Union the ruleset contexts
+ * and treat the branch as protected when a required-status rule applies. Unknown payloads are a no-op.
+ */
+export function mergeBranchRules(settings: RepoSettings, payload: unknown): RepoSettings {
+  const rules = parseBranchRules(payload);
+  if (!rules.present) return settings;
+  const strict =
+    settings.strict_required_checks === true || rules.strict === true
+      ? true
+      : settings.strict_required_checks === false || rules.strict === false
+        ? false
+        : (settings.strict_required_checks ?? null);
+  return {
+    ...settings,
+    branch_protected: true,
+    required_checks: [...new Set([...(settings.required_checks ?? []), ...rules.contexts])],
+    strict_required_checks: strict,
+  };
+}
+
 /** `gh` CLI implementation. Not exercised in tests (see docs/VERIFY.md). */
 export class GhCli implements GitHub {
   async authenticated(repoDir: string): Promise<boolean> {
@@ -161,6 +214,16 @@ export class GhCli implements GitHub {
       out.branch_protected = b.protected ?? null;
       out.strict_required_checks = typeof b.strict === "boolean" ? b.strict : null;
       out.required_checks = b.contexts ?? null;
+      // Rulesets do not fill protection.required_status_checks. UNVERIFIED live (docs/VERIFY.md).
+      try {
+        const rules = JSON.parse(await gh(repoDir, ["api", `repos/{owner}/{repo}/rules/branches/${encodeURIComponent(branch)}`]));
+        const merged = mergeBranchRules(out, rules);
+        out.branch_protected = merged.branch_protected;
+        out.required_checks = merged.required_checks;
+        out.strict_required_checks = merged.strict_required_checks;
+      } catch {
+        // A missing rules API keeps the classic result. It must not hide secret scanning.
+      }
     } catch (e) {
       out.error = (e as Error).message.split("\n")[0]!.slice(0, 200);
     }

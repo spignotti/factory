@@ -178,7 +178,7 @@ export function scanText(dir: string, repo: Pick<RepoConfig, "checks">): string 
   return parts.join("\n");
 }
 
-/** A check that runs in CI (fast or full, not local_only) and is not swallowed. */
+/** A check that runs in CI (fast or full, not local_only). The caller drops swallowed commands. */
 export function blockingRuns(repo: Pick<RepoConfig, "checks">): string[] {
   return repo.checks.filter((c) => c.tier !== "manual" && !c.local_only).map((c) => c.run);
 }
@@ -244,6 +244,8 @@ export function parseGitleaks(text: string | undefined): { present: boolean; use
     const body = part.split(/^\s*\[\[/)[0] ?? "";
     allowlists.push({
       description: /^\s*description\s*=\s*\S/m.test(body),
+      // Content-bound is a regex of the secret text (docs/BASELINE.md). `commits` still hides every
+      // finding in that commit, so a commit list with a description is not enough.
       contentBound: /^\s*regexes\s*=/m.test(body) || /^\s*regexTarget\s*=\s*"match"/m.test(body) || /^\s*stopwords\s*=/m.test(body),
     });
   }
@@ -257,21 +259,57 @@ export function pyrightRank(mode: string | undefined): number | undefined {
   return PYRIGHT_RANK[mode.toLowerCase()];
 }
 
-/** pyright `typeCheckingMode`, else mypy `strict` as `strict` and a configured mypy without it as `basic`. */
+const PYRIGHT_MODE = /^\s*typeCheckingMode\s*[:=]\s*["']?(off|basic|standard|strict)["']?/i;
+
+/** A mode written on its own line. Comments do not count. */
+function explicitPyrightMode(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    const stripped = line.replace(/(^|\s)#.*$/, "").trim();
+    const mode = PYRIGHT_MODE.exec(stripped)?.[1];
+    if (mode) return mode;
+  }
+  return undefined;
+}
+
+/** Body of `[tool.pyright]`, or undefined when the table is absent. An empty table is `""`. */
+function pyrightTable(text: string): string | undefined {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === "[tool.pyright]");
+  if (start < 0) return undefined;
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^\[/.test(line.trim())) break;
+    body.push(line);
+  }
+  return body.join("\n");
+}
+
+/**
+ * pyright `typeCheckingMode`, else mypy `strict` as `strict` and a configured mypy without it as `basic`.
+ * pyright's documented default is `standard` when `pyrightconfig.json` or `[tool.pyright]` omits the key.
+ * `pyrightconfig.json` wins over `pyproject.toml` when both exist.
+ */
 export function typeCheckingMode(dir: string): { tool: "pyright" | "mypy"; mode: string } | undefined {
   const json = read(dir, "pyrightconfig.json");
   if (json !== undefined) {
     try {
       const mode = (JSON.parse(json) as { typeCheckingMode?: unknown }).typeCheckingMode;
+      if (mode === undefined) return { tool: "pyright", mode: "standard" };
       if (typeof mode === "string") return { tool: "pyright", mode };
+      return { tool: "pyright", mode: "invalid" };
     } catch {
       return { tool: "pyright", mode: "invalid" };
     }
   }
-  const sources = [read(dir, "pyproject.toml"), read(dir, "mypy.ini"), read(dir, ".mypy.ini"), read(dir, "setup.cfg")].filter((t): t is string => t !== undefined);
+  const pyproject = read(dir, "pyproject.toml");
+  if (pyproject !== undefined) {
+    const table = pyrightTable(pyproject);
+    if (table !== undefined) return { tool: "pyright", mode: explicitPyrightMode(table) ?? "standard" };
+  }
+  const sources = [pyproject, read(dir, "mypy.ini"), read(dir, ".mypy.ini"), read(dir, "setup.cfg")].filter((t): t is string => t !== undefined);
   for (const text of sources) {
-    const py = /typeCheckingMode\s*[:=]\s*["']?(off|basic|standard|strict)["']?/i.exec(text);
-    if (py) return { tool: "pyright", mode: py[1]! };
+    const mode = explicitPyrightMode(text);
+    if (mode) return { tool: "pyright", mode };
   }
   for (const text of sources) {
     if (!/\[(tool\.mypy|mypy[^\]]*)\]/.test(text)) continue;
@@ -309,22 +347,187 @@ function triggersOf(doc: unknown): string[] {
 }
 
 /**
- * Job names that block a pull request. The factory stub blocks through its `done` job only
- * (`select` and `check` feed that job). Other workflows contribute every job.
+ * Job id or name that shares a pull_request workflow but does not gate the merge: path filters
+ * (`changes`), release and publish, automerge (`enable`) and `meta`.
+ */
+const NON_GATING_JOBS = new Set(["changes", "release", "publish", "enable", "meta", "automerge", "auto-merge"]);
+
+function isNonGatingJob(id: string, name: string | undefined): boolean {
+  return [id, name ?? ""].some((n) => NON_GATING_JOBS.has(n.trim().toLowerCase()));
+}
+
+/** True when a job or step `if` cannot hold for a pull_request event. */
+function skipsPullRequest(expr: string | undefined): boolean {
+  if (!expr?.trim()) return false;
+  const compact = expr.replace(/\s+/g, " ");
+  if (/github\.event_name\s*==\s*['"]pull_request(?:_target)?['"]/.test(compact)) return false;
+  if (/github\.event_name\s*!=\s*['"]pull_request(?:_target)?['"]/.test(compact)) return true;
+  const nonPr = /github\.event_name\s*==\s*['"](push|release|workflow_dispatch|schedule|workflow_call|merge_group)['"]/.test(compact);
+  return nonPr || /refs\/tags/.test(compact);
+}
+
+interface WorkflowJobView {
+  /** Check-run name GitHub reports (job `name`, else the id). */
+  label: string;
+  /** Runs on a pull request and is a merge gate. */
+  blocksPr: boolean;
+  runs: string[];
+}
+
+function jobRunScripts(job: { steps?: unknown }): string[] {
+  if (!Array.isArray(job.steps)) return [];
+  const runs: string[] = [];
+  for (const step of job.steps) {
+    if (!step || typeof step !== "object") continue;
+    const row = step as { if?: unknown; run?: unknown };
+    if (skipsPullRequest(typeof row.if === "string" ? row.if : undefined)) continue;
+    if (typeof row.run === "string" && row.run.trim()) runs.push(row.run);
+  }
+  return runs;
+}
+
+function prJobs(doc: unknown, stub: boolean): WorkflowJobView[] {
+  if (!triggersOf(doc).some((t) => t === "pull_request" || t === "pull_request_target")) return [];
+  const jobs = (doc as { jobs?: Record<string, { name?: unknown; if?: unknown; steps?: unknown }> } | null)?.jobs ?? {};
+  const out: WorkflowJobView[] = [];
+  for (const [id, job] of Object.entries(jobs)) {
+    // The stub blocks through `done` only; `select` and `check` feed that job.
+    if (stub && id !== "done") continue;
+    const name = typeof job?.name === "string" && job.name.trim() ? job.name.trim() : undefined;
+    const blocksPr = !isNonGatingJob(id, name) && !skipsPullRequest(typeof job?.if === "string" ? job.if : undefined);
+    out.push({ label: name ?? id, blocksPr, runs: blocksPr ? jobRunScripts(job ?? {}) : [] });
+  }
+  return out;
+}
+
+/**
+ * Check-run names that gate a pull request. Release, publish, path-filter and automerge helpers
+ * are omitted, as are jobs whose `if` does not run on pull_request.
  */
 export function blockingJobs(dir: string): string[] {
   const out: string[] = [];
   for (const file of workflowFiles(dir)) {
-    if (!triggersOf(file.doc).some((t) => t === "pull_request" || t === "pull_request_target")) continue;
-    const jobs = (file.doc as { jobs?: Record<string, { name?: unknown }> } | null)?.jobs ?? {};
     const stub = `.github/workflows/${file.name}` === ".github/workflows/factory.yml";
-    for (const [id, job] of Object.entries(jobs)) {
-      if (stub && id !== "done") continue;
-      const label = typeof job?.name === "string" && job.name.trim() ? job.name.trim() : id;
-      out.push(label);
-    }
+    for (const job of prJobs(file.doc, stub)) if (job.blocksPr) out.push(job.label);
   }
   return [...new Set(out)];
+}
+
+interface NoxSession {
+  name: string;
+  defaultOn: boolean;
+  body: string;
+}
+
+function stripPyComments(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/(^|\s)#.*$/, ""))
+    .join("\n");
+}
+
+/** `@nox.session` functions. `default=False` sessions stay out of a bare `nox` run. */
+function parseNoxSessions(text: string): NoxSession[] {
+  const lines = text.split(/\r?\n/);
+  const out: NoxSession[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (!lines[i]!.startsWith("@nox.session")) {
+      i++;
+      continue;
+    }
+    const deco: string[] = [];
+    while (i < lines.length && !lines[i]!.startsWith("def ")) {
+      const line = lines[i]!;
+      if (line.trim() === "" || line.startsWith("@") || /^[ \t]/.test(line)) {
+        deco.push(line);
+        i++;
+        continue;
+      }
+      break;
+    }
+    const def = /^def\s+([A-Za-z_]\w*)\s*\(/.exec(lines[i] ?? "");
+    if (!def) {
+      i++;
+      continue;
+    }
+    const name = def[1]!;
+    i++;
+    const body: string[] = [];
+    while (i < lines.length) {
+      const line = lines[i]!;
+      if (line.trim() !== "" && !/^[ \t]/.test(line)) break;
+      body.push(line);
+      i++;
+    }
+    out.push({ name, defaultOn: !/default\s*=\s*False/.test(deco.join("\n")), body: body.join("\n") });
+  }
+  return out;
+}
+
+/**
+ * Session names a command passes to nox (`nox -s quality`, `uvx nox -s quality`).
+ * Null when the command does not invoke nox. Empty means the default sessions.
+ */
+function noxSessionNames(command: string): string[] | null {
+  if (!/\bnox\b/.test(command)) return null;
+  const names = new Set<string>();
+  const tokens = command.split(/\s+/);
+  for (let i = 0; i < tokens.length; i++) {
+    const flag = tokens[i]!.replace(/[";&|]+$/g, "");
+    if (flag === "-s" || flag === "--session" || flag === "--sessions") {
+      for (let j = i + 1; j < tokens.length; j++) {
+        const raw = tokens[j]!;
+        if (raw.startsWith("-")) break;
+        const name = raw.replace(/^[("']+|[)"',]+$/g, "").replace(/\(.*$/, "");
+        if (!/^[A-Za-z_][\w]*$/.test(name)) break;
+        names.add(name);
+        i = j;
+      }
+    } else if (/^--sessions?=/.test(flag)) {
+      const name = flag.split("=")[1]?.replace(/["']/g, "").replace(/\(.*$/, "");
+      if (name && /^[A-Za-z_][\w]*$/.test(name)) names.add(name);
+    }
+  }
+  for (const match of command.matchAll(/["']nox["']\s*,\s*["'](?:-s|--sessions?)["']\s*,\s*["']([A-Za-z_][\w]*)["']/g)) names.add(match[1]!);
+  return [...names];
+}
+
+function sessionClosure(sessions: NoxSession[], name: string, seen: Set<string>): string {
+  if (seen.has(name)) return "";
+  seen.add(name);
+  const session = sessions.find((s) => s.name === name);
+  if (!session) return "";
+  const body = stripPyComments(session.body);
+  const notified = [...body.matchAll(/session\.notify\(\s*["']([^"']+)["']/g)].map((m) => m[1]!);
+  const nested = noxSessionNames(body) ?? [];
+  return [body, ...[...notified, ...nested].map((child) => sessionClosure(sessions, child, seen))].join("\n");
+}
+
+/**
+ * Commands that can fail a pull request: repo.yaml checks and pull_request job steps, plus the
+ * nox session bodies those commands run. Swallowed commands (`|| true`) are left out.
+ */
+export function blockingAuditTexts(dir: string, repo: Pick<RepoConfig, "checks">): string[] {
+  const commands = blockingRuns(repo).filter((run) => !swallowed(run));
+  for (const file of workflowFiles(dir)) {
+    const stub = `.github/workflows/${file.name}` === ".github/workflows/factory.yml";
+    for (const job of prJobs(file.doc, stub)) {
+      if (!job.blocksPr) continue;
+      for (const run of job.runs) if (!swallowed(run)) commands.push(run);
+    }
+  }
+  const noxfile = read(dir, "noxfile.py");
+  if (!noxfile) return commands;
+  const sessions = parseNoxSessions(noxfile);
+  const extra: string[] = [];
+  for (const command of commands) {
+    const picked = noxSessionNames(command);
+    if (picked === null) continue;
+    const names = picked.length > 0 ? picked : sessions.filter((s) => s.defaultOn).map((s) => s.name);
+    extra.push(names.map((name) => sessionClosure(sessions, name, new Set())).join("\n"));
+  }
+  return [...commands, ...extra];
 }
 
 export interface DependabotUpdate {

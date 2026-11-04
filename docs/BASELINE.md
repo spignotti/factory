@@ -39,10 +39,10 @@ Vendor the files you need from `templates/baseline/` and point the tool at them.
 | Tool | Baseline | Where it runs |
 | --- | --- | --- |
 | ruff | `python/ruff-base.toml`: `extend = "ruff-base.toml"`, line length 100, tests ignore S101/S105/S106 | CI check |
-| pyright or mypy | pyright `typeCheckingMode` `standard` or stricter; mypy `strict = True` | CI check |
-| pip-audit | blocking full check (do not swallow the exit code) | CI and factory full gates |
+| pyright or mypy | pyright `typeCheckingMode` `standard` or stricter. A `pyrightconfig.json` or `[tool.pyright]` table that omits the key uses pyright's default, `standard`. mypy `strict = True` | CI check |
+| pip-audit | blocking full check or a pull_request job step (a nox session that step runs counts when it calls pip-audit). Do not swallow the exit code | CI and factory full gates |
 | semgrep | CI: `--metrics=off --error` and `p/default` or `p/python`, plus `p/owasp-top-ten` and `p/secrets`, plus the repo's own rules | CI uses the registry. Factory fast gates use `templates/baseline/semgrep/rules/` only, offline |
-| gitleaks | default rules (`[extend] useDefault = true`). Allowlist entries are content-bound (`regexes` or `regexTarget = "match"`) and have a `description` | CI check and factory fast gates (`base..HEAD`, `--redact`) |
+| gitleaks | default rules (`[extend] useDefault = true`). Allowlist entries are content-bound (`regexes` or `regexTarget = "match"`) and have a `description`. A `commits` list does not make an entry content-bound | CI check and factory fast gates (`base..HEAD`, `--redact`) |
 | pnpm or npm audit | `--audit-level high` or stricter (`low`, `moderate`; not `critical` alone) | CI and factory full gates |
 | TypeScript | `strict` and `noUncheckedIndexedAccess` (`typescript/tsconfig.baseline.json`). ESLint `recommendedTypeChecked` | CI check |
 | shellcheck | `-S style -x` and `shellcheckrc` | CI check |
@@ -74,10 +74,14 @@ check fails doctor, it does not warn.
 
 Doctor warns, with the fix in the detail, for a ruff select below the baseline, a dead ignore, a
 type checker below standard, semgrep without a registry ruleset or `--error`, trivy that does not
-block HIGH and CRITICAL, gitleaks without default rules, branch protection that omits a
-pull_request job or is not strict, and a dependabot config that would edit the stub. It fails only
-when a public repo has secret scanning or push protection off, or when a Python or npm/pnpm
-lockfile has no blocking dependency audit.
+block HIGH and CRITICAL, gitleaks without default rules or with an allowlist that is not
+content-bound (a `commits` list still warns), branch protection or a ruleset that omits a
+pull_request job that gates the merge or is not strict, and a dependabot config that would edit
+the stub. Release, publish, path-filter (`changes`) and automerge (`enable`, `meta`) jobs are not
+merge gates, and neither is a job whose `if` skips pull requests. Ruleset required checks come from
+`GET /repos/{owner}/{repo}/rules/branches/{branch}`. It fails only when a public repo has secret
+scanning or push protection off, or when a Python or npm/pnpm lockfile has no blocking dependency
+audit.
 
 ## Config guard
 

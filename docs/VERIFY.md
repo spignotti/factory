@@ -56,6 +56,11 @@ Unverified (needs a real provider):
   `secret_scanning_push_protection.status`, and `required_status_checks.strict` (plus check contexts).
   UNVERIFIED against a live repository: non-admin tokens omit `security_and_analysis`, and doctor then
   warns on public repos instead of failing. The jq was checked against sample JSON only.
+- `repoSettings` also reads `GET /repos/{owner}/{repo}/rules/branches/{branch}` and merges a
+  `required_status_checks` rule (`context`, `strict_required_status_checks_policy`) into those fields.
+  Classic branch protection does not return ruleset checks. UNVERIFIED against a live repository.
+  The parser was checked against the documented JSON shape in `test/unit/baseline.test.ts` (no `gh`
+  process and no network). A failed rules request leaves the classic result in place.
 - Factory full gates invoke `zizmor --offline`. UNVERIFIED against a current zizmor binary (the flag is
   the documented switch that skips the GitHub API). Tests inject the command and do not spawn it.
 - `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue`, `updatePr`, `markReady` and

@@ -7,8 +7,8 @@ import { baselineConfigChecks, baselineGithubChecks, type BaselineCheck } from "
 import { planBaselineGates, runBaselineGates } from "../../src/baseline/gates.js";
 import { formatGateResults, skippedSecurityGates } from "../../src/steps/gates.js";
 import { baselineVersion, loadRuff, parseRuffToml, RUFF_BASELINE, semgrepRulesDir } from "../../src/baseline/spec.js";
-import { doctorCommand, type DoctorReport } from "../../src/commands/doctor.js";
-import { FakeGitHub } from "../../src/gh.js";
+import { doctorCommand, githubChecks, type DoctorReport } from "../../src/commands/doctor.js";
+import { FakeGitHub, mergeBranchRules, type RepoSettings } from "../../src/gh.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 
 const tools = { gitleaks: true, semgrep: true };
@@ -103,7 +103,17 @@ describe("doctor baseline checks", () => {
     expect(at(baselineConfigChecks(tree({ "pyproject.toml": "[tool.mypy]\nstrict = True\n" }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "ok", detail: expect.stringMatching(/mypy strict/) });
     expect(at(baselineConfigChecks(tree({ "pyproject.toml": "[tool.mypy]\nignore_errors = false\n" }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "warn" });
     expect(at(baselineConfigChecks(tree({ "pyproject.toml": "[project]\nname='a'\n" }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "warn", detail: expect.stringMatching(/no pyright or mypy/) });
+    expect(at(baselineConfigChecks(tree({ "pyrightconfig.json": "{}\n" }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "ok", detail: expect.stringMatching(/pyright standard/) });
     expect(at(baselineConfigChecks(tree(), cfg(""), tools, none), "type checker")!.status).toBe("ok");
+  });
+
+  it("type checker: [tool.pyright] without typeCheckingMode is standard; basic still warns", () => {
+    const pyproject = `[project]\nname = "tourenpilot"\nrequires-python = ">=3.12"\n\n[tool.pyright]\npythonVersion = "3.12"\ninclude = ["src"]\nreportMissingTypeStubs = false\nvenvPath = "."\nvenv = ".venv"\n`;
+    expect(at(baselineConfigChecks(tree({ "pyproject.toml": pyproject }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "ok", detail: expect.stringMatching(/pyright standard/) });
+    const basic = pyproject.replace("pythonVersion", 'typeCheckingMode = "basic"\npythonVersion');
+    expect(at(baselineConfigChecks(tree({ "pyproject.toml": basic }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "warn", detail: expect.stringMatching(/below standard/) });
+    const commented = `[tool.pyright]\n# typeCheckingMode = "basic"\ninclude = ["src"]\n`;
+    expect(at(baselineConfigChecks(tree({ "pyproject.toml": commented }), cfg(""), tools, none), "type checker")).toMatchObject({ status: "ok", detail: expect.stringMatching(/pyright standard/) });
   });
 
   it("semgrep: pass with registry rulesets and --error, warn when either is missing, exception covers a ruleset", () => {
@@ -143,6 +153,17 @@ describe("doctor baseline checks", () => {
       ".gitleaks.toml": '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "docs example"\nregexTarget = "match"\nregexes = ["example-token"]\n',
     });
     expect(at(baselineConfigChecks(bound, run, tools, none), "gitleaks")!.status).toBe("ok");
+    // docs/BASELINE.md: a commits list is not content-bound, even with a description.
+    const commits = tree({
+      ".gitleaks.toml": '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "rotated token, bound to the commit that introduced it"\ncommits = ["0123456789abcdef0123456789abcdef01234567"]\n',
+    });
+    const commitWarn = at(baselineConfigChecks(commits, run, tools, none), "gitleaks")!;
+    expect(commitWarn).toMatchObject({ status: "warn", detail: expect.stringMatching(/not content-bound/) });
+    expect(commitWarn.detail).not.toMatch(/no description/);
+    const commitsAndRegex = tree({
+      ".gitleaks.toml": '[extend]\nuseDefault = true\n\n[[allowlists]]\ndescription = "docs example, also pinned to a commit"\ncommits = ["0123456789abcdef0123456789abcdef01234567"]\nregexTarget = "match"\nregexes = ["example-token"]\n',
+    });
+    expect(at(baselineConfigChecks(commitsAndRegex, run, tools, none), "gitleaks")!.status).toBe("ok");
     expect(at(baselineConfigChecks(tree(), cfg(""), tools, none), "gitleaks")).toMatchObject({ status: "warn", detail: expect.stringMatching(/no gitleaks check/) });
   });
 
@@ -159,6 +180,53 @@ describe("doctor baseline checks", () => {
     expect(at(baselineConfigChecks(py, good, tools, none), "dependency audit")!.status).toBe("ok");
     const local = cfg('checks:\n  - { name: py, run: "pip-audit", tier: full, local_only: true }\n');
     expect(at(baselineConfigChecks(tree({ "requirements.txt": "requests==2.32.0\n" }), local, tools, none), "dependency audit")!.status).toBe("fail");
+  });
+
+  it("dependency audit: pip-audit inside the nox session a pull_request job runs is blocking", () => {
+    const noxfile = [
+      "import nox",
+      "",
+      "@nox.session",
+      "def quality(session: nox.Session) -> None:",
+      '    session.install("-e", ".")',
+      '    session.run("ruff", "check", ".")',
+      '    session.run("pip-audit")',
+      "",
+      "@nox.session(default=False)",
+      "def unused(session: nox.Session) -> None:",
+      '    session.run("pip-audit")',
+      "",
+    ].join("\n");
+    const ci = [
+      "name: ci",
+      "on:",
+      "  pull_request:",
+      "  push:",
+      '    tags: ["v*"]',
+      "jobs:",
+      "  quality:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: uvx nox -s quality",
+      "  release:",
+      "    if: startsWith(github.ref, 'refs/tags/v')",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: pip-audit",
+      "",
+    ].join("\n");
+    const py = { "pyproject.toml": "[project]\nname='tourenpilot'\n", "noxfile.py": noxfile, ".github/workflows/ci.yml": ci };
+    expect(at(baselineConfigChecks(tree(py), cfg(""), tools, none), "dependency audit")).toMatchObject({ status: "ok", detail: expect.stringMatching(/pip-audit/) });
+    const viaNotify = noxfile.replace('    session.run("pip-audit")\n', '    session.notify("audit")\n').concat('@nox.session\ndef audit(session: nox.Session) -> None:\n    session.run("pip-audit")\n');
+    expect(at(baselineConfigChecks(tree({ ...py, "noxfile.py": viaNotify }), cfg(""), tools, none), "dependency audit")!.status).toBe("ok");
+    const direct = ci.replace("uvx nox -s quality", "pip-audit");
+    expect(at(baselineConfigChecks(tree({ "pyproject.toml": py["pyproject.toml"], ".github/workflows/ci.yml": direct }), cfg(""), tools, none), "dependency audit")!.status).toBe("ok");
+    const lintOnly = noxfile.replace('    session.run("pip-audit")\n', '    session.run("ruff", "format", "--check", ".")\n');
+    expect(at(baselineConfigChecks(tree({ ...py, "noxfile.py": lintOnly }), cfg(""), tools, none), "dependency audit")).toMatchObject({ status: "fail", detail: expect.stringMatching(/pip-audit/) });
+    const swallowedStep = ci.replace("uvx nox -s quality", "uvx nox -s quality || true");
+    expect(at(baselineConfigChecks(tree({ ...py, ".github/workflows/ci.yml": swallowedStep }), cfg(""), tools, none), "dependency audit")!.status).toBe("fail");
+    const otherSession = ci.replace("uvx nox -s quality", "uvx nox -s lint");
+    expect(at(baselineConfigChecks(tree({ ...py, ".github/workflows/ci.yml": otherSession }), cfg(""), tools, none), "dependency audit")!.status).toBe("fail");
   });
 
   it("dependabot: pass when the stub is excluded, warn when github-actions would edit it, pass when there is no config", () => {
@@ -202,6 +270,101 @@ describe("doctor baseline checks", () => {
     expect(at(good, "status checks strict")).toMatchObject({ status: "ok" });
     expect(at(baselineGithubChecks(dir, { ...base, required_checks: ["done", "Lint"], strict_required_checks: false }), "status checks strict")).toMatchObject({ status: "warn", detail: expect.stringMatching(/up to date/) });
     expect(baselineGithubChecks(dir, { ...base, branch_protected: false }).some((c) => c.name === "required checks")).toBe(false);
+  });
+
+  it("required checks: a ruleset covers gating jobs and ignores release, publish and automerge helpers", async () => {
+    const ci = [
+      "name: ci",
+      "on:",
+      "  pull_request:",
+      "  push:",
+      '    tags: ["v*"]',
+      "  workflow_dispatch:",
+      "jobs:",
+      "  changes:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo paths",
+      "  quality:",
+      "    needs: [changes]",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: uvx nox -s quality",
+      "  gitleaks:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: gitleaks detect --source . --redact --no-banner",
+      "  done:",
+      "    if: always()",
+      "    needs: [quality, gitleaks]",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      '      - run: test "${{ needs.quality.result }}" = success',
+      "  release:",
+      "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo release",
+      "  publish:",
+      "    needs: [release]",
+      "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo publish",
+      "  enable:",
+      "    if: github.event_name == 'pull_request'",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo automerge",
+      "  meta:",
+      "    if: github.event_name == 'workflow_dispatch'",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo meta",
+      "  deploy:",
+      "    if: startsWith(github.ref, 'refs/tags/v')",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo deploy",
+      "",
+    ].join("\n");
+    const dir = tree({ ".github/workflows/ci.yml": ci });
+    const ruleset = [
+      { type: "pull_request", parameters: { required_approving_review_count: 0 } },
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: true,
+          do_not_enforce_on_create: false,
+          required_status_checks: [{ context: "quality", integration_id: 15368 }, { context: "gitleaks" }, { context: "done" }],
+        },
+        ruleset_source_type: "Repository",
+        ruleset_source: "example/tourenpilot",
+        ruleset_id: 1,
+      },
+    ];
+    const classic: RepoSettings = { private: true, auto_merge_allowed: null, branch_protected: false, required_checks: null, strict_required_checks: null };
+    expect(mergeBranchRules(classic, { unexpected: true })).toEqual(classic);
+    const merged = mergeBranchRules(classic, ruleset);
+    expect(merged.branch_protected).toBe(true);
+    expect(merged.required_checks).toEqual(["quality", "gitleaks", "done"]);
+    expect(merged.strict_required_checks).toBe(true);
+    const good = baselineGithubChecks(dir, merged);
+    expect(at(good, "required checks")).toMatchObject({ status: "ok" });
+    expect(at(good, "status checks strict")).toMatchObject({ status: "ok" });
+    const gh = new FakeGitHub();
+    gh.settings = merged;
+    const hints = await githubChecks(gh, dir, cfg(""));
+    expect(hints.some((c) => c.name === "branch protection")).toBe(false);
+    const gapRules = structuredClone(ruleset);
+    const params = gapRules[1]!.parameters as { required_status_checks: { context: string }[]; strict_required_status_checks_policy: boolean };
+    params.required_status_checks = params.required_status_checks.filter((c) => c.context !== "quality");
+    params.strict_required_status_checks_policy = false;
+    const gap = baselineGithubChecks(dir, mergeBranchRules(classic, gapRules));
+    const missing = at(gap, "required checks")!;
+    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/quality/) });
+    expect(missing.detail).not.toMatch(/release|publish|enable|meta|changes|deploy/);
+    expect(at(gap, "status checks strict")).toMatchObject({ status: "warn", detail: expect.stringMatching(/up to date/) });
   });
 });
 
