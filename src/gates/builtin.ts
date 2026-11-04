@@ -35,10 +35,14 @@ export function protectedPaths(plan: Plan, changed: string[], humanOnly: string[
     : ok("protected_paths", declared.size ? `declared: ${[...declared].join(", ")}` : "");
 }
 
-/** Counted lines only: lockfiles, binaries and `limits.diff_exclude` are named in the detail, not counted. */
-export function diffSize(stat: Map<string, DiffEntry>, max: number): BuiltinResult {
+/**
+ * Counted lines only: lockfiles, binaries and `limits.diff_exclude` are named in the detail, not counted.
+ * With `countTests: false`, test-file lines are named too and do not count toward `max`.
+ */
+export function diffSize(stat: Map<string, DiffEntry>, max: number, opts?: { countTests?: boolean }): BuiltinResult {
   const t = diffTotals(stat);
-  return t.counted > max ? fail("max_diff_lines", `diff has ${formatDiffTotals(t)} > ${max}`) : ok("max_diff_lines", formatDiffTotals(t));
+  const detail = formatDiffTotals(t, opts);
+  return t.counted > max ? fail("max_diff_lines", `diff has ${detail} > ${max}`) : ok("max_diff_lines", detail);
 }
 
 /** Every verify:test criterion of the given packages has evidence naming a changed test file. */

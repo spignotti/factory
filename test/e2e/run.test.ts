@@ -10,7 +10,7 @@ import { continueBaseRed } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
 import type { AgentRequest } from "../../src/agents/runner.js";
-import type { FakeStep } from "../../src/agents/fake-runner.js";
+import { type FakeStep, realSleep } from "../../src/agents/fake-runner.js";
 import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
 import { addOrigin, commitFile, FIXTURES } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
@@ -231,6 +231,10 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(eventsOf(r, "agent_finished").find((e) => e.role === "implement")).toMatchObject({ tokens_in: 1000, tokens_out: 200 });
     // result.json cost_usd counts metered providers only; these fake models are subscriptions
     expect(r.result.cost_usd).toBe(0);
+    // diff_count_tests defaults to true: test lines stay in the limit and are not split out.
+    expect(r.result.counted_lines).toBeUndefined();
+    expect(r.result.excluded_test_lines).toBeUndefined();
+    expect(eventsOf(r, "gate_result").filter((e) => e.data.check === "max_diff_lines").every((e) => e.data.counted_lines === undefined)).toBe(true);
   });
 
   it("agents get the allowlisted env and an isolated HOME; no env values in events or result", async () => {
@@ -454,6 +458,44 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "needs_human", lane: "fast", rounds: 2 });
     expect(r.result.reason).toMatch(/no extra round/);
     expect(r.runner.remaining()).toEqual({});
+  });
+
+  it("diff_count_tests false: test files stay out of max_diff_lines; the log and result.json report both numbers", async () => {
+    const testFile = [
+      'import assert from "node:assert/strict";',
+      'import { test } from "node:test";',
+      'import { multiply } from "../src/math.js";',
+      "",
+      'test("multiply", () => {',
+      "  assert.equal(multiply(2, 3), 6);",
+      "});",
+      ...Array.from({ length: 80 }, (_, i) => `// padding ${i}`),
+      "",
+    ].join("\n");
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => {
+        c.limits = { ...(c.limits as object), diff_count_tests: false, max_diff_lines: 20 };
+        c.merge = { ...(c.merge as object), low_max_diff_lines: 30 };
+      },
+      steps: (steps) => steps.map((st) => (st.role === "implement" ? { ...st, writes: { ...st.writes, "test/multiply.test.js": testFile } } : st)),
+    });
+    expect(r.result.result).toBe("done");
+    // Production diff fits the gate; the same lines plus tests still raise merge risk.
+    expect(r.result.counted_lines).toBeGreaterThan(0);
+    expect(r.result.counted_lines!).toBeLessThanOrEqual(20);
+    expect(r.result.excluded_test_lines).toBeGreaterThan(40);
+    const riskLines = r.result.counted_lines! + r.result.excluded_test_lines!;
+    expect(riskLines).toBeGreaterThan(30);
+    expect(r.result.risk).toBe("medium");
+    expect(r.github.prs[0]?.body).toContain(`diff ${riskLines} lines > 30`);
+    expect(r.resultFile).toEqual(r.result);
+    const gateEvents = eventsOf(r, "gate_result").filter((e) => e.data.check === "max_diff_lines");
+    expect(gateEvents.length).toBeGreaterThan(0);
+    for (const e of gateEvents) expect(e.data).toMatchObject({ counted_lines: expect.any(Number), excluded_test_lines: expect.any(Number) });
+    const final = [...eventsOf(r, "progress")].reverse().find((e) => typeof e.data.counted_lines === "number");
+    expect(final?.data).toMatchObject({ counted_lines: r.result.counted_lines, excluded_test_lines: r.result.excluded_test_lines });
+    expect(r.file("gates-1.json")).toContain("test lines not counted");
   });
 
   it("fast lane escalates after implement when the diff is too big: full review, medium risk, PR names the reasons", async () => {
@@ -820,13 +862,13 @@ describe("run guards", () => {
   });
 
   it("max_wall_minutes also stops an agent session that keeps heartbeating", async () => {
-    const started = Date.now();
     const r = await runScenario({
       script: "clean.json",
       patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.005), // 300 ms
+      // Fake sleep: the 1000 heartbeats do not take 10 s. A wall-clock cap on the whole scenario
+      // includes fixture setup and fails when the worker is busy, without saying the limit failed.
       steps: (steps) => steps.map((s) => (s.role === "plan_high" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
     });
-    expect(Date.now() - started).toBeLessThan(5000);
     expect(r.result).toMatchObject({ result: "needs_human" });
     expect(r.result.reason).toMatch(/max_wall_minutes/);
     expect(eventsOf(r, "heartbeat").length).toBeGreaterThan(3);
@@ -848,14 +890,21 @@ describe("run guards", () => {
 
   it("an external abort (SIGTERM handler) stops the run as failed and still writes result.json", async () => {
     const controller = new AbortController();
-    const started = Date.now();
+    // The plan session is blocked in a long sleep. Abort from outside that call, and time only the
+    // stop itself: the old bound included fixture setup and fired late when the worker was busy.
+    let abortedAt = 0;
     const r = await runScenario({
       script: "clean.json",
-      steps: (steps) => steps.map((s) => (s.role === "plan_high" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
-      deps: { signal: controller.signal },
-      onCall: () => void setTimeout(() => controller.abort(new Interrupted("SIGTERM")), 100),
+      steps: (steps) => steps.map((s) => (s.role === "plan_high" ? { ...s, heartbeats: { count: 1000, interval_ms: 60_000 } } : s)),
+      deps: { signal: controller.signal, sleep: realSleep },
+      onCall: () => void setTimeout(() => {
+        abortedAt = Date.now();
+        controller.abort(new Interrupted("SIGTERM"));
+      }, 30),
     });
-    expect(Date.now() - started).toBeLessThan(5000);
+    expect(abortedAt).toBeGreaterThan(0);
+    expect(Date.now() - abortedAt).toBeLessThan(5000);
+    expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
     expect(r.resultFile).toMatchObject({ result: "failed", reason: "interrupted by SIGTERM" });
     expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "failed" } });
     expect(r.github.prs).toEqual([]);

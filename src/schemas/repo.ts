@@ -296,6 +296,10 @@ export const RepoConfigSchema = z
         diff_exclude: z
           .array(z.string().min(1).refine((g) => !CATCH_ALL.has(g.replace(/^\.\//, "")), "diff_exclude must not match every file"))
           .default([]),
+        // When false, files matching `tests.globs` (the test-gate classification) are left out of
+        // `max_diff_lines` only. Fast-lane and merge line limits still count them. Default true.
+        // Turning it off is a loosening (config_guard).
+        diff_count_tests: z.boolean().default(true),
       })
       .default({
         max_diff_lines: 1500,
@@ -308,6 +312,7 @@ export const RepoConfigSchema = z
         pr_ci_wait_minutes: 20,
         forbidden_paths: [],
         diff_exclude: [],
+        diff_count_tests: true,
       }),
     services: z.array(ServiceSchema).default([]),
     ui: z

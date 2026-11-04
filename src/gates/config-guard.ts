@@ -175,6 +175,7 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   }
   if (a.merge.low_max_diff_lines > b.merge.low_max_diff_lines) out.push("merge.low_max_diff_lines raised");
   if (a.limits.max_diff_lines > b.limits.max_diff_lines) out.push("limits.max_diff_lines raised");
+  if (b.limits.diff_count_tests && !a.limits.diff_count_tests) out.push("limits.diff_count_tests turned off");
   const excl = a.limits.diff_exclude.filter((x) => !b.limits.diff_exclude.includes(x));
   if (excl.length) out.push(`limits.diff_exclude added: ${excl.join(", ")}`);
   removed("tests.globs", b.tests.globs, a.tests.globs);

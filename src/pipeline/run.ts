@@ -275,6 +275,7 @@ class RunFrame {
       minutes: Math.round(((this.now() - this.startedAt) / 60_000) * 10) / 10,
       cost_usd: Math.round(this.events.totals.cost_usd * 10_000) / 10_000,
       reason: out.reason,
+      ...(this.events.diffCount ?? {}),
       ...(out.questions ? { questions: out.questions } : {}),
       branch: out.branch,
       worktree: out.worktree,
