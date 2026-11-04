@@ -10,8 +10,8 @@ import { resolveToolchains, type Toolchains } from "../toolchains.js";
 import {
   auditLevelOk,
   baselineVersion,
+  blockingAuditTexts,
   blockingJobs,
-  blockingRuns,
   dependabotUpdates,
   exceptionRules,
   hasImageBuild,
@@ -27,7 +27,6 @@ import {
   scanText,
   SEMGREP_BASE_RULESETS,
   SEMGREP_REGISTRY,
-  swallowed,
   trivyIgnoreIssues,
   typeCheckingMode,
 } from "./spec.js";
@@ -155,9 +154,10 @@ function dependencyAudit(dir: string, repo: RepoConfig, toolchains: Toolchains):
   const pnpm = isPnpmProject(dir, toolchains);
   const npm = isNpmProject(dir, pnpm);
   if (!python && !pnpm && !npm) return ok("dependency audit", "no Python project and no npm or pnpm lockfile");
-  const runs = blockingRuns(repo).filter((r) => !swallowed(r));
+  // repo.yaml checks and pull_request steps, including a nox session the step runs.
+  const runs = blockingAuditTexts(dir, repo);
   const missing: string[] = [];
-  if (python && !runs.some((r) => /\bpip-audit\b/.test(r))) missing.push("pip-audit (blocking full check, not || true)");
+  if (python && !runs.some((r) => /\bpip-audit\b/.test(r))) missing.push("pip-audit (blocking check or CI step; a nox session that step runs counts; not || true)");
   if (pnpm && !runs.some((r) => /\bpnpm\s+audit\b/.test(r) && auditLevelOk(r))) missing.push("pnpm audit --audit-level high (low or moderate is fine; critical-only is not)");
   if (npm && !runs.some((r) => /\bnpm\s+audit\b/.test(r) && auditLevelOk(r))) missing.push("npm audit --audit-level=high");
   return missing.length
