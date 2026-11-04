@@ -36,8 +36,9 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
   bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity, and a scope check that
   warns the plan reviewer when the plan says "only" a path the task does not). The planner reads the repo's
-  `AGENTS.md` at the base commit. `plan_normalize` retries once with the schema errors before the run falls back to
-  the planner; the progress event lists both attempts.
+  `AGENTS.md` at the base commit. `plan_normalize` retries once with the zod paths and the JSON schema of the failing
+  fields (the first prompt does not include that schema) before the run falls back to the planner; the progress
+  event lists both attempts.
 - **Implement** (`src/steps/implement.ts`): DAG order, fresh session per package, handoff validation with one
   re-prompt, fast gates with the failure tail back into the same session (max 3), factory commits,
   cascade-skip. Bug plans prove the repro red on base and green after the fix. A plan opts out only with

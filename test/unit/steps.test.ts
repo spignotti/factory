@@ -189,7 +189,12 @@ describe("plan_normalize schema retry", () => {
     const out = await obtainPlan(ctx, "none");
     expect(out.kind).toBe("plan");
     expect(runner.calls.map((c) => c.role)).toEqual(["plan_normalize", "plan_normalize"]);
+    expect(runner.calls[0]?.prompt).not.toContain("JSON schema for the failing fields:");
+    expect(runner.calls[0]?.prompt).toContain("plan schema shape");
     expect(runner.calls[1]?.prompt).toMatch(/acceptance\.0:.*expected object, received string/);
+    expect(runner.calls[1]?.prompt).toContain("Return only one ```json block and no other text.");
+    expect(runner.calls[1]?.prompt).toContain("acceptance[]:");
+    expect(runner.calls[1]?.prompt).toContain('"verify"');
     const attempts = seen.filter((e) => e.role === "plan_normalize" && e.data.attempts).map((e) => e.data.attempts);
     expect(attempts.at(-1)).toEqual([
       expect.objectContaining({ n: 1, ok: false, errors: expect.arrayContaining([expect.stringMatching(/acceptance\.0:.*expected object, received string/)]) }),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planReviewNotes, quoteOccursIn, RED_GREEN_NA_LABEL, redGreenDecision, scopeNarrowingWarnings, validatePlan } from "../../src/schemas/plan.js";
+import { normalizeRetryNote, planFieldSchema, planReviewNotes, quoteOccursIn, RED_GREEN_NA_LABEL, redGreenDecision, scopeNarrowingWarnings, validatePlan } from "../../src/schemas/plan.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 
 const repo = parseRepoConfig(`
@@ -241,6 +241,32 @@ describe("scope narrowing warnings", () => {
     expect(notes).toContain("A6: restricts to only tests/test_web.py");
     expect(notes).toContain("red_green loosening: not_applicable");
     expect(notes).toContain("the assertion cannot fail on base");
+  });
+});
+
+describe("plan_normalize retry note", () => {
+  it("shows the zod path and the JSON schema of a string acceptance item, which the first prompt never had", () => {
+    const raw = {
+      version: 1,
+      type: "feature",
+      goal: "Add sum",
+      packages: [{ title: "sum" }],
+      acceptance: ["sum(1, 2) returns 3"],
+    };
+    const errors = errorsOf(raw);
+    const note = normalizeRetryNote(errors);
+    expect(note).toContain("Return only one ```json block and no other text.");
+    expect(note).toMatch(/acceptance\.0:.*expected object, received string/);
+    expect(note).toContain("JSON schema for the failing fields:");
+    expect(note).toContain("acceptance[]:");
+    const acceptance = planFieldSchema("acceptance.0") as { type?: string; required?: string[]; properties?: Record<string, unknown> };
+    expect(acceptance.type).toBe("object");
+    expect(acceptance.required).toEqual(expect.arrayContaining(["id", "package", "text", "verify"]));
+    expect(JSON.stringify(acceptance.properties?.verify)).toContain("test");
+    expect(note).toContain(JSON.stringify(acceptance));
+    expect(note).toMatch(/packages\.0\.id:/);
+    expect(note).toContain("packages[].id:");
+    expect(normalizeRetryNote(["A2: source_quote not found in task text"])).not.toContain("JSON schema for the failing fields:");
   });
 });
 

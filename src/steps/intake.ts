@@ -4,7 +4,7 @@ import { extractJson } from "../agents/runner.js";
 import type { GitHub } from "../gh.js";
 import { type AgentCall, callAgent, type RunContext, type Task } from "../pipeline/context.js";
 import { asData, rolePrompt } from "../prompts.js";
-import { type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
+import { normalizeRetryNote, type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import { planStep } from "./plan.js";
 
 export type PlanEffort = "none" | "medium" | "high";
@@ -71,8 +71,9 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
       prompt: [
         asData("task", ctx.task.text),
         ctx.task.labels.length ? `Issue labels: ${ctx.task.labels.join(", ")}` : "",
-        "Return only plan.json (plan schema shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",
-        errors.length ? `Your previous output was rejected:\n- ${errors.join("\n- ")}` : "",
+        errors.length
+          ? normalizeRetryNote(errors)
+          : "Return only plan.json (plan schema shape) or {\"version\":1,\"questions\":[...]} as a ```json block.",
       ].filter(Boolean).join("\n\n"),
     };
     const res = await callAgent(ctx, "intake", call);

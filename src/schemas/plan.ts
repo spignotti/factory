@@ -316,3 +316,64 @@ export function planReviewNotes(plan: Plan, taskText: string, labels: string[] =
   }
   return lines.join("\n");
 }
+
+let planJsonSchema: Record<string, unknown> | undefined;
+
+function planSchemaRoot(): Record<string, unknown> {
+  planJsonSchema ??= z.toJSONSchema(PlanSchema, { target: "draft-2020-12" }) as Record<string, unknown>;
+  return planJsonSchema;
+}
+
+/**
+ * JSON schema node for a zod path such as `acceptance.0` or `packages.0.id`.
+ * Array indexes select `items`. Undefined when the path is not a schema field
+ * (a code check like `A2: source_quote …`).
+ */
+export function planFieldSchema(path: string): unknown | undefined {
+  const parts = path.split(".").filter(Boolean);
+  let node: unknown = planSchemaRoot();
+  for (const part of parts) {
+    if (!node || typeof node !== "object") return undefined;
+    const o = node as { properties?: Record<string, unknown>; items?: unknown };
+    if (/^\d+$/.test(part)) {
+      if (!o.items) return undefined;
+      node = o.items;
+      continue;
+    }
+    if (o.properties && part in o.properties) {
+      node = o.properties[part];
+      continue;
+    }
+    const items = o.items as { properties?: Record<string, unknown> } | undefined;
+    if (items?.properties && part in items.properties) {
+      node = items.properties[part];
+      continue;
+    }
+    return undefined;
+  }
+  return node;
+}
+
+/**
+ * Second `plan_normalize` attempt. The first prompt only names "plan schema shape", so a fast model
+ * invents strings for `acceptance` and omits ids (runs 20261104-124243-50c0b0 and 20261104-140835-5be6cd).
+ * Repeating the zod sentence did not show the object those paths require, so the retry came back invalid too.
+ */
+export function normalizeRetryNote(errors: string[]): string {
+  const blocks: string[] = [];
+  const seen = new Set<string>();
+  for (const error of errors) {
+    const path = error.split(":")[0]?.trim() ?? "";
+    const schema = planFieldSchema(path);
+    if (schema === undefined) continue;
+    const key = path.replace(/\.\d+(?=\.|$)/g, "[]");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    blocks.push(`${key}:\n${JSON.stringify(schema)}`);
+  }
+  return [
+    "Your previous output was rejected. Return only one ```json block and no other text.",
+    `Zod errors (path: message):\n${errors.map((e) => `- ${e}`).join("\n")}`,
+    blocks.length ? `JSON schema for the failing fields:\n${blocks.join("\n\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+}
