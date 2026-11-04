@@ -7,6 +7,14 @@ import { OpenAuditTicketSchema } from "./proposal.js";
  */
 const nullableStr = z.string().nullable();
 
+/** Latest provider-stream retry still in flight (`factory status`). */
+const StepRetrySchema = z.strictObject({
+  class: z.string(),
+  attempt: z.number().int(),
+  max: z.number().int(),
+  package: z.string().nullable(),
+});
+
 export const StatusReportSchema = z.strictObject({
   generated_at: z.string(),
   running: z.array(
@@ -15,6 +23,8 @@ export const StatusReportSchema = z.strictObject({
       pid: z.number().int(), minutes: z.number(), branch: nullableStr, pr: nullableStr,
       /** Sandboxed check in flight (`null` when the run is not inside a check). */
       check: z.string().nullable(),
+      /** Stream-abort retry of the current agent call (`null` once that call finished). */
+      retry: StepRetrySchema.nullable(),
     }),
   ),
   waiting: z.array(
@@ -36,6 +46,7 @@ export const StatusReportSchema = z.strictObject({
       run_id: z.string(), repo: z.string(), task: z.string(), step: z.string(), lane: z.enum(["standard", "fast"]),
       pid: z.number().int(), minutes: z.number(), silent_minutes: z.number(), branch: nullableStr, pr: nullableStr,
       check: z.string().nullable(),
+      retry: StepRetrySchema.nullable(),
     }),
   ),
   prs: z.array(

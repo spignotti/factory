@@ -56,6 +56,44 @@
               "string",
               "null"
             ]
+          },
+          "retry": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "class": {
+                    "type": "string"
+                  },
+                  "attempt": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "max": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "package": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "class",
+                  "attempt",
+                  "max",
+                  "package"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -68,7 +106,8 @@
           "minutes",
           "branch",
           "pr",
-          "check"
+          "check",
+          "retry"
         ],
         "additionalProperties": false
       }
@@ -289,6 +328,44 @@
               "string",
               "null"
             ]
+          },
+          "retry": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "class": {
+                    "type": "string"
+                  },
+                  "attempt": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "max": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "package": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "class",
+                  "attempt",
+                  "max",
+                  "package"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -302,7 +379,8 @@
           "silent_minutes",
           "branch",
           "pr",
-          "check"
+          "check",
+          "retry"
         ],
         "additionalProperties": false
       }

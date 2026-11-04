@@ -25,6 +25,8 @@ describe("limit defaults", () => {
       max_wall_minutes: 240,
       pr_ci_wait_minutes: 20,
       base_red_resume_hours: 48,
+      stream_retries: 2,
+      step_token_warn: 1_000_000,
     });
   });
 });

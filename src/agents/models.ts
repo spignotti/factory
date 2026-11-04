@@ -3,7 +3,7 @@ import { billingOf, familyOf, type ModelEntry, type Profile, profileRoleOf } fro
 import { realSleep, type Sleep } from "./fake-runner.js";
 import { AgentError, type AgentRequest, type AgentResponse, type AgentRunner, type AgentUsage } from "./runner.js";
 
-export type ErrorClass = "capacity" | "network" | "limit" | "auth" | "invalid_output" | "other";
+export type ErrorClass = "capacity" | "network" | "stream" | "limit" | "auth" | "invalid_output" | "other";
 
 /**
  * A dropped, failed or timed-out connection: worth retrying the same model. undici reports a cut stream as
@@ -11,6 +11,13 @@ export type ErrorClass = "capacity" | "network" | "limit" | "auth" | "invalid_ou
  * connection as `Connection error.` (20261030-125347-5b7ada: a request in flight across a 19 min box freeze).
  */
 const NETWORK = /^terminated$|^request timed out\.?$|^connection error\.?$|\bAPIConnectionTimeoutError\b|\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|socket hang up|fetch failed|other side closed|premature close/i;
+
+/**
+ * The provider closed the token stream before a finish reason (20261104-150805-15d527:
+ * `Stream ended without finish_reason` on a multi-million-token implement call). Same idea as a
+ * transport drop, but its retry budget is `limits.stream_retries`, not `retry.attempts`.
+ */
+const STREAM = /stream ended without finish_reason|\bwithout finish_reason\b|\bpremature eof\b|\bunexpected eof\b|connection reset during streaming|\berror while streaming\b|\bwhile processing the stream\b|\b(?:sse |response )?stream closed\b|\bstream(?:ing)? (?:response )?ended\b|\bincomplete chunked (?:read|encoding)\b/i;
 
 /** Bad agent output; never a reason to fall back to another model. */
 export class InvalidOutputError extends Error {
@@ -31,6 +38,7 @@ export function classifyError(err: unknown): ErrorClass {
     return "capacity";
   }
   if (status === undefined && NETWORK.test(message.trim())) return "network";
+  if (STREAM.test(message)) return "stream";
   if (status === 401 || status === 403 || /unauthori[sz]ed|invalid api key|authenticat|forbidden|not logged in/i.test(message)) {
     return "auth";
   }
@@ -38,6 +46,11 @@ export function classifyError(err: unknown): ErrorClass {
     return "limit";
   }
   return "other";
+}
+
+/** Provider stream abort (`stream`), as opposed to a transport drop (`network`). */
+export function isStreamAbort(err: unknown): boolean {
+  return classifyError(err) === "stream";
 }
 
 export interface CallDeps {
@@ -51,29 +64,40 @@ export interface CallDeps {
    * a retry attempt (at most `SUSPEND_RETRIES` times per call): the provider dropped it because we were gone.
    */
   suspends?: () => number;
+  /**
+   * Same-model retries for a `stream` abort (`limits.stream_retries`). Default 2. `0` does not retry.
+   * Capacity and network keep `profile.retry.attempts`.
+   */
+  streamRetries?: number;
+  /** Emit a `progress` warning when one call's `tokens_in` reaches this (`limits.step_token_warn`). `0`/absent disables. */
+  tokenWarn?: number;
 }
 
 /** Extra same-model retries per call for attempts that spanned a box freeze. */
 export const SUSPEND_RETRIES = 2;
 
 /** Error classes that are the provider's or the network's fault, not the task's: the run stays resumable. */
-export const TRANSIENT_CLASSES: readonly ErrorClass[] = ["capacity", "network"];
+export const TRANSIENT_CLASSES: readonly ErrorClass[] = ["capacity", "network", "stream"];
 
 /**
- * The model chain gave up on a transient error (capacity, network, timeout). The run ends `needs_human`
+ * The model chain gave up on a transient error (capacity, network, stream abort). The run ends `needs_human`
  * (resumable, worktree kept) instead of `failed`.
  */
 export class TransientAgentError extends Error {
   constructor(
     readonly errorClass: ErrorClass,
     cause: unknown,
+    message?: string,
   ) {
-    super(`transient ${errorClass} error after retries: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    super(message ?? `transient ${errorClass} error after retries: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
     this.name = "TransientAgentError";
   }
 }
 
-export type ModelRequest = Omit<AgentRequest, "model" | "thinking">;
+export type ModelRequest = Omit<AgentRequest, "model" | "thinking"> & {
+  /** Implement package this call belongs to; copied onto `step_retry` for `factory status`. */
+  packageId?: string;
+};
 
 export interface ModelResponse extends AgentResponse {
   model: string;
@@ -105,13 +129,6 @@ function nextEntry(chain: ModelEntry[], i: number, cls: ErrorClass): number {
 }
 
 /**
- * Runs one agent call with the role's model chain: capacity and network errors retry the same model with
- * exponential backoff, then fall back (network like other: never to `capacity_only`); limit/auth/other fall back directly, skipping
- * `capacity_only` entries; invalid output never falls back. An attempt that spanned a box freeze and failed
- * with a network or unclassified error is retried without counting (`SUSPEND_RETRIES`). When the chain gives
- * up on a transient class it throws `TransientAgentError`. Usage is recorded from successful and failed calls.
- */
-/**
  * Usage as recorded: a subscription provider bills no per-call USD, so its catalog cost is dropped
  * (reports show its tokens instead); `data.billing` keeps the kind for `stats`.
  */
@@ -120,23 +137,53 @@ export function billedUsage(model: string, usage: Partial<AgentUsage> | undefine
   return { ...usage, ...(billing === "subscription" ? { cost_usd: 0 } : {}), billing };
 }
 
+/** One call's input size, without putting the tokens on the event (that would double-count usage). */
+function warnStepTokens(events: EventLog, step: string, role: string, model: string, tokensIn: number | undefined, threshold: number | undefined): void {
+  if (!threshold || threshold <= 0 || tokensIn === undefined || tokensIn < threshold) return;
+  events.emit({
+    step,
+    event: "progress",
+    role,
+    model,
+    data: {
+      warning: "step_tokens",
+      detail: `single step used ${tokensIn} tokens_in (threshold ${threshold})`,
+      tokens_in: tokensIn,
+      threshold,
+    },
+  });
+}
+
+/**
+ * Runs one agent call with the role's model chain: capacity and network errors retry the same model with
+ * exponential backoff, then fall back (network like other: never to `capacity_only`); a provider stream abort
+ * retries the same model up to `streamRetries` (the current call only) and then falls back the same way;
+ * limit/auth/other fall back directly, skipping `capacity_only` entries; invalid output never falls back.
+ * An attempt that spanned a box freeze and failed with a network, stream or unclassified error is retried
+ * without counting (`SUSPEND_RETRIES`). When the chain gives up on a transient class it throws
+ * `TransientAgentError`. Usage is recorded from successful and failed calls.
+ */
 export async function callModel(deps: CallDeps, step: string, req: ModelRequest): Promise<ModelResponse> {
   const { profile, events } = deps;
   const sleep = deps.sleep ?? realSleep;
   const chain = chainFor(profile, req.role);
   const suspends = deps.suspends ?? (() => 0);
+  const streamRetries = deps.streamRetries ?? 2;
   let suspendRetries = 0;
+  let streamRetriesUsed = 0;
   let lastError: unknown;
   let lastClass: ErrorClass = "other";
+  const { packageId, ...agentReq } = req;
   for (let i = 0; i >= 0 && i < chain.length; ) {
     const entry = chain[i]!;
     let next: number;
     for (let attempt = 0; ; attempt++) {
       const suspendsBefore = suspends();
       try {
-        const res = await deps.runner.run({ ...req, model: entry.model, thinking: entry.thinking });
+        const res = await deps.runner.run({ ...agentReq, model: entry.model, thinking: entry.thinking });
         const { billing, ...usage } = billedUsage(entry.model, res.usage, profile);
         events.emit({ step, event: "agent_finished", role: req.role, model: entry.model, ...usage, data: { billing } });
+        warnStepTokens(events, step, req.role, entry.model, res.usage?.tokens_in, deps.tokenWarn);
         return { ...res, model: entry.model };
       } catch (err) {
         lastError = err;
@@ -151,13 +198,33 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
           ...usage,
           data: { class: cls, message: (err as Error).message.slice(0, 500), billing },
         });
+        warnStepTokens(events, step, req.role, entry.model, err instanceof AgentError ? err.usage.tokens_in : undefined, deps.tokenWarn);
         if (req.signal?.aborted) throw err;
         if (cls === "invalid_output") throw err;
-        if ((cls === "network" || cls === "other") && suspends() > suspendsBefore && suspendRetries < SUSPEND_RETRIES) {
+        if ((cls === "network" || cls === "stream" || cls === "other") && suspends() > suspendsBefore && suspendRetries < SUSPEND_RETRIES) {
           // The box was frozen while this request was in flight: not the model's fault, not counted as an attempt.
           suspendRetries++;
           attempt--;
           events.emit({ step, event: "model_retry", role: req.role, model: entry.model, data: { after_suspend: true, suspend_retry: suspendRetries } });
+          continue;
+        }
+        if (cls === "stream" && attempt < streamRetries) {
+          const delay = backoffMs(attempt, profile.retry);
+          streamRetriesUsed++;
+          events.emit({
+            step,
+            event: "step_retry",
+            role: req.role,
+            model: entry.model,
+            data: {
+              class: "stream",
+              attempt: attempt + 1,
+              max: streamRetries,
+              delay_ms: delay,
+              ...(packageId ? { package: packageId } : {}),
+            },
+          });
+          await sleep(delay, req.signal);
           continue;
         }
         if ((cls === "capacity" || cls === "network") && attempt + 1 < profile.retry.attempts) {
@@ -181,6 +248,10 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
     }
     i = next;
   }
-  if (TRANSIENT_CLASSES.includes(lastClass) && !req.signal?.aborted) throw new TransientAgentError(lastClass, lastError);
+  if (TRANSIENT_CLASSES.includes(lastClass) && !req.signal?.aborted) {
+    const causeText = lastError instanceof Error ? lastError.message : String(lastError);
+    const message = lastClass === "stream" ? `provider stream aborted after ${streamRetriesUsed} ${streamRetriesUsed === 1 ? "retry" : "retries"}: ${causeText}` : undefined;
+    throw new TransientAgentError(lastClass, lastError, message);
+  }
   throw lastError;
 }

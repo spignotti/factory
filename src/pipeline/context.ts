@@ -202,7 +202,15 @@ export async function callAgent(
         },
       },
       (signal) =>
-        callModel({ runner: deps.runner, profile: deps.profile, events, sleep: deps.sleep, suspends: () => suspends }, step, {
+        callModel({
+          runner: deps.runner,
+          profile: deps.profile,
+          events,
+          sleep: deps.sleep,
+          suspends: () => suspends,
+          streamRetries: ctx.repo.limits.stream_retries,
+          tokenWarn: ctx.repo.limits.step_token_warn,
+        }, step, {
           ...req,
           // Prompts carry gate output and app text: exact-match redaction of every secret value.
           system: events.redact(req.system),

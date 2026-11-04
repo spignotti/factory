@@ -6,7 +6,7 @@ import { listRuns, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatusReportSchema } from "../schemas/reports.js";
-import { currentCheckName, eventsForRun, isQueuedWaiter, lastEventMs, orphanedRunIds, queuedFromEvents } from "../run-health.js";
+import { currentCheckName, currentStepRetry, eventsForRun, isQueuedWaiter, lastEventMs, orphanedRunIds, queuedFromEvents } from "../run-health.js";
 
 /** `factory status --json` (schema `schemas/status.schema.json`). */
 export type StatusReport = z.infer<typeof StatusReportSchema>;
@@ -62,6 +62,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
         run_id: r.run_id, repo: st.repo, task: taskOf(r), step: st.step, lane: st.lane ?? "standard", pid,
         minutes: Math.round(((now - r.started_at.getTime()) / 60_000) * 10) / 10, branch: st.branch, pr: st.pr,
         check: currentCheckName(events),
+        retry: currentStepRetry(events),
       };
       report.running.push(entry);
       try {
@@ -102,12 +103,18 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
   return report;
 }
 
+function retryNote(retry: StatusReport["running"][number]["retry"]): string {
+  if (!retry) return "";
+  const pkg = retry.package ? ` ${retry.package}` : "";
+  return ` [${retry.class} retry ${retry.attempt}/${retry.max}${pkg}]`;
+}
+
 export function renderStatus(s: StatusReport): string {
   const out: string[] = [];
   const section = (title: string, lines: string[]) => out.push(`${title} (${lines.length})${lines.length ? `:\n${lines.map((l) => `  ${l}`).join("\n")}` : ""}`);
-  section("running", s.running.map((r) => `${r.run_id} ${r.task} — ${r.step}${r.check ? ` (${r.check})` : ""}, ${r.lane}, ${r.minutes} min (${r.repo})`));
+  section("running", s.running.map((r) => `${r.run_id} ${r.task} — ${r.step}${r.check ? ` (${r.check})` : ""}${retryNote(r.retry)}, ${r.lane}, ${r.minutes} min (${r.repo})`));
   section("queued", s.queued.map((r) => `${r.run_id} ${r.task} — waiting for lock (holder ${r.holder_run_id ?? "?"}), ${r.minutes} min (${r.repo})`));
-  section("stalled", s.stalled.map((r) => `${r.run_id} ${r.task} — no event for ${r.silent_minutes} min, still in ${r.step}${r.check ? ` (${r.check})` : ""} (${r.repo})`));
+  section("stalled", s.stalled.map((r) => `${r.run_id} ${r.task} — no event for ${r.silent_minutes} min, still in ${r.step}${r.check ? ` (${r.check})` : ""}${retryNote(r.retry)} (${r.repo})`));
   section("waiting", s.waiting.map((r) => `${r.run_id} ${r.task} — ${r.result}: ${r.reason}${r.pr ? ` ${r.pr}` : ""}`));
   section("orphaned", s.orphaned.map((r) => `${r.run_id} ${r.task} — lock holder gone in ${r.step}; factory resume ${r.run_id} or factory status`));
   section("interrupted", s.interrupted.map((r) => `${r.run_id} ${r.task} — stopped in ${r.step}; factory resume ${r.run_id}`));
