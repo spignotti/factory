@@ -2,7 +2,7 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Sleep } from "../agents/fake-runner.js";
 import { EventLog, type RunResult, writeResult } from "../events.js";
-import { git, repoLockId } from "../git.js";
+import { git, repoLockId, withRepoGitOps } from "../git.js";
 import { loadNotifyConfig, notifyRunFinished, type Fetch } from "../notify.js";
 import { releaseRunLock } from "../pipeline/lock.js";
 import type { RunState } from "../pipeline/state.js";
@@ -85,21 +85,26 @@ export async function abandonRun(opts: AbandonOptions): Promise<AbandonOutcome> 
 
 /** Deletes a run worktree. A git failure falls back to removing the directory. True when something was removed. */
 export async function removeRunWorktree(repo: string, worktree: string): Promise<boolean> {
-  if (!existsSync(worktree)) {
-    if (existsSync(repo)) await git(repo, ["worktree", "prune"]).catch(() => undefined);
-    return false;
+  if (!existsSync(repo)) {
+    if (!existsSync(worktree)) return false;
+    rmSync(worktree, { recursive: true, force: true });
+    return !existsSync(worktree);
   }
-  if (existsSync(repo)) {
+  return withRepoGitOps(repo, async () => {
+    if (!existsSync(worktree)) {
+      await git(repo, ["worktree", "prune"]).catch(() => undefined);
+      return false;
+    }
     try {
       await git(repo, ["worktree", "remove", "--force", worktree]);
       return true;
     } catch {
       // not registered, or the git dir is wedged: delete the directory below
     }
-  }
-  rmSync(worktree, { recursive: true, force: true });
-  if (existsSync(repo)) await git(repo, ["worktree", "prune"]).catch(() => undefined);
-  return !existsSync(worktree);
+    rmSync(worktree, { recursive: true, force: true });
+    await git(repo, ["worktree", "prune"]).catch(() => undefined);
+    return !existsSync(worktree);
+  });
 }
 
 function abandonedResult(run: RunRecord, reason: string): RunResult {

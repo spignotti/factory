@@ -13,7 +13,13 @@
 
 Never touched: `keys/`, `secrets/`, `memory/`, `archive/keys`, `archive/memory`, `*.bak`, `profile.yaml`, `notify.yaml*`, or runs that are active, or needs_input / needs_human / base_red while idle &lt; 14 days.
 
-Guards: skip repos whose lock is held; skip when deploy-self holds its deploy lock; no `--force` on the scheduled path; dirty worktrees and branches with unpushed commits are skipped.
+Guards:
+
+- **Sandbox `home/`** of a terminal run (not `needs_input` / `needs_human` / `base_red`, not `locked`, idle ≥ `home_hours`) is removed with **no repo lock**. The directory is that run's cache, not a git operation. A run that currently holds a lock slot is skipped (`run is live; home/ kept`). Another run of the same repo holding a slot does not keep it.
+- **Worktrees and `factory/*` branches** (merged/closed PRs, and no-PR runs past retention) take a short lock file `factory.gitops.lock` in the checkout's git common dir, not a run slot. The same lock is held around `git worktree add` / `remove` / `prune` in runs, adopt, abandon and base worktrees, so those operations do not interleave. Manual and scheduled gc wait up to 60s for it; the automatic gc at the start of `factory run` waits 5s. If it stays busy, that worktree is skipped until the next gc. A live run's worktree is never removed. A free run slot is not required, so a repo with `max_runs: 2` and one run active is still cleaned.
+- **Metadata archive** still takes every run slot (exclusive). It does not delete a run directory while any slot is held.
+- **deploy-self:** gc skips deletions only while `deploy-self.sh once` holds `flock` on `$FACTORY_RELEASES/.deploy.lock`. That flock is on the process fd and is released when `once` exits, including a crash. A leftover lock file with nobody holding it does not block gc, and the daemon's `.daemon.lock` is a different file, so a finished deploy cannot skip the daily run permanently. A missing `flock` binary fails closed (gc skips). The overlap with a deploy is one `once` (a fetch, or a build when `main` moved), not the daemon's whole lifetime.
+- No `--force` on the scheduled path. Dirty worktrees and branches with unpushed commits are skipped.
 
 ## Configuration
 
@@ -38,10 +44,10 @@ Each run appends one JSON line to `$FACTORY_HOME/gc.log` (rotated at 5 MiB) with
 
 ## Scheduling (supercronic)
 
-This box uses **supercronic** and supervisord, not systemd. The crontab line (daily 04:30) is in [ops/supercronic/factory-gc.crontab](../ops/supercronic/factory-gc.crontab).
+This box uses **supercronic** and supervisord, not systemd. The scheduled gc **already runs** daily at 04:30 as supervisord program `factory-gc` (supercronic on the crontab below), with `gc.retention.dry_run: false` (live deletes). The crontab line is in [ops/supercronic/factory-gc.crontab](../ops/supercronic/factory-gc.crontab).
 
 On the box every job has its own supercronic process under supervisord (`/workspace/ops/supervisor/conf.d/*.conf`,
-one `[program:…]` per crontab, like `backup-cron` and `box-heartbeat`). To enable gc:
+one `[program:…]` per crontab, like `backup-cron` and `box-heartbeat`). To enable gc on a new box:
 
 1. Copy the crontab to `/workspace/ops/factory-gc/crontab`.
 2. Add `/workspace/ops/supervisor/conf.d/factory-gc.conf` with

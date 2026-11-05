@@ -2,9 +2,9 @@ import { existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Sleep } from "../agents/fake-runner.js";
 import type { GitHub } from "../gh.js";
-import { git, gitOk, repoLockId } from "../git.js";
+import { AUTO_GC_GIT_OPS_WAIT_MS, git, gitOk, tryRepoGitOps } from "../git.js";
 import type { Fetch } from "../notify.js";
-import { acquireRepoLock, activeHolders } from "../pipeline/lock.js";
+import { activeHolders } from "../pipeline/lock.js";
 import { EVIDENCE_RETENTION_DAYS, pruneEvidence } from "../evaluate/evidence.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
@@ -90,6 +90,16 @@ export interface GcOptions {
   notifyFetch?: Fetch;
   notifySleep?: Sleep;
   notifyBackoffMs?: number[];
+  /** How long to wait for the per-repo git-ops lock. Default 60s (`GIT_OPS_WAIT_MS`). */
+  gitOpsWaitMs?: number;
+}
+
+function runIsLive(factoryHome: string, runId: string): boolean {
+  return activeHolders(factoryHome).some((h) => h.runId === runId);
+}
+
+function skipGitOps(skip: (reason: string) => void, op: "busy" | "not-a-repo"): void {
+  skip(op === "busy" ? "git worktree operations are busy; worktree kept" : "repository is not a git checkout");
 }
 
 function emptyReport(dryRun: boolean): GcReport {
@@ -115,8 +125,10 @@ function emptyReport(dryRun: boolean): GcReport {
  *   worktree only; the local branch and its commits stay. Such a run can no longer be resumed.
  * - PR open and the run finished, idle for `stripAfterHours` (default 12): deletes only `node_modules`, `.venv`
  *   and `.nox` at the worktree root; the worktree stays.
- * A dirty worktree is kept unless `force`. Runs of a repository whose lock is held are skipped (PR states are
- * looked up before the lock is taken, so a parallel `factory run` is never blocked by a network call).
+ * A dirty worktree is kept unless `force`. A run that holds a lock slot is left untouched. Worktree removal
+ * and local branch deletion take the per-repo git-ops lock (not a run slot), so they proceed while another
+ * run of the same repo is active; PR state is looked up before that lock, so a parallel `factory run` is
+ * never blocked by a network call. Sandbox `home/` of a terminal run is removed with no repo lock.
  * Evidence retention: run folders older than 30 days leave the `factory-evidence`
  * branch of every repository the factory ran in, with a normal commit and a plain push.
  * needs_input with no answer for 2 working days (Mon–Fri, Europe/Berlin) is abandoned and the owner is notified.
@@ -141,6 +153,17 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
     return report;
   }
   const prunedRepos = new Set<string>();
+  // One timeout per repo per gc. A lock that stays busy does not cost 60s on every later run.
+  const gitOpsBusy = new Set<string>();
+  const withGcGitOps = async <T>(repo: string, fn: () => Promise<T>): Promise<T | "busy" | "not-a-repo"> => {
+    if (gitOpsBusy.has(repo)) return "busy";
+    const op = await tryRepoGitOps(repo, fn, opts.gitOpsWaitMs === undefined ? undefined : { waitMs: opts.gitOpsWaitMs });
+    if (!op.ok) {
+      if (op.reason === "busy") gitOpsBusy.add(repo);
+      return op.reason === "busy" ? "busy" : "not-a-repo";
+    }
+    return op.value;
+  };
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
     if (!st || st.gc_at) continue;
@@ -164,72 +187,90 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
         continue;
       }
     }
-    const release = acquireRepoLock(opts.factoryHome, await repoLockId(st.repo), `gc-${run.run_id}`, { maxRuns: lockMaxRuns(st.repo), exclusive: true });
-    if (!release) {
-      skip("repository is locked by a running factory process");
+    if (runIsLive(opts.factoryHome, run.run_id)) {
+      skip("run is live; left untouched");
       continue;
     }
-    try {
-      if (st.pr && prState === "open") {
-        if (wt && st.step === "finished" && idle >= stripMs) {
-          const heavy = HEAVY_DIRS.filter((d) => existsSync(join(wt, d)));
-          if (heavy.length) {
-            if (!dryRun) for (const d of heavy) rmSync(join(wt, d), { recursive: true, force: true });
-            report.stripped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed: [...heavy] });
-          }
+    if (st.pr && prState === "open") {
+      if (wt && st.step === "finished" && idle >= stripMs) {
+        const heavy = HEAVY_DIRS.filter((d) => existsSync(join(wt, d)));
+        if (heavy.length) {
+          if (!dryRun) for (const d of heavy) rmSync(join(wt, d), { recursive: true, force: true });
+          report.stripped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed: [...heavy] });
         }
-        skip("PR is open");
+      }
+      skip("PR is open");
+      continue;
+    }
+    if (wt && (await dirty(wt))) {
+      skip("worktree has uncommitted changes (use --force)");
+      continue;
+    }
+    if (st.branch) {
+      const unpushed = await branchHasUnpushedCommits(st.repo, st.branch);
+      // A merged PR whose head branch GitHub auto-deleted (and a pruned fetch dropped) is still pushed:
+      // GitHub keeps refs/pull/<n>/head. Fails closed when that ref cannot be read.
+      if (unpushed.unpushed && st.pr && prState === "merged" && (await pullHeadMatches(st.repo, st.pr, st.branch))) unpushed.unpushed = false;
+      if (unpushed.unpushed) {
+        skip(unpushed.reason ?? "branch has unpushed commits");
         continue;
       }
-      if (wt && (await dirty(wt))) {
-        skip("worktree has uncommitted changes (use --force)");
-        continue;
-      }
-      if (st.branch) {
-        const unpushed = await branchHasUnpushedCommits(st.repo, st.branch);
-        // A merged PR whose head branch GitHub auto-deleted (and a pruned fetch dropped) is still pushed:
-        // GitHub keeps refs/pull/<n>/head. Fails closed when that ref cannot be read.
-        if (unpushed.unpushed && st.pr && prState === "merged" && (await pullHeadMatches(st.repo, st.pr, st.branch))) unpushed.unpushed = false;
-        if (unpushed.unpushed) {
-          skip(unpushed.reason ?? "branch has unpushed commits");
+    }
+    if (!st.pr) {
+      const entry = {
+        run_id: run.run_id,
+        repo: st.repo,
+        pr: null,
+        pr_state: "none" as const,
+        worktree_removed: true,
+        branch_deleted: false,
+        remote_branch_deleted: false,
+        notes: [`no PR, idle ${Math.floor(idle / MS_HOUR / 24)} days (${st.result ?? "interrupted"}); branch ${st.branch ?? "(none)"} kept; resume is no longer possible`],
+      };
+      if (!dryRun) {
+        const op = await withGcGitOps(st.repo, async () => {
+          if (runIsLive(opts.factoryHome, run.run_id)) return "live" as const;
+          if (await dirty(wt!)) return "dirty" as const;
+          await git(st.repo, ["worktree", "remove", ...(opts.force ? ["--force"] : []), wt!]);
+          return "ok" as const;
+        });
+        if (op === "busy" || op === "not-a-repo") {
+          skipGitOps(skip, op);
           continue;
         }
-      }
-      if (!st.pr) {
-        const entry = {
-          run_id: run.run_id,
-          repo: st.repo,
-          pr: null,
-          pr_state: "none" as const,
-          worktree_removed: true,
-          branch_deleted: false,
-          remote_branch_deleted: false,
-          notes: [`no PR, idle ${Math.floor(idle / MS_HOUR / 24)} days (${st.result ?? "interrupted"}); branch ${st.branch ?? "(none)"} kept; resume is no longer possible`],
-        };
-        if (!dryRun) {
-          await git(st.repo, ["worktree", "remove", ...(opts.force ? ["--force"] : []), wt!]);
-          markCollected(run, now());
-          prunedRepos.add(st.repo);
+        if (op === "live") {
+          skip("run is live; left untouched");
+          continue;
         }
-        report.cleaned.push(entry);
-        continue;
-      }
-      const branch = st.branch!;
-      const entry = { run_id: run.run_id, repo: st.repo, pr: st.pr, pr_state: prState as "merged" | "closed", worktree_removed: false, branch_deleted: false, remote_branch_deleted: false, notes: [] as string[] };
-      const factoryBranch = FACTORY_BRANCH.test(branch);
-      if (!factoryBranch) entry.notes.push(`branch ${branch} is not a factory/* branch; kept`);
-      const local = await localSha(st.repo, branch);
-      let remote: string | null = null;
-      if (factoryBranch && local) {
-        try {
-          remote = await remoteSha(st.repo, branch);
-          if (!remote) entry.notes.push("remote branch already gone");
-          else if (remote !== local) entry.notes.push("remote branch moved since the factory pushed it; kept");
-        } catch (e) {
-          entry.notes.push(`remote not reachable; remote branch kept (${(e as Error).message.slice(0, 120)})`);
+        if (op === "dirty") {
+          skip("worktree has uncommitted changes (use --force)");
+          continue;
         }
+        markCollected(run, now());
+        prunedRepos.add(st.repo);
       }
-      if (!dryRun) {
+      report.cleaned.push(entry);
+      continue;
+    }
+    const branch = st.branch!;
+    const entry = { run_id: run.run_id, repo: st.repo, pr: st.pr, pr_state: prState as "merged" | "closed", worktree_removed: false, branch_deleted: false, remote_branch_deleted: false, notes: [] as string[] };
+    const factoryBranch = FACTORY_BRANCH.test(branch);
+    if (!factoryBranch) entry.notes.push(`branch ${branch} is not a factory/* branch; kept`);
+    const local = await localSha(st.repo, branch);
+    let remote: string | null = null;
+    if (factoryBranch && local) {
+      try {
+        remote = await remoteSha(st.repo, branch);
+        if (!remote) entry.notes.push("remote branch already gone");
+        else if (remote !== local) entry.notes.push("remote branch moved since the factory pushed it; kept");
+      } catch (e) {
+        entry.notes.push(`remote not reachable; remote branch kept (${(e as Error).message.slice(0, 120)})`);
+      }
+    }
+    if (!dryRun) {
+      const op = await withGcGitOps(st.repo, async () => {
+        if (runIsLive(opts.factoryHome, run.run_id)) return "live" as const;
+        if (wt && (await dirty(wt))) return "dirty" as const;
         if (wt) {
           await git(st.repo, ["worktree", "remove", ...(opts.force ? ["--force"] : []), wt]);
           entry.worktree_removed = true;
@@ -239,24 +280,36 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
           await git(st.repo, ["branch", "-D", branch]);
           entry.branch_deleted = true;
         }
-        if (factoryBranch && local && remote && remote === local) {
-          try {
-            await git(st.repo, ["push", "origin", "--delete", branch]);
-            entry.remote_branch_deleted = true;
-          } catch (e) {
-            entry.notes.push(`remote branch delete failed: ${(e as Error).message.slice(0, 120)}`);
-          }
-        }
-        markCollected(run, now());
-      } else {
-        entry.worktree_removed = wt !== null;
-        entry.branch_deleted = factoryBranch && local !== null;
-        entry.remote_branch_deleted = factoryBranch && local !== null && remote === local;
+        return "ok" as const;
+      });
+      if (op === "busy" || op === "not-a-repo") {
+        skipGitOps(skip, op);
+        continue;
       }
-      report.cleaned.push(entry);
-    } finally {
-      release();
+      if (op === "live") {
+        skip("run is live; left untouched");
+        continue;
+      }
+      if (op === "dirty") {
+        skip("worktree has uncommitted changes (use --force)");
+        continue;
+      }
+      // Network delete stays outside the git-ops lock so a slow push does not stall worktree adds.
+      if (factoryBranch && local && remote && remote === local) {
+        try {
+          await git(st.repo, ["push", "origin", "--delete", branch]);
+          entry.remote_branch_deleted = true;
+        } catch (e) {
+          entry.notes.push(`remote branch delete failed: ${(e as Error).message.slice(0, 120)}`);
+        }
+      }
+      markCollected(run, now());
+    } else {
+      entry.worktree_removed = wt !== null;
+      entry.branch_deleted = factoryBranch && local !== null;
+      entry.remote_branch_deleted = factoryBranch && local !== null && remote === local;
     }
+    report.cleaned.push(entry);
   }
   await abandonUnanswered({ ...opts, dryRun }, report, nowMs);
   if (opts.retentionStages ?? true) {
@@ -275,7 +328,8 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
 
 /**
  * The automatic gc at the start of `factory run`: best effort, bounded in time, never throws, no evidence
- * pushes. Locked repositories, open PRs and runs inside the retention are left alone (see `gc`).
+ * pushes. Live runs, open PRs and runs inside the retention are left alone (see `gc`). The git-ops wait
+ * is shorter than a manual gc so one busy lock cannot consume the whole budget.
  */
 export async function autoGc(opts: { factoryHome: string; github: GitHub; timeoutMs?: number; log?: (s: string) => void }): Promise<GcReport | undefined> {
   let timer: NodeJS.Timeout | undefined;
@@ -285,7 +339,7 @@ export async function autoGc(opts: { factoryHome: string; github: GitHub; timeou
       timer.unref();
     });
     const r = await Promise.race([
-      gc({ factoryHome: opts.factoryHome, github: opts.github, evidence: false, retentionStages: false, writeLog: false }),
+      gc({ factoryHome: opts.factoryHome, github: opts.github, evidence: false, retentionStages: false, writeLog: false, gitOpsWaitMs: AUTO_GC_GIT_OPS_WAIT_MS }),
       timeout,
     ]);
     if (!r) opts.log?.("factory: automatic gc timed out; run `factory gc` by hand\n");
@@ -331,15 +385,6 @@ async function abandonUnanswered(opts: GcOptions, report: GcReport, nowMs: () =>
       continue;
     }
     report.abandoned.push({ run_id: run.run_id, repo: st.repo, reason, notified: outcome.notified });
-  }
-}
-
-/** Checkout `concurrency.max_runs`, or 1 when repo.yaml cannot be read. Exclusive claim still covers higher slots that exist. */
-function lockMaxRuns(repo: string): number {
-  try {
-    return loadRepoConfig(repo).concurrency.max_runs;
-  } catch {
-    return 1;
   }
 }
 

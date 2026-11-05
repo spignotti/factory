@@ -7,7 +7,7 @@ import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
 import { sh, tail } from "../exec.js";
-import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse } from "../git.js";
+import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse, withRepoGitOps } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema, type Plan } from "../schemas/plan.js";
 import { loadRepoConfig, parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
@@ -485,7 +485,7 @@ async function beginWork(
     gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${b}`]).then(async (local) => local || remoteBranchExists(repoDir, b));
   if (await taken(branch)) branch = f.maxRuns > 1 ? `${stem}-${runId}-s${slot}` : `${branch}-${runId.slice(-6)}`;
   const worktree = join(runDir, "worktree");
-  const add = (b: string) => git(repoDir, ["worktree", "add", "-q", "-b", b, worktree, baseSha]);
+  const add = (b: string) => withRepoGitOps(repoDir, () => git(repoDir, ["worktree", "add", "-q", "-b", b, worktree, baseSha]));
   try {
     await add(branch);
   } catch (e) {

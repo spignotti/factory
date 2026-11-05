@@ -9,7 +9,7 @@ import { publishEvidence } from "../../src/evaluate/evidence.js";
 import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { FakeGitHub } from "../../src/gh.js";
-import { repoLockId } from "../../src/git.js";
+import { repoLockId, tryRepoGitOps } from "../../src/git.js";
 import { acquireRepoLock, repoLockPath } from "../../src/pipeline/lock.js";
 import { resumeFactory } from "../../src/pipeline/run.js";
 import { addWorkingDays } from "../../src/working-days.js";
@@ -241,19 +241,79 @@ describe("factory gc", () => {
     expect(git(r.repo, "rev-parse", "refs/factory/evidence^").trim()).toBe(pub.sha);
   });
 
-  it("skips a repository whose lock is held; never deletes a branch outside factory/*", async () => {
+  it("never deletes a branch outside factory/*", async () => {
     const { r, branch } = await pushedRun();
     r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
-    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-cccccc")!;
-    expect((await gc({ factoryHome: r.factoryHome, github: r.github })).skipped[0]?.reason).toMatch(/locked/);
-    release();
-
     const st = stateOf(r.runDir);
     git(r.repo, "branch", "-m", branch, "feature/human");
     writeFileSync(join(r.runDir, "state.json"), JSON.stringify({ ...st, branch: "feature/human" }));
     const res = await gc({ factoryHome: r.factoryHome, github: r.github });
     expect(res.cleaned[0]).toMatchObject({ branch_deleted: false, remote_branch_deleted: false, notes: [expect.stringMatching(/not a factory/)] });
     expect(localHas(r.repo, "feature/human")).toBe(true);
+  });
+
+  it("cleans a merged worktree and a terminal home while another run holds the only repo slot", async () => {
+    const { GcRetentionSchema } = await import("../../src/gc/retention-config.js");
+    const { r, branch, wt } = await pushedRun();
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    mkdirSync(join(r.runDir, "home"), { recursive: true });
+    writeFileSync(join(r.runDir, "home", "cache"), "x");
+    const retention = GcRetentionSchema.parse({ dry_run: false, home_hours: 0 });
+    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-eeeeee")!;
+    try {
+      const res = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, retention });
+      expect(res.skipped.filter((s) => /live|busy|locked/.test(s.reason))).toEqual([]);
+      expect(res.home_removed.map((h) => h.run_id)).toEqual([r.runId]);
+      expect(existsSync(join(r.runDir, "home"))).toBe(false);
+      expect(res.cleaned).toEqual([expect.objectContaining({ run_id: r.runId, worktree_removed: true, branch_deleted: true, remote_branch_deleted: true })]);
+      expect(existsSync(wt)).toBe(false);
+      expect(localHas(r.repo, branch)).toBe(false);
+    } finally {
+      release();
+    }
+  });
+
+  it("does not remove the home or worktree of a live run", async () => {
+    const { GcRetentionSchema } = await import("../../src/gc/retention-config.js");
+    const { r, wt } = await pushedRun();
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    mkdirSync(join(r.runDir, "home"), { recursive: true });
+    writeFileSync(join(r.runDir, "home", "cache"), "x");
+    const retention = GcRetentionSchema.parse({ dry_run: false, home_hours: 0 });
+    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), r.runId)!;
+    try {
+      const res = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, retention });
+      expect(existsSync(wt)).toBe(true);
+      expect(existsSync(join(r.runDir, "home"))).toBe(true);
+      expect(res.cleaned).toEqual([]);
+      expect(res.home_removed).toEqual([]);
+      expect(res.skipped.some((s) => s.run_id === r.runId && /live/.test(s.reason))).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  it("keeps a merged worktree when git operations are busy and still removes home/", async () => {
+    const { GcRetentionSchema } = await import("../../src/gc/retention-config.js");
+    const { r, branch, wt } = await pushedRun();
+    r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
+    mkdirSync(join(r.runDir, "home"), { recursive: true });
+    writeFileSync(join(r.runDir, "home", "cache"), "x");
+    const retention = GcRetentionSchema.parse({ dry_run: false, home_hours: 0 });
+    const held = await tryRepoGitOps(
+      r.repo,
+      async () => {
+        const res = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, retention, gitOpsWaitMs: 0 });
+        expect(res.cleaned).toEqual([]);
+        expect(res.skipped.some((s) => /git worktree operations are busy/.test(s.reason))).toBe(true);
+        expect(existsSync(wt)).toBe(true);
+        expect(localHas(r.repo, branch)).toBe(true);
+        expect(res.home_removed.map((h) => h.run_id)).toEqual([r.runId]);
+        expect(existsSync(join(r.runDir, "home"))).toBe(false);
+      },
+      { waitMs: 0 },
+    );
+    expect(held.ok).toBe(true);
   });
 });
 
@@ -301,23 +361,25 @@ describe("factory gc: runs without PR, open PRs, automatic gc", () => {
     await expect(resumeFactory(r.runId, {}, { factoryHome: r.factoryHome } as never)).rejects.toThrow(/cleaned up by factory gc/);
   });
 
-  it("a finished run with an open PR loses only node_modules/.venv/.nox after 12 h; a locked repo is left alone", async () => {
+  it("a finished run with an open PR loses only node_modules/.venv/.nox after 12 h; a live run is left alone", async () => {
     const { r, wt } = await doneRun();
     for (const d of ["node_modules/pkg", ".venv/lib", "src-keep"]) mkdirSync(join(wt, d), { recursive: true });
     expect((await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).stripped).toEqual([]);
 
     const later = () => Date.now() + 13 * 3_600_000;
-    const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
+    const live = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), r.runId)!;
     const locked = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
-    release();
-    expect(locked).toMatchObject({ stripped: [], skipped: [expect.objectContaining({ reason: expect.stringMatching(/locked/) })] });
+    live();
+    expect(locked).toMatchObject({ stripped: [], skipped: [expect.objectContaining({ reason: expect.stringMatching(/live/) })] });
     expect(existsSync(join(wt, "node_modules"))).toBe(true);
 
     const dry = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true, evidence: false });
     expect(dry.stripped).toEqual([{ run_id: r.runId, repo: r.repo, pr: r.result.pr, removed: ["node_modules", ".venv"] }]);
     expect(existsSync(join(wt, "node_modules"))).toBe(true);
 
+    const other = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
     const res = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
+    other();
     expect(res).toMatchObject({ cleaned: [], skipped: [expect.objectContaining({ reason: "PR is open" })], stripped: [expect.objectContaining({ removed: ["node_modules", ".venv"] })] });
     expect(existsSync(join(wt, "node_modules")) || existsSync(join(wt, ".venv"))).toBe(false);
     expect(existsSync(join(wt, "src-keep"))).toBe(true);

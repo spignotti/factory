@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { tryPathLock } from "./pipeline/lock.js";
 import { LOCK_GLOBS } from "./paths.js";
 import { matchesAny } from "./schemas/plan.js";
 
@@ -338,16 +339,66 @@ export async function remotesWithCredentials(repoDir: string): Promise<string[]>
 }
 
 /**
+ * How long manual and scheduled `factory gc` waits for an in-flight worktree add or remove.
+ * The automatic gc at the start of `factory run` waits less so one busy lock cannot consume its budget.
+ */
+export const GIT_OPS_WAIT_MS = 60_000;
+export const AUTO_GC_GIT_OPS_WAIT_MS = 5_000;
+
+/** Absolute git common dir, or undefined when `repoDir` is not a checkout. */
+async function commonGitDir(repoDir: string): Promise<string | undefined> {
+  try {
+    const out = (await git(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+    return out ? resolve(repoDir, out) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Serializes factory mutations of one checkout's worktree registry (`worktree add/remove/prune`,
+ * local `branch -D`). The lock file is `factory.gitops.lock` in the git common dir, not a run slot:
+ * another run may hold a slot while this is taken, and it is released when `fn` returns.
+ * `busy` means a live holder kept it for the whole wait.
+ */
+export async function tryRepoGitOps<T>(
+  repoDir: string,
+  fn: () => Promise<T> | T,
+  opts?: { waitMs?: number; pollMs?: number },
+): Promise<{ ok: true; value: T } | { ok: false; reason: "busy" | "not-a-repo" }> {
+  const common = await commonGitDir(repoDir);
+  if (!common) return { ok: false, reason: "not-a-repo" };
+  const locked = await tryPathLock(join(common, "factory.gitops.lock"), "gitops", fn, { waitMs: opts?.waitMs ?? GIT_OPS_WAIT_MS, pollMs: opts?.pollMs });
+  if (!locked.ok) return { ok: false, reason: "busy" };
+  return { ok: true, value: locked.value };
+}
+
+/** `tryRepoGitOps`, throwing when the lock is not acquired. */
+export async function withRepoGitOps<T>(repoDir: string, fn: () => Promise<T> | T, opts?: { waitMs?: number; pollMs?: number }): Promise<T> {
+  const r = await tryRepoGitOps(repoDir, fn, opts);
+  if (!r.ok) throw new Error(r.reason === "busy" ? `git worktree operations on ${repoDir} are busy` : `not a git repository: ${repoDir}`);
+  return r.value;
+}
+
+/**
  * Runs `fn` in a temporary detached worktree of `repoDir` at `sha` (clean: tracked files only, no
  * untracked or ignored files of the user's checkout), removed afterwards.
+ * Add and remove take the git-ops lock so they do not interleave with `factory gc`.
  */
 export async function withBaseWorktree<T>(repoDir: string, sha: string, dir: string, fn: (dir: string) => Promise<T>): Promise<T> {
-  await git(repoDir, ["worktree", "add", "-q", "--detach", dir, sha]);
+  await withRepoGitOps(repoDir, () => git(repoDir, ["worktree", "add", "-q", "--detach", dir, sha]));
   try {
     return await fn(dir);
   } finally {
-    await git(repoDir, ["worktree", "remove", "--force", dir]).catch(() => "");
-    rmSync(dir, { recursive: true, force: true });
-    await gitOk(repoDir, ["worktree", "prune"]);
+    try {
+      await withRepoGitOps(repoDir, async () => {
+        await git(repoDir, ["worktree", "remove", "--force", dir]).catch(() => "");
+        rmSync(dir, { recursive: true, force: true });
+        await gitOk(repoDir, ["worktree", "prune"]);
+      });
+    } catch {
+      // The lock was busy. Drop the directory; a later prune clears a stale registration.
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 }

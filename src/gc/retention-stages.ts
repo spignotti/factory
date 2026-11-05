@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { GcOptions, GcReport } from "../commands/gc.js";
-import { git, repoLockId } from "../git.js";
+import { git, repoLockId, tryRepoGitOps } from "../git.js";
 import { acquireRepoLock, activeHolders } from "../pipeline/lock.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { listRuns } from "../runs.js";
@@ -51,7 +51,10 @@ export function realDirInside(root: string, path: string): boolean {
   }
 }
 
-/** Takes every lock slot of the run's repository for `fn`; returns false (nothing done) when a slot is held. */
+/**
+ * Takes every lock slot of the run's repository for `fn` (metadata archive). Returns false when a slot
+ * is held. Sandbox `home/` does not use this: that directory is the run's cache, not a git operation.
+ */
 async function withRunRepoLock(opts: GcOptions, run: RunRecord, tag: string, fn: () => void): Promise<boolean> {
   const repo = run.state!.repo;
   let id = repo;
@@ -70,14 +73,20 @@ async function withRunRepoLock(opts: GcOptions, run: RunRecord, tag: string, fn:
   return true;
 }
 
-/** Removes eligible `runs/<id>/home` directories. */
+function runIsLive(factoryHome: string, runId: string): boolean {
+  return activeHolders(factoryHome).some((h) => h.runId === runId);
+}
+
+/**
+ * Removes eligible `runs/<id>/home` directories. No repo lock: the directory is that run's sandbox
+ * cache. A live holder, and needs_input / needs_human / base_red inside the resume window, are kept.
+ */
 export async function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): Promise<void> {
-  const live = new Set(activeHolders(opts.factoryHome).map((h) => h.runId).filter((id): id is string => !!id));
   const runsRoot = join(opts.factoryHome, "runs");
   const now = nowMs();
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
-    if (!st || live.has(run.run_id)) continue;
+    if (!st) continue;
     if (protectedIdleRun(run, now, cfg.worktree_resume_days)) continue;
     if (!homeEligible(run, now, cfg.home_hours)) continue;
     const home = join(run.dir, "home");
@@ -89,15 +98,16 @@ export async function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcReten
     }
     const bytes = dirBytes(home);
     const entry = { run_id: run.run_id, repo: st.repo, bytes, reason: `terminal run idle ≥ ${cfg.home_hours}h; sandbox home is cache` };
+    // The holder list is the live-run guard. A resume takes its slot before it recreates home/.
+    if (runIsLive(opts.factoryHome, run.run_id)) {
+      report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "run is live; home/ kept" });
+      continue;
+    }
     if (opts.dryRun) {
       report.home_removed.push(entry);
       continue;
     }
-    const done = await withRunRepoLock(opts, run, "gc-home", () => rmSync(home, { recursive: true, force: true }));
-    if (!done) {
-      report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "repository is locked by a running factory process; home/ kept" });
-      continue;
-    }
+    rmSync(home, { recursive: true, force: true });
     report.home_removed.push(entry);
   }
 }
@@ -217,17 +227,19 @@ export function gcArchiveRuns(opts: GcOptions, report: GcReport, cfg: GcRetentio
   }
 }
 
-/** Runs `git worktree prune` on repositories that had worktree cleanup. */
+/** Runs `git worktree prune` on repositories that had worktree cleanup, under the git-ops lock. */
 export async function pruneFactoryWorktrees(repos: Iterable<string>, opts: GcOptions, report: GcReport): Promise<void> {
   for (const repo of repos) {
     if (!existsSync(repo)) continue;
-    const release = acquireRepoLock(opts.factoryHome, await repoLockId(repo), "gc-prune", { maxRuns: lockMaxRuns(repo), exclusive: true });
-    if (!release) continue;
-    try {
-      if (!opts.dryRun) await git(repo, ["worktree", "prune"]).catch(() => "");
+    if (opts.dryRun) {
       report.worktree_pruned.push({ repo });
-    } finally {
-      release();
+      continue;
     }
+    const op = await tryRepoGitOps(
+      repo,
+      () => git(repo, ["worktree", "prune"]).catch(() => ""),
+      opts.gitOpsWaitMs === undefined ? undefined : { waitMs: opts.gitOpsWaitMs },
+    );
+    if (op.ok) report.worktree_pruned.push({ repo });
   }
 }

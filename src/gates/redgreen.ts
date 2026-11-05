@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh, tail } from "../exec.js";
-import { git } from "../git.js";
+import { git, withRepoGitOps } from "../git.js";
 import { gateCheckTimeoutMs, type CheckPulse, shTimedOut, watchCheck } from "./timeout.js";
 import type { Deadline } from "../pipeline/budget.js";
 import type { Jail } from "../sandbox/sandbox.js";
@@ -74,7 +74,7 @@ export async function redGreenProof(opts: {
     });
   const tmp = mkdtempSync(join(tmpdir(), "factory-base-"));
   const baseDir = join(tmp, "wt");
-  await git(worktree, ["worktree", "add", "-q", "--detach", baseDir, baseSha]);
+  await withRepoGitOps(worktree, () => git(worktree, ["worktree", "add", "-q", "--detach", baseDir, baseSha]));
   try {
     for (const f of files) {
       mkdirSync(dirname(join(baseDir, f)), { recursive: true });
@@ -102,7 +102,7 @@ export async function redGreenProof(opts: {
     ].join("\n");
     return { ok: redOnBase && greenOnHead, redOnBase, greenOnHead, inconclusive: false, timedOut: false, detail };
   } finally {
-    await git(worktree, ["worktree", "remove", "--force", baseDir]).catch(() => "");
+    await withRepoGitOps(worktree, () => git(worktree, ["worktree", "remove", "--force", baseDir]).catch(() => "")).catch(() => "");
     rmSync(tmp, { recursive: true, force: true });
   }
 }
