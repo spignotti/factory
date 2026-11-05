@@ -296,7 +296,7 @@ export async function acquireRepoLockWithRetry(
 export interface LockOptions {
   /** How many runs may hold a slot at once. Default 1 (one run per repo). */
   maxRuns?: number;
-  /** Claim every slot (gc, archive) so a new run cannot start mid-cleanup. */
+  /** Claim every slot (metadata archive) so a new run cannot start mid-cleanup. */
   exclusive?: boolean;
 }
 
@@ -444,6 +444,34 @@ export async function waitForRepoLock(
       continue;
     }
     await realSleep(opts.pollMs, opts.signal);
+  }
+}
+
+/**
+ * One attempt at a hard-link lock that is not a run slot (git worktree mutations).
+ * The holder pid is the liveness check: a dead pid is taken over, same as a repo slot.
+ */
+export async function tryPathLock<T>(
+  lockFile: string,
+  holder: string,
+  fn: () => Promise<T> | T,
+  opts?: { waitMs?: number; pollMs?: number },
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  const waitMs = opts?.waitMs ?? 0;
+  const pollMs = opts?.pollMs ?? 20;
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    const release = tryClaim(lockFile, holder);
+    if (release) {
+      try {
+        return { ok: true, value: await fn() };
+      } finally {
+        release();
+      }
+    }
+    const left = deadline - Date.now();
+    if (left <= 0) return { ok: false };
+    await realSleep(Math.min(pollMs, left));
   }
 }
 

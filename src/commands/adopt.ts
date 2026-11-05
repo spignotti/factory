@@ -11,7 +11,7 @@ import { CI_STUB_PATH, renderCiStub, REQUIRED_CHECK } from "../ci.js";
 import { describeToolchains, detectToolchains } from "../toolchains.js";
 import type { Io } from "./gates.js";
 import type { GitHub, RepoSettings } from "../gh.js";
-import { baseRef, commitAll, git, gitOk, originUrl, remoteBranchExists, revParse, withBaseWorktree } from "../git.js";
+import { baseRef, commitAll, git, gitOk, originUrl, remoteBranchExists, revParse, withBaseWorktree, withRepoGitOps } from "../git.js";
 import { canonicalRepoId } from "../memory.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { nextProposalId, proposalsDir, writeProposal } from "../proposals.js";
@@ -194,7 +194,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
   mkdirSync(work, { recursive: true });
   const tmp = mkdtempSync(join(work, `${date}-`));
   const wt = join(tmp, "worktree");
-  await git(repoDir, ["worktree", "add", "-q", "-b", branch, wt, sha]);
+  await withRepoGitOps(repoDir, () => git(repoDir, ["worktree", "add", "-q", "-b", branch, wt, sha]));
   try {
     const files = (await git(wt, ["ls-files"])).split("\n").filter(Boolean);
     const detection = detect(wt, files);
@@ -298,9 +298,11 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     }
     return report;
   } finally {
-    await git(repoDir, ["worktree", "remove", "--force", wt]).catch(() => "");
+    await withRepoGitOps(repoDir, async () => {
+      await git(repoDir, ["worktree", "remove", "--force", wt]).catch(() => "");
+      await gitOk(repoDir, ["worktree", "prune"]);
+    }).catch(() => undefined);
     rmSync(tmp, { recursive: true, force: true });
-    await gitOk(repoDir, ["worktree", "prune"]);
   }
 }
 

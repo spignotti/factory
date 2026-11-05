@@ -1,9 +1,11 @@
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { gc } from "../../src/commands/gc.js";
-import { GcRetentionSchema, isProtectedFactoryPath, loadGcRetention } from "../../src/gc/retention-config.js";
+import { deploySelfBusy, GcRetentionSchema, isProtectedFactoryPath, loadGcRetention } from "../../src/gc/retention-config.js";
+import { acquireRepoLock } from "../../src/pipeline/lock.js";
 import {
   branchHasUnpushedCommits,
   homeEligible,
@@ -14,7 +16,7 @@ import {
 } from "../../src/gc/retention-helpers.js";
 import { appendGcLog } from "../../src/gc/retention-log.js";
 import { FakeGitHub } from "../../src/gh.js";
-import { git as gitCmd } from "../../src/git.js";
+import { git as gitCmd, tryRepoGitOps } from "../../src/git.js";
 import type { RunResultKind } from "../../src/events.js";
 import type { RunState } from "../../src/pipeline/state.js";
 import type { RunRecord } from "../../src/runs.js";
@@ -70,6 +72,8 @@ describe("gc retention helpers", () => {
     expect(homeEligible(done, Date.now(), 24)).toBe(true);
     const input = runRecord({ run_id: "20261001-120000-ffffff", result: "needs_input", updated_at: new Date(Date.now() - 2 * DAY).toISOString() });
     expect(homeEligible(input, Date.now(), 24)).toBe(false);
+    const locked = runRecord({ run_id: "20261001-120000-aaaaab", result: "locked", updated_at: new Date(Date.now() - 2 * DAY).toISOString() });
+    expect(homeEligible(locked, Date.now(), 0)).toBe(false);
   });
 
   it("keeps the newest 20 runs per repo for metadata", () => {
@@ -168,6 +172,127 @@ describe("gc retention integration", () => {
     writeFileSync(join(fh, "profile.yaml"), "gc:\n  retention:\n    dry_run: true\n");
     const cfg = loadGcRetention(fh);
     expect(cfg.dry_run).toBe(true);
+  });
+
+  it("removes a terminal home while another run holds a slot, and keeps a live or resumable home", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-busy-"));
+    dirs.push(factoryHome);
+    const terminal = "20261101-120000-aaaaaa";
+    const resumable = "20261101-120000-bbbbbb";
+    const write = (id: string, result: "failed" | "needs_input" | "locked") => {
+      const dir = join(factoryHome, "runs", id);
+      mkdirSync(join(dir, "home"), { recursive: true });
+      writeFileSync(join(dir, "home", "cache.bin"), "x");
+      const state: RunState = {
+        version: 1,
+        run_id: id,
+        repo: factoryHome,
+        task: { ref: "text:t.md", title: "t", text: "t", labels: [] },
+        no_pr: true,
+        step: "finished",
+        result,
+        reason: "",
+        branch: null,
+        worktree: null,
+        base_sha: null,
+        packages: {},
+        failures: {},
+        handoffs: [],
+        rounds: 0,
+        findings: [],
+        gate_count: 0,
+        pr: null,
+        pr_draft: null,
+        updated_at: new Date(Date.now() - 3_600_000).toISOString(),
+      };
+      writeFileSync(join(dir, "state.json"), JSON.stringify(state));
+    };
+    write(terminal, "failed");
+    write(resumable, "needs_input");
+    const other = acquireRepoLock(factoryHome, "https://github.com/acme/widgets.git", "20261029-000000-eeeeee")!;
+    try {
+      const r = await gc({
+        factoryHome,
+        github: new FakeGitHub(),
+        evidence: false,
+        retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 0, metadata_days: 1e6 }),
+        needsInputWorkingDays: 99,
+      });
+      expect(r.home_removed.map((h) => h.run_id)).toEqual([terminal]);
+      expect(readFileSync(join(factoryHome, "runs", resumable, "home", "cache.bin"), "utf8")).toBe("x");
+      expect(r.skipped.some((s) => /repository is locked/.test(s.reason))).toBe(false);
+    } finally {
+      other();
+    }
+
+    const liveId = "20261101-120000-cccccc";
+    write(liveId, "failed");
+    const live = acquireRepoLock(factoryHome, "https://github.com/acme/widgets.git", liveId)!;
+    try {
+      const r = await gc({
+        factoryHome,
+        github: new FakeGitHub(),
+        evidence: false,
+        retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 0, metadata_days: 1e6 }),
+      });
+      expect(r.home_removed).toEqual([]);
+      expect(readFileSync(join(factoryHome, "runs", liveId, "home", "cache.bin"), "utf8")).toBe("x");
+      expect(r.skipped.some((s) => s.run_id === liveId && /live/.test(s.reason))).toBe(true);
+    } finally {
+      live();
+    }
+  });
+
+  it("a deploy flock blocks only while it is held", async () => {
+    const rel = mkdtempSync(join(tmpdir(), "deploy-rel-"));
+    dirs.push(rel);
+    const lock = join(rel, ".deploy.lock");
+    writeFileSync(lock, "");
+    const env = { FACTORY_RELEASES: rel };
+    expect(deploySelfBusy(env)).toBe(false);
+    // `flock file command` leaves the lock fd open in the child, so the whole group has to die.
+    const child = spawn("flock", [lock, "sleep", "30"], { stdio: "ignore", detached: true });
+    const exited = new Promise((resolve) => child.on("exit", () => resolve(undefined)));
+    try {
+      const deadline = Date.now() + 2000;
+      while (!deploySelfBusy(env)) {
+        if (Date.now() > deadline) throw new Error("flock was not observed");
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    } finally {
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          child.kill("SIGKILL");
+        }
+      }
+      await exited;
+    }
+    expect(deploySelfBusy(env)).toBe(false);
+  });
+
+  it("git-ops lock is independent of a held run slot and exclusive against itself", async () => {
+    const root = mkdtempSync(join(tmpdir(), "gitops-"));
+    dirs.push(root);
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    await gitCmd(repo, ["init"]);
+    const home = join(root, "fh");
+    const release = acquireRepoLock(home, "https://github.com/acme/widgets.git", "run-1")!;
+    try {
+      const free = await tryRepoGitOps(repo, async () => 1, { waitMs: 0 });
+      expect(free).toEqual({ ok: true, value: 1 });
+      const nested = await tryRepoGitOps(
+        repo,
+        () => tryRepoGitOps(repo, async () => 1, { waitMs: 40, pollMs: 10 }),
+        { waitMs: 0 },
+      );
+      expect(nested.ok).toBe(true);
+      if (nested.ok) expect(nested.value).toEqual({ ok: false, reason: "busy" });
+    } finally {
+      release();
+    }
   });
 
   it("appendGcLog rotates", () => {

@@ -66,7 +66,12 @@ export function loadGcRetention(factoryHome: string): GcRetention {
   return mergeRetention(loadLayers({ factoryHome }));
 }
 
-/** True when deploy-self holds its deploy lock (build/switch in progress). */
+/**
+ * True when deploy-self's `once` holds `flock` on `.deploy.lock`.
+ * The flock is on that process's fd and is released when the process exits, including a crash.
+ * A leftover lock file with no holder does not count, and the daemon's `.daemon.lock` is a different
+ * file, so a finished deploy cannot skip the daily gc permanently. A missing `flock` binary fails closed.
+ */
 export function deploySelfBusy(env: NodeJS.ProcessEnv = process.env): boolean {
   const rel = env.FACTORY_RELEASES ?? join(homedir(), ".local/share/factory-releases");
   const lock = join(rel, ".deploy.lock");
