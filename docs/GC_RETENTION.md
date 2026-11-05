@@ -6,16 +6,16 @@
 
 | Stage | When | Paths |
 | --- | --- | --- |
-| Sandbox **home/** | Terminal run idle ≥ 24 h | `$FACTORY_HOME/runs/<id>/home` |
+| Sandbox **home/** | Terminal run idle ≥ 24 h. A `needs_input` / `needs_human` / `base_red` run is eligible the same way once its PR is merged or closed. | `$FACTORY_HOME/runs/<id>/home` |
 | **Worktrees** | Merged/closed PRs (existing rules); no-PR failed idle ≥ 7 d; needs_input / needs_human / base_red idle ≥ 14 d | Git worktrees; then `git worktree prune` per repo |
 | **Metadata** | Idle ≥ 90 d (failed ≥ 180 d), keeping the newest 20 runs per repo | Tarball to `$FACTORY_HOME/archive/runs/<id>.tar.gz`, then drop `$FACTORY_HOME/runs/<id>/` |
 | **Archive** | Tarballs/dirs under `archive/runs/` older than 180 d | Deletes tarballs; strips `home/` and `worktree/` from legacy archived run dirs first |
 
-Never touched: `keys/`, `secrets/`, `memory/`, `archive/keys`, `archive/memory`, `*.bak`, `profile.yaml`, `notify.yaml*`, or runs that are active, or needs_input / needs_human / base_red while idle &lt; 14 days.
+Never touched: `keys/`, `secrets/`, `memory/`, `archive/keys`, `archive/memory`, `*.bak`, `profile.yaml`, `notify.yaml*`, or runs that are active. needs_input / needs_human / base_red keep their worktree and metadata while idle &lt; 14 days; their sandbox `home/` is removed after `home_hours` only when that run's PR is already merged or closed (an open or missing PR keeps `home/`).
 
 Guards:
 
-- **Sandbox `home/`** of a terminal run (not `needs_input` / `needs_human` / `base_red`, not `locked`, idle ≥ `home_hours`) is removed with **no repo lock**. The directory is that run's cache, not a git operation. A run that currently holds a lock slot is skipped (`run is live; home/ kept`). Another run of the same repo holding a slot does not keep it.
+- **Sandbox `home/`** is removed with **no repo lock** when the run is terminal (not `locked`) and idle ≥ `home_hours`, and also when a `needs_input` / `needs_human` / `base_red` run is idle ≥ `home_hours` and its PR is merged or closed. The directory is that run's cache, not a git operation. Only `runs/<id>/home` goes; events, state, plan, reviews and `pr.md` stay. An open or missing PR keeps the home. A run that currently holds a lock slot is skipped (`run is live; home/ kept`). Another run of the same repo holding a slot does not keep it. PR state is the same `GitHub.prStatus` lookup the worktree stage uses; a failed lookup keeps `home/`.
 - **Worktrees and `factory/*` branches** (merged/closed PRs, and no-PR runs past retention) take a short lock file `factory.gitops.lock` in the checkout's git common dir, not a run slot. The same lock is held around `git worktree add` / `remove` / `prune` in runs, adopt, abandon and base worktrees, so those operations do not interleave. Manual and scheduled gc wait up to 60s for it; the automatic gc at the start of `factory run` waits 5s. If it stays busy, that worktree is skipped until the next gc. A live run's worktree is never removed. A free run slot is not required, so a repo with `max_runs: 2` and one run active is still cleaned.
 - **Metadata archive** still takes every run slot (exclusive). It does not delete a run directory while any slot is held.
 - **deploy-self:** gc skips deletions only while `deploy-self.sh once` holds `flock` on `$FACTORY_RELEASES/.deploy.lock`. That flock is on the process fd and is released when `once` exits, including a crash. A leftover lock file with nobody holding it does not block gc, and the daemon's `.daemon.lock` is a different file, so a finished deploy cannot skip the daily run permanently. A missing `flock` binary fails closed (gc skips). The overlap with a deploy is one `once` (a fetch, or a build when `main` moved), not the daemon's whole lifetime.
