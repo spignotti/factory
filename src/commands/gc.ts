@@ -10,7 +10,7 @@ import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { BERLIN, workingDaysElapsed } from "../working-days.js";
 import { deploySelfBusy, loadGcRetention } from "../gc/retention-config.js";
-import { branchHasUnpushedCommits, HOUR as MS_HOUR, lastActivity, protectedIdleRun, worktreeRetentionMs } from "../gc/retention-helpers.js";
+import { branchHasUnpushedCommits, HOUR as MS_HOUR, lastActivity, protectedIdleRun, resolveGcPrState, worktreeRetentionMs } from "../gc/retention-helpers.js";
 import { appendGcLog } from "../gc/retention-log.js";
 import { gcArchiveRuns, gcMetadataArchive, gcRunHomes, pruneFactoryWorktrees } from "../gc/retention-stages.js";
 import type { Io } from "./gates.js";
@@ -128,7 +128,8 @@ function emptyReport(dryRun: boolean): GcReport {
  * A dirty worktree is kept unless `force`. A run that holds a lock slot is left untouched. Worktree removal
  * and local branch deletion take the per-repo git-ops lock (not a run slot), so they proceed while another
  * run of the same repo is active; PR state is looked up before that lock, so a parallel `factory run` is
- * never blocked by a network call. Sandbox `home/` of a terminal run is removed with no repo lock.
+ * never blocked by a network call. Sandbox `home/` is removed with no repo lock: terminal runs after
+ * `home_hours`, and resume-status runs the same way once their PR is merged or closed.
  * Evidence retention: run folders older than 30 days leave the `factory-evidence`
  * branch of every repository the factory ran in, with a normal commit and a plain push.
  * needs_input with no answer for 2 working days (Mon–Fri, Europe/Berlin) is abandoned and the owner is notified.
@@ -180,12 +181,13 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
     }
     let prState: "open" | "merged" | "closed" = "open";
     if (st.pr) {
-      try {
-        prState = (await opts.github.prStatus(st.repo, st.pr)).state;
-      } catch (e) {
-        skip(`PR state unknown: ${(e as Error).message.slice(0, 200)}`);
+      const looked = await resolveGcPrState(opts.github, st.repo, st.pr);
+      if (looked.state === "unknown") {
+        skip(looked.reason);
         continue;
       }
+      if (looked.state === "none") continue;
+      prState = looked.state;
     }
     if (runIsLive(opts.factoryHome, run.run_id)) {
       skip("run is live; left untouched");

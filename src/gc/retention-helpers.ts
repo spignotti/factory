@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { RunResultKind } from "../events.js";
+import type { GitHub } from "../gh.js";
 import { git, gitOk } from "../git.js";
 import type { RunRecord } from "../runs.js";
 import type { GcRetention } from "./retention-config.js";
@@ -16,21 +17,47 @@ export function lastActivity(run: RunRecord): number {
 
 const RESUME_RESULTS = new Set<RunResultKind>(["needs_input", "needs_human", "base_red"]);
 
+/** needs_input / needs_human / base_red: the run can still be resumed. */
+export function isResumeResult(result: RunResultKind | null | undefined): boolean {
+  return result != null && RESUME_RESULTS.has(result);
+}
+
 /** Runs that must not be touched while idle for fewer than `worktree_resume_days`. */
 export function protectedIdleRun(run: RunRecord, nowMs: number, resumeDays: number): boolean {
   const st = run.state;
   if (!st) return true;
   if (st.result === null) return true;
-  if (!RESUME_RESULTS.has(st.result)) return false;
+  if (!isResumeResult(st.result)) return false;
   return nowMs - lastActivity(run) < resumeDays * DAY;
 }
 
-/** Terminal runs whose sandbox `home/` may be removed after `home_hours`. */
-export function homeEligible(run: RunRecord, nowMs: number, homeHours: number): boolean {
+export type GcPrState =
+  | { state: "none" | "open" | "merged" | "closed" }
+  | { state: "unknown"; reason: string };
+
+/**
+ * PR state for gc, via `GitHub.prStatus` (the same call the worktree stage uses).
+ * No PR is `none`. A thrown lookup stays `unknown` so the caller keeps the run.
+ */
+export async function resolveGcPrState(github: GitHub, repo: string, pr: string | null): Promise<GcPrState> {
+  if (!pr) return { state: "none" };
+  try {
+    return { state: (await github.prStatus(repo, pr)).state };
+  } catch (e) {
+    return { state: "unknown", reason: `PR state unknown: ${(e as Error).message.slice(0, 200)}` };
+  }
+}
+
+/**
+ * Sandbox `home/` may go after `home_hours`.
+ * Resume-status runs qualify only when `prTerminal` is set: their PR is already merged or closed,
+ * so the home is cache. An open or missing PR stays protected (worktree and metadata rules are separate).
+ */
+export function homeEligible(run: RunRecord, nowMs: number, homeHours: number, opts?: { prTerminal?: boolean }): boolean {
   const st = run.state;
   if (!st || st.result === null) return false;
-  if (RESUME_RESULTS.has(st.result)) return false;
   if (st.result === "locked") return false;
+  if (isResumeResult(st.result) && !opts?.prTerminal) return false;
   const idle = nowMs - lastActivity(run);
   if (idle < homeHours * HOUR) return false;
   return true;

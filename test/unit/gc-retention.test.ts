@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -21,7 +21,8 @@ import type { RunResultKind } from "../../src/events.js";
 import type { RunState } from "../../src/pipeline/state.js";
 import type { RunRecord } from "../../src/runs.js";
 
-const DAY = 86_400_000;
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 
 function runRecord(v: { run_id: string; result: RunResultKind; updated_at: string; repo?: string }): RunRecord {
   const started = new Date("2026-10-01T12:00:00.000Z");
@@ -67,13 +68,24 @@ describe("gc retention helpers", () => {
     expect(worktreeRetentionMs(input, cfg)).toBe(14 * DAY);
   });
 
-  it("home eligible only for terminal idle runs", () => {
+  it("home eligible only for terminal idle runs, or resume runs whose PR is already finished", () => {
     const done = runRecord({ run_id: "20261001-120000-eeeeee", result: "done", updated_at: new Date(Date.now() - 2 * DAY).toISOString() });
     expect(homeEligible(done, Date.now(), 24)).toBe(true);
+    const abandoned = runRecord({ run_id: "20261001-120000-eeeeef", result: "abandoned", updated_at: new Date(Date.now() - 25 * HOUR).toISOString() });
+    expect(homeEligible(abandoned, Date.now(), 24)).toBe(true);
+    const freshDone = runRecord({ run_id: "20261001-120000-eeeef0", result: "done", updated_at: new Date(Date.now() - HOUR).toISOString() });
+    expect(homeEligible(freshDone, Date.now(), 24)).toBe(false);
     const input = runRecord({ run_id: "20261001-120000-ffffff", result: "needs_input", updated_at: new Date(Date.now() - 2 * DAY).toISOString() });
     expect(homeEligible(input, Date.now(), 24)).toBe(false);
+    expect(homeEligible(input, Date.now(), 24, { prTerminal: false })).toBe(false);
+    const human = runRecord({ run_id: "20261001-120000-fffffa", result: "needs_human", updated_at: new Date(Date.now() - 25 * HOUR).toISOString() });
+    expect(homeEligible(human, Date.now(), 24)).toBe(false);
+    expect(homeEligible(human, Date.now(), 24, { prTerminal: true })).toBe(true);
+    const freshHuman = runRecord({ run_id: "20261001-120000-fffffb", result: "needs_human", updated_at: new Date(Date.now() - HOUR).toISOString() });
+    expect(homeEligible(freshHuman, Date.now(), 24, { prTerminal: true })).toBe(false);
     const locked = runRecord({ run_id: "20261001-120000-aaaaab", result: "locked", updated_at: new Date(Date.now() - 2 * DAY).toISOString() });
     expect(homeEligible(locked, Date.now(), 0)).toBe(false);
+    expect(homeEligible(locked, Date.now(), 0, { prTerminal: true })).toBe(false);
   });
 
   it("keeps the newest 20 runs per repo for metadata", () => {
@@ -293,6 +305,168 @@ describe("gc retention integration", () => {
     } finally {
       release();
     }
+  });
+
+  function writeGcRun(
+    factoryHome: string,
+    v: { id: string; result: RunResultKind; idleMs: number; pr: string | null },
+  ): string {
+    const dir = join(factoryHome, "runs", v.id);
+    mkdirSync(join(dir, "home"), { recursive: true });
+    writeFileSync(join(dir, "home", "cache.bin"), "sandbox");
+    mkdirSync(join(dir, "reviews"), { recursive: true });
+    writeFileSync(join(dir, "reviews", "r1.md"), "review");
+    writeFileSync(join(dir, "pr.md"), "pr");
+    writeFileSync(join(dir, "plan.md"), "plan");
+    writeFileSync(join(dir, "events.jsonl"), "{}\n");
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ result: v.result }));
+    const state: RunState = {
+      version: 1,
+      run_id: v.id,
+      repo: factoryHome,
+      task: { ref: "text:t.md", title: "t", text: "t", labels: [] },
+      no_pr: v.pr === null,
+      step: "finished",
+      result: v.result,
+      reason: "",
+      branch: null,
+      worktree: null,
+      base_sha: null,
+      packages: {},
+      failures: {},
+      handoffs: [],
+      rounds: 0,
+      findings: [],
+      gate_count: 0,
+      pr: v.pr,
+      pr_draft: null,
+      updated_at: new Date(Date.now() - v.idleMs).toISOString(),
+    };
+    writeFileSync(join(dir, "state.json"), JSON.stringify(state));
+    return dir;
+  }
+
+  function expectMetadata(dir: string): void {
+    expect(readFileSync(join(dir, "state.json"), "utf8")).toContain("run_id");
+    expect(readFileSync(join(dir, "result.json"), "utf8")).toContain("result");
+    expect(readFileSync(join(dir, "events.jsonl"), "utf8")).toBe("{}\n");
+    expect(readFileSync(join(dir, "plan.md"), "utf8")).toBe("plan");
+    expect(readFileSync(join(dir, "reviews", "r1.md"), "utf8")).toBe("review");
+    expect(readFileSync(join(dir, "pr.md"), "utf8")).toBe("pr");
+  }
+
+  it("strips home of resume runs whose PR is merged or closed after home_hours, and keeps the rest of the run", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-resume-home-"));
+    dirs.push(factoryHome);
+    const merged = "https://github.com/acme/pm/pull/41";
+    const closed = "https://github.com/acme/pm/pull/42";
+    const human = "20261104-150805-15d527";
+    const input = "20261104-160805-15d528";
+    const red = "20261104-170805-15d529";
+    const liveId = "20261104-210805-15d52d";
+    const humanDir = writeGcRun(factoryHome, { id: human, result: "needs_human", idleMs: 25 * HOUR, pr: merged });
+    const inputDir = writeGcRun(factoryHome, { id: input, result: "needs_input", idleMs: 25 * HOUR, pr: closed });
+    const redDir = writeGcRun(factoryHome, { id: red, result: "base_red", idleMs: 25 * HOUR, pr: merged });
+    const liveDir = writeGcRun(factoryHome, { id: liveId, result: "needs_human", idleMs: 25 * HOUR, pr: merged });
+    const gh = new FakeGitHub();
+    gh.prStates.set(merged, { state: "merged", draft: false });
+    gh.prStates.set(closed, { state: "closed", draft: false });
+    const live = acquireRepoLock(factoryHome, "https://github.com/acme/widgets.git", liveId)!;
+    try {
+      const r = await gc({
+        factoryHome,
+        github: gh,
+        evidence: false,
+        retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 24, metadata_days: 1e6 }),
+        needsInputWorkingDays: 99,
+      });
+      expect(r.home_removed.map((h) => h.run_id).sort()).toEqual([human, input, red].sort());
+      expect(r.home_removed.find((h) => h.run_id === human)?.reason).toContain("PR is merged");
+      expect(r.home_removed.find((h) => h.run_id === input)?.reason).toContain("PR is closed");
+      for (const dir of [humanDir, inputDir, redDir, liveDir]) {
+        expect(existsSync(join(dir, "home"))).toBe(dir === liveDir);
+        expectMetadata(dir);
+      }
+      expect(r.metadata_moved).toEqual([]);
+      expect(r.cleaned).toEqual([]);
+      expect(r.skipped.some((s) => s.run_id === liveId && /live/.test(s.reason))).toBe(true);
+    } finally {
+      live();
+    }
+  });
+
+  it("keeps home of a needs_human run while its PR is open or missing, inside the resume window", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-resume-keep-"));
+    dirs.push(factoryHome);
+    const open = "https://github.com/acme/pm/pull/43";
+    const openId = "20261104-180805-15d52a";
+    const noneId = "20261104-190805-15d52b";
+    const freshId = "20261104-200805-15d52c";
+    const merged = "https://github.com/acme/pm/pull/44";
+    const openDir = writeGcRun(factoryHome, { id: openId, result: "needs_human", idleMs: 25 * HOUR, pr: open });
+    const noneDir = writeGcRun(factoryHome, { id: noneId, result: "needs_human", idleMs: 3 * DAY, pr: null });
+    const freshDir = writeGcRun(factoryHome, { id: freshId, result: "needs_human", idleMs: HOUR, pr: merged });
+    const gh = new FakeGitHub();
+    gh.prStates.set(open, { state: "open", draft: true });
+    gh.prStates.set(merged, { state: "merged", draft: false });
+    const r = await gc({
+      factoryHome,
+      github: gh,
+      evidence: false,
+      retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 24, metadata_days: 1e6, worktree_resume_days: 14 }),
+      needsInputWorkingDays: 99,
+    });
+    expect(r.home_removed).toEqual([]);
+    for (const dir of [openDir, noneDir, freshDir]) {
+      expect(readFileSync(join(dir, "home", "cache.bin"), "utf8")).toBe("sandbox");
+      expectMetadata(dir);
+    }
+  });
+
+  it("still strips done and abandoned homes after home_hours and keeps a fresher terminal home", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-terminal-home-"));
+    dirs.push(factoryHome);
+    const doneId = "20261104-220805-15d52e";
+    const abandonedId = "20261104-230805-15d52f";
+    const freshId = "20261105-000805-15d530";
+    const doneDir = writeGcRun(factoryHome, { id: doneId, result: "done", idleMs: 25 * HOUR, pr: null });
+    const abandonedDir = writeGcRun(factoryHome, { id: abandonedId, result: "abandoned", idleMs: 25 * HOUR, pr: null });
+    const freshDir = writeGcRun(factoryHome, { id: freshId, result: "done", idleMs: HOUR, pr: null });
+    const r = await gc({
+      factoryHome,
+      github: new FakeGitHub(),
+      evidence: false,
+      retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 24, metadata_days: 1e6 }),
+    });
+    expect(r.home_removed.map((h) => h.run_id).sort()).toEqual([abandonedId, doneId].sort());
+    expect(r.home_removed.every((h) => h.reason.startsWith("terminal run"))).toBe(true);
+    expect(existsSync(join(doneDir, "home"))).toBe(false);
+    expect(existsSync(join(abandonedDir, "home"))).toBe(false);
+    expect(readFileSync(join(freshDir, "home", "cache.bin"), "utf8")).toBe("sandbox");
+    expectMetadata(doneDir);
+    expectMetadata(abandonedDir);
+    expect(r.metadata_moved).toEqual([]);
+  });
+
+  it("keeps a resume home when PR state cannot be read", async () => {
+    const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-pr-unknown-"));
+    dirs.push(factoryHome);
+    const id = "20261104-150805-15d531";
+    const pr = "https://github.com/acme/pm/pull/45";
+    const dir = writeGcRun(factoryHome, { id, result: "needs_human", idleMs: 25 * HOUR, pr });
+    const gh = new FakeGitHub();
+    gh.prStatus = async () => {
+      throw new Error("github down");
+    };
+    const r = await gc({
+      factoryHome,
+      github: gh,
+      evidence: false,
+      retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 24, metadata_days: 1e6 }),
+    });
+    expect(r.home_removed).toEqual([]);
+    expect(readFileSync(join(dir, "home", "cache.bin"), "utf8")).toBe("sandbox");
+    expect(r.skipped.some((s) => s.run_id === id && s.reason.startsWith("PR state unknown"))).toBe(true);
   });
 
   it("appendGcLog rotates", () => {

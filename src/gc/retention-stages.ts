@@ -10,13 +10,16 @@ import { isProtectedFactoryPath, type GcRetention } from "./retention-config.js"
 import type { RunRecord } from "../runs.js";
 import {
   DAY,
+  HOUR,
   dirBytes,
   homeEligible,
+  isResumeResult,
   lastActivity,
   metadataArchiveBlocked,
   metadataRetentionMs,
   protectedIdleRun,
   protectedMetadataRunIds,
+  resolveGcPrState,
 } from "./retention-helpers.js";
 
 function lockMaxRuns(repo: string): number {
@@ -79,7 +82,9 @@ function runIsLive(factoryHome: string, runId: string): boolean {
 
 /**
  * Removes eligible `runs/<id>/home` directories. No repo lock: the directory is that run's sandbox
- * cache. A live holder, and needs_input / needs_human / base_red inside the resume window, are kept.
+ * cache. A live holder is kept. Resume-status runs (`needs_input` / `needs_human` / `base_red`) keep
+ * `home/` while the PR is open or missing; a merged or closed PR is treated like a terminal run after
+ * `home_hours`. Worktree and metadata retention for those runs is unchanged.
  */
 export async function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): Promise<void> {
   const runsRoot = join(opts.factoryHome, "runs");
@@ -87,17 +92,31 @@ export async function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcReten
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
     if (!st) continue;
-    if (protectedIdleRun(run, now, cfg.worktree_resume_days)) continue;
-    if (!homeEligible(run, now, cfg.home_hours)) continue;
     const home = join(run.dir, "home");
     if (!existsSync(home)) continue;
+    let reason = `terminal run idle ≥ ${cfg.home_hours}h; sandbox home is cache`;
+    if (isResumeResult(st.result)) {
+      // Open and missing PRs stay protected past the resume window too: only a finished PR makes home cache.
+      if (!st.pr || now - lastActivity(run) < cfg.home_hours * HOUR) continue;
+      const looked = await resolveGcPrState(opts.github, st.repo, st.pr);
+      if (looked.state === "unknown") {
+        report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: looked.reason });
+        continue;
+      }
+      if (looked.state !== "merged" && looked.state !== "closed") continue;
+      if (!homeEligible(run, now, cfg.home_hours, { prTerminal: true })) continue;
+      reason = `resume run idle ≥ ${cfg.home_hours}h and PR is ${looked.state}; sandbox home is cache`;
+    } else {
+      if (protectedIdleRun(run, now, cfg.worktree_resume_days)) continue;
+      if (!homeEligible(run, now, cfg.home_hours)) continue;
+    }
     if (isProtectedFactoryPath(opts.factoryHome, home)) continue;
     if (!realDirInside(runsRoot, home)) {
       report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "home/ is a symlink or outside $FACTORY_HOME/runs; kept" });
       continue;
     }
     const bytes = dirBytes(home);
-    const entry = { run_id: run.run_id, repo: st.repo, bytes, reason: `terminal run idle ≥ ${cfg.home_hours}h; sandbox home is cache` };
+    const entry = { run_id: run.run_id, repo: st.repo, bytes, reason };
     // The holder list is the live-run guard. A resume takes its slot before it recreates home/.
     if (runIsLive(opts.factoryHome, run.run_id)) {
       report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "run is live; home/ kept" });
