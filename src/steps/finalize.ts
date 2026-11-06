@@ -16,6 +16,7 @@ import { asData, asset, rolePrompt } from "../prompts.js";
 import { formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
+import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
@@ -370,33 +371,61 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   throwIfInterrupted(ctx.deps);
   let pr: string | null = input.existingPr?.url ?? null;
   let draft: boolean | null = input.existingPr?.draft ?? null;
-  if (!input.noPr && hasCommits && !blockPush) {
+  // A pull request stays a draft until local gates have passed and the final push has landed.
+  // The push itself is a draft event, so the stub does not start select/check for it.
+  const willPush = !input.noPr && hasCommits && !blockPush;
+  if (!input.noPr && input.existingPr && (result !== "done" || willPush)) {
+    try {
+      const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, input.existingPr);
+      draft = held.draft;
+      if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
+    } catch (e) {
+      const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
+      ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
+      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+    }
+  }
+  if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
     try {
       const head = await revParse(ctx.worktree, "HEAD");
       await pushIdempotent(ctx, head);
       // An open PR on this branch (an earlier attempt's create that looked failed, or one opened by hand)
-      // is adopted, never duplicated.
-      let target = input.existingPr ?? (await adoptablePr(ctx, head));
+      // is adopted, never duplicated. Known PRs were converted to draft before this push.
+      let target = input.existingPr ? { url: input.existingPr.url, draft: draft !== false } : await adoptablePr(ctx, head);
+      let created = false;
       if (!target) {
         try {
-          pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: result !== "done", labels: guarded.length ? [PROTECTED_LABEL] : [] });
-          draft = result !== "done";
+          pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: true, labels: guarded.length ? [PROTECTED_LABEL] : [] });
+          draft = true;
+          created = true;
+          target = { url: pr, draft: true };
         } catch (e) {
           target = await adoptablePr(ctx, head);
           if (!target) throw e;
         }
       }
-      if (target) {
+      if (target && !created) {
         pr = target.url;
-        draft = target.draft;
+        if (!target.draft && result !== "done") {
+          const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, target);
+          target = { url: target.url, draft: held.draft };
+          if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: target.url } });
+        }
+        draft = result === "done" ? target.draft : true;
         await ctx.deps.github.updatePr(ctx.worktree, target.url, { title, body });
         if (guarded.length) await ctx.deps.github.addLabel(ctx.worktree, target.url, PROTECTED_LABEL);
-        if (result === "done" && target.draft) {
+      }
+      // Ready is after the push, and only when the local result is done. Then CI is polled.
+      if (target && result === "done") {
+        if (target.draft) {
           await ctx.deps.github.markReady(ctx.worktree, target.url);
-          draft = false;
+          ctx.events.emit({ step: "finalize", event: "progress", data: { pr_ready: target.url } });
         }
+        draft = false;
+      } else if (target) {
+        draft = true;
       }
       // Pending PR checks are polled; they are not a failure. Red checks are: the PR is not merged on its own.
       if (result === "done" && pr) {

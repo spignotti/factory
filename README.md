@@ -590,6 +590,28 @@ name without the workflow name, so branch protection (or a ruleset) must require
 Actions; requiring `factory / done` blocks every PR, because nothing ever reports that context
 (`factory doctor --repo .` warns about it).
 
+**Draft pull requests.** The pipeline opens every PR as a draft and pushes while it is still a draft.
+It marks the PR ready only after the local gates have passed and that push has finished, and only
+then waits for GitHub CI. A local failure does not mark the PR ready; a PR that was already ready
+is converted back to draft (`gh pr ready --undo`) before the push. On a draft `pull_request` the
+stub does not run `select` or `check`. `done` still runs and exits non-zero. A skipped required
+check counts as passed, so skipping `done` would be a green gate. `ready_for_review`, and
+`synchronize` / `reopened` on a PR that is not a draft, run the full matrix. `converted_to_draft`
+cancels an in-flight full run and fails `done`. Tags `v*` and `workflow_dispatch` still pass `--all`.
+The decision uses the draft flag on the event, never the author, branch, labels, or PR text.
+
+A failed draft `done` does not by itself end the factory run: while no select/check suite has
+finished, that failure is still pending and the run keeps polling. A real failure is red
+immediately. The latest completed run of a check name wins, so the draft failure does not stick
+after the ready run succeeds, and converting the PR back to draft fails `done` again. A skipped
+`done` is red to the factory.
+
+**Downstream rollout.** Merging this repository does not change private repos. After the change is
+merged and tagged, update the stub in order: tourenpilot, then tourenpilot-ops, then pm, each with
+`factory ci-stub --ref <tag>` in its own PR. Actions minutes in those repos stay as they are until
+that stub is running and a draft event shows `done` failing with `select` and `check` skipped, and
+the following ready event shows the full matrix on that head.
+
 **Local-only checks:** `local_only: true` checks (a host stack CI does not have, see Services) are left out
 of the selection when `CI` is set, so the stub neither lists nor runs them; the factory runs them locally
 before the PR.

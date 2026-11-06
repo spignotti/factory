@@ -9,7 +9,9 @@ copy a workflow per tool.
 
 `factory ci-stub` renders `templates/ci/factory.yml`. Doctor hashes that one file. Branch protection
 requires one status, `done`, which is red when selection or any check fails. `pull_request` has no
-branch filter and drafts are not skipped, so the stub blocks every merge, including Dependabot.
+branch filter. A draft event does not run select/check, but `done` still runs and fails, so a draft
+is never a skipped (and therefore passing) required check. Dependabot and other ready pull requests
+run the full matrix. Nothing is skipped because of author, branch, labels, or the PR body.
 
 A reusable workflow would be a second file and a second required check. The stub stays identical in
 every repo; the tool commands live in `.factory/repo.yaml` `checks`.

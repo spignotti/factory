@@ -14,6 +14,7 @@ import { loadRepoConfig, parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } fr
 import { withRepoModels } from "../config.js";
 import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from "../memory.js";
 import { finalize, syncBase } from "../steps/finalize.js";
+import { ensurePrDraft } from "../steps/pr-draft.js";
 import { baseCheckOutcome, type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
 import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
@@ -666,7 +667,10 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     st.packages = Object.fromEntries(impl.status);
     st.failures = impl.failures;
     sync();
-    if (impl.needsInput) return f.set({ result: "needs_input", reason: "bug without failing repro", questions: impl.needsInput });
+    if (impl.needsInput) {
+      const draftError = await keepDraft(f);
+      return f.set({ result: "needs_input", reason: draftError ? `bug without failing repro; ${draftError}` : "bug without failing repro", questions: impl.needsInput });
+    }
     gates = impl.lastGates ?? gates;
     const failed = [...impl.status].filter(([, s]) => s !== "done").map(([id, s]) => `${id} ${s}${impl.failures[id] ? `: ${impl.failures[id]}` : ""}`);
     if (failed.length || !gates) {
@@ -713,6 +717,28 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
   f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
+}
+
+/**
+ * A local stop must not leave the pull request ready for review. Closed PRs and `--no-pr` are left alone.
+ * When conversion fails, the returned text is appended to the run reason.
+ */
+async function keepDraft(f: RunFrame): Promise<string | undefined> {
+  const st = f.state;
+  if (!st?.pr || st.no_pr || !st.worktree || !f.deps) return;
+  try {
+    const held = await ensurePrDraft(f.deps.github, st.worktree, { url: st.pr, draft: st.pr_draft ?? true });
+    if (held.changed) {
+      st.pr_draft = true;
+      f.save();
+      f.events.emit({ step: "resume", event: "progress", data: { pr_marked_draft: st.pr } });
+    }
+    return;
+  } catch (e) {
+    const msg = (e as Error).message.slice(0, 200);
+    f.events.emit({ step: "resume", event: "progress", data: { pr_draft_error: msg } });
+    return `draft conversion failed: ${msg}`;
+  }
 }
 
 /**
@@ -838,11 +864,17 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     st.base_sha = ctx.baseSha;
     st.gate_count = ctx.gateCount;
     f.save();
-    if (!ready.ok) return f.set({ result: "needs_human", reason: ready.reason });
+    if (!ready.ok) {
+      const draftError = await keepDraft(f);
+      return f.set({ result: "needs_human", reason: draftError ? `${ready.reason}; ${draftError}` : ready.reason });
+    }
     let gates = ready.gates;
     if (gates && !gates.green) {
       const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });
-      if (!fixed.ok) return f.set({ result: "needs_human", reason: `resume: ${fixed.reason}` });
+      if (!fixed.ok) {
+        const draftError = await keepDraft(f);
+        return f.set({ result: "needs_human", reason: draftError ? `resume: ${fixed.reason}; ${draftError}` : `resume: ${fixed.reason}` });
+      }
       gates = fixed.gates;
     }
     events.emit({ step: "resume", event: "step_finished", data: { continue_at: st.step } });

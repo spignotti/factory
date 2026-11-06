@@ -193,7 +193,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.runner.remaining()).toEqual({});
 
     const pr = r.github.prs[0]!;
-    expect(pr.draft).toBe(false);
+    expect(pr.draft).toBe(true);
+    expect(r.github.readied).toEqual([pr.url]);
     expect(pr.base).toBe("main");
     expect(pr.head).toMatch(/^factory\/task-add-a-multiply-function/);
     expect(r.github.pushes).toEqual([pr.head]);
@@ -239,6 +240,39 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.result.counted_lines).toBeUndefined();
     expect(r.result.excluded_test_lines).toBeUndefined();
     expect(eventsOf(r, "gate_result").filter((e) => e.data.check === "max_diff_lines").every((e) => e.data.counted_lines === undefined)).toBe(true);
+  });
+
+  it("opens a draft, pushes, marks ready, and only then reads CI", async () => {
+    const order: string[] = [];
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        const push = gh.push.bind(gh);
+        const create = gh.createPr.bind(gh);
+        const ready = gh.markReady.bind(gh);
+        const status = gh.baseStatus.bind(gh);
+        gh.push = async (dir, branch) => {
+          order.push("push");
+          return push(dir, branch);
+        };
+        gh.createPr = async (req) => {
+          order.push(`create:${req.draft}`);
+          return create(req);
+        };
+        gh.markReady = async (dir, pr) => {
+          order.push("ready");
+          return ready(dir, pr);
+        };
+        gh.baseStatus = async () => {
+          order.push("status");
+          return status();
+        };
+      },
+    });
+    expect(r.result.result).toBe("done");
+    expect(order).toEqual(["status", "push", "create:true", "ready", "status"]);
+    expect(r.github.drafted).toEqual([]);
+    expect(r.events.some((e) => e.data.pr_ready)).toBe(true);
   });
 
   it("agents get the allowlisted env and an isolated HOME; no env values in events or result", async () => {
@@ -345,7 +379,8 @@ ${fixed}` } };
     expect(round2.sessionKey).toBe(r.runner.calls.find((c) => c.role === "review_plan")?.sessionKey);
     const merged = JSON.parse(r.file("merged-2.json"));
     expect(merged.findings[0]).toMatchObject({ id: "R1-plan-1", status: "accepted_wontfix" });
-    expect(r.github.prs[0]?.draft).toBe(false);
+    expect(r.github.prs[0]?.draft).toBe(true);
+    expect(r.github.readied).toEqual([r.github.prs[0]!.url]);
   });
 
   it("stalemate: rejected wontfix -> needs_human, draft PR, human_review", async () => {
@@ -353,6 +388,7 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", rounds: 2 });
     expect(r.result.reason).toMatch(/stalemate/);
     expect(r.github.prs[0]?.draft).toBe(true);
+    expect(r.github.readied).toEqual([]);
     expect(r.github.prs[0]?.body).toContain("Blockers (needs_human)");
     expect(r.github.autoMerged).toEqual([]);
   });
@@ -833,7 +869,8 @@ describe("base moved before finalize", () => {
     const baseMoved = r.events.filter((e) => e.event === "progress" && e.data.base_moved).length;
     expect(baseMoved).toBe(1);
     expect(() => r.file("gates-3.json")).not.toThrow(); // implement, finalize, after merge
-    expect(r.github.prs[0]!.draft).toBe(false);
+    expect(r.github.prs[0]!.draft).toBe(true);
+    expect(r.github.readied).toEqual([r.github.prs[0]!.url]);
   });
 
   it("conflict: merge aborted, needs_human naming the files, draft PR, worktree clean", async () => {

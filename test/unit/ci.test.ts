@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -18,11 +19,17 @@ describe("CI stub", () => {
     const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; concurrency: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
     // no run on pushes to the base branch; tags and manual runs do; no branch filter: every PR
     expect(Object.keys(wf.on)).toEqual(["pull_request", "push", "workflow_dispatch"]);
-    expect(wf.on.pull_request).toBeNull();
+    expect(wf.on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"] });
     expect(wf.on.push).toEqual({ tags: ["v*"] });
-    // only a newer push to the same PR cancels a run (a cancelled check on a commit reads as red)
+    // a newer event of the same kind cancels a run; draft and ready runs do not cancel each other
+    expect(wf.concurrency.group).toContain("converted_to_draft");
+    expect(wf.concurrency.group).toContain("'draft'");
     expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
     expect(Object.keys(wf.jobs)).toEqual(["select", "check", "done"]);
+    expect(wf.jobs.select!.if).toContain("github.event.pull_request.draft == false");
+    expect(wf.jobs.check!.if).toContain("github.event.pull_request.draft == false");
+    expect(wf.jobs.check!.if).toContain("needs.select.outputs.checks != '[]'");
+    expect(wf.jobs.done!.if).toBe("always()");
     expect(wf.env.FACTORY).toBe("npx -y github:spignotti/factory#v1.2.3");
     const done = wf.jobs.done!;
     expect(done.needs).toEqual(["select", "check"]);
@@ -31,6 +38,35 @@ describe("CI stub", () => {
     // untrusted values reach the shell through env, never interpolated into the script
     for (const job of Object.values(wf.jobs)) for (const step of job.steps) expect(step.run ?? "").not.toContain("${{");
     expect(renderCiStub("main")).not.toContain("@FACTORY_REF@");
+    const text = renderCiStub("v1.2.3");
+    expect(text).not.toContain("github.actor");
+    expect(text).not.toContain("github.event.pull_request.labels");
+    expect(text).not.toContain("github.head_ref");
+    expect(text).toContain("contents: read");
+    expect(text).not.toContain("pull-requests:");
+  });
+
+  it("done fails closed on a draft or a cancelled run and is not a skipped success", () => {
+    const wf = parse(renderCiStub("v1.2.3")) as { jobs: Record<string, { if?: string; steps: { run?: string }[] }> };
+    const done = wf.jobs.done!;
+    expect(done.if).toBe("always()");
+    const script = done.steps[0]!.run!;
+    const run = (env: Record<string, string>) => {
+      try {
+        execFileSync("bash", ["-c", script], { env: { ...process.env, ...env }, encoding: "utf8" });
+        return 0;
+      } catch (e) {
+        return (e as { status?: number }).status ?? 1;
+      }
+    };
+    // A skipped select/check on a draft must not make `done` pass.
+    expect(run({ DRAFT: "true", CANCELLED: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
+    expect(run({ DRAFT: "false", CANCELLED: "true", SELECT: "success", CHECK: "success" })).toBe(1);
+    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "success", CHECK: "success" })).toBe(0);
+    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "success", CHECK: "skipped" })).toBe(0);
+    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "failure", CHECK: "skipped" })).toBe(1);
+    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "success", CHECK: "failure" })).toBe(1);
+    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
   });
 
   it("template: the check job installs the toolchains select resolved (pnpm, node, python, uv) before the check", () => {

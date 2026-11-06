@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { git } from "./git.js";
+import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
 
 const execFileP = promisify(execFile);
 
@@ -41,6 +42,8 @@ export interface GitHub {
   updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void>;
   /** Resume: a draft PR whose run is now done becomes ready for review. */
   markReady(repoDir: string, pr: string): Promise<void>;
+  /** A ready PR whose run is not done, or whose next push must stay cheap, becomes a draft. */
+  markDraft(repoDir: string, pr: string): Promise<void>;
   /** `status` / `gc`: current state of a factory PR. */
   prStatus(repoDir: string, pr: string): Promise<PrStatus>;
   /** `doctor`: is `gh` logged in (no token is read or printed)? */
@@ -231,12 +234,14 @@ export class GhCli implements GitHub {
   }
 
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
-    const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {status, conclusion}]"]);
-    const runs = JSON.parse(out || "[]") as { status: string; conclusion: string | null }[];
-    if (runs.length === 0) return "none";
-    if (runs.some((r) => ["failure", "timed_out", "cancelled", "action_required"].includes(r.conclusion ?? ""))) return "red";
-    if (runs.some((r) => r.status !== "completed")) return "pending";
-    return "green";
+    const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id}]"]);
+    const raw = JSON.parse(out || "[]") as { name?: string; status?: string; conclusion?: string | null; started_at?: string | null; id?: number; suite?: number | null }[];
+    const runs: CheckRunView[] = [];
+    for (const run of raw) {
+      if (!run.name || !run.status) continue;
+      runs.push({ name: run.name, status: run.status, conclusion: run.conclusion || null, started_at: run.started_at, id: run.id, suite: run.suite });
+    }
+    return aggregateCheckRuns(runs);
   }
 
   async getIssue(repoDir: string, n: number): Promise<Issue> {
@@ -289,6 +294,10 @@ export class GhCli implements GitHub {
 
   async markReady(repoDir: string, pr: string): Promise<void> {
     await gh(repoDir, ["pr", "ready", pr]);
+  }
+
+  async markDraft(repoDir: string, pr: string): Promise<void> {
+    await gh(repoDir, ["pr", "ready", "--undo", pr]);
   }
 
   async ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]> {
@@ -363,6 +372,7 @@ export class FakeGitHub implements GitHub {
   async createPr(req: PrRequest): Promise<string> {
     const url = `https://github.test/pr/${this.prs.length + 1}`;
     this.prs.push({ ...req, url });
+    this.prStates.set(url, { state: "open", draft: req.draft });
     for (const label of req.labels ?? []) await this.addLabel(req.repoDir, url, label);
     return url;
   }
@@ -379,6 +389,7 @@ export class FakeGitHub implements GitHub {
 
   readonly updates: { pr: string; title: string; body: string }[] = [];
   readonly readied: string[] = [];
+  readonly drafted: string[] = [];
 
   async updatePr(_repoDir: string, pr: string, update: { title: string; body: string }): Promise<void> {
     this.updates.push({ pr, ...update });
@@ -386,6 +397,14 @@ export class FakeGitHub implements GitHub {
 
   async markReady(_repoDir: string, pr: string): Promise<void> {
     this.readied.push(pr);
+    const prev = this.prStates.get(pr);
+    this.prStates.set(pr, { state: prev?.state ?? "open", draft: false });
+  }
+
+  async markDraft(_repoDir: string, pr: string): Promise<void> {
+    this.drafted.push(pr);
+    const prev = this.prStates.get(pr);
+    this.prStates.set(pr, { state: prev?.state ?? "open", draft: true });
   }
 
   /** PR states by URL; created PRs are open. */
