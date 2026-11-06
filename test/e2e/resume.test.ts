@@ -54,7 +54,8 @@ describe("factory resume", () => {
     expect(git(wt, "log", "--format=%s|%an", "main..HEAD")).toContain("fix: human changes before resume|factory-bot");
     expect(git(wt, "status", "--porcelain")).toBe("");
     expect(r2.github.prs).toHaveLength(1);
-    expect(r2.github.prs[0]!.draft).toBe(false);
+    expect(r2.github.prs[0]!.draft).toBe(true);
+    expect(r2.github.readied).toEqual([r2.result.pr]);
     expect(r2.events.some((e) => e.step === "resume" && e.data.human_changes_committed)).toBe(true);
     expect(readState(r.runDir)).toMatchObject({ step: "finished", result: "done", packages: { P1: "done" } });
     // events.jsonl is appended to, not replaced
@@ -179,6 +180,33 @@ describe("factory resume", () => {
     expect(git(origin, "merge-base", "--is-ancestor", "main", head)).toBe("");
     expect(readFileSync(join(r.runDir, "worktree", "src/math.js"), "utf8")).toBe(BOTH);
     expect(r3.events.some((e) => e.step === "resume" && e.data.remote_branch_merged)).toBe(true);
+  });
+
+  it("a PR marked ready by hand is converted back to draft when resume still cannot merge", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      setup: (repo) => void addOrigin(repo),
+      github: (gh) => {
+        gh.push = async (dir, branch) => {
+          gh.pushes.push(branch);
+          git(dir, "push", "-q", "-u", "origin", branch);
+        };
+      },
+      onCall: (req, repo) => {
+        if (req.role !== "review_plan") return;
+        commitFile(repo, "src/math.js", DIVIDE, "main moved");
+        git(repo, "push", "-q", "origin", "main");
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    const url = r.result.pr!;
+    r.github.prStates.set(url, { state: "open", draft: false });
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
+    expect(r2.result.result).toBe("needs_human");
+    expect(r2.result.reason).toMatch(/merge conflict in src\/math\.js/);
+    expect(r2.github.drafted).toEqual([url]);
+    expect(r2.github.readied).toEqual([]);
+    expect(r2.github.prStates.get(url)?.draft).toBe(true);
   });
 });
 

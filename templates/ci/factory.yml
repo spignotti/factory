@@ -8,10 +8,14 @@ name: factory
 # the diff. A tag and a manual run have no such diff: the tag is a commit already on the base, so
 # `factory gates --select --base origin/main` would keep only path-less checks. Those events pass
 # `--all` and run every check of the tier. One stub, not a reusable workflow: doctor hashes this
-# single file and branch protection requires one status, `done`. Draft PRs run too: a skipped
-# required check counts as passed, so skipping drafts would let a PR marked ready merge before its checks.
+# single file and branch protection requires one status, `done`. A draft pull request does not run
+# select/check. `done` still runs and fails: a skipped required check counts as passed, so skipping
+# `done` would turn a draft into a green gate. ready_for_review and a later push to a ready PR run
+# the full matrix. converted_to_draft cancels an in-flight full run and fails `done`. Nothing is
+# skipped because of author, branch, labels, or the PR body. Tags and workflow_dispatch are unchanged.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -21,15 +25,20 @@ on:
         default: manual
 permissions:
   contents: read
-# Only a newer push to the same PR cancels a run; a manual run is never cancelled (the factory counts a
-# cancelled check on a commit as red).
+# Draft events and ready events do not cancel each other: cancelling the full run can leave `done`
+# skipped (GitHub then treats it as passed) or can fail it after the ready run already succeeded.
+# A newer event of the same kind still cancels the older one. converted_to_draft uses the full
+# group so an in-flight ready run cannot finish green. `done` exits non-zero when this run was
+# cancelled. A manual run and a tag are never cancelled.
 concurrency:
-  group: factory-${{ github.ref }}
+  group: factory-${{ (github.event.action == 'converted_to_draft' && 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft && 'draft') || 'full' }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   FACTORY: "npx -y github:spignotti/factory#@FACTORY_REF@"
 jobs:
   select:
+    # Draft events skip the runner. `done` still runs and fails; this job is not a required check.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     outputs:
       checks: ${{ steps.s.outputs.checks }}
@@ -67,7 +76,7 @@ jobs:
           echo "toolchains=$toolchains" >> "$GITHUB_OUTPUT"
   check:
     needs: select
-    if: ${{ needs.select.outputs.checks != '[]' }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.select.outputs.checks != '[]' }}
     strategy:
       fail-fast: false
       matrix:
@@ -98,7 +107,8 @@ jobs:
       - env:
           CHECK: ${{ matrix.check }}
         run: $FACTORY gates --run "$CHECK"
-  # The single required status check, named `done` (the job name; GitHub Actions reports no workflow prefix): red when selection failed, any check failed or was cancelled.
+  # The single required status check, named `done` (the job name; GitHub Actions reports no workflow prefix).
+  # always(): a skipped `done` is a successful required check. Draft and cancelled runs exit 1 instead.
   done:
     needs: [select, check]
     if: always()
@@ -107,7 +117,18 @@ jobs:
       - env:
           SELECT: ${{ needs.select.result }}
           CHECK: ${{ needs.check.result }}
+          DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
+          CANCELLED: ${{ cancelled() && 'true' || 'false' }}
         run: |
+          set -eu
+          if [ "$CANCELLED" = "true" ]; then
+            echo "cancelled: not a successful check"
+            exit 1
+          fi
+          if [ "$DRAFT" = "true" ]; then
+            echo "draft: checks are not run until the pull request is ready for review"
+            exit 1
+          fi
           echo "select: $SELECT, check: $CHECK"
           test "$SELECT" = success
           test "$CHECK" = success || test "$CHECK" = skipped
