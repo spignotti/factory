@@ -33,8 +33,11 @@ permissions:
 concurrency:
   group: factory-${{ (github.event.action == 'converted_to_draft' && 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft && 'draft') || 'full' }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Node 22.23.4 ships npm 10.9.9. Its libnpmexec (9.0.5) calls pacote without an Arborist,
+# and GitFetcher then refuses to pack a git dependency (`npx github:<repo>#<ref>`).
+# npm 11.21.1 (libnpmexec 10.3.4) passes Arborist. The factory pin stays that git ref.
 env:
-  FACTORY: "npx -y github:spignotti/factory#@FACTORY_REF@"
+  FACTORY: "npx --yes --package npm@11.21.1 -- npm exec --yes --package github:spignotti/factory#@FACTORY_REF@ -- factory"
 jobs:
   select:
     # Draft events skip the runner. `done` still runs and fails; this job is not a required check.

@@ -628,7 +628,7 @@ checks, the stub installs what `factory gates --toolchains` resolves for the rep
 `factory doctor --repo .` checks the file is the unedited template of the installed factory for its ref.
 The template belongs to the factory version, so after a factory upgrade with a template change the stub
 differs until its pin is bumped (`factory ci-stub --ref <new tag>`); bumping the ref is a deliberate PR.
-The ref must be a published tag of this repo (CI runs `npx github:spignotti/factory#<ref>`).
+The ref is the pinned git commit or tag (CI runs that ref through `npm exec` on npm 11.21.1, because Node 22's npm 10.9.9 cannot pack a `github:` spec).
 
 ## Adopt
 
