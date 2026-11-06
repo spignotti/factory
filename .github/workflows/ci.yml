@@ -21,7 +21,9 @@ jobs:
   # docs (`docs/**`, root `*.md`; prompts under roles/ and standards/ are code), its steps are skipped and it passes at once. Anything else runs in full.
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # ffmpeg's apt install is normally a few seconds. A slow Ubuntu mirror has
+    # filled the whole job before typecheck, lint, or tests started.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
