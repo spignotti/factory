@@ -11,6 +11,12 @@ import { main } from "../../src/cli.js";
 
 const URL_ = "https://hooks.example.test/x";
 
+/** Run id whose start time stays inside the 7-day doctor window. */
+function recentRunId(at: Date, suffix: string): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${at.getUTCFullYear()}${p(at.getUTCMonth() + 1)}${p(at.getUTCDate())}-${p(at.getUTCHours())}${p(at.getUTCMinutes())}${p(at.getUTCSeconds())}-${suffix}`;
+}
+
 function repoWithOrigin(): string {
   const dir = mkdtempSync(join(tmpdir(), "factory-doc-repo-"));
   execFileSync("git", ["init", "-q", "-b", "main", dir]);
@@ -22,14 +28,16 @@ describe("notify doctor and run guard", () => {
   it("notifyDoctorChecks fails on a non-empty outbox and recent skipped notify", async () => {
     const factoryHome = mkdtempSync(join(tmpdir(), "factory-doc-home-"));
     const repo = repoWithOrigin();
-    const runDir = join(factoryHome, "runs", "20261030-140000-abcabc");
+    const now = new Date();
+    const runId = recentRunId(new Date(now.getTime() - 60 * 60 * 1000), "abcabc");
+    const runDir = join(factoryHome, "runs", runId);
     mkdirSync(runDir, { recursive: true });
-    const events = new EventLog(runDir, "20261030-140000-abcabc", () => Date.now(), []);
+    const events = new EventLog(runDir, runId, () => now.getTime(), []);
     writeFileSync(
       join(runDir, "state.json"),
       JSON.stringify({
         version: 1,
-        run_id: "20261030-140000-abcabc",
+        run_id: runId,
         repo,
         task: { ref: "t", labels: [] },
         no_pr: true,
@@ -59,11 +67,11 @@ describe("notify doctor and run guard", () => {
       repo: "acme/widgets",
       kind: "failed",
       payload: withEventId(
-        { event: "factory.run_finished", run_id: "20261030-140000-abcabc", repo: "acme/widgets", result: "done", reason: "ok", pr: null, finished_at: new Date().toISOString() },
+        { event: "factory.run_finished", run_id: runId, repo: "acme/widgets", result: "done", reason: "ok", pr: null, finished_at: now.toISOString() },
         "acme/widgets",
       ),
     });
-    const checks = await notifyDoctorChecks(factoryHome);
+    const checks = await notifyDoctorChecks(factoryHome, now.getTime());
     expect(checks.some((c) => c.name === "notify outbox" && c.status === "fail")).toBe(true);
     expect(checks.some((c) => c.name === "notify delivery" && c.status === "fail")).toBe(true);
     expect(checks.some((c) => c.name === "notify coverage" && c.status === "fail")).toBe(true);
@@ -103,11 +111,11 @@ describe("notify doctor and run guard", () => {
       return new EventLog(runDir, id, () => ms, []);
     };
     const now = Date.now();
-    mkRun("20261030-140000-aaaaaa", now - 3_600_000).emit({ step: "run", event: "notify", data: { status: "skipped", repo: "acme/widgets" } });
-    mkRun("20261030-150000-bbbbbb", now - 60_000).emit({ step: "run", event: "notify", data: { status: "sent", repo: "acme/widgets" } });
+    mkRun(recentRunId(new Date(now - 3_600_000), "aaaaaa"), now - 3_600_000).emit({ step: "run", event: "notify", data: { status: "skipped", repo: "acme/widgets" } });
+    mkRun(recentRunId(new Date(now - 60_000), "bbbbbb"), now - 60_000).emit({ step: "run", event: "notify", data: { status: "sent", repo: "acme/widgets" } });
     let checks = await notifyDoctorChecks(factoryHome, now);
     expect(checks.filter((c) => c.status === "fail")).toEqual([]);
-    mkRun("20261030-160000-cccccc", now - 1_000).emit({ step: "run", event: "notify", data: { status: "failed", repo: "acme/widgets" } });
+    mkRun(recentRunId(new Date(now - 1_000), "cccccc"), now - 1_000).emit({ step: "run", event: "notify", data: { status: "failed", repo: "acme/widgets" } });
     checks = await notifyDoctorChecks(factoryHome, now);
     expect(checks.find((c) => c.name === "notify delivery")).toMatchObject({ status: "fail" });
   });

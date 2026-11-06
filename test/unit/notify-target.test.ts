@@ -29,6 +29,12 @@ const TARGET_URL = "https://hooks.example.test/mercator-hook-secret";
 const KEY_R = "crsr_repo-sender-key-0123456789";
 const KEY_T = "crsr_target-sender-key-0123456789";
 
+/** Run id whose start time stays inside the 7-day doctor window. */
+function recentRunId(at: Date, suffix: string): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${at.getUTCFullYear()}${p(at.getUTCMonth() + 1)}${p(at.getUTCDate())}-${p(at.getUTCHours())}${p(at.getUTCMinutes())}${p(at.getUTCSeconds())}-${suffix}`;
+}
+
 const yaml = () => `targets:
   mercator:
     url: ${TARGET_URL}
@@ -219,8 +225,8 @@ describe("named notify targets", () => {
       writeFileSync(join(runDir, "state.json"), JSON.stringify({ version: 1, run_id: id, repo, step: "finished", result: "done" }));
       return new EventLog(runDir, id, () => now, []);
     };
-    mk("20261030-140000-aaaaaa").emit({ step: "run", event: "notify", data: { status: "failed", repo: "acme/widgets", target: "mercator" } });
-    mk("20261030-150000-bbbbbb").emit({ step: "run", event: "notify", data: { status: "sent", repo: "acme/widgets" } });
+    mk(recentRunId(new Date(now - 120_000), "aaaaaa")).emit({ step: "run", event: "notify", data: { status: "failed", repo: "acme/widgets", target: "mercator" } });
+    mk(recentRunId(new Date(now - 60_000), "bbbbbb")).emit({ step: "run", event: "notify", data: { status: "sent", repo: "acme/widgets" } });
     const doc = await notifyDoctorChecks(factoryHome, now);
     expect(doc.find((c) => c.name === "notify delivery")).toMatchObject({ status: "fail" });
   });
