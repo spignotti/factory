@@ -47,7 +47,7 @@ describe("CI stub", () => {
     expect(wf.jobs.check!.if).toContain("github.event.pull_request.draft == false");
     expect(wf.jobs.check!.if).toContain("needs.select.outputs.checks != '[]'");
     expect(wf.jobs.done!.if).toBe("always()");
-    expect(wf.env.FACTORY).toBe("npx -y github:spignotti/factory#v1.2.3");
+    expect(wf.env.FACTORY).toBe("npx --yes --package npm@11.21.1 -- npm exec --yes --package github:spignotti/factory#v1.2.3 -- factory");
     const done = wf.jobs.done!;
     expect(done.needs).toEqual(["select", "check"]);
     expect(done.if).toBe("always()");
@@ -87,6 +87,15 @@ describe("CI stub", () => {
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "failure", CHECK: "skipped" })).toBe(1);
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "success", CHECK: "failure" })).toBe(1);
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
+  });
+
+  it("git pin is installed by npm 11.21.1, not by Node 22's npm 10.9.9 npx", () => {
+    const sha = "dbc340170bf0ed2bc19c542f718f1e8f81821eab";
+    const factory = renderCiStub(sha).match(/^ {2}FACTORY: "(.*)"$/m)?.[1];
+    expect(factory).toBe(`npx --yes --package npm@11.21.1 -- npm exec --yes --package github:spignotti/factory#${sha} -- factory`);
+    // npm 10.9.9 libnpmexec does not pass Arborist; a direct `npx github:` pack throws.
+    expect(factory?.startsWith("npx --yes github:")).toBe(false);
+    expect(factory?.startsWith("npx -y github:")).toBe(false);
   });
 
   it("status functions stay in if conditions; env cancelled() is rejected", () => {
