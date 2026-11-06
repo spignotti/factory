@@ -20,9 +20,21 @@ export interface EvalCommandOptions {
   cwd?: string;
 }
 
+function hiddenLabel(r: EvalRecord): string {
+  return r.hidden_status === "harness" ? "harness" : r.hidden_pass ? "pass" : "fail";
+}
+
 function progress(io: Io) {
-  return (r: EvalRecord) =>
-    io.err(`eval ${r.task} × ${r.profile} #${r.repeat}: ${r.result}, hidden ${r.hidden_pass ? "pass" : "fail"}, ${r.wall_s}s${r.reason && r.result !== "done" ? ` (${r.reason.slice(0, 120)})` : ""}\n`);
+  return (r: EvalRecord) => {
+    const note = r.hidden_status === "harness" ? r.hidden_output : r.reason && r.result !== "done" ? r.reason : "";
+    io.err(`eval ${r.task} × ${r.profile} #${r.repeat}: ${r.result}, hidden ${hiddenLabel(r)}, ${r.wall_s}s${note ? ` (${note.slice(0, 160)})` : ""}\n`);
+  };
+}
+
+/** Harness rows are not a finished quality comparison. Genuine hidden failures still exit 0. */
+function qualityExit(records: EvalRecord[], signal?: AbortSignal): number {
+  if (signal?.aborted) return 130;
+  return records.some((r) => r.hidden_status === "harness") ? 1 : 0;
 }
 
 /** Writes `<out>/<date>.jsonl` (appended) and `<out>/<date>.md` (a section per invocation). */
@@ -51,7 +63,7 @@ export async function evalCommand(opts: EvalCommandOptions, deps: Omit<EvalDeps,
     const summaries = names.map((n) => summarize(n, records));
     if (opts.json) io.out(JSON.stringify({ results_file: files.jsonl, summaries, records }) + "\n");
     else io.out(`${files.table}\nresults: ${files.jsonl}\n`);
-    return deps.signal?.aborted ? 130 : 0;
+    return qualityExit(records, deps.signal);
   } catch (e) {
     if (e instanceof EvalError) {
       io.err(`factory eval: ${e.message}\n`);
@@ -72,7 +84,8 @@ export interface ExperimentOptions {
 
 /**
  * `factory experiment --base <profile> --variant <profile>`: eval of both, the decision rule,
- * a JSON verdict (schemas/verdict.schema.json) on stdout. Exit 0 for every verdict; 2 on bad input.
+ * a JSON verdict (schemas/verdict.schema.json) on stdout. Exit 0 for every verdict; 1 when a hidden
+ * check did not run (harness); 2 on bad input.
  */
 export async function experimentCommand(opts: ExperimentOptions, deps: Omit<EvalDeps, "now">, io: Io): Promise<number> {
   const cwd = opts.cwd ?? process.cwd();
@@ -90,6 +103,10 @@ export async function experimentCommand(opts: ExperimentOptions, deps: Omit<Eval
       return 130;
     }
     const files = persist(resolve(cwd, opts.out ?? "evals/results"), records, [base.name, variant.name], `experiment ${base.name} vs ${variant.name}`, date);
+    if (records.some((r) => r.hidden_status === "harness")) {
+      io.err("factory experiment: hidden checks hit harness errors; no verdict (not model quality)\n");
+      return 1;
+    }
     const summaries = { base: summarize(base.name, records), variant: summarize(variant.name, records) };
     const verdict: Verdict = VerdictSchema.parse({
       version: 1,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join, resolve } from "node:path";
@@ -131,9 +131,17 @@ function versionString(): string {
   const version = packageVersion();
   try {
     const root = fileURLToPath(new URL("..", import.meta.url));
-    if (!existsSync(join(root, ".git"))) return version;
-    const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return sha ? `${version} (${sha})` : version;
+    if (existsSync(join(root, ".git"))) {
+      const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+      if (sha) return `${version} (${sha})`;
+    }
+    // Staging tarballs have no checkout. BUILD.json is written by scripts/pack-staging.mjs.
+    const buildPath = join(root, "BUILD.json");
+    if (existsSync(buildPath)) {
+      const commit = (JSON.parse(readFileSync(buildPath, "utf8")) as { commit?: string }).commit?.trim();
+      if (commit) return `${version} (${commit.slice(0, 12)})`;
+    }
+    return version;
   } catch {
     return version;
   }
@@ -181,7 +189,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const factoryHome = factoryHomeOf();
       // Sandbox and provider policy come from the user profile, as for `run`.
       const sandbox = sandboxFor(resolveProfile(loadLayers({ factoryHome })), io);
-      const workDir = values["work-dir"] ?? join(factoryHome, "eval", "work");
+      // Absolute before any `git worktree add`. A relative `--work-dir` is otherwise created under the clone.
+      const workDir = resolve(values["work-dir"] ?? join(factoryHome, "eval", "work"));
       if (values.validate) return await validateCommand({ tasks: values.tasks, json: values.json }, { factoryHome, workDir, sandbox, keep: values.keep }, io);
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });

@@ -1,8 +1,9 @@
-import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { killRunningCommands, resetKilledCommands, sh } from "../../src/exec.js";
-import { changedFiles, discardChanges, remoteBranchExists, stageAll } from "../../src/git.js";
+import { changedFiles, discardChanges, git, remoteBranchExists, stageAll, withBaseWorktree } from "../../src/git.js";
 import { addOrigin, createFixtureRepo, gitIn } from "../helpers/repo.js";
 
 describe("git helpers", () => {
@@ -21,6 +22,36 @@ describe("git helpers", () => {
     const base = gitIn(dir, "rev-parse", "HEAD").trim();
     gitIn(dir, "mv", "AGENTS.md", "docs-agents.md");
     expect(await changedFiles(dir, base)).toEqual(["AGENTS.md", "docs-agents.md"]);
+  });
+});
+
+describe("git errors and worktrees", () => {
+  it("a missing cwd keeps the spawn error instead of an empty git ls-files message", async () => {
+    const missing = join(mkdtempSync(join(tmpdir(), "git-missing-")), "nope");
+    await expect(git(missing, ["ls-files"])).rejects.toThrow(/git ls-files failed: spawn git ENOENT/);
+  });
+
+  it("a relative worktree path is created where the caller asked, and git ls-files works there", async () => {
+    const root = mkdtempSync(join(tmpdir(), "git-rel-"));
+    const prev = process.cwd();
+    try {
+      process.chdir(root);
+      mkdirSync("repo");
+      await git("repo", ["init", "-q", "-b", "main"]);
+      writeFileSync("repo/a.txt", "a\n");
+      await git("repo", ["add", "a.txt"]);
+      await git("repo", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+      const sha = (await git("repo", ["rev-parse", "HEAD"])).trim();
+      const listed = await withBaseWorktree("repo", sha, "out/wt", async (dir) => {
+        expect(dir).toBe(resolve(root, "out/wt"));
+        expect(existsSync("out/wt")).toBe(true);
+        expect(existsSync("repo/out/wt")).toBe(false);
+        return git(dir, ["ls-files"]);
+      });
+      expect(listed).toContain("a.txt");
+    } finally {
+      process.chdir(prev);
+    }
   });
 });
 

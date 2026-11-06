@@ -40,6 +40,7 @@ const sum = (o: Partial<ProfileSummary>): ProfileSummary => ({
   bug_findings: 0,
   real_findings: 0,
   errors: 0,
+  harness_errors: 0,
   determinism_ratio: 1,
   ...o,
 });
@@ -61,8 +62,10 @@ describe("eval report", () => {
 
   it("summary: pass rate, means, sums, errors per profile", () => {
     const s = summarize("a", [rec({ cost_usd: 0.5, wall_s: 10 }), rec({ repeat: 2, hidden_pass: false, result: "error", cost_usd: 1.5, wall_s: 30, real_findings: 2 }), rec({ profile: "b" })]);
-    expect(s).toMatchObject({ runs: 2, passes: 1, pass_rate: 0.5, mean_cost_usd: 1, mean_wall_s: 20, real_findings: 2, errors: 1, determinism_ratio: 0 });
+    expect(s).toMatchObject({ runs: 2, passes: 1, pass_rate: 0.5, mean_cost_usd: 1, mean_wall_s: 20, real_findings: 2, errors: 1, harness_errors: 0, determinism_ratio: 0 });
     expect(summarize("none", []).pass_rate).toBeNull();
+    const withHarness = summarize("a", [rec({ hidden_pass: true, hidden_status: "pass" }), rec({ repeat: 2, hidden_pass: false, hidden_status: "harness", hidden_output: "harness: sh: 1: .venv/bin/python: not found" })]);
+    expect(withHarness).toMatchObject({ runs: 2, passes: 1, pass_rate: 1, harness_errors: 1 });
   });
 
   describe("decision rule", () => {
@@ -90,6 +93,7 @@ describe("eval report", () => {
       expect(mixed.reasons).toContain("both ahead on different measures");
     });
     it("needs repeat ≥ 2 and equal run counts", () => {
+      expect(() => decide(A, sum({ harness_errors: 1 }), 2)).toThrow(/not model-quality evidence/);
       expect(() => decide(A, A, 1)).toThrow(DecisionError);
       expect(() => decide(A, sum({ runs: 3 }), 2)).toThrow(/same, non-zero/);
       expect(() => decide(sum({ runs: 0 }), sum({ runs: 0 }), 2)).toThrow(DecisionError);

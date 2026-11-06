@@ -33,16 +33,49 @@ Per task × profile × repeat (interleaved per task and repeat, so drift hits al
 2. `run --no-pr` with the profile's models, prompts and flags, against a throwaway factory home
    (`<work-dir>/<task>--<profile>--<n>/home`): fresh findings memory, no entries in your `runs/`
    or `stats`. Pi credentials and the provider policy come from your factory home.
-3. Hidden tests copied in, `hidden.check` run (jailed like the run's checks when the sandbox is on).
+3. Hidden tests copied in. `repo_config.setup` runs again in the check environment, then `hidden.check`
+   (jailed like the run's checks when the sandbox is on). The pipeline's own setup is not reused:
+   it installs interpreters (uv's CPython, the pnpm store) under the run HOME, and the check jail
+   hides that HOME, so a `.venv/bin/python` left by the run is `sh: .venv/bin/python: not found`
+   even after a green gate. Regenerable directories (`.venv`, `node_modules`, `.nox`) are removed
+   first so the reinstall does not keep those dangling links. This is the same order as
+   `eval --validate`.
 4. Metrics into `evals/results/<date>.jsonl` (schemas/eval-record.schema.json) and a Markdown table
    into `evals/results/<date>.md`.
 
-A harness failure (clone, setup, crash) is recorded with result `error` and counts as a failed run.
-The run is aborted at `timeout_min` (`timed_out: true`).
+A clone or crash is recorded with result `error`. A hidden check that never ran (setup failed,
+missing interpreter, no worktree) is `hidden_status: harness`, `hidden_pass: false`, and
+`hidden_output` starting with `harness:`. The pipeline `result` stays whatever the run did
+(`done` is still a finished pipeline). Harness rows are left out of the pass rate and block an
+experiment verdict (exit 1, no win/loss). A real hidden assertion failure is `hidden_status: fail`
+and still counts. Neither is a provider `usage[].errors` entry. The run is aborted at
+`timeout_min` (`timed_out: true`).
+
+`--work-dir` and `--out` may be relative to the current directory (they are made absolute before
+`git worktree add`). A relative worktree path used to be created inside the clone, and the plan
+step then failed with `git ls-files failed:` and an empty detail before any model call.
+
+```sh
+# scratch layout: task yaml, work dir and results dir are separate writable directories
+factory eval --validate \
+  --tasks /absolute/evals/tasks/pallets__flask-5014.yaml \
+  --work-dir /absolute/work-validate
+factory eval \
+  --profile /absolute/implement-high.yaml \
+  --profile /absolute/implement-medium.yaml \
+  --tasks /absolute/evals/tasks/pallets__flask-5014.yaml \
+  --repeat 2 \
+  --out /absolute/results \
+  --work-dir /absolute/work
+```
+
+Do not point `--work-dir` at the task repo itself. Do not export `GIT_DIR` or `GIT_WORK_TREE`.
+The canonical task YAML is the one shipped in `evals/tasks/`; a scratch copy is not required.
 
 ## Metrics
 
-- **pass rate**: share of runs whose hidden check passed.
+- **pass rate**: share of runs whose hidden check passed, among runs where the check actually ran.
+  Harness rows are not in the numerator or the denominator (`pass_rate` is null when every row is harness).
 - **cost**: USD from provider usage; tokens in + out alongside. Subscription providers report 0 USD.
 - **wall time**: whole eval step (clone, run, hidden check, real-findings verification).
 - **rounds**, **gate failures** (red non-flaky checks over all gate runs, base excluded),

@@ -15,8 +15,12 @@ export async function git(cwd: string, args: string[]): Promise<string> {
     const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
     return stdout;
   } catch (e) {
-    const err = e as { stderr?: string; message: string };
-    throw new Error(`git ${args[0]} failed: ${(err.stderr ?? err.message).trim()}`, { cause: e });
+    const err = e as { stderr?: string; message?: string };
+    // A missing cwd makes Node set stderr to "" and put `spawn git ENOENT` on `message`.
+    // `??` would keep the empty stderr and hide that (eval recorded `git ls-files failed: `).
+    const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
+    const detail = stderr || (err.message ?? String(e)).trim();
+    throw new Error(`git ${args[0]} failed: ${detail}`, { cause: e });
   }
 }
 
@@ -386,19 +390,23 @@ export async function withRepoGitOps<T>(repoDir: string, fn: () => Promise<T> | 
  * Add and remove take the git-ops lock so they do not interleave with `factory gc`.
  */
 export async function withBaseWorktree<T>(repoDir: string, sha: string, dir: string, fn: (dir: string) => Promise<T>): Promise<T> {
-  await withRepoGitOps(repoDir, () => git(repoDir, ["worktree", "add", "-q", "--detach", dir, sha]));
+  // `git worktree add` resolves a relative path against the repo, not the caller's cwd.
+  // `--work-dir work` otherwise created `repo/work/.../plan-base` and `git ls-files` on the
+  // intended path failed with an empty stderr (`spawn git ENOENT`).
+  const abs = resolve(dir);
+  await withRepoGitOps(repoDir, () => git(repoDir, ["worktree", "add", "-q", "--detach", abs, sha]));
   try {
-    return await fn(dir);
+    return await fn(abs);
   } finally {
     try {
       await withRepoGitOps(repoDir, async () => {
-        await git(repoDir, ["worktree", "remove", "--force", dir]).catch(() => "");
-        rmSync(dir, { recursive: true, force: true });
+        await git(repoDir, ["worktree", "remove", "--force", abs]).catch(() => "");
+        rmSync(abs, { recursive: true, force: true });
         await gitOk(repoDir, ["worktree", "prune"]);
       });
     } catch {
       // The lock was busy. Drop the directory; a later prune clears a stale registration.
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(abs, { recursive: true, force: true });
     }
   }
 }

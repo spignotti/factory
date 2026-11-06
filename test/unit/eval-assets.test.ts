@@ -15,6 +15,10 @@ describe("shipped eval assets", () => {
       expect((t.repo_config!.tests as { run?: string }).run).toContain("{files}");
     }
     expect(tasks.filter((t) => t.id.startsWith("unjs__")).length).toBeGreaterThanOrEqual(3);
+    const flask = tasks.find((t) => t.id === "pallets__flask-5014");
+    expect(flask?.hidden.check).toBe(".venv/bin/python -m pytest -q tests/test_blueprints.py");
+    expect(String((flask?.repo_config as { setup?: string } | undefined)?.setup)).toContain("uv venv -q -p 3.11 .venv");
+    expect(flask?.exclude).toEqual([".venv/", "node_modules/"]);
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));
     const baseline = loadEvalProfile("baseline");
     expect(resolveEvalProfile(baseline, home).roles.implement[0]!.model).toBe("opencode-go/deepseek-v4.1-flash");
