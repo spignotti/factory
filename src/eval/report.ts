@@ -7,9 +7,15 @@ const mean = (xs: number[]) => (xs.length ? round(xs.reduce((a, b) => a + b, 0) 
  * Determinism ratio: over the tasks a profile ran at least twice, the share whose
  * repeats all agree on hidden pass and on the run result. Null when no task ran twice.
  */
+/** Older lines have no `hidden_status`; they were pass/fail, never a labeled harness error. */
+export function hiddenStatus(r: EvalRecord): "pass" | "fail" | "harness" {
+  return r.hidden_status ?? (r.hidden_pass ? "pass" : "fail");
+}
+
 export function determinismRatio(records: EvalRecord[]): number | null {
   const groups = new Map<string, EvalRecord[]>();
-  for (const r of records) groups.set(r.task, [...(groups.get(r.task) ?? []), r]);
+  // A harness error is not a quality outcome, so it does not make two repeats "agree".
+  for (const r of records) if (hiddenStatus(r) !== "harness") groups.set(r.task, [...(groups.get(r.task) ?? []), r]);
   const repeated = [...groups.values()].filter((g) => g.length >= 2);
   if (!repeated.length) return null;
   const stable = repeated.filter((g) => g.every((r) => r.hidden_pass === g[0]!.hidden_pass && r.result === g[0]!.result));
@@ -18,12 +24,13 @@ export function determinismRatio(records: EvalRecord[]): number | null {
 
 export function summarize(profile: string, all: EvalRecord[]): ProfileSummary {
   const rs = all.filter((r) => r.profile === profile);
-  const passes = rs.filter((r) => r.hidden_pass).length;
+  const measured = rs.filter((r) => hiddenStatus(r) !== "harness");
+  const passes = measured.filter((r) => r.hidden_pass).length;
   return {
     profile,
     runs: rs.length,
     passes,
-    pass_rate: rs.length ? round(passes / rs.length) : null,
+    pass_rate: measured.length ? round(passes / measured.length) : null,
     mean_cost_usd: mean(rs.map((r) => r.cost_usd)),
     mean_tokens: mean(rs.map((r) => r.tokens_in + r.tokens_out)),
     mean_wall_s: mean(rs.map((r) => r.wall_s)),
@@ -32,6 +39,7 @@ export function summarize(profile: string, all: EvalRecord[]): ProfileSummary {
     bug_findings: rs.reduce((a, r) => a + r.bug_findings, 0),
     real_findings: rs.reduce((a, r) => a + r.real_findings, 0),
     errors: rs.filter((r) => r.result === "error").length,
+    harness_errors: rs.filter((r) => hiddenStatus(r) === "harness").length,
     determinism_ratio: determinismRatio(rs),
   };
 }
@@ -79,6 +87,9 @@ export class DecisionError extends Error {}
  */
 export function decide(base: ProfileSummary, variant: ProfileSummary, repeat: number): Pick<Verdict, "verdict" | "keep" | "reasons" | "cost_measure"> {
   if (repeat < 2) throw new DecisionError(`the decision rule needs repeat ≥ 2 (got ${repeat})`);
+  if ((base.harness_errors ?? 0) > 0 || (variant.harness_errors ?? 0) > 0) {
+    throw new DecisionError(`harness errors are not model-quality evidence (base ${base.harness_errors ?? 0}, variant ${variant.harness_errors ?? 0}); no verdict`);
+  }
   if (base.runs !== variant.runs || base.runs === 0) throw new DecisionError(`both profiles need the same, non-zero number of runs (base ${base.runs}, variant ${variant.runs})`);
   const measure = costMeasure(base, variant);
   const win = beats(variant, base, measure);
@@ -103,12 +114,12 @@ const row = (cells: unknown[]) => `| ${cells.map(cell).join(" | ")} |`;
 /** Markdown: one summary row per profile, then one row per task × profile. */
 export function markdownTable(records: EvalRecord[], profiles: string[]): string {
   const lines = [
-    row(["profile", "runs", "pass rate", "passes", "mean cost $", "mean tokens", "mean wall s", "mean rounds", "gate failures", "bug findings", "real findings", "errors", "determinism"]),
-    row(Array(13).fill("---")),
+    row(["profile", "runs", "pass rate", "passes", "mean cost $", "mean tokens", "mean wall s", "mean rounds", "gate failures", "bug findings", "real findings", "errors", "determinism", "harness"]),
+    row(Array(14).fill("---")),
   ];
   for (const p of profiles) {
     const s = summarize(p, records);
-    lines.push(row([p, s.runs, s.pass_rate, s.passes, costCell(records.filter((r) => r.profile === p), s.mean_cost_usd), s.mean_tokens, s.mean_wall_s, s.mean_rounds, s.gate_failures, s.bug_findings, s.real_findings, s.errors, s.determinism_ratio]));
+    lines.push(row([p, s.runs, s.pass_rate, s.passes, costCell(records.filter((r) => r.profile === p), s.mean_cost_usd), s.mean_tokens, s.mean_wall_s, s.mean_rounds, s.gate_failures, s.bug_findings, s.real_findings, s.errors, s.determinism_ratio, s.harness_errors]));
   }
   lines.push("", row(["task", "profile", "hidden pass", "results", "rounds", "gate failures", "real findings", "cost $", "tokens", "wall s"]), row(Array(10).fill("---")));
   const tasks = [...new Set(records.map((r) => r.task))];
@@ -120,7 +131,7 @@ export function markdownTable(records: EvalRecord[], profiles: string[]): string
         row([
           t,
           p,
-          `${rs.filter((r) => r.hidden_pass).length}/${rs.length}`,
+          `${rs.filter((r) => r.hidden_pass).length}/${rs.filter((r) => hiddenStatus(r) !== "harness").length}${rs.some((r) => hiddenStatus(r) === "harness") ? ` +${rs.filter((r) => hiddenStatus(r) === "harness").length} harness` : ""}`,
           rs.map((r) => r.result).join(", "),
           rs.map((r) => r.rounds).join(", "),
           rs.reduce((a, r) => a + r.gate_failures, 0),

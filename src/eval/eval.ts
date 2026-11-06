@@ -162,10 +162,45 @@ function envFor(deps: EvalDeps, repo: RepoConfig, root: string, cwd: string): En
   return { env, home, jail: { sandbox, rw: [cwd, home], ro: common ? [common] : [], hide: [deps.factoryHome, join(root, "home")] } };
 }
 
-async function runHidden(task: EvalTask, deps: EvalDeps, repo: RepoConfig, root: string, cwd: string): Promise<{ pass: boolean; output: string }> {
+/** Dependency dirs `setup` recreates. The pipeline's copies point at the run HOME, which the check jail hides. */
+const CHECK_ENV_DIRS = [".venv", "node_modules", ".nox"] as const;
+
+export interface HiddenCheck {
+  status: "pass" | "fail" | "harness";
+  pass: boolean;
+  output: string;
+}
+
+/**
+ * Exit 127 is the shell's "command not found" (`sh: 1: .venv/bin/python: not found`), including a
+ * symlink whose target the jail does not mount. A test assertion exits 1. Timeouts are harness too:
+ * they say nothing about the patch.
+ */
+export function classifyHiddenRun(code: number, output: string): HiddenCheck {
+  const text = tail(output, 30);
+  if (code === 0) return { status: "pass", pass: true, output: text };
+  if (code === 127 || /\[factory\] (timed out|not started|killed)/.test(output)) {
+    return { status: "harness", pass: false, output: `harness: ${text}` };
+  }
+  return { status: "fail", pass: false, output: text };
+}
+
+/**
+ * Runs `repo.setup` in the check environment, then `hidden.check`.
+ * The pipeline's setup installs uv's CPython (and the pnpm store) under the run HOME. The check
+ * jail hides that HOME, so `.venv/bin/python` from the run is `not found` even when every gate
+ * passed. `eval --validate` already reinstalls on a fresh worktree; the post-run check must too.
+ */
+async function hiddenCheck(task: EvalTask, deps: EvalDeps, repo: RepoConfig, root: string, cwd: string): Promise<HiddenCheck> {
   const { env, jail } = envFor(deps, repo, root, cwd);
-  const r = await sh(task.hidden.check, { cwd, env, jail, timeoutMs: task.timeout_min * 60_000 });
-  return { pass: r.code === 0, output: tail(r.output, 30) };
+  const timeoutMs = task.timeout_min * 60_000;
+  if (repo.setup) {
+    for (const name of CHECK_ENV_DIRS) rmSync(join(cwd, name), { recursive: true, force: true });
+    const s = await sh(repo.setup, { cwd, env, jail, timeoutMs });
+    if (s.code !== 0) return { status: "harness", pass: false, output: `harness: setup failed: ${tail(s.output, 15)}` };
+  }
+  const r = await sh(task.hidden.check, { cwd, env, jail, timeoutMs });
+  return classifyHiddenRun(r.code, r.output);
 }
 
 function readEvents(runDir: string): FactoryEvent[] {
@@ -220,11 +255,9 @@ async function realFindings(task: EvalTask, deps: EvalDeps, repo: RepoConfig, ro
     await withBaseWorktree(repoDir, sha, join(root, `verify-${sha.slice(0, 12)}`), async (wt) => {
       await copyHidden(task, repoDir, wt);
       const { env, jail } = envFor(deps, repo, root, wt);
-      if (repo.setup) {
-        const s = await sh(repo.setup, { cwd: wt, env, jail, timeoutMs: task.timeout_min * 60_000 });
-        if (s.code !== 0) return; // nothing verifiable on this commit
-      }
-      out.set("hidden", (await runHidden(task, deps, repo, root, wt)).pass);
+      const hidden = await hiddenCheck(task, deps, repo, root, wt);
+      if (hidden.output.startsWith("harness: setup failed")) return; // nothing verifiable on this commit
+      if (hidden.status !== "harness") out.set("hidden", hidden.pass);
       for (const r of await runChecks(checks, { cwd: wt, env, envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, jail }))
         out.set(`check:${r.name}`, r.status !== "fail" && r.status !== "timeout");
     });
@@ -338,18 +371,20 @@ export async function evalOne(task: EvalTask, profile: LoadedEvalProfile, repeat
     }
     const events = readEvents(result.run_dir);
     const m = metrics(events, result.run_dir);
-    let hidden = { pass: false, output: "no worktree: the run stopped before implementing" };
+    let hidden: HiddenCheck = { status: "harness", pass: false, output: "harness: no worktree: the run stopped before implementing" };
     if (result.worktree && existsSync(result.worktree) && !deps.signal?.aborted) {
       await copyHidden(task, repoDir, result.worktree);
-      hidden = await runHidden(task, deps, repo, root, result.worktree);
+      hidden = await hiddenCheck(task, deps, repo, root, result.worktree);
     }
+    const reason = [result.reason, hidden.status === "harness" ? `hidden harness: ${hidden.output}` : ""].filter(Boolean).join("; ").slice(0, 1000);
     const real = deps.signal?.aborted ? 0 : await realFindings(task, deps, repo, root, repoDir, result, events);
     return EvalRecordSchema.parse({
       ...base,
       run_id: result.run_id,
       result: result.result,
-      reason: result.reason,
+      reason,
       hidden_pass: hidden.pass,
+      hidden_status: hidden.status,
       hidden_output: hidden.output,
       rounds: result.rounds,
       gate_failures: m.gateFailures,
@@ -363,7 +398,16 @@ export async function evalOne(task: EvalTask, profile: LoadedEvalProfile, repeat
       timed_out: timedOut,
     });
   } catch (e) {
-    return EvalRecordSchema.parse({ ...base, result: "error", reason: String((e as Error).message ?? e).slice(0, 1000), wall_s: Math.round((now() - started) / 100) / 10, timed_out: timedOut });
+    const message = String((e as Error).message ?? e).slice(0, 1000);
+    return EvalRecordSchema.parse({
+      ...base,
+      result: "error",
+      reason: message,
+      hidden_status: "harness",
+      hidden_output: `harness: ${message}`,
+      wall_s: Math.round((now() - started) / 100) / 10,
+      timed_out: timedOut,
+    });
   } finally {
     deps.signal?.removeEventListener("abort", onOuter);
     if (!deps.keep) {
@@ -432,21 +476,16 @@ export async function validateTask(task: EvalTask, deps: Pick<EvalDeps, "factory
     const at = async (sha: string, label: string) =>
       withBaseWorktree(repoDir, sha, join(root, label), async (wt) => {
         await copyHidden(task, repoDir, wt);
-        const { env, jail } = envFor(d, repo, root, wt);
-        if (repo.setup) {
-          const s = await sh(repo.setup, { cwd: wt, env, jail, timeoutMs: task.timeout_min * 60_000 });
-          if (s.code !== 0) return { pass: false, output: `setup failed: ${tail(s.output, 15)}` };
-        }
-        return runHidden(task, d, repo, root, wt);
+        return hiddenCheck(task, d, repo, root, wt);
       });
     const head = await revParse(repoDir, "HEAD");
     const onBase = await at(head, "base");
     await fetchHidden(task, repoDir);
     // The fix commit plus the eval repo config (the check may rely on repo.yaml setup only).
     const onFix = await at(task.hidden.from_commit, "fix");
-    const ok = !onBase.pass && onFix.pass && !/^setup failed/.test(onBase.output);
-    const detail = ok ? "base red, fix green" : `base ${onBase.pass ? "green (hidden tests do not detect the missing change)" : "red"}: ${onBase.output.slice(-600)}\nfix ${onFix.pass ? "green" : "red"}: ${onFix.output.slice(-600)}`;
-    return { task: task.id, ok, base_red: !onBase.pass, fix_green: onFix.pass, detail };
+    const ok = onBase.status === "fail" && onFix.status === "pass";
+    const detail = ok ? "base red, fix green" : `base ${onBase.status}: ${onBase.output.slice(-600)}\nfix ${onFix.status}: ${onFix.output.slice(-600)}`;
+    return { task: task.id, ok, base_red: onBase.status === "fail", fix_green: onFix.status === "pass", detail };
   } catch (e) {
     return { task: task.id, ok: false, base_red: false, fix_green: false, detail: (e as Error).message.slice(0, 1000) };
   } finally {

@@ -484,7 +484,8 @@ async function beginWork(
   const taken = (b: string) =>
     gitOk(repoDir, ["rev-parse", "--verify", `refs/heads/${b}`]).then(async (local) => local || remoteBranchExists(repoDir, b));
   if (await taken(branch)) branch = f.maxRuns > 1 ? `${stem}-${runId}-s${slot}` : `${branch}-${runId.slice(-6)}`;
-  const worktree = join(runDir, "worktree");
+  // Absolute: a relative path is resolved against the repo by `git worktree add`, not against this process.
+  const worktree = resolve(join(runDir, "worktree"));
   const add = (b: string) => withRepoGitOps(repoDir, () => git(repoDir, ["worktree", "add", "-q", "-b", b, worktree, baseSha]));
   try {
     await add(branch);

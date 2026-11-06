@@ -104,6 +104,12 @@ export const EvalRecordSchema = z
     result: z.enum([...RESULTS, "error"]),
     reason: z.string(),
     hidden_pass: z.boolean(),
+    /**
+     * `pass` / `fail`: the hidden check ran. `harness`: it did not (setup, missing interpreter,
+     * no worktree, clone error). Absent on older result lines; readers treat that as pass/fail
+     * from `hidden_pass`. Harness is not a model-quality result.
+     */
+    hidden_status: z.enum(["pass", "fail", "harness"]).optional(),
     hidden_output: z.string(),
     rounds: z.number().int().min(0),
     /** Red non-flaky checks over all gate runs of the run (base checks excluded). */
@@ -136,6 +142,8 @@ export const ProfileSummarySchema = z
     bug_findings: z.number().int(),
     real_findings: z.number().int(),
     errors: z.number().int(),
+    /** Runs whose hidden check never executed (setup, missing interpreter, no worktree, clone). */
+    harness_errors: z.number().int().min(0).default(0),
     /** Share of tasks whose repeats agree on hidden pass and result; null below 2 repeats. */
     determinism_ratio: z.number().nullable(),
   })

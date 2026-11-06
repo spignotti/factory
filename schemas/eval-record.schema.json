@@ -47,6 +47,14 @@
     "hidden_pass": {
       "type": "boolean"
     },
+    "hidden_status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "harness"
+      ]
+    },
     "hidden_output": {
       "type": "string"
     },

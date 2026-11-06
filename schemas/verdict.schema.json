@@ -122,6 +122,12 @@
               "minimum": -9007199254740991,
               "maximum": 9007199254740991
             },
+            "harness_errors": {
+              "default": 0,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
             "determinism_ratio": {
               "type": [
                 "number",
@@ -142,6 +148,7 @@
             "bug_findings",
             "real_findings",
             "errors",
+            "harness_errors",
             "determinism_ratio"
           ],
           "additionalProperties": false
@@ -212,6 +219,12 @@
               "minimum": -9007199254740991,
               "maximum": 9007199254740991
             },
+            "harness_errors": {
+              "default": 0,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
             "determinism_ratio": {
               "type": [
                 "number",
@@ -232,6 +245,7 @@
             "bug_findings",
             "real_findings",
             "errors",
+            "harness_errors",
             "determinism_ratio"
           ],
           "additionalProperties": false
