@@ -14,6 +14,23 @@ const write = (repo: string, path: string, text: string) => {
   writeFileSync(join(repo, path), text);
 };
 
+/** Status functions GitHub allows only in a job or step `if`. Anywhere else the workflow file is invalid. */
+const STATUS_FN = /\b(?:always|cancelled|failure|success)\s*\(/;
+
+function statusCallsOutsideIf(node: unknown, key: string | null, found: string[]): void {
+  if (typeof node === "string") {
+    if (key !== "if" && STATUS_FN.test(node)) found.push(node.trim());
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) statusCallsOutsideIf(item, key, found);
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const [k, v] of Object.entries(node)) statusCallsOutsideIf(v, k, found);
+  }
+}
+
 describe("CI stub", () => {
   it("template: every PR, select → check matrix → done; done is red when selection failed", () => {
     const wf = parse(renderCiStub("v1.2.3")) as { on: Record<string, unknown>; concurrency: Record<string, unknown>; jobs: Record<string, { needs?: string[]; if?: string; steps: { run?: string; env?: Record<string, string> }[] }>; env: Record<string, string> };
@@ -34,7 +51,7 @@ describe("CI stub", () => {
     const done = wf.jobs.done!;
     expect(done.needs).toEqual(["select", "check"]);
     expect(done.if).toBe("always()");
-    expect(done.steps[0]!.run).toContain('test "$SELECT" = success');
+    expect(done.steps.map((s) => s.run).join("\n")).toContain('test "$SELECT" = success');
     // untrusted values reach the shell through env, never interpolated into the script
     for (const job of Object.values(wf.jobs)) for (const step of job.steps) expect(step.run ?? "").not.toContain("${{");
     expect(renderCiStub("main")).not.toContain("@FACTORY_REF@");
@@ -47,11 +64,14 @@ describe("CI stub", () => {
   });
 
   it("done fails closed on a draft or a cancelled run and is not a skipped success", () => {
-    const wf = parse(renderCiStub("v1.2.3")) as { jobs: Record<string, { if?: string; steps: { run?: string }[] }> };
+    const wf = parse(renderCiStub("v1.2.3")) as { jobs: Record<string, { if?: string; steps: { if?: string; run?: string }[] }> };
     const done = wf.jobs.done!;
     expect(done.if).toBe("always()");
-    const script = done.steps[0]!.run!;
-    const run = (env: Record<string, string>) => {
+    const cancel = done.steps.find((s) => s.if === "cancelled()");
+    const gate = done.steps.find((s) => s.run?.includes('test "$SELECT"'));
+    expect(cancel?.run).toContain("exit 1");
+    expect(gate?.if).toBeUndefined();
+    const run = (script: string, env: Record<string, string>) => {
       try {
         execFileSync("bash", ["-c", script], { env: { ...process.env, ...env }, encoding: "utf8" });
         return 0;
@@ -59,14 +79,28 @@ describe("CI stub", () => {
         return (e as { status?: number }).status ?? 1;
       }
     };
-    // A skipped select/check on a draft must not make `done` pass.
-    expect(run({ DRAFT: "true", CANCELLED: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
-    expect(run({ DRAFT: "false", CANCELLED: "true", SELECT: "success", CHECK: "success" })).toBe(1);
-    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "success", CHECK: "success" })).toBe(0);
-    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "success", CHECK: "skipped" })).toBe(0);
-    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "failure", CHECK: "skipped" })).toBe(1);
-    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "success", CHECK: "failure" })).toBe(1);
-    expect(run({ DRAFT: "false", CANCELLED: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
+    expect(run(cancel!.run!, {})).toBe(1);
+    // A skipped select/check on a draft must not make `done` pass. Cancellation is the step `if`, not this script.
+    expect(run(gate!.run!, { DRAFT: "true", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
+    expect(run(gate!.run!, { DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(0);
+    expect(run(gate!.run!, { DRAFT: "false", SELECT: "success", CHECK: "skipped" })).toBe(0);
+    expect(run(gate!.run!, { DRAFT: "false", SELECT: "failure", CHECK: "skipped" })).toBe(1);
+    expect(run(gate!.run!, { DRAFT: "false", SELECT: "success", CHECK: "failure" })).toBe(1);
+    expect(run(gate!.run!, { DRAFT: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
+  });
+
+  it("status functions stay in if conditions; env cancelled() is rejected", () => {
+    const rendered = renderCiStub("v1.2.3");
+    const ok: string[] = [];
+    statusCallsOutsideIf(parse(rendered), null, ok);
+    expect(ok).toEqual([]);
+    const illegal = rendered.replace(
+      "DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}",
+      "DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}\n          CANCELLED: ${{ cancelled() && 'true' || 'false' }}",
+    );
+    const bad: string[] = [];
+    statusCallsOutsideIf(parse(illegal), null, bad);
+    expect(bad.some((s) => s.includes("cancelled()"))).toBe(true);
   });
 
   it("template: the check job installs the toolchains select resolved (pnpm, node, python, uv) before the check", () => {

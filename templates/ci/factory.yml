@@ -109,22 +109,23 @@ jobs:
         run: $FACTORY gates --run "$CHECK"
   # The single required status check, named `done` (the job name; GitHub Actions reports no workflow prefix).
   # always(): a skipped `done` is a successful required check. Draft and cancelled runs exit 1 instead.
+  # `cancelled()` is legal only in an `if`. GitHub rejects the workflow when it appears in `env` or `run`.
+  # The step must run and fail: a skipped step would leave this job successful.
   done:
     needs: [select, check]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - if: cancelled()
+        run: |
+          echo "cancelled: not a successful check"
+          exit 1
       - env:
           SELECT: ${{ needs.select.result }}
           CHECK: ${{ needs.check.result }}
           DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
-          CANCELLED: ${{ cancelled() && 'true' || 'false' }}
         run: |
           set -eu
-          if [ "$CANCELLED" = "true" ]; then
-            echo "cancelled: not a successful check"
-            exit 1
-          fi
           if [ "$DRAFT" = "true" ]; then
             echo "draft: checks are not run until the pull request is ready for review"
             exit 1
