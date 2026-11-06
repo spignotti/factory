@@ -11,6 +11,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +21,8 @@ const short = sha.slice(0, 12);
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const outDir = process.env.FACTORY_STAGING_DIR ?? "/opt/cursor/artifacts";
 const name = `factory-staging-${short}`;
-const stage = join(outDir, name);
+// Stage off the artifact volume. tar there can see a file change under it and exit 1.
+const stage = join(tmpdir(), name);
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
 
@@ -88,7 +90,9 @@ Exit 0 and \`base red, fix green\` is a valid task. After the repeated run, \`hi
 
 const tarPath = join(outDir, `${name}.tar.gz`);
 rmSync(tarPath, { force: true });
-execFileSync("tar", ["-czf", tarPath, "-C", outDir, name]);
+mkdirSync(outDir, { recursive: true });
+execFileSync("tar", ["-czf", tarPath, "-C", tmpdir(), name]);
 const hash = createHash("sha256").update(readFileSync(tarPath)).digest("hex");
 writeFileSync(join(outDir, `${name}.tar.gz.sha256`), `${hash}  ${name}.tar.gz\n`);
+writeFileSync(join(outDir, "STAGING.md"), readFileSync(join(stage, "STAGING.md")));
 process.stdout.write(`${tarPath}\n${hash}  ${name}.tar.gz\n`);
