@@ -82,6 +82,17 @@ describe("factory doctor: model layers", () => {
     const c2 = capture();
     expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), json: true, probe: { ...probe, pasta: () => false }, view }, c2.io)).toBe(0);
     expect((JSON.parse(c2.text()) as DoctorReport).checks.find((x) => x.name === "sandbox")).toMatchObject({ status: "warn", detail: expect.stringMatching(/network shared/) });
+    expect((JSON.parse(c2.text()) as DoctorReport).checks.find((x) => x.name === "sandbox")?.detail).not.toMatch(/unjailed/);
+
+    const off = mkdtempSync(join(tmpdir(), "fh-"));
+    writeFileSync(join(off, "profile.yaml"), "sandbox: off\n");
+    const c3 = capture();
+    expect(await doctorCommand({ factoryHome: off, json: true, probe, view }, c3.io)).toBe(0);
+    expect((JSON.parse(c3.text()) as DoctorReport).checks.find((x) => x.name === "sandbox")).toMatchObject({ status: "warn", detail: expect.stringMatching(/unjailed/) });
+
+    const c4 = capture();
+    expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), json: true, probe: { ...probe, platform: "darwin" }, view }, c4.io)).toBe(0);
+    expect((JSON.parse(c4.text()) as DoctorReport).checks.find((x) => x.name === "sandbox")).toMatchObject({ status: "warn", detail: expect.stringMatching(/unjailed/) });
   });
 });
 
