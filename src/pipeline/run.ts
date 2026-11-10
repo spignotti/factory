@@ -27,6 +27,7 @@ import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLockWithRetry, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
+import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -119,9 +120,10 @@ export async function takeRepoLock(
 }
 
 /**
- * After the plan names files: keep the slot only when those paths do not overlap another live run.
- * A conflict releases the slot before waiting, so two runs cannot each hold a slot and wait.
- * Returns false when the run is `locked` (the lock is already released).
+ * After the plan names files: keep the slot only when those paths do not overlap another live run
+ * or an open `factory/*` PR. A conflict releases the slot before waiting, so two runs cannot each
+ * hold a slot and wait. Returns false when the run is `locked` (the lock is already released).
+ * `ownBranch` is this run's branch on resume, so its own open PR is not a conflict.
  */
 async function ensurePathClaim(
   f: RunFrame,
@@ -132,13 +134,40 @@ async function ensurePathClaim(
   plan: Plan,
   exclusivePaths: string[],
   wait: boolean,
+  ownBranch?: string,
 ): Promise<boolean> {
   const paths = planPaths(plan);
   const exclusive = touchesExclusive(paths, exclusivePaths);
   const raw = await repoLockId(repoDir);
   const key = lockRepoKey(raw);
   const poll = deps.lockPollMs ?? 15_000;
+  const yieldSlot = async (reason: string, overlap: string[]): Promise<boolean> => {
+    if (!wait) {
+      f.release?.();
+      f.release = undefined;
+      f.set({ result: "locked", reason });
+      return false;
+    }
+    f.release?.();
+    f.release = undefined;
+    events.emit({ step: "intake", event: "queued", data: { repo: key, overlap, waiter_pid: process.pid } });
+    await realSleep(poll, deps.signal);
+    const again = await takeRepoLock(deps, repoDir, runId, events, true, f.maxRuns);
+    if (!again.release) {
+      f.set({ result: "locked", reason: again.reason || reason });
+      return false;
+    }
+    f.release = again.release;
+    f.lockSlot = again.release.slot;
+    return true;
+  };
   for (;;) {
+    const hits = await openFactoryPrOverlap(deps.github, repoDir, paths, ownBranch);
+    if (hits.length) {
+      const reason = factoryPrOverlapReason("planned", hits);
+      if (!(await yieldSlot(reason, hits.map((h) => `#${h.number} (${h.files.slice(0, 8).join(", ")})`)))) return false;
+      continue;
+    }
     const slot = f.release?.slot;
     if (slot === undefined) return false;
     const decision = decidePathClaim(deps.factoryHome, raw, slot, runId, { paths, exclusive });
@@ -148,24 +177,24 @@ async function ensurePathClaim(
       continue;
     }
     const reason = `planned paths overlap active runs: ${decision.conflicts.join("; ")}`;
-    if (!wait) {
-      f.release?.();
-      f.release = undefined;
-      f.set({ result: "locked", reason });
-      return false;
-    }
-    events.emit({ step: "intake", event: "queued", data: { repo: key, overlap: decision.conflicts, waiter_pid: process.pid } });
+    if (!(await yieldSlot(reason, decision.conflicts))) return false;
+  }
+}
+
+/** So a finalize path-claim wait can drop the slot and take one again, same as intake. */
+function bindLockWait(f: RunFrame, ctx: RunContext): void {
+  ctx.releaseLock = () => {
     f.release?.();
     f.release = undefined;
-    await realSleep(poll, deps.signal);
-    const again = await takeRepoLock(deps, repoDir, runId, events, true, f.maxRuns);
-    if (!again.release) {
-      f.set({ result: "locked", reason: again.reason || reason });
-      return false;
-    }
+  };
+  ctx.reacquireLock = async () => {
+    const again = await takeRepoLock(ctx.deps, ctx.repoDir, ctx.runId, ctx.events, true, f.maxRuns);
+    if (!again.release) return undefined;
     f.release = again.release;
     f.lockSlot = again.release.slot;
-  }
+    ctx.lockSlot = again.release.slot;
+    return again.release.slot;
+  };
 }
 
 interface Outcome {
@@ -499,6 +528,7 @@ async function beginWork(
   Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement", base_ci: undefined });
   f.save();
   const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation], lockSlot: f.lockSlot, maxRuns: f.maxRuns, wait: f.state?.wait ?? false };
+  bindLockWait(f, ctx);
   const services = (ctx.services = runServices(ctx));
   f.cleanups.push(() => services.stopAll());
   const env = agentEnv(ctx);
@@ -589,7 +619,7 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     throw e;
   }
   try {
-    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, false))) return undefined;
+    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, false, st.branch ?? undefined))) return undefined;
   } catch (e) {
     f.release?.();
     f.release = undefined;
@@ -813,7 +843,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     throw e;
   }
   try {
-    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false))) {
+    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false, st.branch ?? undefined))) {
       const locked: RunResult = {
         run_id: runId, repo: st.repo, task: st.task.ref, type: plan.type, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
         pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: f.out.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
@@ -850,6 +880,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       maxRuns: f.maxRuns,
       wait: st.wait ?? false,
     };
+    bindLockWait(f, ctx);
     const services = (ctx.services = runServices(ctx));
     f.cleanups.push(() => services.stopAll());
     if (st.step === "implement") {

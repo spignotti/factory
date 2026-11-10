@@ -35,6 +35,11 @@ export interface GitHub {
   remoteBranchSha(repoDir: string, branch: string): Promise<string | null>;
   /** The open PR whose head is `branch` (same repo), null when there is none. */
   findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null>;
+  /**
+   * Open pull requests on `factory/*` branches in this repo, with the files each one changes.
+   * A finished run no longer holds a path claim; these files still block another run on the same paths.
+   */
+  openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]>;
   enableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
@@ -107,6 +112,45 @@ export interface OpenPr {
   draft: boolean;
   /** Head commit as GitHub sees it. */
   headSha: string | null;
+}
+
+/** An open PR on a `factory/*` branch, and the files it changes. */
+export interface OpenFactoryPr {
+  number: number;
+  /** Head branch (`factory/…`). */
+  branch: string;
+  files: string[];
+}
+
+function filePaths(files: unknown): string[] {
+  const rows = Array.isArray(files) ? files : files && typeof files === "object" && Array.isArray((files as { nodes?: unknown }).nodes) ? (files as { nodes: unknown[] }).nodes : [];
+  const out: string[] = [];
+  for (const file of rows) {
+    if (typeof file === "string" && file) out.push(file);
+    else if (file && typeof file === "object") {
+      const path = (file as { path?: unknown; filename?: unknown }).path ?? (file as { filename?: unknown }).filename;
+      if (typeof path === "string" && path) out.push(path);
+    }
+  }
+  return out;
+}
+
+/**
+ * `gh pr list --json number,headRefName,isCrossRepository,files`.
+ * Keeps same-repo `factory/*` heads. `files` may be a flat list or `{ nodes: [...] }`.
+ */
+export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
+  if (!Array.isArray(payload)) return [];
+  const out: OpenFactoryPr[] = [];
+  for (const row of payload) {
+    if (!row || typeof row !== "object") continue;
+    const pr = row as { number?: unknown; headRefName?: unknown; isCrossRepository?: unknown; files?: unknown };
+    if (pr.isCrossRepository === true) continue;
+    if (typeof pr.number !== "number" || !Number.isInteger(pr.number) || pr.number <= 0) continue;
+    if (typeof pr.headRefName !== "string" || !pr.headRefName.startsWith("factory/")) continue;
+    out.push({ number: pr.number, branch: pr.headRefName, files: filePaths(pr.files) });
+  }
+  return out;
 }
 
 export interface PrStatus {
@@ -259,6 +303,12 @@ export class GhCli implements GitHub {
     return /^([0-9a-f]{40,64})\s/m.exec(stdout)?.[1] ?? null;
   }
 
+  async openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]> {
+    // UNVERIFIED: `files[].path` from `gh pr list --json files` (docs/VERIFY.md). Capped at 100 PRs and gh's file page.
+    const out = await gh(repoDir, ["pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName,isCrossRepository,files"]);
+    return parseOpenFactoryPrs(JSON.parse(out || "[]"));
+  }
+
   async findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null> {
     const list = JSON.parse(await gh(repoDir, ["pr", "list", "--head", branch, "--state", "open", "--limit", "5", "--json", "url,isDraft,headRefOid,headRefName"]) || "[]") as {
       url: string;
@@ -367,6 +417,13 @@ export class FakeGitHub implements GitHub {
   async findOpenPr(_repoDir: string, branch: string): Promise<OpenPr | null> {
     const pr = this.prs.find((p) => p.head === branch && (this.prStates.get(p.url)?.state ?? "open") === "open");
     return pr ? { url: pr.url, draft: this.prStates.get(pr.url)?.draft ?? pr.draft, headSha: this.remoteShas.get(branch) ?? null } : null;
+  }
+
+  /** Open `factory/*` PRs and the files they change. Tests plant a finished run's PR here. */
+  readonly factoryPrs: OpenFactoryPr[] = [];
+
+  async openFactoryPrFiles(): Promise<OpenFactoryPr[]> {
+    return this.factoryPrs.map((p) => ({ number: p.number, branch: p.branch, files: [...p.files] }));
   }
 
   async createPr(req: PrRequest): Promise<string> {

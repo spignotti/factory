@@ -68,7 +68,7 @@ export function protectedSection(ctx: Pick<RunContext, "plan">, files: string[],
 }
 
 export interface FinalizeOutput {
-  result: "done" | "needs_human";
+  result: "done" | "needs_human" | "locked";
   reason: string;
   risk: RiskAssessment;
   mergePolicy: MergePolicy;
@@ -354,6 +354,9 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   let blockPush = false;
   if (!input.noPr && hasCommits) {
     const claim = await ensureChangedPathClaim(ctx, changed, ctx.wait ?? false);
+    if (!claim.ok && claim.kind === "pr") {
+      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft: input.existingPr?.draft ?? null };
+    }
     if (!claim.ok) {
       result = "needs_human";
       reason = claim.reason;
