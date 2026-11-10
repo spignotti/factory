@@ -14,7 +14,7 @@ import type { Io } from "./gates.js";
 import { createSandbox, gitCommonDir, type Sandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
 import { mkdtempSync, rmSync, statfsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
+import { buildAgentEnv, ensureSharedCache, prepareAgentHome } from "../agents/env.js";
 import { sh, tail } from "../exec.js";
 import { Services } from "../services.js";
 import { browsersPath, findHeadlessShell, INSTALL_HINT, knownDevice } from "../evaluate/browser.js";
@@ -396,11 +396,11 @@ export async function liveServiceChecks(repoDir: string, repo: RepoConfig, facto
     const sha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
     await withBaseWorktree(repoDir, sha, join(tmp, "wt"), async (wt) => {
       const home = prepareAgentHome(tmp);
-      const base = buildAgentEnv(process.env, { home, extra: repo.agent_env, exclude: secrets?.names ?? [] });
+      const base = buildAgentEnv(process.env, { home, factoryHome, extra: repo.agent_env, exclude: secrets?.names ?? [] });
       // Services get the repo secrets like in a run; setup does not.
       const env = { ...base, ...(secrets?.env ?? {}) };
       const common = gitCommonDir(wt);
-      const jail = sandbox.mode === "off" ? undefined : { sandbox, rw: [wt, home], ro: common ? [common] : [], hide: [factoryHome, ...(secrets?.files ?? [])] };
+      const jail = sandbox.mode === "off" ? undefined : { sandbox, rw: [wt, home, ensureSharedCache(factoryHome)], ro: common ? [common] : [], hide: [factoryHome, ...(secrets?.files ?? [])] };
       if (repo.setup) {
         const setup = await sh(repo.setup, { cwd: wt, env: base, jail, timeoutMs: 15 * 60_000 });
         if (setup.code !== 0) {

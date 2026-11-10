@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { z } from "zod";
 import { loadLayers } from "../config.js";
 
-/** Retention knobs for `factory gc` (built-in and user profile only). */
+/**
+ * Retention knobs for `factory gc` (built-in and user profile only).
+ * `home_hours`, `metadata_*` and `archive_tarball_days` are accepted so older profiles still load.
+ * The strip does not wait on them, and gc no longer writes metadata tarballs.
+ */
 export const GcRetentionSchema = z
   .object({
     dry_run: z.boolean().default(true),
@@ -70,18 +74,20 @@ export function loadGcRetention(factoryHome: string): GcRetention {
  * True when deploy-self's `once` holds `flock` on `.deploy.lock`.
  * The flock is on that process's fd and is released when the process exits, including a crash.
  * A leftover lock file with no holder does not count, and the daemon's `.daemon.lock` is a different
- * file, so a finished deploy cannot skip the daily gc permanently. A missing `flock` binary fails closed.
+ * file, so a finished deploy cannot skip the daily gc permanently. A missing `flock` binary does not
+ * count as busy: macOS has no flock, and gc must still run.
  */
 export function deploySelfBusy(env: NodeJS.ProcessEnv = process.env): boolean {
   const rel = env.FACTORY_RELEASES ?? join(homedir(), ".local/share/factory-releases");
   const lock = join(rel, ".deploy.lock");
   if (!existsSync(lock)) return false;
-  // Non-blocking flock: exit 1 when the lock is held by deploy-self. Any other failure (flock missing,
-  // lock unreadable) counts as busy, so gc fails closed.
+  // Non-blocking flock: exit 1 when the lock is held by deploy-self. ENOENT (no flock binary) is not busy.
   try {
-    execFileSync("flock", ["-n", lock, "true"], { stdio: "ignore" });
+    execFileSync("flock", ["-n", lock, "true"], { stdio: "ignore", env: { ...process.env, ...env } });
     return false;
-  } catch {
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return false;
     return true;
   }
 }

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
+import { buildAgentEnv, ensureSharedCache, prepareAgentHome } from "../agents/env.js";
 import { sh, tail } from "../exec.js";
 import { git, gitOk } from "../git.js";
 import { gitCommonDir, type Sandbox } from "../sandbox/sandbox.js";
@@ -55,9 +55,9 @@ export async function measureChecks(
   const tmp = mkdtempSync(join(tmpdir(), "factory-adopt-measure-"));
   try {
     const home = prepareAgentHome(tmp);
-    const env = buildAgentEnv(process.env, { home, extra: opts.agentEnv ?? [] });
+    const env = buildAgentEnv(process.env, { home, factoryHome: opts.factoryHome, extra: opts.agentEnv ?? [] });
     const common = gitCommonDir(dir);
-    const jail = !opts.sandbox || opts.sandbox.mode === "off" ? undefined : { sandbox: opts.sandbox, rw: [dir, home], ro: common ? [common] : [], hide: [opts.factoryHome] };
+    const jail = !opts.sandbox || opts.sandbox.mode === "off" ? undefined : { sandbox: opts.sandbox, rw: [dir, home, ensureSharedCache(opts.factoryHome)], ro: common ? [common] : [], hide: [opts.factoryHome] };
     const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
     let setupResult: MeasureResult["setup"] = null;
     if (setup) {

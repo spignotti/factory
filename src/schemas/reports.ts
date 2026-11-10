@@ -172,7 +172,7 @@ export const GcReportSchema = z.strictObject({
     }),
   ),
   skipped: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, reason: z.string() })),
-  // Finished runs with an open PR: dependency folders removed at the worktree root.
+  // Terminal runs: dependency folders removed anywhere under the worktree.
   stripped: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, removed: z.array(z.string()) })).default([]),
   // Evidence-branch retention per repository (folders removed, or why not).
   evidence: z.array(z.strictObject({ repo: z.string(), removed: z.array(z.string()), note: z.string().optional() })).default([]),
@@ -182,12 +182,10 @@ export const GcReportSchema = z.strictObject({
   home_removed: z
     .array(z.strictObject({ run_id: z.string(), repo: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
     .default([]),
-  /** Run metadata moved to `$FACTORY_HOME/archive/runs/<id>.tar.gz`. */
-  metadata_moved: z
-    .array(z.strictObject({ run_id: z.string(), repo: z.string(), tarball: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
+  /** Published `evidence/` and `services/` logs removed from terminal runs (also on dry-run). */
+  run_dirs_removed: z
+    .array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, removed: z.array(z.enum(["evidence/", "services/"])) }))
     .default([]),
-  /** Purged paths under `$FACTORY_HOME/archive/runs`. */
-  archive_purged: z.array(z.strictObject({ path: z.string(), bytes: z.number().int().min(0), reason: z.string() })).default([]),
   worktree_pruned: z.array(z.strictObject({ repo: z.string() })).default([]),
   log_path: z.string().optional(),
 });

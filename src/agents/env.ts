@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Variables agent tool processes may inherit from the factory. Everything else is dropped. */
@@ -49,8 +49,33 @@ export function prepareAgentHome(runDir: string): string {
   return home;
 }
 
+/** Shared download cache for setup, checks and agents. `HOME` stays the per-run directory. */
+export function sharedCacheDir(factoryHome: string): string {
+  return join(factoryHome, "cache");
+}
+
+/** Creates `$FACTORY_HOME/cache` when the home exists. Does not create a missing factory home. */
+export function ensureSharedCache(factoryHome: string): string {
+  const cache = sharedCacheDir(factoryHome);
+  if (existsSync(factoryHome)) mkdirSync(cache, { recursive: true });
+  return cache;
+}
+
+/** Package-manager caches for setup, checks and agents. All four point at `$FACTORY_HOME/cache`. */
+export function sharedCacheEnv(factoryHome: string): Record<string, string> {
+  const cache = ensureSharedCache(factoryHome);
+  return {
+    UV_CACHE_DIR: cache,
+    npm_config_cache: cache,
+    PIP_CACHE_DIR: cache,
+    XDG_CACHE_HOME: cache,
+  };
+}
+
 export interface AgentEnvOptions {
   home: string;
+  /** When set, package caches go to `$FACTORY_HOME/cache` (setup, checks, agents). */
+  factoryHome?: string;
   /** Explicitly configured extra names (repo.yaml `agent_env`, profile role `env`). */
   extra?: readonly string[];
   /** Names never passed (repo secrets and their wrapper credentials: commands get them, agents never). */
@@ -68,6 +93,7 @@ export function buildAgentEnv(parent: NodeJS.ProcessEnv, opts: AgentEnvOptions):
     if (value !== undefined) env[name] = value;
   }
   Object.assign(env, opts.set ?? {});
+  if (opts.factoryHome) Object.assign(env, sharedCacheEnv(opts.factoryHome));
   Object.assign(env, {
     HOME: opts.home,
     XDG_CONFIG_HOME: join(opts.home, ".config"),

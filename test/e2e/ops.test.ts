@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -20,8 +20,7 @@ import { runScenario } from "../helpers/scenario.js";
 
 const gcExtras = {
   home_removed: [],
-  metadata_moved: [],
-  archive_purged: [],
+  run_dirs_removed: [],
   worktree_pruned: [],
 } as const;
 
@@ -515,6 +514,54 @@ describe("factory gc", () => {
     );
     expect(held.ok).toBe(true);
   });
+
+  it("strips a merged failed run when the remote branch is gone but refs/pull/<n>/head matches", async () => {
+    const { r, branch, wt } = await pushedRun();
+    const pr = "https://github.com/acme/widgets/pull/7";
+    writeFileSync(join(r.runDir, "state.json"), JSON.stringify({ ...stateOf(r.runDir), pr, result: "failed", step: "implement" }));
+    r.github.prStates.set(pr, { state: "merged", draft: false });
+    mkdirSync(join(r.runDir, "home"), { recursive: true });
+    writeFileSync(join(r.runDir, "home", "cache"), "x");
+    mkdirSync(join(r.runDir, "services"), { recursive: true });
+    writeFileSync(join(r.runDir, "services", "web.log"), "log");
+    mkdirSync(join(r.runDir, "evidence"), { recursive: true });
+    writeFileSync(join(r.runDir, "evidence", "shot.png"), "png");
+    writeFileSync(join(r.runDir, "events.jsonl"), readFileSync(join(r.runDir, "events.jsonl"), "utf8") + JSON.stringify({ data: { evidence: { sha: "abc" } } }) + "\n");
+    const exclude = git(r.repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").trim();
+    writeFileSync(exclude, readFileSync(exclude, "utf8") + "\nnode_modules/\n");
+    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    writeFileSync(join(wt, "node_modules", "pkg.js"), "x");
+    git(r.repo, "push", "-q", "origin", "--delete", branch);
+    git(r.repo, "fetch", "-q", "--prune", "origin");
+
+    const kept = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
+    expect(kept.cleaned).toEqual([]);
+    expect(kept.home_removed).toEqual([]);
+    expect(kept.stripped).toEqual([]);
+    expect(kept.skipped).toEqual([expect.objectContaining({ run_id: r.runId, reason: expect.stringMatching(/not on any remote/) })]);
+    expect(existsSync(join(r.runDir, "home", "cache"))).toBe(true);
+    expect(existsSync(join(wt, "node_modules", "pkg.js"))).toBe(true);
+
+    git(r.repo, "push", "-q", "origin", `${branch}:refs/pull/7/head`);
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
+    expect(res.cleaned).toEqual([expect.objectContaining({ run_id: r.runId, pr_state: "merged", worktree_removed: true, branch_deleted: true, remote_branch_deleted: false, notes: [expect.stringMatching(/remote branch already gone/)] })]);
+    expect(res.home_removed.map((h) => h.run_id)).toEqual([r.runId]);
+    expect(res.run_dirs_removed).toEqual([{ run_id: r.runId, repo: r.repo, pr, removed: ["evidence/", "services/"] }]);
+    expect(res.stripped).toEqual([{ run_id: r.runId, repo: r.repo, pr, removed: ["node_modules"] }]);
+    expect(existsSync(wt)).toBe(false);
+    expect(existsSync(join(r.runDir, "home"))).toBe(false);
+    expect(existsSync(join(r.runDir, "evidence"))).toBe(false);
+    expect(existsSync(join(r.runDir, "services"))).toBe(false);
+    expect(localHas(r.repo, branch)).toBe(false);
+    expect(stateOf(r.runDir).gc_at).toEqual(expect.any(String));
+
+    const again = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
+    expect(again.cleaned).toEqual([]);
+    expect(again.home_removed).toEqual([]);
+    expect(again.stripped).toEqual([]);
+    expect(again.run_dirs_removed).toEqual([]);
+    expect(existsSync(join(r.runDir, "state.json"))).toBe(true);
+  });
 });
 
 describe("factory gc: runs without PR, open PRs, automatic gc", () => {
@@ -529,17 +576,17 @@ describe("factory gc: runs without PR, open PRs, automatic gc", () => {
   it("a run without PR keeps its worktree inside the retention; afterwards only the worktree goes, the branch stays", async () => {
     const { r, wt, branch } = await doneRun();
     rewrite(r.runDir, { pr: null, result: "failed", step: "implement" });
-    expect(await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).toEqual({
-      dry_run: false,
-      cleaned: [],
-      skipped: [],
-      stripped: [],
-      evidence: [],
-      abandoned: [],
-      ...gcExtras,
-      log_path: expect.any(String),
-    });
+    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    writeFileSync(join(wt, "node_modules", "pkg.js"), "x");
+    const early = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
+    expect(early.cleaned).toEqual([]);
+    expect(early.stripped).toEqual([]);
+    expect(early.home_removed.map((h) => h.run_id)).toEqual([r.runId]);
+    expect(existsSync(join(r.runDir, "home"))).toBe(false);
     expect(existsSync(wt)).toBe(true);
+    // Resume does not re-run setup. Dependency folders stay until the failed retention removes the worktree.
+    expect(existsSync(join(wt, "node_modules", "pkg.js"))).toBe(true);
+    rmSync(join(wt, "node_modules"), { recursive: true, force: true });
 
     const later = () => Date.now() + 8 * DAY;
     const dry = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true, evidence: false });
@@ -561,28 +608,38 @@ describe("factory gc: runs without PR, open PRs, automatic gc", () => {
     await expect(resumeFactory(r.runId, {}, { factoryHome: r.factoryHome } as never)).rejects.toThrow(/cleaned up by factory gc/);
   });
 
-  it("a finished run with an open PR loses only node_modules/.venv/.nox after 12 h; a live run is left alone", async () => {
+  it("a finished pushed run strips nested dependency folders immediately; a live run is left alone", async () => {
     const { r, wt } = await doneRun();
-    for (const d of ["node_modules/pkg", ".venv/lib", "src-keep"]) mkdirSync(join(wt, d), { recursive: true });
-    expect((await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false })).stripped).toEqual([]);
+    for (const d of ["node_modules/pkg", ".venv/lib", "pkg/node_modules/left", "src-keep"]) mkdirSync(join(wt, d), { recursive: true });
+    mkdirSync(join(r.runDir, "services"), { recursive: true });
+    writeFileSync(join(r.runDir, "services", "web.log"), "log");
+    writeFileSync(join(r.runDir, "events.jsonl"), readFileSync(join(r.runDir, "events.jsonl"), "utf8") + JSON.stringify({ data: { evidence: { sha: "abc" } } }) + "\n");
+    mkdirSync(join(r.runDir, "evidence"), { recursive: true });
+    writeFileSync(join(r.runDir, "evidence", "shot.png"), "png");
 
-    const later = () => Date.now() + 13 * 3_600_000;
     const live = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), r.runId)!;
-    const locked = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
+    const locked = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
     live();
-    expect(locked).toMatchObject({ stripped: [], skipped: [expect.objectContaining({ reason: expect.stringMatching(/live/) })] });
+    expect(locked.stripped).toEqual([]);
+    expect(locked.skipped.some((s) => s.reason.match(/live/))).toBe(true);
     expect(existsSync(join(wt, "node_modules"))).toBe(true);
 
-    const dry = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true, evidence: false });
-    expect(dry.stripped).toEqual([{ run_id: r.runId, repo: r.repo, pr: r.result.pr, removed: ["node_modules", ".venv"] }]);
+    const dry = await gc({ factoryHome: r.factoryHome, github: r.github, dryRun: true, evidence: false });
+    expect(dry.stripped).toEqual([{ run_id: r.runId, repo: r.repo, pr: r.result.pr, removed: [".venv", "node_modules", "pkg/node_modules"] }]);
     expect(existsSync(join(wt, "node_modules"))).toBe(true);
+    expect(existsSync(join(r.runDir, "services", "web.log"))).toBe(true);
 
     const other = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
-    const res = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, evidence: false });
+    const res = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
     other();
-    expect(res).toMatchObject({ cleaned: [], skipped: [expect.objectContaining({ reason: "PR is open" })], stripped: [expect.objectContaining({ removed: ["node_modules", ".venv"] })] });
-    expect(existsSync(join(wt, "node_modules")) || existsSync(join(wt, ".venv"))).toBe(false);
+    expect(res).toMatchObject({ cleaned: [], skipped: [expect.objectContaining({ reason: "PR is open" })], stripped: [expect.objectContaining({ removed: [".venv", "node_modules", "pkg/node_modules"] })] });
+    expect(existsSync(join(wt, "node_modules")) || existsSync(join(wt, ".venv")) || existsSync(join(wt, "pkg", "node_modules"))).toBe(false);
     expect(existsSync(join(wt, "src-keep"))).toBe(true);
+    expect(existsSync(join(r.runDir, "evidence"))).toBe(false);
+    expect(existsSync(join(r.runDir, "services"))).toBe(false);
+    expect(existsSync(join(r.runDir, "events.jsonl"))).toBe(true);
+    expect(existsSync(join(r.runDir, "plan.json"))).toBe(true);
+    expect(existsSync(join(r.runDir, "result.json"))).toBe(true);
     expect(stateOf(r.runDir).gc_at).toBeUndefined();
   });
 
@@ -676,59 +733,57 @@ describe("needs_input timeout and archive retention", () => {
     }
   });
 
-  it("tarballs run metadata after retention and still deletes the branch when the PR merges first", async () => {
-    const { GcRetentionSchema } = await import("../../src/gc/retention-config.js");
+  it("keeps run logs after the PR merges and does not archive the run directory", async () => {
     const r = await runScenario({ script: "clean.json", setup: (repo) => void addOrigin(repo) });
     git(r.repo, "push", "-q", "origin", r.result.branch!);
     const wt = join(r.runDir, "worktree");
     writeFileSync(join(wt, "scratch.txt"), "dirty");
     mkdirSync(join(r.runDir, "services"), { recursive: true });
-    writeFileSync(join(r.runDir, "services", "svc.log"), "kept");
-    writeFileSync(join(r.runDir, "notes.txt"), "drop");
+    writeFileSync(join(r.runDir, "services", "svc.log"), "log");
+    writeFileSync(join(r.runDir, "notes.txt"), "keep");
     const branch = r.result.branch!;
     stamp(r.runDir, new Date(Date.now() - 15 * DAY).toISOString());
 
-    const early = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now(), archiveDays: 30 });
-    expect(early.metadata_moved).toEqual([]);
+    const early = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now() });
     expect(existsSync(join(r.runDir, "plan.json"))).toBe(true);
+    expect(existsSync(join(r.runDir, "events.jsonl"))).toBe(true);
     expect(existsSync(wt)).toBe(true);
+    expect(early.home_removed.map((h) => h.run_id)).toEqual([r.runId]);
+    expect(existsSync(join(r.runDir, "services"))).toBe(false);
 
     r.github.prStates.set(r.result.pr!, { state: "merged", draft: false });
     git(wt, "clean", "-fdq");
     const cleaned = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false, now: () => Date.now() });
     expect(cleaned.cleaned[0]).toMatchObject({ branch_deleted: true });
     expect(git(r.repo, "branch", "--list", branch).trim()).toBe("");
-
-    const retention = GcRetentionSchema.parse({ metadata_days: 0, metadata_min_per_repo: 0 });
-    const res = await gc({
-      factoryHome: r.factoryHome,
-      github: r.github,
-      evidence: false,
-      now: () => Date.now(),
-      retention,
-      archiveDays: 0,
-    });
-    expect(res.metadata_moved[0]).toMatchObject({ run_id: r.runId });
-    expect(existsSync(r.runDir)).toBe(false);
-    expect(existsSync(join(r.factoryHome, "archive", "runs", `${r.runId}.tar.gz`))).toBe(true);
+    expect(existsSync(r.runDir)).toBe(true);
+    expect(existsSync(join(r.runDir, "plan.json"))).toBe(true);
+    expect(existsSync(join(r.runDir, "result.json"))).toBe(true);
+    expect(existsSync(join(r.runDir, "state.json"))).toBe(true);
+    expect(existsSync(join(r.runDir, "notes.txt"))).toBe(true);
+    expect(existsSync(join(r.factoryHome, "archive"))).toBe(false);
   });
 
-  it("does not archive needs_human, a GitHub-CI base_red inside its window, or a live run", async () => {
+  it("resume-state runs keep worktree and home", async () => {
     const human = await runScenario({ script: "clean.json" });
     const rewrite = (runDir: string, patch: Record<string, unknown>) => writeFileSync(join(runDir, "state.json"), JSON.stringify({ ...stateOf(runDir), ...patch }));
     rewrite(human.runDir, { result: "needs_human", updated_at: new Date(Date.now() - 30 * DAY).toISOString() });
     const red = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "red") });
-    expect((await gc({ factoryHome: human.factoryHome, github: human.github, evidence: false, now: () => Date.now(), archiveDays: 0 })).metadata_moved).toEqual([]);
+    expect((await gc({ factoryHome: human.factoryHome, github: human.github, evidence: false, now: () => Date.now() })).home_removed).toEqual([]);
     expect(existsSync(join(human.runDir, "plan.json"))).toBe(true);
-    expect((await gc({ factoryHome: red.factoryHome, github: red.github, evidence: false, now: () => Date.now(), archiveDays: 0 })).metadata_moved).toEqual([]);
+    expect(existsSync(join(human.runDir, "home"))).toBe(true);
+    expect(existsSync(join(human.runDir, "worktree"))).toBe(true);
+    expect((await gc({ factoryHome: red.factoryHome, github: red.github, evidence: false, now: () => Date.now() })).home_removed).toEqual([]);
+    expect(existsSync(join(red.runDir, "home"))).toBe(true);
     expect(existsSync(join(red.runDir, "plan.json"))).toBe(true);
 
     const live = await runScenario({ script: "clean.json" });
     rewrite(live.runDir, { updated_at: new Date(Date.now() - 30 * DAY).toISOString() });
     const release = acquireRepoLock(live.factoryHome, await repoLockId(live.repo), live.runId)!;
     try {
-      expect((await gc({ factoryHome: live.factoryHome, github: live.github, evidence: false, now: () => Date.now(), archiveDays: 0 })).metadata_moved).toEqual([]);
+      expect((await gc({ factoryHome: live.factoryHome, github: live.github, evidence: false, now: () => Date.now() })).home_removed).toEqual([]);
       expect(existsSync(join(live.runDir, "worktree"))).toBe(true);
+      expect(existsSync(join(live.runDir, "home"))).toBe(true);
     } finally {
       release();
     }

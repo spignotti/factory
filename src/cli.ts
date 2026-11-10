@@ -13,7 +13,7 @@ import { Context7Client } from "./docs/context7.js";
 import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { abandonRun } from "./commands/abandon.js";
-import { autoGc, gcCommand } from "./commands/gc.js";
+import { autoGc, gcCommand, resumesBaseRedAfterGc } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
@@ -27,6 +27,7 @@ import { listRuns } from "./runs.js";
 import { createSandbox, type Sandbox } from "./sandbox/sandbox.js";
 import type { Profile } from "./schemas/profile.js";
 import { factoryHomeOf, loadLayers, resolveProfile } from "./config.js";
+import { loadGcRetention } from "./gc/retention-config.js";
 import { asset } from "./prompts.js";
 import { notifyTest, flushNotifyOutbox, requireNotifyHook, requireNotifyTarget } from "./notify.js";
 
@@ -54,11 +55,14 @@ const USAGE = `usage:
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one;
                text includes top gate failures and reasons)
-  factory gc [--dry-run] [--scheduled] [--force] [--retention-days N] [--strip-after-hours N] [--archive-days N] [--json]
-              (worktree and branch of merged/closed PRs; needs_input unanswered for 2 working days
-               (Mon-Fri, Europe/Berlin) is abandoned and the owner notified; run dirs idle for
-               --archive-days (default 90) overrides metadata tarball retention; use factory gc --scheduled for cron (see docs/GC_RETENTION.md)
-               base CI is green again is resumed, within limits.base_red_resume_hours)
+  factory gc [--dry-run] [--scheduled] [--force] [--retention-days N] [--json]
+              (worktree and branch of merged/closed PRs; terminal runs lose home/, published evidence
+               and service logs; done/abandoned also lose dependency folders; failed keeps them until
+               the worktree goes; needs_input unanswered for 2 working days
+               (Mon-Fri, Europe/Berlin) is abandoned and the owner notified;
+               factory gc --scheduled for the daily LaunchAgent (see docs/GC_RETENTION.md).
+               A live gc resumes base_red once base CI is green, within limits.base_red_resume_hours;
+               --dry-run and a scheduled dry-run do not)
   factory gates (--select | --toolchains | --run <check|selected>) [--tier fast|full|manual] [--base <ref>] [--all] [--repo <path>] [--json]
               (--all selects every check of the tier, with no path filter: tag pushes and workflow_dispatch.
                A pull request still filters by the diff. --run starts the services its checks need; with CI set,
@@ -403,8 +407,6 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           scheduled: { type: "boolean", default: false },
           force: { type: "boolean", default: false },
           "retention-days": { type: "string" },
-          "strip-after-hours": { type: "string" },
-          "archive-days": { type: "string" },
           json: { type: "boolean", default: false },
         },
       });
@@ -423,14 +425,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           scheduled: values.scheduled,
           force: values.force,
           retentionDays: num("retention-days", values["retention-days"]),
-          stripAfterHours: num("strip-after-hours", values["strip-after-hours"]),
-          archiveDays: num("archive-days", values["archive-days"]),
           json: values.json,
         },
         io,
       );
-      // Dry-run only reports. A real gc is the timer that continues base_red runs once CI is green.
-      if (!values["dry-run"]) await sweepBaseRedRuns(factoryHome, io);
+      // Dry-run only reports. A scheduled dry-run (profile gc.retention.dry_run) must not resume runs.
+      const retentionDry = loadGcRetention(factoryHome).dry_run;
+      if (resumesBaseRedAfterGc({ dryRun: values["dry-run"], scheduled: values.scheduled }, retentionDry)) await sweepBaseRedRuns(factoryHome, io);
       return code;
     }
     if (command === "run") {
