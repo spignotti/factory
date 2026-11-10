@@ -1,0 +1,47 @@
+# Generated from spignotti/factory templates/ci/factory-minimal.yml. Do not edit by hand:
+# `factory doctor --repo .` compares this file's hash with the template for the pinned ref.
+# Render a new one with `factory ci-stub --ref <tag>`; bumping the ref is a deliberate PR.
+# No non-manual check runs in CI (each is local_only, or there is none). This stub does not
+# install the factory and has no select or check job. `done` fails on a draft or a cancelled
+# run and succeeds on a ready pull request, a tag and a manual run. A skipped `done` would
+# count as passed, so it still runs. Nothing is skipped because of author, branch, labels,
+# or the PR body.
+# github:spignotti/factory#@FACTORY_REF@
+name: factory
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+# Draft events and ready events do not cancel each other: cancelling the ready run can leave
+# `done` skipped (GitHub then treats it as passed) or can fail it after the ready run already
+# succeeded. A newer event of the same kind still cancels the older one. converted_to_draft
+# uses the full group so an in-flight ready run cannot finish green. `done` exits non-zero
+# when this run was cancelled. A manual run and a tag are never cancelled.
+concurrency:
+  group: factory-${{ (github.event.action == 'converted_to_draft' && 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft && 'draft') || 'full' }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  # The single status check, named `done`. It gates nothing beside the repo's own jobs: there
+  # is no matrix. always(): a skipped `done` is a successful required check. Draft and cancelled
+  # runs exit 1 instead. `cancelled()` is legal only in an `if`.
+  done:
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: cancelled()
+        run: |
+          echo "cancelled: not a successful check"
+          exit 1
+      - env:
+          DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
+        run: |
+          set -eu
+          if [ "$DRAFT" = "true" ]; then
+            echo "draft: checks are not run until the pull request is ready for review"
+            exit 1
+          fi
+          echo "no CI checks"

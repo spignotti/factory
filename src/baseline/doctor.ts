@@ -207,8 +207,9 @@ export function baselineConfigChecks(dir: string, repo: RepoConfig, tools: { git
   ];
 }
 
-/** Branch protection and secret scanning. Unknown GitHub fields do not fail. */
-export function baselineGithubChecks(dir: string, settings: RepoSettings): BaselineCheck[] {
+/** Branch protection and secret scanning. Unknown GitHub fields do not fail. `factoryDoneGates` is false when the stub's `done` runs no check. */
+export function baselineGithubChecks(dir: string, settings: RepoSettings, opts?: { factoryDoneGates?: boolean }): BaselineCheck[] {
+  const factoryDoneGates = opts?.factoryDoneGates !== false;
   const checks: BaselineCheck[] = [];
   if (settings.private === false) {
     const secretOff = settings.secret_scanning === false;
@@ -226,10 +227,15 @@ export function baselineGithubChecks(dir: string, settings: RepoSettings): Basel
   }
   if (settings.branch_protected) {
     const required = settings.required_checks ?? [];
-    const missing = blockingJobs(dir).filter((j) => !required.includes(j));
+    const missing = blockingJobs(dir).filter((j) => !required.includes(j) && (factoryDoneGates || j !== "done"));
     checks.push(
       missing.length
-        ? warn("required checks", `branch protection does not require ${missing.join(", ")}. The stub blocks through "done"; every other pull_request job must be required too`)
+        ? warn(
+            "required checks",
+            factoryDoneGates
+              ? `branch protection does not require ${missing.join(", ")}. The stub blocks through "done"; every other pull_request job must be required too`
+              : `branch protection does not require ${missing.join(", ")}`,
+          )
         : ok("required checks", required.length ? `requires ${required.join(", ")}` : "no extra pull_request jobs"),
     );
     if (settings.strict_required_checks === false) {

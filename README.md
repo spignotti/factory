@@ -114,7 +114,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory harden --repo <p>` | signals → ranked proposals |
 | `factory audit --repo <p> --type <t>` | one read-only audit → ranked proposals |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
-| `factory ci-stub [--ref <tag>]` | print the CI workflow |
+| `factory ci-stub [--ref <tag>] [--repo <path>]` | print the CI workflow (minimal when no check runs in CI) |
 | `factory notify test <owner/name> [--target <name>]` | send a test ping to the repo hook or a named target (see [docs/BOTS.md](docs/BOTS.md)) |
 | `factory notify flush` | retry pending run-end notifications from `~/.factory/outbox/` (also at run/resume start) |
 | `factory --version` | package version (plus the commit for a checkout install) |
@@ -574,7 +574,7 @@ GIFs; `factory doctor --repo .` checks both.
 
 ## CI
 
-`factory ci-stub [--ref <tag>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory): on every pull request it
+`factory ci-stub [--ref <tag>] [--repo <path>] > .github/workflows/factory.yml` writes the CI stub (`--ref` defaults to `v<version>`, the release tag of the installed factory; `--repo` defaults to the current directory). When a non-manual check is not `local_only`, on every pull request it
 selects the checks with the same code as a local run and runs each one (`factory gates --run`).
 It does not run on pushes to the base branch (the PR run already checked the merged tree; a base commit
 without check runs makes the factory run the fast checks locally). It does run on tags `v*` and on
@@ -583,12 +583,12 @@ release tag is a commit already on the base, so a diff against `origin/main` wou
 path-scoped. Only a newer push to the same PR
 cancels a run, so no cancelled check marks a base commit red. The npx install of the pinned factory is
 cached per ref. The tool baseline those checks implement is [docs/BASELINE.md](docs/BASELINE.md): one
-stub, not a reusable workflow, because doctor hashes this file and branch protection requires `done`.
+stub, not a reusable workflow, because doctor hashes this file and branch protection requires `done` when the stub runs checks.
 
-**Required status check:** `done`, the stub's last job. GitHub Actions reports a check run under its job
+**Required status check:** `done`, the stub's last job, when the stub runs checks. GitHub Actions reports a check run under its job
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub
 Actions; requiring `factory / done` blocks every PR, because nothing ever reports that context
-(`factory doctor --repo .` warns about it).
+(`factory doctor --repo .` warns about it). When no check runs in CI, do not require `done`.
 
 **Draft pull requests.** The pipeline opens every PR as a draft and pushes while it is still a draft.
 It marks the PR ready only after the local gates have passed and that push has finished, and only
@@ -614,7 +614,11 @@ the following ready event shows the full matrix on that head.
 
 **Local-only checks:** `local_only: true` checks (a host stack CI does not have, see Services) are left out
 of the selection when `CI` is set, so the stub neither lists nor runs them; the factory runs them locally
-before the PR.
+before the PR. When every non-manual check is `local_only` (or there is none), `factory ci-stub` renders
+`templates/ci/factory-minimal.yml` instead: `done` only, no npx, no `select`, no `check`. It fails on a draft
+or a cancelled run and succeeds on a ready pull request. Doctor accepts that file for those repos and does
+not suggest requiring `done` (it gates nothing beside the repo's own jobs). A repo that still has a CI check
+keeps the full stub.
 
 **Toolchains:** GitHub runners (`ubuntu-latest`) have node and python3 but no pnpm or uv. Before the
 checks, the stub installs what `factory gates --toolchains` resolves for the repo: `pnpm/action-setup`
@@ -656,7 +660,7 @@ base branch; the user's checkout is not touched):
   description lists every removed, proposed, kept and moved item and every warning.
 - **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
-- **Settings** are never changed: branch protection (required check `done`) and auto-merge are printed hints, so
+- **Settings** are never changed: branch protection (required check `done`, omitted when no check runs in CI) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
 - **After the merge**: if the repo has tests, check that `tests.globs` and `tests.run` are set (bug plans

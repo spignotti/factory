@@ -3,13 +3,16 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { asset } from "./prompts.js";
+import { loadRepoConfig, REPO_CONFIG_PATH } from "./schemas/repo.js";
 
 /**
- * CI stub: `.github/workflows/factory.yml` is `templates/ci/factory.yml` with the pinned factory
- * ref filled in, identical in every repo. `doctor` compares hashes. Pull requests, release tags
- * and workflow_dispatch run it; pushes to the base branch do not. A tag or manual run passes
- * `gates --select --all` (every check of the tier): the diff against the base is empty. One file,
- * not a reusable workflow, so branch protection has a single required status (`done`).
+ * CI stub: `.github/workflows/factory.yml` is a template with the pinned factory ref filled in.
+ * Repos with a non-manual check that is not `local_only` get `templates/ci/factory.yml` (select,
+ * check, done). Repos where no such check would run in CI get `templates/ci/factory-minimal.yml`
+ * (`done` only, no npx). `doctor` compares hashes against the rendering that matches the repo.
+ * Pull requests, release tags and workflow_dispatch run it; pushes to the base branch do not.
+ * One file, not a reusable workflow, so branch protection has a single status name (`done`) when
+ * the stub actually runs checks.
  */
 export const CI_STUB_PATH = ".github/workflows/factory.yml";
 /**
@@ -20,9 +23,32 @@ export const REQUIRED_CHECK = "done";
 /** What earlier docs told people to require; it never reports, so it blocks every PR. */
 export const LEGACY_REQUIRED_CHECK = "factory / done";
 export const CI_TEMPLATE = new URL("../templates/ci/factory.yml", import.meta.url);
+export const CI_MINIMAL_TEMPLATE = new URL("../templates/ci/factory-minimal.yml", import.meta.url);
 const REF_MARK = "@FACTORY_REF@";
 const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const PINNED = /github:spignotti\/factory#([^\s"']+)/g;
+
+/** `full`: select/check/done. `minimal`: `done` only, no factory install. */
+export type CiStubMode = "full" | "minimal";
+
+/**
+ * A non-manual check that is not `local_only` can run on a pull request or a tag (tier full).
+ * Manual checks are not that matrix. When none would run, the select job would only install the
+ * factory and print `[]`.
+ */
+export function ciStubMode(checks: { tier: string; local_only?: boolean }[]): CiStubMode {
+  return checks.some((c) => c.tier !== "manual" && c.local_only !== true) ? "full" : "minimal";
+}
+
+/** Rendering for the repo's checks. Missing `repo.yaml` keeps the full stub (do not drop checks we cannot see). */
+export function ciStubModeAt(repoDir: string): CiStubMode {
+  if (!existsSync(join(repoDir, REPO_CONFIG_PATH))) return "full";
+  return ciStubMode(loadRepoConfig(repoDir).checks);
+}
+
+export function ciStubTemplate(mode: CiStubMode): string {
+  return readFileSync(mode === "minimal" ? CI_MINIMAL_TEMPLATE : CI_TEMPLATE, "utf8");
+}
 
 /** Default CI-stub pin: the release tag of this factory version (`v<package.json version>`). */
 export function defaultRef(): string {
@@ -32,6 +58,11 @@ export function defaultRef(): string {
 export function renderCiStub(ref: string, template = readFileSync(CI_TEMPLATE, "utf8")): string {
   if (!REF.test(ref) || ref.includes("..")) throw new Error(`invalid factory ref: ${ref}`);
   return template.replaceAll(REF_MARK, ref);
+}
+
+/** The stub `factory ci-stub` prints for this ref and mode. */
+export function renderCiStubFor(ref: string, mode: CiStubMode): string {
+  return renderCiStub(ref, ciStubTemplate(mode));
 }
 
 export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -46,8 +77,8 @@ export function pinnedRefs(text: string): string[] {
   return [...new Set([...text.matchAll(PINNED)].map((m) => m[1]!))];
 }
 
-/** The repo's CI stub equals the template for the ref it pins (hash). */
-export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8"), currentRef?: string): CiStubStatus {
+/** The repo's CI stub equals the rendering for the ref it pins (hash). `mode` is the rendering the repo's checks need. */
+export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8"), currentRef?: string, mode: CiStubMode = "full"): CiStubStatus {
   const path = join(repoDir, CI_STUB_PATH);
   // Not adopted yet (by hand until `adopt`, M5): a warning, not a failure.
   if (!existsSync(path)) return { status: "warn", detail: `${CI_STUB_PATH} is missing; write it with \`factory ci-stub --ref <tag> > ${CI_STUB_PATH}\`` };
@@ -59,7 +90,7 @@ export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE
   const ref = refs[0]!;
   let expected: string;
   try {
-    expected = renderCiStub(ref, template);
+    expected = renderCiStub(ref, mode === "minimal" ? ciStubTemplate("minimal") : template);
   } catch (e) {
     return { status: "fail", detail: (e as Error).message };
   }
