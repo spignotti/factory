@@ -4,7 +4,8 @@ import { createServer } from "node:http";
 import { networkInterfaces, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { bashSpawnHook } from "../../src/agents/pi-runner.js";
+import { bashSpawnHook, toolDefinitions } from "../../src/agents/pi-runner.js";
+import { jailFor, type RunDeps } from "../../src/pipeline/context.js";
 import { sh } from "../../src/exec.js";
 import { PathDenied, PathGuard } from "../../src/sandbox/guard.js";
 import {
@@ -32,8 +33,9 @@ describe("sandbox decision", () => {
   it("preferred degrades with warnings", () => {
     expect(createSandbox("preferred", probe({ pasta: () => false }))).toMatchObject({ fs: "bwrap", net: "shared", warnings: [expect.stringMatching(/host network/)] });
     expect(createSandbox("preferred", probe({ bwrap: () => false }))).toMatchObject({ fs: "none", net: "shared", warnings: [expect.stringMatching(/bwrap/)] });
-    expect(createSandbox("preferred", probe({ platform: "darwin" }))).toMatchObject({ fs: "none", warnings: [expect.stringMatching(/Linux only/)] });
-    expect(createSandbox("off", probe({}))).toMatchObject({ fs: "none", net: "shared" });
+    expect(createSandbox("preferred", probe({ platform: "darwin" }))).toMatchObject({ fs: "none", warnings: [expect.stringMatching(/Linux only.*unjailed/)] });
+    expect(createSandbox("preferred", probe({ bwrap: () => false })).warnings.join(" ")).toMatch(/unjailed/);
+    expect(createSandbox("off", probe({})).warnings.join(" ")).toMatch(/unjailed/);
   });
 });
 
@@ -141,6 +143,19 @@ describe("PathGuard (in-process tools)", () => {
     await expect(g.writeOps().writeFile(join(wt, "link.json"), "x")).rejects.toThrow(/outside/);
     expect(existsSync(join(root, "nope"))).toBe(false);
     expect(readFileSync(join(root, "secret.json"), "utf8")).toBe("SECRET");
+  });
+
+  it("a session with sandbox: off still rejects a read outside the worktree and a write into .git", async () => {
+    const jail = jailFor({ deps: { sandbox: createSandbox("off"), factoryHome: root } as RunDeps, agentHome: join(root, "home") }, wt);
+    expect(jail).toBeUndefined();
+    const tools = toolDefinitions({ cwd: wt, env: {}, jail }, ["read", "write", "edit", "grep", "find", "ls"]);
+    expect(tools.map((t) => t.name)).toEqual(["read", "write", "edit", "grep", "find", "ls"]);
+    const exec = (name: string) => tools.find((t) => t.name === name)!.execute as (id: string, params: { path: string; content?: string }) => Promise<unknown>;
+    await expect(exec("read")("r", { path: join(root, "secret.json") })).rejects.toThrow(/outside the worktree/);
+    await expect(exec("write")("w", { path: join(wt, ".git"), content: "gitdir: /evil" })).rejects.toThrow(/git internals/);
+    expect(readFileSync(join(wt, ".git"), "utf8")).toBe("gitdir: x");
+    const reviewer = toolDefinitions({ cwd: wt, env: {}, jail }, ["read", "grep", "find", "ls"]);
+    expect(reviewer.map((t) => t.name)).toEqual(["read", "grep", "find", "ls"]);
   });
 
   it("find and ls stay inside", async () => {

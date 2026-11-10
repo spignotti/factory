@@ -146,7 +146,8 @@ export function renderDoctor(r: DoctorReport): string {
 export function sandboxCheck(mode: SandboxMode, probe?: SandboxProbe): DoctorCheck {
   try {
     const sb = createSandbox(mode, probe);
-    if (sb.mode === "off") return { name: "sandbox", status: "warn", detail: "off: agent commands run on the host" };
+    // No OS sandbox (off, or preferred degraded to fs none): say so. Startup prints the same warnings.
+    if (sb.fs === "none") return { name: "sandbox", status: "warn", detail: sb.warnings.join("; ") || "unjailed" };
     const what = `${mode}: filesystem ${sb.fs}, network ${sb.net}`;
     return { name: "sandbox", status: sb.warnings.length ? "warn" : "ok", detail: [what, ...sb.warnings].join("; ") };
   } catch (e) {
