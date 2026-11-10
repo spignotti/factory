@@ -7,20 +7,19 @@ sensitive_paths: ["src/auth/**"]
 human_only_paths: [".github/**", "AGENTS.md"]
 merge: { low_max_diff_lines: 100 }
 `);
-const risk = (changed: string[], diffLines = 10, laneEscalated = false) => riskClass({ changed, diffLines, repo, laneEscalated });
+const risk = (changed: string[], diffLines = 10) => riskClass({ changed, diffLines, repo });
 
 describe("risk class", () => {
   it("high when human_only_paths are touched", () => {
     expect(risk(["src/a.js", ".github/workflows/ci.yml"])).toMatchObject({ risk: "high" });
     expect(risk(["AGENTS.md", "src/auth/x.js"]).risk).toBe("high");
   });
-  it("medium for sensitive paths, dependencies, migrations, big diffs, lane escalation", () => {
+  it("medium for sensitive paths, dependencies, migrations and big diffs only", () => {
     expect(risk(["src/auth/login.js"])).toMatchObject({ risk: "medium", reasons: ["sensitive_paths: src/auth/login.js"] });
     expect(risk(["package.json"]).risk).toBe("medium");
     expect(risk(["uv.lock"]).risk).toBe("medium");
     expect(risk(["supabase/migrations/001.sql"]).risk).toBe("medium");
     expect(risk(["src/a.js"], 101)).toMatchObject({ risk: "medium", reasons: ["diff 101 lines > 100"] });
-    expect(risk(["src/a.js"], 10, true)).toMatchObject({ risk: "medium", reasons: ["fast-lane escalation"] });
   });
   it("low otherwise", () => {
     expect(risk(["src/a.js"], 100)).toEqual({ risk: "low", reasons: [] });

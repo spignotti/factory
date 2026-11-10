@@ -121,11 +121,11 @@ export const hostProbe: SandboxProbe = {
 
 /** Decides the sandbox for a run; throws SandboxUnavailable when `required` cannot be met. */
 export function createSandbox(mode: SandboxMode, probe: SandboxProbe = hostProbe): Sandbox {
-  if (mode === "off") return { ...NO_SANDBOX, warnings: ["sandbox: off; agent commands run on the host"] };
+  if (mode === "off") return { ...NO_SANDBOX, warnings: ["sandbox: off; unjailed"] };
   if (probe.platform !== "linux") {
     const why = `sandboxing is Linux only (platform ${probe.platform})`;
     if (mode === "required") throw new SandboxUnavailable([why]);
-    return { mode, fs: "none", net: "shared", warnings: [`sandbox: ${why}; agent commands run on the host`] };
+    return { mode, fs: "none", net: "shared", warnings: [`sandbox: ${why}; unjailed`] };
   }
   const bwrap = probe.bwrap();
   const pasta = bwrap && probe.pasta();
@@ -135,7 +135,7 @@ export function createSandbox(mode: SandboxMode, probe: SandboxProbe = hostProbe
     );
     if (missing.length) throw new SandboxUnavailable(missing);
   }
-  if (!bwrap) return { mode, fs: "none", net: "shared", warnings: ["sandbox: bwrap unavailable; agent commands run on the host"] };
+  if (!bwrap) return { mode, fs: "none", net: "shared", warnings: ["sandbox: bwrap unavailable; unjailed"] };
   if (!pasta) return { mode, fs: "bwrap", net: "shared", warnings: ["sandbox: pasta unavailable; agent commands share the host network (host services reachable)"] };
   return { mode, fs: "bwrap", net: "isolated", warnings: [] };
 }

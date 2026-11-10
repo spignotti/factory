@@ -268,6 +268,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
           return status();
         };
       },
+      // One sample: this test is the push/ready order, not the PR CI wait.
+      patch: (c) => void ((c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0),
     });
     expect(r.result.result).toBe("done");
     expect(order).toEqual(["status", "push", "create:true", "ready", "status"]);
@@ -538,9 +540,9 @@ ${fixed}` } };
     expect(r.file("gates-1.json")).toContain("test lines not counted");
   });
 
-  it("fast lane escalates after implement when the diff is too big: full review, medium risk, PR names the reasons", async () => {
+  it("fast lane escalates after implement when the diff is too big: full review, PR names the reasons, risk stays on the diff", async () => {
     const r = await runScenario({ script: "clean.json", options: { lane: "fast" }, patch: (c) => void (c.fast_lane = { max_diff_lines: 3 }), steps: (s) => s.map((x) => (x.role === "plan_high" ? { ...x, role: "plan_normalize" } : x)) });
-    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "medium" });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "low" });
     expect(r.runner.remaining()).toEqual({});
     const esc = eventsOf(r, "lane_escalated");
     expect(esc).toHaveLength(1);
@@ -548,7 +550,7 @@ ${fixed}` } };
     expect((esc[0]!.data.reasons as string[])[0]).toMatch(/^diff \d+ lines > fast_lane.max_diff_lines 3$/);
     expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data).toMatchObject({ mode: "full" });
     expect(r.github.prs[0]?.body).toMatch(/- lane: fast → standard \(diff \d+ lines/);
-    expect(r.github.prs[0]?.body).toContain("fast-lane escalation");
+    expect(r.github.prs[0]?.body).not.toContain("fast-lane escalation");
     expect(JSON.parse(r.file("state.json"))).toMatchObject({ lane: "standard" });
   });
 
@@ -560,8 +562,19 @@ ${fixed}` } };
     expect((eventsOf(r, "lane_escalated")[0]!.data.reasons as string[])[0]).toMatch(/^plan_normalize output invalid/);
   });
 
+  it("fast lane: normalize failure, small diff, no sensitive paths -> risk low; escalation stays in result.json", async () => {
+    const r = await runScenario({ script: "invented-normalize.json", options: { lane: "fast" } });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "low" });
+    expect(r.resultFile).toMatchObject({ lane: "standard", risk: "low" });
+    expect(r.runner.calls.map((c) => c.role).slice(0, 3)).toEqual(["plan_normalize", "plan_normalize", "plan_medium"]);
+    const reasons = eventsOf(r, "lane_escalated")[0]!.data.reasons as string[];
+    expect(reasons[0]).toMatch(/^plan_normalize output invalid/);
+    expect(r.github.prs[0]?.body).toContain("plan_normalize output invalid");
+    expect(r.github.prs[0]?.body).not.toContain("fast-lane escalation");
+  });
+
   it("fallback: capacity error -> backoff retry on the same model -> fallback", async () => {
-    const r = await runScenario({ script: "fallback.json" });
+    const r = await runScenario({ script: "fallback.json", patch: (c) => void ((c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0) });
     expect(r.result.result).toBe("done");
     expect(r.runner.calls.filter((c) => c.role === "plan_high").map((c) => c.model)).toEqual([
       "openai/sol", "openai/sol", "openai/sol", "opencode-go/grok-4.7",
@@ -650,7 +663,7 @@ ${fixed}` } };
     ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
   };
 
-  it("pending CI on the PR head is polled and still pending does not fail the run", async () => {
+  it("pending CI on the PR head is polled; still pending is human_review and is not auto-merged", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
@@ -660,11 +673,41 @@ ${fixed}` } };
       patch: autoMerge,
       deps: { baseCiPollMs: 30_000 },
     });
-    expect(r.result.result).toBe("done");
-    expect(r.result.merge_policy).toBe("auto");
-    expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
     expect(r.events.some((e) => e.event === "progress" && (e.data.pr_ci as { status?: string } | undefined)?.status === "pending")).toBe(true);
+  });
+
+  it("none on the PR head is polled until green, then auto-merge is enabled", async () => {
+    const seq = ["none", "none", "green"] as const;
+    let i = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
+      },
+      patch: autoMerge,
+      deps: { baseCiPollMs: 30_000 },
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.slept).toEqual([30_000]);
+  });
+
+  it("none on the PR head that never registers is human_review and is not auto-merged", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => void (gh.status = "none"),
+      patch: autoMerge,
+      deps: { baseCiPollMs: 30_000 },
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.drafted).toEqual([]);
+    expect(r.github.readied).toEqual([r.result.pr]);
+    expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
   });
 
   it("pending PR CI that turns green continues and does not wait out the whole window", async () => {
@@ -683,7 +726,7 @@ ${fixed}` } };
     expect(r.github.autoMerged).toEqual([r.result.pr]);
   });
 
-  it("red CI on the PR head is needs_human and is not auto-merged", async () => {
+  it("red CI on the PR head is needs_human, draft again, and is not auto-merged", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
@@ -695,20 +738,44 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
     expect(r.result.reason).toMatch(/CI on the PR head \([0-9a-f]{8}\) is red/);
     expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.readied).toEqual([r.result.pr]);
+    expect(r.github.drafted).toEqual([r.result.pr]);
+    expect(r.github.prStates.get(r.result.pr!)?.draft).toBe(true);
+    expect(JSON.parse(r.file("state.json"))).toMatchObject({ pr_draft: true });
+    expect(r.events.some((e) => e.data.pr_marked_draft === r.result.pr)).toBe(true);
     expect(r.github.updates.some((u) => u.body.includes("## CI"))).toBe(true);
     expect(r.slept).toEqual([]);
   });
 
-  it("pr_ci_wait_minutes 0 does not wait; a pending head still does not fail", async () => {
+  it("green CI on the PR head enables auto-merge", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.github.drafted).toEqual([]);
+    expect(r.slept).toEqual([]);
+  });
+
+  it("pr_ci_wait_minutes 0 does not wait; a pending head still does not fail or auto-merge", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
         gh.baseStatus = async () => (n++ === 0 ? "none" : "pending");
       },
-      patch: (c) => void ((c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0),
+      patch: (c) => {
+        (c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0;
+        ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
+      },
     });
-    expect(r.result.result).toBe("done");
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.github.autoMerged).toEqual([]);
     expect(r.slept).toEqual([]);
   });
 
@@ -791,8 +858,15 @@ ${fixed}` } };
   });
 
   describe("each merge policy is reachable via config", () => {
-    it("auto (auto_merge_max_risk: low, low-risk diff) enables auto-merge", async () => {
-      const r = await runScenario({ script: "clean.json", patch: (c) => void (c.merge = { auto_merge_max_risk: "low" }) });
+    it("auto (auto_merge_max_risk: low, low-risk diff) enables auto-merge when CI is green", async () => {
+      let n = 0;
+      const r = await runScenario({
+        script: "clean.json",
+        github: (gh) => {
+          gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        },
+        patch: (c) => void (c.merge = { auto_merge_max_risk: "low" }),
+      });
       expect(r.result).toMatchObject({ result: "done", risk: "low", merge_policy: "auto" });
       expect(r.github.autoMerged).toEqual([r.result.pr]);
     });

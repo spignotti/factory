@@ -346,7 +346,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ctx.events.diffCount = diffReport;
     ctx.events.emit({ step: "finalize", event: "progress", data: { ...diffReport } });
   }
-  const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
+  const risk = riskClass({ changed, diffLines, repo: ctx.repo });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
@@ -427,7 +427,10 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       } else if (target) {
         draft = true;
       }
-      // Pending PR checks are polled; they are not a failure. Red checks are: the PR is not merged on its own.
+      // None and pending are the same wait: checks often register after markReady.
+      // They are not a failure, but they are not a green head, so auto-merge stays off.
+      // Red checks send the PR back to draft and end the run needs_human.
+      let headGreen = false;
       if (result === "done" && pr) {
         const ci = await pollCommitCi({
           github: ctx.deps.github,
@@ -437,6 +440,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           pollMs: ctx.deps.baseCiPollMs ?? 30_000,
           sleep: ctx.deps.sleep,
           signal: ctx.deps.signal,
+          waitWhile: ["pending", "none"],
           onUpdate: (info) =>
             ctx.events.emit({
               step: "finalize",
@@ -450,13 +454,19 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
             }),
         });
         ctx.deadline.extend?.(ci.waitedMs);
+        headGreen = ci.status === "green";
         if (ci.status === "red") {
           result = "needs_human";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
+          const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr, draft: false });
+          draft = held.draft;
+          if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
           await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
+        } else if (!headGreen && policy === "auto") {
+          policy = "human_review";
         }
       }
-      if (policy === "auto" && result === "done") await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+      if (policy === "auto" && result === "done" && headGreen) await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
