@@ -18,7 +18,7 @@ What the build could not verify without real providers, credentials or GitHub. C
   databaseId,headSha,workflowName,event,conclusion,createdAt`, `gh run view --json jobs`
   (`name/conclusion/startedAt/completedAt`), `commits/<sha>/check-runs` (`status/conclusion`), `tags`.
 
-## Pi SDK (`@earendil-works/pi-coding-agent` 1.4.0)
+## Pi SDK (`@earendil-works/pi-coding-agent` 1.5.2)
 
 Verified against the installed type declarations and sources: `createAgentSession`, tool selection by name
 (a `customTools` entry replaces the built-in tool, so the bash `spawnHook` controls every bash env),
@@ -40,9 +40,9 @@ Unverified (needs a real provider):
 - Abort: killing bash children Pi spawned relies on Pi's abort handling with long-running tool calls.
 - Bash timeout: Pi's bash has no default timeout; the factory sets `timeout` per call
   (`withCommandTimeout`), and Pi kills the process tree and throws "Command timed out after N seconds"
-  (verified in `test/unit/bash-timeout.test.ts` against Pi 1.4.0). Stdin is `ignore` in Pi's local shell.
+  (verified in `test/unit/bash-timeout.test.ts` against Pi 1.4.0, re-run on 1.5.2). Stdin is `ignore` in Pi's local shell.
 
-### Providers (Pi 1.4.0 registry, not live endpoints)
+### Providers (Pi 1.5.2 registry, not live endpoints)
 
 - `opencode` = OpenCode Zen (`https://opencode.ai/inference/v1`), pay-per-use, never used.
 - `opencode-go` = subscription (`https://opencode.ai/inference/go/v1`). It reads the same
