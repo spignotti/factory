@@ -71,8 +71,10 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   five yes/no rows (data/migrations, auth/permissions, secrets handling, prod deploy/infra, dependencies)
   and an overall rating (low/medium/high) with a one-line reason. When the plan carries `host_steps` and
   the repo sets `pr.host_steps_section`, the body also has that section (copy-paste commands, verify, roll back);
-  otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, pending
-  CI on the head is polled up to `limits.pr_ci_wait_minutes` and does not fail the run; red CI ends it `needs_human`.
+  otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, `none` and pending
+  CI on the head are polled up to `limits.pr_ci_wait_minutes` and do not fail the run. Still none or pending
+  leaves an auto policy as `human_review` (no auto-merge). Auto-merge is enabled only when that CI is green.
+  Red CI ends it `needs_human` and converts the PR back to draft.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/stream/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
@@ -240,8 +242,10 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # limits.base_red_resume_hours [48]: a base_red caused by GitHub CI on the base commit is resumed (same run
 # id) once that commit is green or has no checks, if it stopped within this many hours (0–168; 0 = off).
 # `factory gc` and the start of `factory run` do the check. A local fast-check base_red is not resumed.
-# limits.pr_ci_wait_minutes [20]: after the PR is pushed, pending CI on the head is polled this long (0–120).
-# Still pending does not fail the run; red CI ends it needs_human (no auto-merge). The wait is not work time.
+# limits.pr_ci_wait_minutes [20]: after the PR is pushed, none and pending CI on the head are polled
+# this long (0–120; 0 = one sample). Still none or pending does not fail the run and does not enable
+# auto-merge (an auto policy becomes human_review). Only green enables auto-merge. Red CI ends it
+# needs_human and marks the PR draft again. The wait is not work time.
 # max_wall_minutes [240, 4 h] is active time: time the box was suspended (VM paused, laptop asleep) is credited
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
 # commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
@@ -462,8 +466,9 @@ Agent bash, repo `setup`, gate checks and red-green test runs are jailed with bu
 network namespace: only the run's worktree and agent HOME are writable, git metadata is
 read-only, host loopback, Docker bridge, metadata service and LAN are unreachable, the internet works.
 Jailed commands run as the factory's own uid/gid with all capabilities dropped (never root, so file
-permissions apply as in CI). File
-tools are confined to the worktree. Set `sandbox: required | preferred | off` in
+permissions apply as in CI). File tools (read, write, edit, grep, find, ls) stay confined to the
+worktree even when no OS sandbox is active (`sandbox: off`, or `preferred` degraded to unjailed).
+Set `sandbox: required | preferred | off` in
 `~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
 (bubblewrap), `pasta` (passt) and `ip` (iproute2); `factory doctor` shows what is in effect.
 
@@ -739,7 +744,7 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Fast lane
 
-`factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when the task needs more than one package or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged and listed in the PR.
+`factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when `plan_normalize` stays schema-invalid (it then falls back to the planner), when the task needs more than one package, or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged, listed in the PR and recorded as `lane: standard` in `result.json`. They are not a risk reason: risk is paths, diff size (`merge.low_max_diff_lines`) and protected files only.
 
 ## Reviewers
 

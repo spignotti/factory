@@ -52,7 +52,11 @@ describe("provider stream abort", () => {
       error: { message: ABORT },
       usage: { tokens_in: 2_500_000, tokens_out: 0, cost_usd: 0 },
     };
-    const r = await runScenario({ script: "clean.json", steps: withP2([abort, p2ok]) });
+    const r = await runScenario({
+      script: "clean.json",
+      steps: withP2([abort, p2ok]),
+      patch: (c) => void ((c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0),
+    });
     expect(r.result.result).toBe("done");
     expect(readState(r.runDir).packages).toEqual({ P1: "done", P2: "done" });
     const log = git(join(r.runDir, "worktree"), "log", "--format=%s", "main..HEAD");

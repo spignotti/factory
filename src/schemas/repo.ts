@@ -326,8 +326,10 @@ export const RepoConfigSchema = z
         // After a GitHub-CI base_red, resume the same run once that commit is green, for this many hours
         // (0 = do not resume). Checked by `factory gc` and at the start of `factory run`.
         base_red_resume_hours: z.number().min(0).max(168).default(48),
-        // CI on the PR head after finalize pushes: pending is polled this long and never fails the run
-        // (0 = one sample, pending still does not fail). Red ends the run as needs_human.
+        // CI on the PR head after finalize pushes: none and pending are polled this long
+        // (0 = one sample). Still none or pending does not fail the run and does not enable
+        // auto-merge (an auto policy becomes human_review). Only green enables auto-merge.
+        // Red ends the run as needs_human and marks the PR draft again.
         pr_ci_wait_minutes: z.number().min(0).max(120).default(20),
         forbidden_paths: z.array(z.string()).default([]),
         // Generated paths left out of the diff line limits (lockfiles and binaries already are).
