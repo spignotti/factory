@@ -15,8 +15,9 @@ when the stub runs checks; that status is red when selection or any check fails.
 minimal, `done` gates nothing beside the repo's own jobs, so doctor and adopt do not suggest
 requiring it. `pull_request` has no branch filter. A draft event does not run select/check (the
 minimal stub runs a `draft` marker instead), but `done` still runs and fails, so a draft is never a
-skipped (and therefore passing) required check. A failed or cancelled `done` on a ready pull request
-is red: the marker is skipped there, so that failure is not a draft hold. Dependabot and other ready
+skipped (and therefore passing) required check. On that stub, draft and ready events share one
+concurrency group: marking ready cancels the in-flight draft run. A failed or cancelled `done` on a
+ready pull request is red: the marker is skipped there, so that failure is not a draft hold. Dependabot and other ready
 pull requests run the full matrix when there is one. Nothing is skipped because of author, branch,
 labels, or the PR body.
 

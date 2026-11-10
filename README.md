@@ -609,9 +609,10 @@ A failed draft `done` does not by itself end the factory run when its suite skip
 or the minimal stub's `draft` job succeeded: that failure is still pending and the run keeps
 polling. A failed or cancelled `done` with neither signal is red (the minimal stub on a ready pull
 request has no select/check, so that absence is not a draft hold). A real gate failure is red
-immediately. The latest completed run of a check name wins, so the draft failure does not stick
-after the ready run succeeds, and converting the PR back to draft fails `done` again. A skipped
-`done` is red to the factory.
+immediately. The latest workflow event of a check name wins (the run's created time, not when its `done`
+job started), so a draft failure does not stick after the ready run succeeds, even when that
+draft `done` started later because it waited on a runner. Converting the PR back to draft fails
+`done` again. A skipped `done` is red to the factory.
 
 **Downstream rollout.** Merging this repository does not change private repos. After the change is
 merged and tagged, update the stub in order: tourenpilot, then tourenpilot-ops, then pm, each with
@@ -624,7 +625,8 @@ of the selection when `CI` is set, so the stub neither lists nor runs them; the 
 before the PR. When every check is `local_only` (or there is none), `factory ci-stub` renders
 `templates/ci/factory-minimal.yml` instead: no npx, no `select`, no `check`. A `draft` job runs only on a
 draft pull request so a failed `done` there is not a settled red; on a ready pull request a failed or
-cancelled `done` is red. It fails on a draft or a cancelled run and succeeds on a ready pull request.
+cancelled `done` is red. Draft and ready events share one concurrency group, so marking ready cancels
+the in-flight draft run. It fails on a draft or a cancelled run and succeeds on a ready pull request.
 Doctor accepts that file for those repos and does not suggest requiring `done` (it gates nothing beside
 the repo's own jobs). A check that is not `local_only`, including `tier: manual`, keeps the full stub so
 `workflow_dispatch` can run it.

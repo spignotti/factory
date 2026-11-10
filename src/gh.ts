@@ -217,6 +217,14 @@ function suiteOf(row: Record<string, unknown>): number | undefined {
   return run ? Number(run[1]) : undefined;
 }
 
+/** Check suite creation time, when the payload nests it. Not the check run's own timestamp. */
+function suiteCreated(row: Record<string, unknown>): string | null {
+  const nested = row.checkSuite ?? row.check_suite;
+  if (!nested || typeof nested !== "object") return null;
+  const suite = nested as Record<string, unknown>;
+  return text(suite.createdAt) || text(suite.created_at) || null;
+}
+
 /** GraphQL rollup (upper-case, `startedAt`) and REST check-runs (`started_at`) into one shape. */
 function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
   const runs: CheckRunView[] = [];
@@ -241,6 +249,7 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
       status: mappedStatus,
       conclusion: mappedConclusion,
       started_at: text(row.started_at) || text(row.startedAt) || null,
+      created_at: suiteCreated(row),
       id: num(row.id) ?? num(row.databaseId),
       suite: suiteOf(row),
     });
@@ -250,7 +259,7 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
 
 /**
  * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
- * CI uses `aggregateCheckRuns`: latest run of each name, draft hold, skipped `done` is not green.
+ * CI uses `aggregateCheckRuns`: latest event of each name, draft hold, skipped `done` is not green.
  * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
  */
 export function prStatusFromView(raw: {
@@ -278,6 +287,30 @@ export function prStatusFromView(raw: {
 async function gh(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileP("gh", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
+}
+
+/**
+ * Check suite id → workflow `created_at` (event order). One page: a single SHA does not have 100 runs.
+ * A missing Actions API leaves the map empty; aggregation then uses suite id, then job `started_at`.
+ */
+async function workflowSuiteCreatedAt(repoDir: string, sha: string): Promise<Map<number, string>> {
+  const map = new Map<number, string>();
+  try {
+    const out = await gh(repoDir, [
+      "api",
+      `repos/{owner}/{repo}/actions/runs?head_sha=${sha}&per_page=100`,
+      "--jq",
+      "[.workflow_runs[] | {suite: .check_suite_id, created_at}]",
+    ]);
+    const rows = JSON.parse(out || "[]") as { suite?: number | null; created_at?: string | null }[];
+    if (!Array.isArray(rows)) return map;
+    for (const row of rows) {
+      if (typeof row?.suite === "number" && row.created_at) map.set(row.suite, row.created_at);
+    }
+  } catch {
+    // Event order falls back to check suite id. This must not hide the check runs themselves.
+  }
+  return map;
 }
 
 /** GitHub reports secret scanning as "enabled" or "disabled"; anything else is unknown. */
@@ -397,10 +430,19 @@ export class GhCli implements GitHub {
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id}]"]);
     const raw = JSON.parse(out || "[]") as { name?: string; status?: string; conclusion?: string | null; started_at?: string | null; id?: number; suite?: number | null }[];
+    const createdAt = await workflowSuiteCreatedAt(repoDir, sha);
     const runs: CheckRunView[] = [];
     for (const run of raw) {
       if (!run.name || !run.status) continue;
-      runs.push({ name: run.name, status: run.status, conclusion: run.conclusion || null, started_at: run.started_at, id: run.id, suite: run.suite });
+      runs.push({
+        name: run.name,
+        status: run.status,
+        conclusion: run.conclusion || null,
+        started_at: run.started_at,
+        created_at: run.suite != null ? (createdAt.get(run.suite) ?? null) : null,
+        id: run.id,
+        suite: run.suite,
+      });
     }
     return aggregateCheckRuns(runs);
   }

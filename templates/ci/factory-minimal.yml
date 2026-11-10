@@ -6,8 +6,10 @@
 # succeed before `done`: that check-run name is how ci-status tells a draft hold from a settled
 # red. A ready run skips `draft`, so a failed or cancelled `done` there is red. `done` fails on
 # a draft or a cancelled run and succeeds on a ready pull request, a tag and a manual run. A
-# skipped `done` would count as passed, so it still runs. Nothing is skipped because of author,
-# branch, labels, or the PR body.
+# skipped `done` would count as passed, so it still runs. Draft and ready events share one
+# concurrency group: a ready event cancels the in-flight draft run, whose `done` would otherwise
+# start later (it waited on `draft`) and become the latest failure. Nothing is skipped because of
+# author, branch, labels, or the PR body.
 # github:spignotti/factory#@FACTORY_REF@
 name: factory
 on:
@@ -18,13 +20,12 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# Draft events and ready events do not cancel each other: cancelling the ready run can leave
-# `done` skipped (GitHub then treats it as passed) or can fail it after the ready run already
-# succeeded. A newer event of the same kind still cancels the older one. converted_to_draft
-# uses the full group so an in-flight ready run cannot finish green. `done` exits non-zero
-# when this run was cancelled. A manual run and a tag are never cancelled.
+# One group for every event on this ref, so ready_for_review cancels an in-flight draft run.
+# Split groups let that draft `done` finish after the ready `done` and stick as a failure.
+# `done` still runs when this run is cancelled and exits non-zero: a skipped `done` would count
+# as passed. A manual run and a tag are never cancelled.
 concurrency:
-  group: factory-${{ (github.event.action == 'converted_to_draft' && 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft && 'draft') || 'full' }}-${{ github.ref }}
+  group: factory-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   # Marker only, not a required check. The job id is the check-run name (`draft`). It runs on a

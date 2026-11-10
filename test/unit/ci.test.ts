@@ -189,6 +189,9 @@ describe("CI stub", () => {
     expect(wf.jobs[DRAFT_HOLD_JOB]!.if).toContain("github.event.pull_request.draft");
     expect(wf.jobs.done!.needs).toEqual([DRAFT_HOLD_JOB]);
     expect(wf.jobs.done!.if).toBe("always()");
+    // draft and ready events cancel each other; a ready event must not leave the draft run running
+    expect(wf.concurrency.group).toBe("factory-${{ github.ref }}");
+    expect(wf.concurrency.group).not.toContain("'draft'");
     expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
     const outside: string[] = [];
     statusCallsOutsideIf(parse(text), null, outside);
