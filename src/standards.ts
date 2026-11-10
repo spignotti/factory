@@ -4,10 +4,11 @@ import { parse } from "yaml";
 import { type ChecklistItem, parseChecklist, unmarkedItems } from "./checklist.js";
 
 /**
- * `.factory/standards.md`: the repo's rules as a list, plus an optional `## Severity` section
- * (the old `.factory/review-rules.md`). A rule with `<!-- check: name -->` is automated; the name
+ * `.factory/standards.md`: repo rules are the list items in every section except `## Severity`
+ * and the legacy `## Review rules`. A rule with `<!-- check: name -->` is automated; the name
  * must be a repo.yaml check or a pull_request job. Unmarked rules are judged by the standards reviewer.
  * When `standards.md` is missing, readers fall back to `checklist.md` and `review-rules.md`.
+ * Once `standards.md` exists those old files are ignored.
  */
 
 export const STANDARDS_REL = ".factory/standards.md";
@@ -18,7 +19,16 @@ export const REVIEW_RULES_REL = ".factory/review-rules.md";
 export const STANDARDS_DEPRECATION =
   ".factory/standards.md is missing; .factory/checklist.md and .factory/review-rules.md are deprecated. Run: factory standards migrate --repo <path>";
 
-const SEVERITY_HEADING = /^#{1,6}[ \t]+(severity|review rules)\b/i;
+/** Doctor warning: `standards.md` wins, so a leftover old file is dead config. */
+export function standardsOldIgnored(paths: readonly string[]): string {
+  const listed = paths.join(" and ");
+  const verb = paths.length > 1 ? "are" : "is";
+  const them = paths.length > 1 ? "them" : "it";
+  return `${STANDARDS_REL} is in use; ${listed} ${verb} ignored. Delete ${them}.`;
+}
+
+const HEADING = /^(#{1,6})[ \t]+(.*)$/;
+const EXCLUDED_SECTION = /^(severity|review rules)\b/i;
 
 export interface ResolvedStandards {
   items: ChecklistItem[];
@@ -39,12 +49,34 @@ export interface StandardsInput {
   defaultReviewRules: string;
 }
 
-/** Rules are the list before the severity heading; that heading's body is review-rule guidance. */
+/**
+ * Rules are list items in every section except `## Severity` and `## Review rules`.
+ * A section runs until the next heading of the same or higher level, so a subsection stays inside it.
+ * Line numbers in `rules` match the file: excluded lines are blanked, not dropped, so a rule
+ * appended under `## Rules` stays visible.
+ */
 export function splitStandards(text: string): { rules: string; severity?: string } {
   const lines = text.split("\n");
-  const at = lines.findIndex((l) => SEVERITY_HEADING.test(l));
-  if (at < 0) return { rules: text };
-  return { rules: lines.slice(0, at).join("\n"), severity: lines.slice(at + 1).join("\n") };
+  let excludedLevel: number | undefined;
+  const rules: string[] = [];
+  const severity: string[] = [];
+  for (const line of lines) {
+    const heading = HEADING.exec(line);
+    if (heading) {
+      const level = heading[1]!.length;
+      const title = heading[2]!.replace(/\s+#*\s*$/, "").trim();
+      if (excludedLevel !== undefined && level <= excludedLevel) excludedLevel = undefined;
+      if (excludedLevel === undefined && EXCLUDED_SECTION.test(title)) excludedLevel = level;
+    }
+    if (excludedLevel !== undefined) {
+      if (!heading) severity.push(line);
+      rules.push("");
+    } else {
+      rules.push(line);
+    }
+  }
+  const severityText = severity.join("\n").trim();
+  return severityText ? { rules: rules.join("\n"), severity: severityText } : { rules: rules.join("\n") };
 }
 
 export function resolveStandards(src: StandardsInput): ResolvedStandards {
@@ -102,16 +134,26 @@ function stripTitle(text: string): string {
 
 /**
  * `standards.md` body from the old files. Undefined when both are missing. Does not delete them.
- * A leading H1 (`# Checklist`, `# Review rules`) is dropped so the new headings own the file.
+ * Severity comes first and `## Rules` last, so a line appended at the end is a rule.
+ * A leading H1 is dropped. Headings inside the old review rules are demoted so they stay
+ * inside `## Severity` instead of becoming rule sections.
  */
 export function migrateStandards(input: { checklist?: string; reviewRules?: string }): string | undefined {
   if (input.checklist === undefined && input.reviewRules === undefined) return undefined;
   const rules = input.checklist !== undefined ? stripTitle(input.checklist).trim() : "";
-  const severity = input.reviewRules !== undefined ? stripTitle(input.reviewRules).trim() : "";
+  const severity = input.reviewRules !== undefined ? demoteHeadings(stripTitle(input.reviewRules).trim()) : "";
   const parts = ["# Standards", ""];
-  if (rules) parts.push(rules, "");
   if (severity) parts.push("## Severity", "", severity, "");
+  parts.push("## Rules");
+  if (rules) parts.push("", rules);
   return parts.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+
+function demoteHeadings(text: string): string {
+  return text
+    .split("\n")
+    .map((l) => (/^#{1,6}[ \t]/.test(l) ? `#${l}` : l))
+    .join("\n");
 }
 
 export interface StandardsRemoval {
@@ -151,12 +193,15 @@ export function describeStandardsRemoval(r: StandardsRemoval): string {
   return r.kind === "rule" ? `rule removed: ${r.text}` : `check marker removed: ${r.check}`;
 }
 
-/** The plan declares a removal by naming the rule text, or `check: <name>` for a marker. */
-export function standardsRemovalDeclared(planText: string, r: StandardsRemoval): boolean {
+/**
+ * A rule is declared by its text anywhere in the plan. A marker is declared only when some
+ * package lists `.factory/standards.md` and the plan names that check (the name anywhere in the text).
+ */
+export function standardsRemovalDeclared(planText: string, r: StandardsRemoval, files: readonly string[] = []): boolean {
   const blob = planText.toLowerCase();
   if (r.kind === "rule") return blob.includes(r.text.toLowerCase());
   const name = (r.check ?? "").toLowerCase();
-  return name !== "" && (blob.includes(`check: ${name}`) || blob.includes(`check:${name}`));
+  return name !== "" && files.includes(STANDARDS_REL) && blob.includes(name);
 }
 
 function triggersOf(doc: Record<string, unknown>): string[] {
@@ -202,14 +247,16 @@ export interface StandardsDoctorNote {
 }
 
 /**
- * Doctor: a one-line migration hint when the old files are still in use, then a failure for each
- * dangling `<!-- check: name -->` (not a repo.yaml check and not a pull_request job).
+ * Doctor: a migration hint when the old files are still the source, or a warning to delete them
+ * when `standards.md` already exists (they are ignored). Then a failure for each dangling
+ * `<!-- check: name -->` (not a repo.yaml check and not a pull_request job).
  */
 export function standardsDoctorNotes(repoDir: string, checkNames: readonly string[]): StandardsDoctorNote[] {
   const notes: StandardsDoctorNote[] = [];
   const hasStandards = existsSync(join(repoDir, STANDARDS_REL));
   const old = [existsSync(join(repoDir, CHECKLIST_REL)) ? CHECKLIST_REL : undefined, existsSync(join(repoDir, REVIEW_RULES_REL)) ? REVIEW_RULES_REL : undefined].filter((x): x is string => x !== undefined);
   if (!hasStandards && old.length) notes.push({ name: "standards", status: "warn", detail: STANDARDS_DEPRECATION });
+  if (hasStandards && old.length) notes.push({ name: "standards", status: "warn", detail: standardsOldIgnored(old) });
   const text = hasStandards ? readFileSync(join(repoDir, STANDARDS_REL), "utf8") : old.includes(CHECKLIST_REL) ? readFileSync(join(repoDir, CHECKLIST_REL), "utf8") : "";
   if (!text) return notes;
   const items = hasStandards ? parseChecklist(splitStandards(text).rules) : parseChecklist(text);

@@ -30,6 +30,6 @@ export function standardsMigrateCommand(opts: StandardsMigrateOptions, io: Io): 
   mkdirSync(dirname(dest), { recursive: true });
   writeFileSync(dest, text);
   if (opts.json) io.out(JSON.stringify({ written: STANDARDS_REL }) + "\n");
-  else io.out(`wrote ${STANDARDS_REL} (left ${CHECKLIST_REL} and ${REVIEW_RULES_REL} in place)\n`);
+  else io.out(`wrote ${STANDARDS_REL} (severity first, ## Rules last; left ${CHECKLIST_REL} and ${REVIEW_RULES_REL} in place — ignored once standards.md exists, delete them)\n`);
   return 0;
 }

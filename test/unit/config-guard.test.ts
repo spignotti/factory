@@ -142,12 +142,23 @@ describe("config guard: scope", () => {
     const marker = standardsRemovals(before, markerGone);
     expect(rule).toEqual([{ kind: "rule", text: "no console.log" }]);
     expect(marker).toEqual([{ kind: "marker", text: "tests pass", check: "unit" }]);
-    const undeclared = configGuard({ plan: plan(["src/a.py"]), packages: ["P1"], configChanges: [], suppressions: [], standardsRemovals: [...rule, ...marker] });
+    const undeclared = configGuard({ plan: plan(["src/a.py"], "remove the unit marker"), packages: ["P1"], configChanges: [], suppressions: [], standardsRemovals: [...rule, ...marker] });
     expect(undeclared.ok).toBe(false);
     expect(undeclared.detail).toContain(".factory/standards.md: rule removed: no console.log");
     expect(undeclared.detail).toContain(".factory/standards.md: check marker removed: unit");
+    expect(undeclared.detail).toContain("declare it by listing .factory/standards.md in a package's files and naming the check in the plan");
+    const namedOnly = configGuard({
+      plan: plan(["src/a.py"], "Remove the rule no console.log and drop the unit marker"),
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      standardsRemovals: [...rule, ...marker],
+    });
+    expect(namedOnly.ok).toBe(false);
+    expect(namedOnly.detail).not.toContain("rule removed");
+    expect(namedOnly.detail).toContain("check marker removed: unit");
     const declared = configGuard({
-      plan: plan(["src/a.py"], "Remove the rule no console.log and drop <!-- check: unit -->"),
+      plan: plan([".factory/standards.md", "src/a.py"], "Remove the rule no console.log and drop the unit marker"),
       packages: ["P1"],
       configChanges: [],
       suppressions: [],

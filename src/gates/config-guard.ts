@@ -250,6 +250,12 @@ function planText(plan: Plan, packages: string[]): string {
   return [...ps.flatMap((p) => [p.title, p.description]), ...plan.acceptance.filter((a) => packages.includes(a.package)).map((a) => a.text)].join("\n").toLowerCase();
 }
 
+function standardsRemovalHow(r: StandardsRemoval): string {
+  return r.kind === "marker"
+    ? `declare it by listing ${STANDARDS_REL} in a package's files and naming the check in the plan`
+    : "declare the removal in the plan";
+}
+
 /** Whole plan, not only the packages of this gate: a standards removal is one diff, declared once. */
 function standardsPlanText(plan: Plan): string {
   return [
@@ -270,7 +276,7 @@ export function configGuard(input: {
   suppressions: { file: string; marker: string; line: string }[];
   /** repo.yaml loosening: fails even when the plan declares the file a protected change. */
   loosening?: string[];
-  /** Rule or marker removed from standards.md. Passes only when the plan names that removal. */
+  /** Rule or marker removed from standards.md. A rule passes when the plan names it; a marker passes when a package lists the file and the plan names the check. */
   standardsRemovals?: StandardsRemoval[];
   /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
   labels?: string[];
@@ -285,8 +291,8 @@ export function configGuard(input: {
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
     ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
     ...(input.standardsRemovals ?? [])
-      .filter((r) => !standardsRemovalDeclared(standardsText, r))
-      .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; declare the removal in the plan)`),
+      .filter((r) => !standardsRemovalDeclared(standardsText, r, input.plan.packages.flatMap((p) => p.files)))
+      .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; ${standardsRemovalHow(r)})`),
     ...(exemption.fail ? [exemption.fail] : []),
   ];
   const note = exemption.note ?? "";

@@ -287,10 +287,12 @@ describe("factory doctor: standards", () => {
     const c2 = capture();
     expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c2.io)).toBe(1);
     const migrated = (JSON.parse(c2.text()) as DoctorReport).checks.filter((x) => x.name === "standards");
-    expect(migrated.map((x) => x.status)).toEqual(["fail"]);
-    expect(migrated[0]!.detail).toContain('"missing"');
-    expect(migrated[0]!.detail).not.toContain("ignored");
-    expect(migrated[0]!.detail).not.toContain("lint");
+    expect(migrated.map((x) => x.status)).toEqual(["warn", "fail"]);
+    expect(migrated[0]!.detail).toMatch(/checklist\.md is ignored\. Delete it/);
+    expect(migrated[0]!.detail).not.toMatch(/factory standards migrate/);
+    expect(migrated[1]!.detail).toContain('"missing"');
+    expect(migrated[1]!.detail).not.toContain("ignored");
+    expect(migrated[1]!.detail).not.toContain("lint");
   });
 });
 

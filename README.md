@@ -194,7 +194,7 @@ Runs live in `~/.factory/runs/<run-id>/` (override with `FACTORY_HOME`). The tar
 
 ```
 .factory/repo.yaml         # checks, services, policies (required)
-.factory/standards.md      # repo rules; optional ## Severity section (see Standards)
+.factory/standards.md      # repo rules under ## Rules; optional ## Severity section (see Standards)
 .factory/verify/<area>.md  # verification guides per app area (not human-only: they evolve with the app)
 .github/workflows/factory.yml   # CI stub, generated, never edited by hand
 AGENTS.md                  # repo facts for every agent (purpose, commands, test strategy, do-not rules)
@@ -762,15 +762,17 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Standards
 
-Introduce a standard as one line in `.factory/standards.md`. It is reviewed on every PR from the next one on. `improve` proposes making it a check and cleaning up existing violations; add `<!-- check: name -->` once that name is a `repo.yaml` check or a pull_request job in `.github/workflows/`. `config_guard` treats removing the rule or the marker, unless the plan names that removal, as a loosening. `factory doctor --repo` fails on a dangling marker. `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` still load, with a deprecation warning; `factory standards migrate --repo <path>` writes `standards.md` and leaves them in place.
+Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run proposes making it a check and cleaning up existing violations; add `<!-- check: name -->` once that name is a `repo.yaml` check or a pull_request job in `.github/workflows/`. `config_guard` treats removing the rule, or the marker, as a loosening unless the plan names the rule, or lists `.factory/standards.md` in a package's files and names the check. `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
 
 ```markdown
-- Every API route checks the session
-- Migrations are reversible <!-- check: migrations -->
-
 ## Severity
 
 - `bug`: correctness, security or breakage defect, or an unmet acceptance criterion.
+
+## Rules
+
+- Every API route checks the session
+- Migrations are reversible <!-- check: migrations -->
 ```
 
 ## Findings memory

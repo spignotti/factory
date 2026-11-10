@@ -47,7 +47,7 @@ const USAGE = `usage:
   factory abandon <run-id> [--json]
               (marks the run abandoned, releases a stale lock, removes its worktree; result and logs stay)
   factory standards migrate --repo <path> [--json]
-              (writes .factory/standards.md from checklist.md and review-rules.md; does not delete them)
+              (writes .factory/standards.md from checklist.md and review-rules.md, severity first and ## Rules last; does not delete the old files)
   factory doctor [--repo <path>] [--profile <file>] [--ping] [--services] [--json]
               (setup checks, Zen guard, ChatGPT login; effective model per role and its layer;
                CI stub hash; --ping sends one tiny request per configured model;
