@@ -368,7 +368,13 @@ export async function headSha(cwd: string): Promise<string> {
 }
 
 export async function originUrl(repoDir: string, opts?: GitCallOptions): Promise<string> {
-  return (await git(repoDir, ["remote", "get-url", "origin"], opts).catch(() => "")).trim();
+  // No origin is "", but a timeout is rethrown: falling back to the path would pick another lock and queue key.
+  return (
+    await git(repoDir, ["remote", "get-url", "origin"], opts).catch((e: unknown) => {
+      if (isCommandTimeout(e)) throw e;
+      return "";
+    })
+  ).trim();
 }
 
 /** Repo lock id: the origin URL, else the path (one factory process per repository). */

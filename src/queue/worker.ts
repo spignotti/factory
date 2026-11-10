@@ -102,7 +102,7 @@ interface TickCtx {
   handles: Map<string, Tracked>;
   stall: Map<string, StallWatch>;
   terminating: Map<string, Terminating>;
-  behindUpdated: Set<string>;
+  behindUpdated: Map<string, number>;
   /** `update-branch` still running after a tick timeout. One per repo; a later tick does not start another. */
   behindFlight: Map<string, Promise<unknown>>;
   redLogged: Set<string>;
@@ -588,7 +588,9 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
  * Every behind `factory/*` PR whose run ended `done`, one `update-branch` at a time.
  * A failure is logged and left for a later tick; it does not skip the rest of the list.
  */
-async function updateBehind(github: GitHub, repo: string, factoryHome: string, updated: Set<string>, flight: Map<string, Promise<unknown>>, io: Io, timeoutMs: number): Promise<BehindWatch> {
+const BEHIND_RETRY_MS = 10 * 60_000;
+
+async function updateBehind(github: GitHub, repo: string, factoryHome: string, updated: Map<string, number>, flight: Map<string, Promise<unknown>>, io: Io, timeoutMs: number): Promise<BehindWatch> {
   let prs: OpenFactoryPr[];
   try {
     prs = await withTimeout(github.openFactoryPrFiles(repo), timeoutMs, "open PRs");
@@ -620,7 +622,9 @@ async function updateBehind(github: GitHub, repo: string, factoryHome: string, u
       updated.delete(key);
       continue;
     }
-    if (updated.has(key) || flight.has(repo)) {
+    // A PR still behind 10 minutes after its last update fell behind again (another PR merged): update it again.
+    const last = updated.get(key);
+    if ((last !== undefined && Date.now() - last < BEHIND_RETRY_MS) || flight.has(repo)) {
       needsUpdate = true;
       continue;
     }
@@ -641,7 +645,7 @@ async function updateBehind(github: GitHub, repo: string, factoryHome: string, u
       continue;
     }
     flight.delete(repo);
-    updated.add(key);
+    updated.set(key, Date.now());
     needsUpdate = true;
     io.out(`queue: updated PR #${pr.number} (behind)\n`);
   }
@@ -841,7 +845,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
   const handles = new Map<string, Tracked>();
   const stall = new Map<string, StallWatch>();
   const terminating = new Map<string, Terminating>();
-  const behindUpdated = new Set<string>();
+  const behindUpdated = new Map<string, number>();
   const behindFlight = new Map<string, Promise<unknown>>();
   const redLogged = new Set<string>();
   const dir = queueDir(opts.factoryHome);
