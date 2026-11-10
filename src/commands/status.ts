@@ -9,6 +9,7 @@ import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatusReportSchema } from "../schemas/reports.js";
 import { currentCheckName, currentStepRetry, eventsForRun, isQueuedWaiter, lastEventMs, orphanedRunIds, queuedFromEvents } from "../run-health.js";
+import { summarizeQueues } from "../queue/store.js";
 import { parseSince } from "./stats.js";
 
 /** `factory status --json` (schema `schemas/status.schema.json`). */
@@ -155,6 +156,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     stalled: [],
     prs: [],
     audit_tickets: openAuditTickets(opts.factoryHome),
+    queues: summarizeQueues(opts.factoryHome),
     since: null,
   };
   const prCache = new Map<string, Promise<PrStatus | Error>>();
@@ -249,6 +251,13 @@ export function renderStatus(s: StatusReport): string {
   const out: string[] = [];
   const section = (title: string, lines: string[]) => out.push(`${title} (${lines.length})${lines.length ? `:\n${lines.map((l) => `  ${l}`).join("\n")}` : ""}`);
   section("running", s.running.map((r) => `${r.run_id} ${r.task} — ${r.step}${r.check ? ` (${r.check})` : ""}${retryNote(r.retry)}, ${r.lane}, ${r.minutes} min (${r.repo})`));
+  section("queues", s.queues.map((q) => {
+    const next = q.next.map((n) => {
+      const extra = n.status === "running" && n.run_id ? ` ${n.run_id}` : n.reason ? ` ${n.reason}` : "";
+      return `#${n.issue} ${n.status}${extra}`;
+    }).join(", ");
+    return `${q.repo} — pending ${q.pending}, running ${q.running}, parked ${q.parked}${next ? `; next ${next}` : ""}`;
+  }));
   section("queued", s.queued.map((r) => `${r.run_id} ${r.task} — waiting for lock (holder ${r.holder_run_id ?? "?"}), ${r.minutes} min (${r.repo})`));
   section("stalled", s.stalled.map((r) => `${r.run_id} ${r.task} — no event for ${r.silent_minutes} min, still in ${r.step}${r.check ? ` (${r.check})` : ""}${retryNote(r.retry)} (${r.repo})`));
   section("waiting", s.waiting.map((r) => `${r.run_id} ${r.task} — ${r.result}: ${r.reason}${r.pr ? ` ${r.pr}` : ""}`));

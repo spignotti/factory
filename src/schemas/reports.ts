@@ -58,6 +58,26 @@ export const StatusReportSchema = z.strictObject({
   /** Open audit proposals, one row per proposal, across every repo in `$FACTORY_HOME`. */
   audit_tickets: z.array(OpenAuditTicketSchema),
   /**
+   * Issue queues (`$FACTORY_HOME/queue`). Pending / running / parked counts and the next
+   * non-done entries. Empty when no queue file exists.
+   */
+  queues: z.array(
+    z.strictObject({
+      repo: z.string(),
+      pending: z.number().int().min(0),
+      running: z.number().int().min(0),
+      parked: z.number().int().min(0),
+      next: z.array(
+        z.strictObject({
+          issue: z.number().int(),
+          status: z.enum(["pending", "running", "parked"]),
+          run_id: z.string().nullable(),
+          reason: z.string().nullable(),
+        }),
+      ),
+    }),
+  ),
+  /**
    * Finished runs in `factory status --since`. Null when the flag is omitted.
    * Built from `result.json` (mtime is the finish time) plus live PR state, not from `events.jsonl`.
    */

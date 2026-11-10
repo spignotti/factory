@@ -26,6 +26,13 @@ describe("git helpers", () => {
 });
 
 describe("git errors and worktrees", () => {
+  it("kills a hung git command at the timeout", async () => {
+    const dir = createFixtureRepo();
+    const started = Date.now();
+    await expect(git(dir, ["-c", "alias.sleep=!sleep 30", "sleep"], { timeoutMs: 200 })).rejects.toThrow(/timed out/);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   it("a missing cwd keeps the spawn error instead of an empty git ls-files message", async () => {
     const missing = join(mkdtempSync(join(tmpdir(), "git-missing-")), "nope");
     await expect(git(missing, ["ls-files"])).rejects.toThrow(/git ls-files failed: spawn git ENOENT/);

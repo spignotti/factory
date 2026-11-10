@@ -32,7 +32,7 @@ import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
-import { listRuns } from "../runs.js";
+import { listRuns, runStartedAt } from "../runs.js";
 
 export interface RunOptions extends TaskInput {
   repo: string;
@@ -43,6 +43,8 @@ export interface RunOptions extends TaskInput {
   wait?: boolean;
   /** Named notify.yaml target (`factory run --notify`). Stored on the run; the name only. */
   notifyTarget?: string;
+  /** Predetermined id (`queue run`). Also placed on the child command line so a restart can match the pid. */
+  runId?: string;
 }
 
 export interface ResumeOptions {
@@ -53,7 +55,7 @@ export interface ResumeOptions {
   notifyTarget?: string;
 }
 
-function newRunId(now: number): string {
+export function newRunId(now: number): string {
   const d = new Date(now).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
   return `${d}-${randomBytes(3).toString("hex")}`;
 }
@@ -432,8 +434,10 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   await flushNotifyOutbox(deps.factoryHome, { factoryHome: deps.factoryHome, fetch: deps.notifyFetch, sleep: deps.sleep, backoffMs: deps.notifyBackoffMs, signal: deps.signal }, START_FLUSH).catch(() => undefined);
   const now = deps.now ?? Date.now;
   const startedAt = now();
-  const runId = newRunId(startedAt);
+  const runId = opts.runId ?? newRunId(startedAt);
+  if (!runStartedAt(runId)) throw new Error(`invalid run id ${runId}`);
   const runDir = join(deps.factoryHome, "runs", runId);
+  if (existsSync(runDir)) throw new Error(`run ${runId} already exists`);
   mkdirSync(runDir, { recursive: true });
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });

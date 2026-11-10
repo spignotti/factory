@@ -32,8 +32,14 @@ export function gitTimeoutMs(args: string[]): number {
   return sub !== undefined && GIT_NETWORK.has(sub) ? GIT_NETWORK_TIMEOUT_MS : GIT_LOCAL_TIMEOUT_MS;
 }
 
+export interface GitCallOptions {
+  /** Overrides the default local/network timeout (the queue worker passes a shorter one). */
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+}
+
 /** Git for the factory process itself (its own env). Agents never get this. */
-export async function git(cwd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<string> {
+export async function git(cwd: string, args: string[], opts?: GitCallOptions): Promise<string> {
   const timeoutMs = opts?.timeoutMs ?? gitTimeoutMs(args);
   try {
     const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024, env: opts?.env });
@@ -53,7 +59,7 @@ export async function git(cwd: string, args: string[], opts?: { timeoutMs?: numb
  * False when git exits non-zero. A timeout is not a failed command: it is rethrown so a caller
  * that needed fresh remote state cannot continue on a stale ref.
  */
-export async function gitOk(cwd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<boolean> {
+export async function gitOk(cwd: string, args: string[], opts?: GitCallOptions): Promise<boolean> {
   try {
     await git(cwd, args, opts);
     return true;
@@ -63,15 +69,15 @@ export async function gitOk(cwd: string, args: string[], opts?: { timeoutMs?: nu
   }
 }
 
-export async function revParse(cwd: string, ref: string): Promise<string> {
-  return (await git(cwd, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+export async function revParse(cwd: string, ref: string, opts?: GitCallOptions): Promise<string> {
+  return (await git(cwd, ["rev-parse", "--verify", `${ref}^{commit}`], opts)).trim();
 }
 
 /**
  * Remote base ref when an `origin` remote exists, else the local branch.
  * A fetch that times out throws: a cached `origin/<branch>` is not a substitute for a fresh one.
  */
-export async function baseRef(repoDir: string, branch: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<string> {
+export async function baseRef(repoDir: string, branch: string, opts?: GitCallOptions): Promise<string> {
   if (await gitOk(repoDir, ["remote", "get-url", "origin"], opts)) {
     try {
       await gitOk(repoDir, ["fetch", "--quiet", "origin", branch], opts);
@@ -361,13 +367,19 @@ export async function headSha(cwd: string): Promise<string> {
   return revParse(cwd, "HEAD");
 }
 
-export async function originUrl(repoDir: string): Promise<string> {
-  return (await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "")).trim();
+export async function originUrl(repoDir: string, opts?: GitCallOptions): Promise<string> {
+  // No origin is "", but a timeout is rethrown: falling back to the path would pick another lock and queue key.
+  return (
+    await git(repoDir, ["remote", "get-url", "origin"], opts).catch((e: unknown) => {
+      if (isCommandTimeout(e)) throw e;
+      return "";
+    })
+  ).trim();
 }
 
 /** Repo lock id: the origin URL, else the path (one factory process per repository). */
-export async function repoLockId(repoDir: string): Promise<string> {
-  return (await originUrl(repoDir)) || repoDir;
+export async function repoLockId(repoDir: string, opts?: GitCallOptions): Promise<string> {
+  return (await originUrl(repoDir, opts)) || repoDir;
 }
 
 /**

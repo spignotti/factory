@@ -33,6 +33,8 @@ export interface Issue {
   title: string;
   body: string;
   labels: string[];
+  /** Absent on older fixtures: treated as open. */
+  state?: "open" | "closed";
 }
 
 export interface PrRequest {
@@ -50,6 +52,11 @@ export interface PrRequest {
 export interface GitHub {
   baseStatus(repoDir: string, sha: string): Promise<BaseStatus>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
+  /**
+   * Factory PR for this issue (`factory/<n>` or `factory/<n>-*`), any state. Null when there is none.
+   * Queue `--after` when the dependency is not in the queue. Open wins over merged.
+   */
+  findFactoryPr(repoDir: string, issue: number): Promise<FactoryPrRef | null>;
   push(repoDir: string, branch: string): Promise<void>;
   createPr(req: PrRequest): Promise<string>;
   /** Sha of `branch` on origin, null when it does not exist there. Throws when origin cannot be asked. */
@@ -72,6 +79,11 @@ export interface GitHub {
   markDraft(repoDir: string, pr: string): Promise<void>;
   /** `status` / `gc`: current state of a factory PR. */
   prStatus(repoDir: string, pr: string): Promise<PrStatus>;
+  /**
+   * Merge the base into an open PR (`gh pr update-branch`, no `--rebase`). Never a force-push.
+   * Queue worker: a `done` factory PR that is `BEHIND`, so auto-merge can proceed after CI.
+   */
+  updateBranch(repoDir: string, pr: string): Promise<void>;
   /** `doctor`: is `gh` logged in (no token is read or printed)? */
   authenticated(repoDir: string): Promise<boolean>;
   /** `doctor` hints; readable without admin rights. Unknown values are null. */
@@ -198,6 +210,11 @@ export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
   return out;
 }
 
+export interface FactoryPrRef {
+  number: number;
+  state: "open" | "merged" | "closed";
+}
+
 export interface PrStatus {
   state: "open" | "merged" | "closed";
   draft: boolean;
@@ -207,6 +224,26 @@ export interface PrStatus {
   behind?: boolean;
   /** `mergeable` CONFLICTING or `mergeStateStatus` DIRTY. */
   conflicting?: boolean;
+}
+
+function factoryIssueNumber(branch: string): number | undefined {
+  const m = /^factory\/(\d+)(?:-|$)/.exec(branch);
+  return m ? Number(m[1]) : undefined;
+}
+
+function pickFactoryPr(raw: unknown, issue: number): FactoryPrRef | null {
+  if (!Array.isArray(raw)) return null;
+  const mine: FactoryPrRef[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const pr = row as { number?: unknown; state?: unknown; headRefName?: unknown };
+    if (typeof pr.number !== "number" || typeof pr.headRefName !== "string") continue;
+    if (factoryIssueNumber(pr.headRefName) !== issue) continue;
+    const rawState = String(pr.state ?? "open").toLowerCase();
+    const state: FactoryPrRef["state"] = rawState === "merged" || rawState === "closed" ? rawState : "open";
+    mine.push({ number: pr.number, state });
+  }
+  return mine.find((p) => p.state === "open") ?? mine.find((p) => p.state === "merged") ?? mine[0] ?? null;
 }
 
 function rollupNodes(rollup: unknown): unknown[] {
@@ -500,9 +537,22 @@ export class GhCli implements GitHub {
   }
 
   async getIssue(repoDir: string, n: number): Promise<Issue> {
-    const out = await gh(repoDir, ["issue", "view", String(n), "--json", "number,title,body,labels"]);
-    const j = JSON.parse(out) as { number: number; title: string; body: string; labels: { name: string }[] };
-    return { number: j.number, title: j.title, body: j.body, labels: j.labels.map((l) => l.name) };
+    const out = await gh(repoDir, ["issue", "view", String(n), "--json", "number,title,body,labels,state"]);
+    const j = JSON.parse(out) as { number: number; title: string; body: string; labels: { name: string }[]; state?: string };
+    return {
+      number: j.number,
+      title: j.title,
+      body: j.body,
+      labels: j.labels.map((l) => l.name),
+      state: (j.state ?? "open").toLowerCase() === "closed" ? "closed" : "open",
+    };
+  }
+
+  async findFactoryPr(repoDir: string, issue: number): Promise<FactoryPrRef | null> {
+    if (!(await hasRemote(repoDir))) return null;
+    // UNVERIFIED: `gh pr list --search head:factory/N` (docs/VERIFY.md). Client-side filter is exact.
+    const out = await gh(repoDir, ["pr", "list", "--state", "all", "--limit", "20", "--json", "number,state,headRefName", "--search", `head:factory/${issue}`]);
+    return pickFactoryPr(JSON.parse(out || "[]"), issue);
   }
 
   async push(repoDir: string, branch: string): Promise<void> {
@@ -590,6 +640,12 @@ export class GhCli implements GitHub {
     const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"]));
     return prStatusFromView(j);
   }
+
+  async updateBranch(repoDir: string, pr: string): Promise<void> {
+    // Default is a merge commit. Do not pass `--rebase`: that rewrites the branch the factory pushed.
+    // UNVERIFIED: live `gh pr update-branch` (docs/VERIFY.md).
+    await gh(repoDir, ["pr", "update-branch", pr]);
+  }
 }
 
 /** Files a new PR would report: committed diff against `base`, empty when this is not a git checkout. */
@@ -627,7 +683,17 @@ export class FakeGitHub implements GitHub {
   async getIssue(_repoDir: string, n: number): Promise<Issue> {
     const issue = this.issues.get(n);
     if (!issue) throw new Error(`issue #${n} not found`);
-    return issue;
+    return { ...issue, state: issue.state ?? "open" };
+  }
+
+  /** Planted factory PR for `--after` when the dependency is not queued. Open `factoryPrs` are also seen. */
+  readonly factoryPrByIssue = new Map<number, FactoryPrRef>();
+
+  async findFactoryPr(_repoDir: string, issue: number): Promise<FactoryPrRef | null> {
+    const planted = this.factoryPrByIssue.get(issue);
+    if (planted) return planted;
+    const open = this.factoryPrs.find((p) => factoryIssueNumber(p.branch) === issue);
+    return open ? { number: open.number, state: "open" } : null;
   }
 
   /** Branch → sha on the fake origin; a push records the worktree's HEAD. */
@@ -730,8 +796,26 @@ export class FakeGitHub implements GitHub {
   async prStatus(_repoDir: string, pr: string): Promise<PrStatus> {
     const s = this.prStates.get(pr);
     if (s) return s;
-    const created = this.prs.find((p) => p.url === pr);
+    const created = this.prs.find((p) => p.url === pr || p.url.endsWith(`/${pr}`));
     if (!created) throw new Error(`PR ${pr} not found`);
-    return { state: "open", draft: created.draft };
+    return this.prStates.get(created.url) ?? { state: "open", draft: created.draft };
+  }
+
+  /** `gh pr update-branch` stand-in: records the call and clears `behind` so a second tick does not repeat it. */
+  readonly updatedBranches: string[] = [];
+
+  async updateBranch(_repoDir: string, pr: string): Promise<void> {
+    this.updatedBranches.push(pr);
+    const keys = [pr];
+    const created = this.prs.find((p) => p.url === pr || p.url.endsWith(`/${pr}`));
+    if (created) keys.push(created.url);
+    let found = false;
+    for (const key of keys) {
+      const prev = this.prStates.get(key);
+      if (!prev) continue;
+      found = true;
+      this.prStates.set(key, { ...prev, behind: false });
+    }
+    if (!found) this.prStates.set(pr, { state: "open", draft: false, behind: false });
   }
 }
