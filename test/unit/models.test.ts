@@ -45,10 +45,13 @@ describe("error classification", () => {
     [new AgentError("Your team has either used all available credits or reached its monthly spending limit."), "limit"],
     [new AgentError("xAI API error (403): Your team has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits or raise your spending limit.", undefined, 403), "limit"],
     [new AgentError("Team usage limit reached", undefined, 429, 5_000), "limit"],
+    [new AgentError("used all available credits; try again in 60 seconds"), "limit"],
     [new AgentError("error: ttft_admission_refused"), "capacity"],
     [new AgentError("503 Service Unavailable, please retry shortly", undefined, 503), "capacity"],
     [new AgentError("429", undefined, 429, 5000), "capacity"],
-    [new AgentError("429 Too Many Requests", undefined, 429), "limit"],
+    [new AgentError("429 Too Many Requests", undefined, 429), "capacity"],
+    [new AgentError("rate limit exceeded, try again in 60 seconds"), "capacity"],
+    [new AgentError("rate limit"), "other"],
     [new AgentError("You exceeded your current quota"), "limit"],
     [new AgentError("usage limit reached"), "limit"],
     [new AgentError("401 Unauthorized", undefined, 401), "auth"],
@@ -113,7 +116,7 @@ describe("fallback", () => {
 
   it("falls back immediately on limit without backoff", async () => {
     const { deps, slept, runner } = setup([
-      { role: "review_plan", error: { message: "rate limit", status: 429 } },
+      { role: "review_plan", error: { message: "usage limit reached", status: 429 } },
       { role: "review_plan", raw: "ok" },
     ]);
     await callModel(deps, "review", req("review_plan"));
@@ -208,7 +211,7 @@ describe("fallback", () => {
     expect(bad.read().some((e) => e.event === "step_retry")).toBe(false);
 
     const limit = setup([
-      { role: "review_plan", error: { message: "rate limit", status: 429 } },
+      { role: "review_plan", error: { message: "usage limit reached", status: 429 } },
       { role: "review_plan", raw: "ok" },
     ]);
     await callModel(limit.deps, "review", req("review_plan"));
@@ -281,6 +284,28 @@ describe("fallback", () => {
     expect(parseRetryAfterText("503 overloaded\nretry-after: 0.4")).toBe(400);
     expect(parseRetryAfterText("retry-after-ms: 1500")).toBe(1500);
     expect(providerRetryAfterMs(new AgentError("at capacity", undefined, 503, 400))).toBe(400);
+    // Header-only Retry-After is not in the text Pi keeps. No delay is invented.
+    expect(providerRetryAfterMs(new AgentError("The model is at capacity", undefined, 429))).toBeUndefined();
+    expect(parseRetryAfterText("429 at capacity")).toBeUndefined();
+  });
+
+  it("retries a 429 and a rate-limit delay parsed from the error text, without a retryAfter field", async () => {
+    const text = setup([
+      { role: "plan_high", model: "openai/sol", error: { message: "rate limit exceeded, try again in 60 seconds" } },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    await callModel(text.deps, "plan", req("plan_high"));
+    expect(text.slept).toEqual([500]);
+    expect(text.read()[0]).toMatchObject({ data: { class: "capacity" } });
+    expect(text.runner.calls.map((c) => c.model)).toEqual(["openai/sol", "openai/sol"]);
+
+    const status = setup([
+      { role: "plan_high", model: "openai/sol", error: { message: "429 Too Many Requests", status: 429 } },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    await callModel(status.deps, "plan", req("plan_high"));
+    expect(status.slept).toEqual([100]);
+    expect(status.read()[0]).toMatchObject({ data: { class: "capacity" } });
   });
 
   it("same-model backoff uses retry-after from the field and from the error text", async () => {

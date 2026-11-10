@@ -2,8 +2,8 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { killRunningCommands, resetKilledCommands, sh } from "../../src/exec.js";
-import { GIT_LOCAL_TIMEOUT_MS, GIT_NETWORK_TIMEOUT_MS, changedFiles, discardChanges, git, gitTimeoutMs, remoteBranchExists, stageAll, withBaseWorktree } from "../../src/git.js";
+import { killRunningCommands, resetKilledCommands, sh, signalExitCode } from "../../src/exec.js";
+import { GIT_LOCAL_TIMEOUT_MS, GIT_NETWORK_TIMEOUT_MS, baseRef, changedFiles, discardChanges, git, gitOk, gitTimeoutMs, remoteBranchExists, stageAll, withBaseWorktree } from "../../src/git.js";
 import { addOrigin, createFixtureRepo, gitIn } from "../helpers/repo.js";
 
 describe("git helpers", () => {
@@ -98,6 +98,50 @@ describe("git timeouts", () => {
   });
 });
 
+describe("baseRef", () => {
+  it("uses origin after a fetch, and a failed fetch may still use the cached remote ref", async () => {
+    const dir = createFixtureRepo();
+    expect(await baseRef(dir, "main")).toBe("main");
+    addOrigin(dir);
+    expect(await baseRef(dir, "main")).toBe("origin/main");
+    gitIn(dir, "remote", "set-url", "origin", join(dir, "missing.git"));
+    expect(await baseRef(dir, "main")).toBe("origin/main");
+  });
+
+  it("a fetch timeout is an error, not a stale origin or the local branch", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "git-baseref-"));
+    const pidFile = join(bin, "pid");
+    const parsed = join(bin, "parsed");
+    const script = join(bin, "git");
+    writeFileSync(
+      script,
+      `#!/bin/sh
+cmd=
+for a in "$@"; do
+  case "$a" in
+    remote|fetch|rev-parse) cmd=$a ;;
+  esac
+done
+if [ "$cmd" = remote ]; then echo https://example.com/r.git; exit 0; fi
+if [ "$cmd" = fetch ]; then echo $$ > ${JSON.stringify(pidFile)}; sleep 30; exit 0; fi
+if [ "$cmd" = rev-parse ]; then echo stale > ${JSON.stringify(parsed)}; exit 0; fi
+exit 0
+`,
+    );
+    chmodSync(script, 0o755);
+    const run = baseRef(bin, "main", { timeoutMs: 10_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
+    const start = Date.now();
+    while (!existsSync(pidFile)) {
+      if (Date.now() - start > 4_000) throw new Error("fake git fetch never started");
+      run.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await expect(run).rejects.toThrow(/git fetch timed out after 10s \(process killed\); refusing to continue on a stale base/);
+    expect(existsSync(parsed)).toBe(false);
+    await expect(gitOk(bin, ["fetch"], { timeoutMs: 200, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } })).rejects.toThrow(/timed out/);
+  });
+});
+
 describe("remoteBranchExists", () => {
   it("is false without an origin, true/false by ls-remote, and true when origin is unreachable", async () => {
     const dir = createFixtureRepo();
@@ -111,6 +155,13 @@ describe("remoteBranchExists", () => {
 });
 
 describe("sh", () => {
+  it("reports a signal death as the signal, not exit 1", async () => {
+    const r = await sh("kill -KILL $$", { cwd: "/", env: { PATH: process.env.PATH ?? "" }, timeoutMs: 5_000 });
+    expect(r.signal).toBe("SIGKILL");
+    expect(r.code).toBe(signalExitCode("SIGKILL"));
+    expect(r.code).not.toBe(1);
+  });
+
   it("kills the whole process group on timeout", async () => {
     const started = Date.now();
     const r = await sh("sleep 30 & sleep 30; echo never", { cwd: "/", env: { PATH: process.env.PATH ?? "" }, timeoutMs: 200 });

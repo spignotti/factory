@@ -1,10 +1,19 @@
 import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import { type Jail, jailedArgv } from "./sandbox/sandbox.js";
 
 export interface ShResult {
   code: number;
+  /** Set when the process died by signal. Absent means it exited; do not infer a signal from `code`. */
+  signal?: NodeJS.Signals | null;
   output: string;
   durationMs: number;
+}
+
+/** POSIX status for a signal death (`128 + n`). `sh` must report this itself; a shell would map it to 1. */
+export function signalExitCode(signal: NodeJS.Signals): number {
+  const n = constants.signals[signal];
+  return n === undefined ? 128 : 128 + n;
 }
 
 /** Process groups of commands still running, so a signal handler can kill them all. */
@@ -48,7 +57,7 @@ export function sh(
   opts: { cwd: string; env: Record<string, string>; timeoutMs?: number; jail?: Jail },
 ): Promise<ShResult> {
   const started = Date.now();
-  if (killedBy) return Promise.resolve({ code: 130, output: `[factory] not started: ${killedBy}\n`, durationMs: 0 });
+  if (killedBy) return Promise.resolve({ code: 130, signal: null, output: `[factory] not started: ${killedBy}\n`, durationMs: 0 });
   return new Promise((resolve) => {
     // Own process group, so a timeout kills everything the command started.
     const [file, ...args] = jailedArgv(opts.jail, "sh", command, opts.cwd, opts.env);
@@ -75,11 +84,17 @@ export function sh(
     child.on("error", (e) => {
       output += String(e);
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (child.pid !== undefined) running.delete(child.pid);
       if (timer) clearTimeout(timer);
       if (killedBy) output += `\n[factory] killed: ${killedBy}\n`;
-      resolve({ code: code ?? 1, output, durationMs: Date.now() - started });
+      // A signal death has `code === null`. Mapping that to 1 makes a SIGKILL look like a failing test.
+      resolve({
+        code: signal ? signalExitCode(signal) : (code ?? 1),
+        signal: signal ?? null,
+        output,
+        durationMs: Date.now() - started,
+      });
     });
   });
 }
@@ -109,7 +124,12 @@ export class CommandTimeoutError extends Error {
 }
 
 export function isCommandTimeout(err: unknown): boolean {
-  return err instanceof CommandTimeoutError || (err instanceof Error && err.cause instanceof CommandTimeoutError);
+  const seen = new Set<unknown>();
+  for (let cur: unknown = err; cur instanceof Error && !seen.has(cur); cur = cur.cause) {
+    if (cur instanceof CommandTimeoutError) return true;
+    seen.add(cur);
+  }
+  return false;
 }
 
 function killProcessGroup(pid: number | undefined): void {
@@ -174,16 +194,18 @@ export function execFileTimed(
     child.stdout?.on("data", (d: Buffer) => take(d, "stdout"));
     child.stderr?.on("data", (d: Buffer) => take(d, "stderr"));
     child.on("error", (e) => finish(() => reject(e)));
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timedOut) {
         finish(() => reject(new CommandTimeoutError(file, args, opts.timeoutMs)));
         return;
       }
-      if (code === 0) {
+      if (code === 0 && !signal) {
         finish(() => resolve({ stdout, stderr }));
         return;
       }
-      finish(() => reject(Object.assign(new Error(`Command failed: ${file} ${args.join(" ")}`), { code, stdout, stderr, killed: false, signal: null })));
+      const exit = signal ? signalExitCode(signal) : (code ?? 1);
+      const why = signal ? `killed by ${signal}` : `exit ${exit}`;
+      finish(() => reject(Object.assign(new Error(`Command failed: ${file} ${args.join(" ")} (${why})`), { code: exit, stdout, stderr, killed: Boolean(signal), signal: signal ?? null })));
     });
   });
 }

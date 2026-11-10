@@ -169,23 +169,92 @@ function tryClaimMemoryLock(lock: string): boolean {
 }
 
 /**
+ * Runs after the observed inode was renamed aside, before it is deleted or restored.
+ * Tests use it to plant a replacement at the original path.
+ */
+export type AfterLockRename = (trash: string) => void;
+
+function asideName(path: string, kind: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${++claimSeq}.${kind}`;
+}
+
+/**
+ * Drop a dead lock or takeover file without unlinking a replacement another waiter just created.
+ * Same rename-aside as the repo lock: move the inode, re-read the pid, delete only the trash name.
+ * Returns whether `path` is absent afterwards.
+ */
+export function discardDeadLockFile(path: string, afterRename?: AfterLockRename): boolean {
+  if (!existsSync(path)) return true;
+  if (holderAlive(path)) return false;
+  const trash = asideName(path, "stale");
+  try {
+    renameSync(path, trash);
+  } catch {
+    return !existsSync(path);
+  }
+  afterRename?.(trash);
+  try {
+    if (holderAlive(trash)) {
+      try {
+        linkSync(trash, path);
+      } catch {
+        // a newer file exists at path; it wins
+      }
+      rmSync(trash, { force: true });
+      return false;
+    }
+  } catch {
+    // unreadable trash: drop it
+  }
+  rmSync(trash, { force: true });
+  return !existsSync(path);
+}
+
+/** Release a file this process created. A replacement at `path` (different pid) is left in place. */
+export function releaseOwnedLockFile(path: string, afterRename?: AfterLockRename): void {
+  const trash = asideName(path, "release");
+  try {
+    renameSync(path, trash);
+  } catch {
+    return;
+  }
+  afterRename?.(trash);
+  try {
+    if (readLockPid(trash) !== process.pid) {
+      try {
+        linkSync(trash, path);
+      } catch {
+        // a newer file exists; it wins
+      }
+    }
+  } catch {
+    // unreadable: drop the trash
+  }
+  rmSync(trash, { force: true });
+}
+
+/**
  * Take a lock whose holder is gone. The `.takeover` guard serializes two waiters so one cannot
- * delete a lock the other just created. A live guard holder is left alone.
+ * delete a lock the other just created. A live guard holder is left alone. A dead guard is renamed
+ * aside (not unlinked by path) so two waiters cannot delete each other's guard.
  */
 function stealDeadMemoryLock(lock: string): void {
   if (!existsSync(lock) || holderAlive(lock)) return;
   const guard = `${lock}.takeover`;
+  if (existsSync(guard)) {
+    if (holderAlive(guard)) return;
+    if (!discardDeadLockFile(guard)) return;
+  }
   try {
     writeFileSync(guard, `${process.pid}\n`, { flag: "wx" });
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    if (!holderAlive(guard)) rmSync(guard, { force: true });
     return;
   }
   try {
-    if (existsSync(lock) && !holderAlive(lock)) rmSync(lock, { force: true });
+    if (existsSync(lock) && !holderAlive(lock)) discardDeadLockFile(lock);
   } finally {
-    rmSync(guard, { force: true });
+    releaseOwnedLockFile(guard);
   }
 }
 
@@ -205,7 +274,8 @@ function withLock<T>(path: string, fn: () => T): T {
   try {
     return fn();
   } finally {
-    rmSync(lock, { force: true });
+    // By inode, not by path: a successor's lock must survive this release.
+    releaseOwnedLockFile(lock);
   }
 }
 

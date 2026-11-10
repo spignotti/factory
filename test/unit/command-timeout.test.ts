@@ -44,4 +44,14 @@ describe("command timeouts for the github cli", () => {
     expect(alive(Number(readFileSync(pidFile, "utf8")))).toBe(false);
     expect(alive(Number(readFileSync(childFile, "utf8")))).toBe(false);
   });
+
+  it("includes stderr so an auth or already-exists failure is not only the command line", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "cmd-stderr-"));
+    const script = join(bin, "gh");
+    writeFileSync(script, "#!/bin/sh\necho 'a pull request for branch already exists' >&2\nexit 1\n");
+    chmodSync(script, 0o755);
+    await expect(ghCommand(bin, ["pr", "create"], { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } })).rejects.toThrow(
+      /gh pr failed: a pull request for branch already exists/,
+    );
+  });
 });

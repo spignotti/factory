@@ -18,7 +18,11 @@ export async function ghCommand(cwd: string, args: string[], opts?: { timeoutMs?
     return stdout;
   } catch (e) {
     if (e instanceof CommandTimeoutError) throw new Error(e.message, { cause: e });
-    throw e;
+    const err = e as { stderr?: string; message?: string };
+    // Empty stderr must not hide `spawn gh ENOENT` or `killed by SIGKILL` on `message`.
+    const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
+    const detail = stderr || (err.message ?? String(e)).trim();
+    throw new Error(`gh ${args[0] ?? ""} failed: ${detail}`, { cause: e });
   }
 }
 

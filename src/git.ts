@@ -49,11 +49,16 @@ export async function git(cwd: string, args: string[], opts?: { timeoutMs?: numb
   }
 }
 
-export async function gitOk(cwd: string, args: string[]): Promise<boolean> {
+/**
+ * False when git exits non-zero. A timeout is not a failed command: it is rethrown so a caller
+ * that needed fresh remote state cannot continue on a stale ref.
+ */
+export async function gitOk(cwd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<boolean> {
   try {
-    await git(cwd, args);
+    await git(cwd, args, opts);
     return true;
-  } catch {
+  } catch (e) {
+    if (isCommandTimeout(e)) throw e;
     return false;
   }
 }
@@ -62,11 +67,18 @@ export async function revParse(cwd: string, ref: string): Promise<string> {
   return (await git(cwd, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
 }
 
-/** Remote base ref when an `origin` remote exists, else the local branch. */
-export async function baseRef(repoDir: string, branch: string): Promise<string> {
-  if (await gitOk(repoDir, ["remote", "get-url", "origin"])) {
-    await gitOk(repoDir, ["fetch", "--quiet", "origin", branch]);
-    if (await gitOk(repoDir, ["rev-parse", "--verify", `origin/${branch}`])) return `origin/${branch}`;
+/**
+ * Remote base ref when an `origin` remote exists, else the local branch.
+ * A fetch that times out throws: a cached `origin/<branch>` is not a substitute for a fresh one.
+ */
+export async function baseRef(repoDir: string, branch: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<string> {
+  if (await gitOk(repoDir, ["remote", "get-url", "origin"], opts)) {
+    try {
+      await gitOk(repoDir, ["fetch", "--quiet", "origin", branch], opts);
+    } catch (e) {
+      throw new Error(`${(e as Error).message}; refusing to continue on a stale base`, { cause: e });
+    }
+    if (await gitOk(repoDir, ["rev-parse", "--verify", `origin/${branch}`], opts)) return `origin/${branch}`;
   }
   return branch;
 }

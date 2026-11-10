@@ -22,26 +22,24 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/**
- * A load/harness failure, not an assertion. node --test still exits 1 and says "fail" for a SyntaxError,
- * so the text has to win over the exit code. Command-not-found is 127; a signal death is 128+n.
- */
-const NON_TEST =
-  /\bSyntaxError\b|\bIndentationError\b|\bTabError\b|\bSyntax error\b|\bParseError\b|\bParsing error\b|command not found|:\s*not found\b|No such file or directory|\bCould not find ['"]|\berror: could not compile\b|\[build failed\]|\bTest suite failed to run\b|\bERROR collecting\b|\bfailed to load config\b|\[factory\] (?:timed out after |not started:|killed:)/i;
-
 export type ReproExit = "pass" | "fail" | "other";
 
 /**
- * A failing test is not "any non-zero exit". Exit 1 (node, pytest, vitest, jest, go) and 101 (cargo)
- * are test failures unless the output is a syntax, load or command error. Exit 127, 126, 2 and a
- * signal death are not a red repro.
+ * Exit status only. Output text is not a classifier: a real assertion can say `SyntaxError` or
+ * `No such file or directory` and still be the bug.
+ * 0 = pass. 126/127 (cannot run the command), a signal death, or 128+n = inconclusive.
+ * Any other non-zero exit is a failing test, including 2 and 101.
  */
-export function classifyReproExit(code: number, output: string): ReproExit {
+export function classifyReproExit(code: number, signal?: NodeJS.Signals | null): ReproExit {
+  if (signal) return "other";
   if (code === 0) return "pass";
   if (code === 126 || code === 127 || code >= 128) return "other";
-  if (NON_TEST.test(output)) return "other";
-  if (code === 1 || code === 101) return "fail";
+  if (code > 0) return "fail";
   return "other";
+}
+
+function reproExitDetail(code: number, signal: NodeJS.Signals | null | undefined): string {
+  return signal ? `killed by ${signal}` : `exit ${code}`;
 }
 
 /**
@@ -112,17 +110,17 @@ export async function redGreenProof(opts: {
     if (shTimedOut(base)) {
       return inconclusive(`repro timed out on base (inconclusive: the process tree was killed; this is not a failing test):\n${tail(base.output, 20)}`, true);
     }
-    const baseKind = classifyReproExit(base.code, base.output);
+    const baseKind = classifyReproExit(base.code, base.signal);
     if (baseKind === "other") {
-      return inconclusive(`repro on base was not a failing test (exit ${base.code}; inconclusive, not a red repro):\n${tail(base.output, 20)}`);
+      return inconclusive(`repro on base was not a failing test (${reproExitDetail(base.code, base.signal)}; inconclusive, not a red repro):\n${tail(base.output, 20)}`);
     }
     const head = await run("head", worktree, cmd);
     if (shTimedOut(head)) {
       return inconclusive(`repro timed out on HEAD (inconclusive: the process tree was killed; this is not a failing test):\n${tail(head.output, 20)}`, true);
     }
-    const headKind = classifyReproExit(head.code, head.output);
+    const headKind = classifyReproExit(head.code, head.signal);
     if (headKind === "other") {
-      return inconclusive(`repro on HEAD was not a failing test (exit ${head.code}; inconclusive, not a red repro):\n${tail(head.output, 20)}`);
+      return inconclusive(`repro on HEAD was not a failing test (${reproExitDetail(head.code, head.signal)}; inconclusive, not a red repro):\n${tail(head.output, 20)}`);
     }
     const redOnBase = baseKind === "fail";
     const greenOnHead = headKind === "pass";

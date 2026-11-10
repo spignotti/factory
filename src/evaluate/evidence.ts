@@ -1,11 +1,8 @@
-import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
-
-const execFileP = promisify(execFile);
+import { git } from "../git.js";
 
 /**
  * Evidence branch: screenshots, diffs, GIFs and videos of a run are committed
@@ -24,14 +21,9 @@ interface Author {
   email: string;
 }
 
-async function run(cwd: string, args: string[], env: Record<string, string> = {}): Promise<string> {
-  try {
-    const { stdout } = await execFileP("git", args, { cwd, env: { ...process.env, ...env }, maxBuffer: 64 * 1024 * 1024 });
-    return stdout.trim();
-  } catch (e) {
-    const err = e as { stderr?: string; message: string };
-    throw new Error(`git ${args[0]} failed: ${(err.stderr ?? err.message).trim().split("\n")[0]}`, { cause: e });
-  }
+/** Same timeouts and process-group kill as `git()`: a hung fetch or push must not hold the repo lock. */
+async function run(cwd: string, args: string[], env: Record<string, string> = {}, timeoutMs?: number): Promise<string> {
+  return (await git(cwd, args, { env: { ...process.env, ...env }, timeoutMs })).trim();
 }
 
 /** `owner/repo` of a GitHub remote URL (https, ssh, scp-like), else null. */
@@ -49,16 +41,16 @@ export function evidenceUrl(slug: string, sha: string, path: string): string {
  * Remote tip of the evidence branch, fetched into a per-call ref (deleted before return) so two
  * publishes in one repo do not clobber a shared local ref. Null when the branch does not exist yet.
  */
-async function fetchTip(repoDir: string): Promise<string | null> {
-  const remote = await run(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${EVIDENCE_BRANCH}`]);
+async function fetchTip(repoDir: string, timeoutMs?: number): Promise<string | null> {
+  const remote = await run(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${EVIDENCE_BRANCH}`], {}, timeoutMs);
   if (!remote) return null;
   const ref = `refs/factory/evidence-${randomBytes(4).toString("hex")}`;
   try {
-    await run(repoDir, ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${EVIDENCE_BRANCH}:${ref}`]);
-    return await run(repoDir, ["rev-parse", ref]);
+    await run(repoDir, ["fetch", "-q", "--no-tags", "origin", `+refs/heads/${EVIDENCE_BRANCH}:${ref}`], {}, timeoutMs);
+    return await run(repoDir, ["rev-parse", ref], {}, timeoutMs);
   } finally {
     try {
-      await run(repoDir, ["update-ref", "-d", ref]);
+      await run(repoDir, ["update-ref", "-d", ref], {}, timeoutMs);
     } catch {
       // the fetch never created it
     }
@@ -74,20 +66,21 @@ async function commitAndPush(
   message: string,
   author: Author,
   edit: (index: (args: string[]) => Promise<string>, parent: string | null) => Promise<boolean>,
+  timeoutMs?: number,
 ): Promise<string | null> {
   for (let attempt = 0; ; attempt++) {
-    const parent = await fetchTip(repoDir);
+    const parent = await fetchTip(repoDir, timeoutMs);
     const dir = mkdtempSync(join(tmpdir(), "factory-evidence-"));
     const env = { GIT_INDEX_FILE: join(dir, "index") };
     try {
-      const index = (args: string[]) => run(repoDir, args, env);
+      const index = (args: string[]) => run(repoDir, args, env, timeoutMs);
       await index(parent ? ["read-tree", parent] : ["read-tree", "--empty"]);
       if (!(await edit(index, parent))) return null;
       const tree = await index(["write-tree"]);
       const who = { GIT_AUTHOR_NAME: author.name, GIT_AUTHOR_EMAIL: author.email, GIT_COMMITTER_NAME: author.name, GIT_COMMITTER_EMAIL: author.email };
-      const sha = await run(repoDir, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], who);
+      const sha = await run(repoDir, ["commit-tree", tree, ...(parent ? ["-p", parent] : []), "-m", message], who, timeoutMs);
       try {
-        await run(repoDir, ["push", "-q", "origin", `${sha}:refs/heads/${EVIDENCE_BRANCH}`]);
+        await run(repoDir, ["push", "-q", "origin", `${sha}:refs/heads/${EVIDENCE_BRANCH}`], {}, timeoutMs);
         return sha;
       } catch (e) {
         if (attempt > 0 || !/rejected|non-fast-forward|fetch first/i.test((e as Error).message)) throw e;
@@ -108,7 +101,7 @@ export interface PublishedEvidence {
 }
 
 /** Commits `files` (names in `dir`) under `<runId>/` and pushes the evidence branch. */
-export async function publishEvidence(repoDir: string, opts: { runId: string; dir: string; files: string[]; author: Author }): Promise<PublishedEvidence> {
+export async function publishEvidence(repoDir: string, opts: { runId: string; dir: string; files: string[]; author: Author; timeoutMs?: number }): Promise<PublishedEvidence> {
   const paths = new Map<string, string>();
   const skipped: string[] = [];
   const sha = await commitAndPush(repoDir, `evidence: ${opts.runId}`, opts.author, async (index) => {
@@ -119,16 +112,16 @@ export async function publishEvidence(repoDir: string, opts: { runId: string; di
         skipped.push(`${f} (larger than ${MAX_EVIDENCE_FILE_BYTES / 1024 / 1024} MB)`);
         continue;
       }
-      const blob = await run(repoDir, ["hash-object", "-w", "--", file]);
+      const blob = await run(repoDir, ["hash-object", "-w", "--", file], {}, opts.timeoutMs);
       const path = `${opts.runId}/${f}`;
       await index(["update-index", "--add", "--cacheinfo", `100644,${blob},${path}`]);
       paths.set(f, path);
     }
     return paths.size > 0;
-  });
+  }, opts.timeoutMs);
   if (!sha) throw new Error("no evidence file to publish");
   // The configured URL (not `get-url`, which applies `insteadOf` rewrites).
-  const url = await run(repoDir, ["config", "--get", "remote.origin.url"]).catch(() => "");
+  const url = await run(repoDir, ["config", "--get", "remote.origin.url"], {}, opts.timeoutMs).catch(() => "");
   return { sha, slug: githubSlug(url), paths, skipped };
 }
 
@@ -136,19 +129,19 @@ export async function publishEvidence(repoDir: string, opts: { runId: string; di
  * Retention: run folders on the evidence branch whose last commit is older than `days` are removed
  * in one commit. Returns the removed folders (dry run: the ones that would be removed).
  */
-export async function pruneEvidence(repoDir: string, opts: { now: number; days?: number; dryRun?: boolean; author: Author }): Promise<string[]> {
+export async function pruneEvidence(repoDir: string, opts: { now: number; days?: number; dryRun?: boolean; author: Author; timeoutMs?: number }): Promise<string[]> {
   const cutoff = opts.now / 1000 - (opts.days ?? EVIDENCE_RETENTION_DAYS) * 86_400;
   const expired = async (parent: string): Promise<string[]> => {
-    const dirs = (await run(repoDir, ["ls-tree", "-d", "--name-only", parent])).split("\n").filter(Boolean);
+    const dirs = (await run(repoDir, ["ls-tree", "-d", "--name-only", parent], {}, opts.timeoutMs)).split("\n").filter(Boolean);
     const out: string[] = [];
     for (const d of dirs) {
-      const at = Number(await run(repoDir, ["log", "-1", "--format=%ct", parent, "--", d]));
+      const at = Number(await run(repoDir, ["log", "-1", "--format=%ct", parent, "--", d], {}, opts.timeoutMs));
       if (at < cutoff) out.push(d);
     }
     return out;
   };
   if (opts.dryRun) {
-    const tip = await fetchTip(repoDir);
+    const tip = await fetchTip(repoDir, opts.timeoutMs);
     return tip ? expired(tip) : [];
   }
   let removed: string[] = [];
@@ -156,6 +149,6 @@ export async function pruneEvidence(repoDir: string, opts: { now: number; days?:
     removed = parent ? await expired(parent) : [];
     for (const d of removed) await index(["rm", "-r", "-q", "--cached", "--", d]);
     return removed.length > 0;
-  });
+  }, opts.timeoutMs);
   return removed;
 }

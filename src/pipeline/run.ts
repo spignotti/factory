@@ -6,7 +6,7 @@ import { prepareAgentHome } from "../agents/env.js";
 import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
-import { sh, tail } from "../exec.js";
+import { isCommandTimeout, sh, tail } from "../exec.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse, withRepoGitOps } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema, type Plan } from "../schemas/plan.js";
@@ -973,9 +973,14 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
     ctx.events.emit({ step: "resume", event: "progress", data: { discarded_uncommitted: true } });
   }
   // Commits a human pushed to the PR branch (e.g. a conflict resolved on GitHub).
+  // A fetch timeout must stop the resume: skipping the merge would keep yesterday's branch.
   if (await remoteBranchExists(ctx.repoDir, branch)) {
     const remote = `refs/remotes/origin/${branch}`;
-    if (await gitOk(wt, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`]) && !(await isAncestor(wt, remote))) {
+    const fetched = await gitOk(wt, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`]).catch((e: unknown) => {
+      if (isCommandTimeout(e)) throw new Error(`${(e as Error).message}; refusing to continue on a stale origin/${branch}`, { cause: e });
+      throw e;
+    });
+    if (fetched && !(await isAncestor(wt, remote))) {
       const merged = await mergeRef(wt, remote, `chore: merge origin/${branch}`, gitAuthor(ctx));
       if (!merged.ok) return fail(`commits on origin/${branch} conflict with the worktree in ${merged.conflicts.join(", ") || merged.error.slice(0, 200)}`);
       ctx.events.emit({ step: "resume", event: "progress", data: { remote_branch_merged: await headSha(wt) } });
