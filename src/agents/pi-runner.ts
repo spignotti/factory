@@ -118,7 +118,8 @@ export class PiRunner implements AgentRunner {
       customTools,
       sessionManager: SessionManager.inMemory(req.cwd),
       // Pi's own retries are off: the factory decides on backoff and fallback.
-      settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true } }),
+      // Cache warming off: since Pi 1.5.1 the default keeps calling the provider after a turn settles.
+      settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: true }, cacheWarming: "off" }),
     });
     return session;
   }
