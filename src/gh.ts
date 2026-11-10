@@ -35,6 +35,11 @@ export interface GitHub {
   remoteBranchSha(repoDir: string, branch: string): Promise<string | null>;
   /** The open PR whose head is `branch` (same repo), null when there is none. */
   findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null>;
+  /**
+   * Open pull requests on `factory/*` branches in this repo, with the files each one changes.
+   * A finished run no longer holds a path claim; these files still block another run on the same paths.
+   */
+  openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]>;
   enableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
@@ -109,9 +114,165 @@ export interface OpenPr {
   headSha: string | null;
 }
 
+/** An open PR on a `factory/*` branch, and the files it changes. */
+export interface OpenFactoryPr {
+  number: number;
+  /** Head branch (`factory/…`). */
+  branch: string;
+  files: string[];
+}
+
+function filePaths(files: unknown): string[] {
+  const rows = Array.isArray(files) ? files : files && typeof files === "object" && Array.isArray((files as { nodes?: unknown }).nodes) ? (files as { nodes: unknown[] }).nodes : [];
+  const out: string[] = [];
+  for (const file of rows) {
+    if (typeof file === "string" && file) out.push(file);
+    else if (file && typeof file === "object") {
+      const path = (file as { path?: unknown; filename?: unknown }).path ?? (file as { filename?: unknown }).filename;
+      if (typeof path === "string" && path) out.push(path);
+    }
+  }
+  return out;
+}
+
+/** `gh pr list` page size for the overlap check. Hitting it means the page is not the full open set. */
+export const OPEN_FACTORY_PR_LIMIT = 1000;
+
+/** The open-PR list filled the page, so a later factory PR may be missing. Not a clearance. */
+export class IncompletePrListError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`open PR list hit the limit (${limit}); refusing to treat it as complete`);
+    this.name = "IncompletePrListError";
+    this.limit = limit;
+  }
+}
+
+export function openFactoryPrListArgs(limit = OPEN_FACTORY_PR_LIMIT): string[] {
+  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", "number,headRefName,isCrossRepository,files"];
+}
+
+/**
+ * `gh pr list --json number,headRefName,isCrossRepository,files`.
+ * Keeps same-repo `factory/*` heads. `files` may be a flat list or `{ nodes: [...] }`.
+ * A payload that is not an array, or that fills `limit`, is incomplete: callers must block, not treat it as every open PR.
+ */
+export function readOpenFactoryPrs(payload: unknown, limit = OPEN_FACTORY_PR_LIMIT): OpenFactoryPr[] {
+  if (!Array.isArray(payload)) throw new Error("open PR list was not a JSON array");
+  if (payload.length >= limit) throw new IncompletePrListError(limit);
+  return parseOpenFactoryPrs(payload);
+}
+
+export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
+  if (!Array.isArray(payload)) return [];
+  const out: OpenFactoryPr[] = [];
+  for (const row of payload) {
+    if (!row || typeof row !== "object") continue;
+    const pr = row as { number?: unknown; headRefName?: unknown; isCrossRepository?: unknown; files?: unknown };
+    if (pr.isCrossRepository === true) continue;
+    if (typeof pr.number !== "number" || !Number.isInteger(pr.number) || pr.number <= 0) continue;
+    if (typeof pr.headRefName !== "string" || !pr.headRefName.startsWith("factory/")) continue;
+    out.push({ number: pr.number, branch: pr.headRefName, files: filePaths(pr.files) });
+  }
+  return out;
+}
+
 export interface PrStatus {
   state: "open" | "merged" | "closed";
   draft: boolean;
+  /** Head checks. Absent when this status was stored without a rollup (older callers). */
+  ci?: "green" | "red" | "pending" | "none";
+  /** `mergeStateStatus` BEHIND. */
+  behind?: boolean;
+  /** `mergeable` CONFLICTING or `mergeStateStatus` DIRTY. */
+  conflicting?: boolean;
+}
+
+function rollupNodes(rollup: unknown): unknown[] {
+  if (Array.isArray(rollup)) return rollup;
+  if (rollup && typeof rollup === "object" && Array.isArray((rollup as { nodes?: unknown }).nodes)) return (rollup as { nodes: unknown[] }).nodes;
+  return [];
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function num(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Check suite, or the Actions run id in `detailsUrl` when `gh pr view` omits the suite. */
+function suiteOf(row: Record<string, unknown>): number | undefined {
+  const direct = num(row.suite) ?? num(row.checkSuiteId);
+  if (direct !== undefined) return direct;
+  const nested = row.checkSuite ?? row.check_suite;
+  if (nested && typeof nested === "object") {
+    const suite = nested as Record<string, unknown>;
+    const id = num(suite.databaseId) ?? num(suite.id);
+    if (id !== undefined) return id;
+  }
+  const url = text(row.detailsUrl) || text(row.details_url) || text(row.targetUrl);
+  const run = /\/actions\/runs\/(\d+)/.exec(url) ?? /\/runs\/(\d+)/.exec(url);
+  return run ? Number(run[1]) : undefined;
+}
+
+/** GraphQL rollup (upper-case, `startedAt`) and REST check-runs (`started_at`) into one shape. */
+function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
+  const runs: CheckRunView[] = [];
+  for (const [index, item] of nodes.entries()) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const conclusion = text(row.conclusion).toLowerCase();
+    const status = text(row.status).toLowerCase();
+    const state = text(row.state).toLowerCase();
+    const name = text(row.name) || text(row.context);
+    if (!name && !conclusion && !status && !state) continue;
+    let mappedStatus = status === "complete" ? "completed" : status;
+    let mappedConclusion: string | null = conclusion || null;
+    if (!mappedStatus && (state === "success" || state === "failure" || state === "error" || state === "pending" || state === "expected")) {
+      mappedStatus = state === "pending" || state === "expected" ? "pending" : "completed";
+    }
+    if (!mappedConclusion && (state === "failure" || state === "error")) mappedConclusion = "failure";
+    if (!mappedConclusion && state === "success") mappedConclusion = "success";
+    if (!mappedStatus) mappedStatus = mappedConclusion ? "completed" : "pending";
+    runs.push({
+      name: name || `check-${index}`,
+      status: mappedStatus,
+      conclusion: mappedConclusion,
+      started_at: text(row.started_at) || text(row.startedAt) || null,
+      id: num(row.id) ?? num(row.databaseId),
+      suite: suiteOf(row),
+    });
+  }
+  return runs;
+}
+
+/**
+ * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
+ * CI uses `aggregateCheckRuns`: latest run of each name, draft hold, skipped `done` is not green.
+ * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
+ */
+export function prStatusFromView(raw: {
+  state?: string;
+  isDraft?: boolean;
+  mergeable?: string | null;
+  mergeStateStatus?: string | null;
+  statusCheckRollup?: unknown;
+}): PrStatus {
+  const stateRaw = (raw.state ?? "open").toLowerCase();
+  const state = stateRaw === "merged" || stateRaw === "closed" ? stateRaw : "open";
+  const fromRuns = aggregateCheckRuns(rollupToCheckRuns(rollupNodes(raw.statusCheckRollup)));
+  const mergeable = (raw.mergeable ?? "").toUpperCase();
+  const mergeState = (raw.mergeStateStatus ?? "").toUpperCase();
+  const ci: NonNullable<PrStatus["ci"]> = mergeState === "UNSTABLE" && fromRuns !== "pending" ? "red" : fromRuns;
+  return {
+    state,
+    draft: raw.isDraft === true,
+    ci,
+    behind: mergeState === "BEHIND",
+    conflicting: mergeable === "CONFLICTING" || mergeState === "DIRTY",
+  };
 }
 
 async function gh(cwd: string, args: string[]): Promise<string> {
@@ -259,6 +420,12 @@ export class GhCli implements GitHub {
     return /^([0-9a-f]{40,64})\s/m.exec(stdout)?.[1] ?? null;
   }
 
+  async openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]> {
+    // UNVERIFIED: `files[].path` from `gh pr list --json files` (docs/VERIFY.md). The page is not a clearance when it hits the limit.
+    const out = await gh(repoDir, openFactoryPrListArgs());
+    return readOpenFactoryPrs(JSON.parse(out || "[]"));
+  }
+
   async findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null> {
     const list = JSON.parse(await gh(repoDir, ["pr", "list", "--head", branch, "--state", "open", "--limit", "5", "--json", "url,isDraft,headRefOid,headRefName"]) || "[]") as {
       url: string;
@@ -324,10 +491,27 @@ export class GhCli implements GitHub {
   }
 
   async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
-    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft"])) as { state: string; isDraft: boolean };
-    const state = j.state.toLowerCase();
-    return { state: state === "merged" || state === "closed" ? state : "open", draft: j.isDraft };
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"]));
+    return prStatusFromView(j);
   }
+}
+
+/** Files a new PR would report: committed diff against `base`, empty when this is not a git checkout. */
+function committedDiffNames(repoDir: string, base: string): string[] {
+  for (const spec of [`${base}...HEAD`, base]) {
+    try {
+      const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=ACMRTUXB", spec], {
+        cwd: repoDir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const files = out.split("\n").filter(Boolean);
+      if (files.length) return files;
+    } catch {
+      // missing base, or not a git dir (unit tests)
+    }
+  }
+  return [];
 }
 
 /** In-memory GitHub for tests: no network, no `gh`. */
@@ -369,10 +553,20 @@ export class FakeGitHub implements GitHub {
     return pr ? { url: pr.url, draft: this.prStates.get(pr.url)?.draft ?? pr.draft, headSha: this.remoteShas.get(branch) ?? null } : null;
   }
 
+  /** Open `factory/*` PRs and the files they change. Tests plant a finished run's PR here. */
+  readonly factoryPrs: OpenFactoryPr[] = [];
+
+  async openFactoryPrFiles(): Promise<OpenFactoryPr[]> {
+    return this.factoryPrs.map((p) => ({ number: p.number, branch: p.branch, files: [...p.files] }));
+  }
+
   async createPr(req: PrRequest): Promise<string> {
-    const url = `https://github.test/pr/${this.prs.length + 1}`;
+    const number = this.prs.length + 1;
+    const url = `https://github.test/pr/${number}`;
     this.prs.push({ ...req, url });
     this.prStates.set(url, { state: "open", draft: req.draft });
+    // A finished run drops its slot; the PR it just opened still occupies those files.
+    if (req.head.startsWith("factory/")) this.factoryPrs.push({ number, branch: req.head, files: committedDiffNames(req.repoDir, req.base) });
     for (const label of req.labels ?? []) await this.addLabel(req.repoDir, url, label);
     return url;
   }

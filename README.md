@@ -110,7 +110,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
-| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, period stats, cleanup |
+| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
@@ -321,7 +321,7 @@ config and model choice are changed in this repository via Cloud Agent PRs (not 
 
 With `max_runs` above 1 the branch is `factory/<task>-<slug>-<run id>-s<slot>`, and port slots prefer lock slot + 1 (`{port_offset}` stays per run). Fixed host ports (`host: true` plus `ports`) are not shifted: the second run that needs them ends `env_missing`. `factory doctor` reports `max_runs`, `exclusive_paths` when set or when `max_runs` is above 1, and warns in that fixed-port case.
 
-After the plan names files, the run publishes those paths. Overlap with another live run's paths (a directory covers its children; `src/auth` does not cover `src/authz`; globs match either way) waits with `--wait` or returns `locked`. A plan that touches `exclusive_paths` is exclusive with every other such plan, even when the files differ — use it for database migrations (`supabase/migrations/**`). A run that is still planning has no paths yet and does not block; the later one yields. `factory gc` metadata archive takes every slot first. Worktree cleanup does not: it uses a short git-ops lock so a busy repo still loses merged worktrees (see Cleanup).
+After the plan names files, the run publishes those paths. Overlap with another live run's paths (a directory covers its children; `src/auth` does not cover `src/authz`; globs match either way) waits with `--wait` or returns `locked`. The same check runs against files changed by open pull requests on `factory/*` branches of this repo: a finished run no longer holds a slot, but its PR still occupies those files. The open-PR list is one page (`--limit 1000`); if that page is full, the run blocks instead of treating the missing rows as free. Overlap releases the slot and ends `locked`; the reason includes the PR number (`#123`). With `--wait` the run waits without holding a slot, then takes one again. Before push, the files actually changed are checked the same way (live runs and open factory PRs). A path-claim wait at finalize releases the slot first, like the wait after the plan. A plan that touches `exclusive_paths` is exclusive with every other such plan, even when the files differ — use it for database migrations (`supabase/migrations/**`). A run that is still planning has no paths yet and does not block; the later one yields. `factory gc` metadata archive takes every slot first. Worktree cleanup does not: it uses a short git-ops lock so a busy repo still loses merged worktrees (see Cleanup).
 
 `concurrency` is read from the checkout's `.factory/repo.yaml` at the start of the run. `pr.host_steps_section` is read from the base commit, with the rest of the PR policy.
 
@@ -787,11 +787,13 @@ API key for OpenCode Go).
 ## Status, stats, cleanup
 
 ```
-factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
-factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
+factory status [--since 12h] [--json]        # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
+factory stats --since 7d [--repo <path>] [--json]  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
 factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 90] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
+
+`factory status --since 12h` (off unless passed; `24h`, `7d`, `4w` as in `stats`) adds what finished in that window. The window is each `result.json` mtime, not a scan of `events.jsonl`: merged and closed PRs, open green PRs still on `human_review` (reason from `result.json` `risk_reasons`: risk, diff size, protected paths), open PRs blocked by draft, red CI, behind or conflicting, or a `needs_human` reason, plus `failed`, `base_red` and `needs_input` with no PR. Live PR state (merged, draft, checks, behind) still comes from GitHub. Text `factory stats` prints the top gate failures and reasons; `--json` already had both.
 
 What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
