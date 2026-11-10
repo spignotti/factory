@@ -42,7 +42,7 @@ Unverified (needs a real provider):
   (`withCommandTimeout`), and Pi kills the process tree and throws "Command timed out after N seconds"
   (verified in `test/unit/bash-timeout.test.ts` against Pi 1.4.0, re-run on 1.5.2). Stdin is `ignore` in Pi's local shell.
 
-### Providers (Pi 1.5.2 registry, not live endpoints)
+### Providers (Pi 1.4.0 registry, not live endpoints; 1.5 uses protocol-specific paths under the same hosts)
 
 - `opencode` = OpenCode Zen (`https://opencode.ai/inference/v1`), pay-per-use, never used.
 - `opencode-go` = subscription (`https://opencode.ai/inference/go/v1`). It reads the same
