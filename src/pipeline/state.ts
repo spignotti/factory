@@ -56,7 +56,7 @@ export interface RunState {
    * within `limits.base_red_resume_hours`. Absent for a local fast-check `base_red`.
    */
   base_ci?: "red" | "pending";
-  /** Set once archive retention has dropped the run directory down to the result and logs. */
+  /** @deprecated Run directories are no longer archived. Left so old state.json files still parse. */
   archived_at?: string;
   /**
    * Named webhook in `notify.yaml` `targets` (the bot that started the run). The name only — never a URL or key.

@@ -49,9 +49,9 @@ export async function resolveGcPrState(github: GitHub, repo: string, pr: string 
 }
 
 /**
- * Sandbox `home/` may go after `home_hours`.
- * Resume-status runs qualify only when `prTerminal` is set: their PR is already merged or closed,
- * so the home is cache. An open or missing PR stays protected (worktree and metadata rules are separate).
+ * Historical idle check for sandbox `home/` (kept for callers that still pass `home_hours`).
+ * `gc` itself strips a terminal run immediately once the branch is pushed or there is no PR, and never
+ * strips a resume-status run.
  */
 export function homeEligible(run: RunRecord, nowMs: number, homeHours: number, opts?: { prTerminal?: boolean }): boolean {
   const st = run.state;
@@ -101,42 +101,3 @@ export async function branchHasUnpushedCommits(repo: string, branch: string): Pr
   return { unpushed: false };
 }
 
-/**
- * needs_input is still open work. So is a live process, an interrupted run, a resumable failure,
- * and a GitHub-CI base_red still inside its resume window.
- */
-export function metadataArchiveBlocked(run: RunRecord, nowMs: number, baseRedHours: number): boolean {
-  const st = run.state;
-  if (!st || st.result === null) return true;
-  if (st.pr && !st.gc_at) return true;
-  if (st.result === "needs_human" || st.result === "needs_input") return true;
-  if (st.result === "failed" && !st.gc_at) return true;
-  if (st.result === "base_red" && !st.base_ci && !st.gc_at) return true;
-  if (st.result === "base_red" && st.base_ci && !st.gc_at) {
-    if (nowMs - lastActivity(run) < baseRedHours * HOUR) return true;
-  }
-  return false;
-}
-
-export function metadataRetentionMs(run: RunRecord, cfg: GcRetention): number {
-  const days = run.state?.result === "failed" ? cfg.metadata_failed_days : cfg.metadata_days;
-  return days * DAY;
-}
-
-/** Run ids protected as the newest `minPerRepo` runs per repository. */
-export function protectedMetadataRunIds(runs: RunRecord[], minPerRepo: number): Set<string> {
-  const byRepo = new Map<string, RunRecord[]>();
-  for (const run of runs) {
-    const repo = run.state?.repo;
-    if (!repo) continue;
-    const list = byRepo.get(repo) ?? [];
-    list.push(run);
-    byRepo.set(repo, list);
-  }
-  const protectedIds = new Set<string>();
-  for (const list of byRepo.values()) {
-    list.sort((a, b) => b.started_at.getTime() - a.started_at.getTime());
-    for (const run of list.slice(0, minPerRepo)) protectedIds.add(run.run_id);
-  }
-  return protectedIds;
-}

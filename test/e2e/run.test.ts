@@ -1033,7 +1033,7 @@ describe("run guards", () => {
     expect(r.result.result).toBe("done");
     expect(r.events.find((e) => e.event === "sandbox")?.data).toMatchObject({ mode: "required", fs: "bwrap", net: "isolated" });
     const impl = reqs.find((q) => q.role === "implement")!;
-    expect(impl.jail?.rw).toEqual([join(r.runDir, "worktree"), join(r.runDir, "home")]);
+    expect(impl.jail?.rw).toEqual([join(r.runDir, "worktree"), join(r.runDir, "home"), join(r.factoryHome, "cache")]);
     expect(impl.jail?.ro).toEqual([join(r.repo, ".git")]);
     expect(impl.jail?.hide).toEqual([r.factoryHome]);
   }, 60_000);

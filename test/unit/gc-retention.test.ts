@@ -3,17 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { gc } from "../../src/commands/gc.js";
+import { gc, resumesBaseRedAfterGc } from "../../src/commands/gc.js";
 import { deploySelfBusy, GcRetentionSchema, isProtectedFactoryPath, loadGcRetention } from "../../src/gc/retention-config.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
-import {
-  branchHasUnpushedCommits,
-  homeEligible,
-  metadataRetentionMs,
-  protectedIdleRun,
-  protectedMetadataRunIds,
-  worktreeRetentionMs,
-} from "../../src/gc/retention-helpers.js";
+import { branchHasUnpushedCommits, homeEligible, protectedIdleRun, worktreeRetentionMs } from "../../src/gc/retention-helpers.js";
 import { appendGcLog } from "../../src/gc/retention-log.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { git as gitCmd, tryRepoGitOps } from "../../src/git.js";
@@ -88,23 +81,14 @@ describe("gc retention helpers", () => {
     expect(homeEligible(locked, Date.now(), 0, { prTerminal: true })).toBe(false);
   });
 
-  it("keeps the newest 20 runs per repo for metadata", () => {
-    const runs = Array.from({ length: 25 }, (_, i) =>
-      runRecord({
-        run_id: `202610${String(i + 1).padStart(2, "0")}-120000-${String(i).padStart(6, "0")}`,
-        result: "done",
-        updated_at: new Date(Date.UTC(2026, 9, i + 1)).toISOString(),
-        repo: "/r/tp",
-      }),
-    );
-    const protectedIds = protectedMetadataRunIds(runs, 20);
-    expect(protectedIds.size).toBe(20);
-  });
-
-  it("metadata retention uses 180 days for failed runs", () => {
-    const cfg = GcRetentionSchema.parse({});
-    const failed = runRecord({ run_id: "20261001-120000-111111", result: "failed", updated_at: new Date().toISOString() });
-    expect(metadataRetentionMs(failed, cfg)).toBe(180 * DAY);
+  it("scheduled dry-run does not resume base_red runs; a live scheduled gc does", () => {
+    expect(resumesBaseRedAfterGc({ dryRun: false, scheduled: true }, true)).toBe(false);
+    expect(resumesBaseRedAfterGc({ dryRun: true, scheduled: true }, false)).toBe(false);
+    expect(resumesBaseRedAfterGc({ dryRun: false, scheduled: true }, false)).toBe(true);
+    expect(resumesBaseRedAfterGc({ dryRun: false, scheduled: false }, true)).toBe(true);
+    const cli = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
+    expect(cli).toContain("resumesBaseRedAfterGc");
+    expect(cli).not.toContain('if (!values["dry-run"]) await sweepBaseRedRuns');
   });
 
   it("protected factory paths", () => {
@@ -255,6 +239,13 @@ describe("gc retention integration", () => {
     }
   });
 
+  it("a missing flock binary does not disable gc", () => {
+    const rel = mkdtempSync(join(tmpdir(), "deploy-rel-missing-"));
+    dirs.push(rel);
+    writeFileSync(join(rel, ".deploy.lock"), "");
+    expect(deploySelfBusy({ FACTORY_RELEASES: rel, PATH: join(rel, "no-such-bin") })).toBe(false);
+  });
+
   it("a deploy flock blocks only while it is held", async () => {
     const rel = mkdtempSync(join(tmpdir(), "deploy-rel-"));
     dirs.push(rel);
@@ -264,7 +255,10 @@ describe("gc retention integration", () => {
     expect(deploySelfBusy(env)).toBe(false);
     // `flock file command` leaves the lock fd open in the child, so the whole group has to die.
     const child = spawn("flock", [lock, "sleep", "30"], { stdio: "ignore", detached: true });
-    const exited = new Promise((resolve) => child.on("exit", () => resolve(undefined)));
+    const exited = new Promise((resolve) => {
+      child.on("exit", () => resolve(undefined));
+      child.on("error", () => resolve(undefined));
+    });
     try {
       const deadline = Date.now() + 2000;
       while (!deploySelfBusy(env)) {
@@ -355,7 +349,7 @@ describe("gc retention integration", () => {
     expect(readFileSync(join(dir, "pr.md"), "utf8")).toBe("pr");
   }
 
-  it("strips home of resume runs whose PR is merged or closed after home_hours, and keeps the rest of the run", async () => {
+  it("resume-state runs keep worktree and home even when the PR is merged or closed", async () => {
     const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-resume-home-"));
     dirs.push(factoryHome);
     const merged = "https://github.com/acme/pm/pull/41";
@@ -380,14 +374,12 @@ describe("gc retention integration", () => {
         retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 24, metadata_days: 1e6 }),
         needsInputWorkingDays: 99,
       });
-      expect(r.home_removed.map((h) => h.run_id).sort()).toEqual([human, input, red].sort());
-      expect(r.home_removed.find((h) => h.run_id === human)?.reason).toContain("PR is merged");
-      expect(r.home_removed.find((h) => h.run_id === input)?.reason).toContain("PR is closed");
+      expect(r.home_removed).toEqual([]);
+      expect(r.stripped).toEqual([]);
       for (const dir of [humanDir, inputDir, redDir, liveDir]) {
-        expect(existsSync(join(dir, "home"))).toBe(dir === liveDir);
+        expect(readFileSync(join(dir, "home", "cache.bin"), "utf8")).toBe("sandbox");
         expectMetadata(dir);
       }
-      expect(r.metadata_moved).toEqual([]);
       expect(r.cleaned).toEqual([]);
       expect(r.skipped.some((s) => s.run_id === liveId && /live/.test(s.reason))).toBe(true);
     } finally {
@@ -423,29 +415,57 @@ describe("gc retention integration", () => {
     }
   });
 
-  it("still strips done and abandoned homes after home_hours and keeps a fresher terminal home", async () => {
+  it("strips a terminal run immediately and keeps log files", async () => {
     const factoryHome = mkdtempSync(join(tmpdir(), "fh-gc-terminal-home-"));
     dirs.push(factoryHome);
     const doneId = "20261104-220805-15d52e";
     const abandonedId = "20261104-230805-15d52f";
     const freshId = "20261105-000805-15d530";
-    const doneDir = writeGcRun(factoryHome, { id: doneId, result: "done", idleMs: 25 * HOUR, pr: null });
-    const abandonedDir = writeGcRun(factoryHome, { id: abandonedId, result: "abandoned", idleMs: 25 * HOUR, pr: null });
-    const freshDir = writeGcRun(factoryHome, { id: freshId, result: "done", idleMs: HOUR, pr: null });
+    const doneDir = writeGcRun(factoryHome, { id: doneId, result: "done", idleMs: HOUR, pr: null });
+    const abandonedDir = writeGcRun(factoryHome, { id: abandonedId, result: "abandoned", idleMs: HOUR, pr: null });
+    const freshDir = writeGcRun(factoryHome, { id: freshId, result: "failed", idleMs: 60_000, pr: null });
+    const wt = join(factoryHome, "wt");
+    mkdirSync(join(wt, "pkg", "node_modules", "left"), { recursive: true });
+    mkdirSync(join(wt, ".venv"), { recursive: true });
+    mkdirSync(join(wt, "src-keep"), { recursive: true });
+    writeFileSync(join(wt, "pkg", "node_modules", "left", "index.js"), "x");
+    const st = JSON.parse(readFileSync(join(doneDir, "state.json"), "utf8")) as RunState;
+    writeFileSync(join(doneDir, "state.json"), JSON.stringify({ ...st, worktree: wt }));
+    writeFileSync(join(doneDir, "plan.json"), "{}");
+    writeFileSync(join(doneDir, "gates-1.json"), "{}");
+    mkdirSync(join(doneDir, "evidence"), { recursive: true });
+    writeFileSync(join(doneDir, "evidence", "shot.png"), "png");
+    writeFileSync(join(doneDir, "events.jsonl"), "{}\n" + JSON.stringify({ data: { evidence: { sha: "abc", files: 1 } } }) + "\n");
+    mkdirSync(join(doneDir, "services"), { recursive: true });
+    writeFileSync(join(doneDir, "services", "web.log"), "log");
+    mkdirSync(join(freshDir, "evidence"), { recursive: true });
+    writeFileSync(join(freshDir, "evidence", "keep.png"), "png");
     const r = await gc({
       factoryHome,
       github: new FakeGitHub(),
       evidence: false,
       retention: GcRetentionSchema.parse({ dry_run: false, home_hours: 24, metadata_days: 1e6 }),
     });
-    expect(r.home_removed.map((h) => h.run_id).sort()).toEqual([abandonedId, doneId].sort());
+    expect(r.home_removed.map((h) => h.run_id).sort()).toEqual([abandonedId, doneId, freshId].sort());
     expect(r.home_removed.every((h) => h.reason.startsWith("terminal run"))).toBe(true);
+    expect(r.stripped).toEqual([{ run_id: doneId, repo: factoryHome, pr: null, removed: [".venv", "pkg/node_modules"] }]);
     expect(existsSync(join(doneDir, "home"))).toBe(false);
-    expect(existsSync(join(abandonedDir, "home"))).toBe(false);
-    expect(readFileSync(join(freshDir, "home", "cache.bin"), "utf8")).toBe("sandbox");
-    expectMetadata(doneDir);
+    expect(existsSync(join(doneDir, "evidence"))).toBe(false);
+    expect(existsSync(join(doneDir, "services"))).toBe(false);
+    expect(existsSync(join(wt, "pkg", "node_modules"))).toBe(false);
+    expect(existsSync(join(wt, ".venv"))).toBe(false);
+    expect(existsSync(join(wt, "src-keep"))).toBe(true);
+    expect(existsSync(join(freshDir, "evidence", "keep.png"))).toBe(true);
+    expect(readFileSync(join(doneDir, "state.json"), "utf8")).toContain("run_id");
+    expect(readFileSync(join(doneDir, "result.json"), "utf8")).toContain("result");
+    expect(readFileSync(join(doneDir, "events.jsonl"), "utf8")).toContain("sha");
+    expect(readFileSync(join(doneDir, "plan.md"), "utf8")).toBe("plan");
+    expect(readFileSync(join(doneDir, "plan.json"), "utf8")).toBe("{}");
+    expect(readFileSync(join(doneDir, "gates-1.json"), "utf8")).toBe("{}");
+    expect(readFileSync(join(doneDir, "reviews", "r1.md"), "utf8")).toBe("review");
+    expect(readFileSync(join(doneDir, "pr.md"), "utf8")).toBe("pr");
     expectMetadata(abandonedDir);
-    expect(r.metadata_moved).toEqual([]);
+    expect(existsSync(join(factoryHome, "archive"))).toBe(false);
   });
 
   it("keeps a resume home when PR state cannot be read", async () => {
@@ -466,13 +486,12 @@ describe("gc retention integration", () => {
     });
     expect(r.home_removed).toEqual([]);
     expect(readFileSync(join(dir, "home", "cache.bin"), "utf8")).toBe("sandbox");
-    expect(r.skipped.some((s) => s.run_id === id && s.reason.startsWith("PR state unknown"))).toBe(true);
   });
 
   it("appendGcLog rotates", () => {
     const fh = mkdtempSync(join(tmpdir(), "fh-log-"));
     dirs.push(fh);
-    appendGcLog(fh, { at: new Date().toISOString(), scheduled: false, report: { dry_run: true, cleaned: [], skipped: [], stripped: [], evidence: [], abandoned: [], home_removed: [], metadata_moved: [], archive_purged: [], worktree_pruned: [] } });
+    appendGcLog(fh, { at: new Date().toISOString(), scheduled: false, report: { dry_run: true, cleaned: [], skipped: [], stripped: [], evidence: [], abandoned: [], home_removed: [], worktree_pruned: [] } });
     expect(readFileSync(join(fh, "gc.log"), "utf8")).toContain("dry_run");
   });
 });

@@ -459,7 +459,7 @@ With `sandbox: off` agents can read the secret files themselves.
 ## Sandbox (Linux)
 
 Agent bash, repo `setup`, gate checks and red-green test runs are jailed with bubblewrap inside a pasta
-network namespace: only the run's worktree and agent HOME are writable, git metadata is
+network namespace: only the run's worktree, agent HOME and `$FACTORY_HOME/cache` are writable, git metadata is
 read-only, host loopback, Docker bridge, metadata service and LAN are unreachable, the internet works.
 Jailed commands run as the factory's own uid/gid with all capabilities dropped (never root, so file
 permissions apply as in CI). File
@@ -776,24 +776,58 @@ API key for OpenCode Go).
 ```
 factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
 factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
-factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 90] [--json]
+factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
 
 What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
 - **No PR** (failed, needs_input, needs_human, interrupted): worktree after 7 idle days (failed) or 14 days (needs_input / needs_human / base_red); branch kept unless unpushed commits block removal.
-- **PR open, run finished,** idle for `--strip-after-hours` (default 12): only `node_modules`, `.venv` and `.nox` at the worktree root.
+- **Terminal run** (`done`, `failed`, `abandoned`) whose branch is pushed, or that has no PR: deletes `home/`, `evidence/` after it was published, service logs, and every `node_modules`, `.venv` and `.nox` under the worktree. Keeps `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md` and review/gate reports in `runs/<id>/`. The same strip runs from the automatic gc at the start of `factory run`. A resume-status run (`needs_input`, `needs_human`, `base_red`) keeps its worktree and `home/`. An unpushed branch is not stripped.
 - **needs_input** with no answer for 2 working days (Mon–Fri, Europe/Berlin, from `state.updated_at`): the run is abandoned (worktree removed, result and logs kept) and the repo's notify hook is POSTed so the bot can tell the owner. A live lock is left alone.
-- **Sandbox home/** after 24 h idle (no repo lock; a live run is kept): terminal runs, and `needs_input` / `needs_human` / `base_red` whose PR is already merged or closed. An open or missing PR keeps `home/`. **Metadata** tarballed to `$FACTORY_HOME/archive/runs/` after 90 d (180 d for failed), keeping the newest 20 runs per repo; **archive/runs** tarballs dropped after 180 d. Protected: active runs; needs_input / needs_human / base_red worktrees and metadata while idle &lt; 14 d; unpushed commits; dirty worktrees (no `--force` on `--scheduled`).
+- Run directories are not archived and are not deleted by age, so `status` and `stats` keep seeing them. Protected: a live lock; resume-status worktrees while idle &lt; 14 d (no PR); unpushed commits; dirty worktrees (no `--force` on `--scheduled`).
 
 `factory abandon <run-id>` does the same abandon by hand (stale lock released; a process that is still running must be stopped first). The branch is kept. `factory resume` refuses an abandoned run.
 
-A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume. Local fast checks that failed on the base are not resumed. The daily cron below is the timer when nothing else starts a run.
+A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by a live `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume, and neither does `factory gc --scheduled` while `gc.retention.dry_run` is true. Local fast checks that failed on the base are not resumed. The daily LaunchAgent below is the timer when nothing else starts a run.
 
-A live run (one that holds a lock slot) is left untouched, and a worktree with uncommitted changes needs `--force`. Removing `home/` does not take the repo lock. Worktree removal and local `factory/*` branch deletion take a short `factory.gitops.lock` in the git common dir (the same lock as `git worktree add` / `remove` / `prune` elsewhere) and wait up to 60s for it, so they proceed while another run of the repo is active. Metadata archive still takes every slot. When deploy-self's `once` holds its deploy flock, gc skips deletions; the flock dies with that process, so a finished deploy cannot skip the daily run permanently.
-`factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence pruning, a 5s git-ops wait, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The base_red resume sweep still runs.
-Evidence pruning (30 days) runs only with an explicit `factory gc`. On this box the scheduled gc already runs daily at 04:30 via supercronic, supervisord program `factory-gc`, with `gc.retention.dry_run: false` (see [ops/supercronic/factory-gc.crontab](ops/supercronic/factory-gc.crontab) and [docs/GC_RETENTION.md](docs/GC_RETENTION.md)). The built-in profile default remains `dry_run: true` until a box flips it after reviewing `$FACTORY_HOME/gc.log`.
+A live run (one that holds a lock slot) is left untouched, and a worktree with uncommitted changes needs `--force`. Stripping `home/` and dependency folders does not take the repo lock. Worktree removal and local `factory/*` branch deletion take a short `factory.gitops.lock` in the git common dir (the same lock as `git worktree add` / `remove` / `prune` elsewhere) and wait up to 60s for it, so they proceed while another run of the repo is active. When deploy-self's `once` holds its deploy flock, gc skips deletions; the flock dies with that process, so a finished deploy cannot skip the daily run permanently. A missing `flock` binary does not skip gc.
+`factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence-branch pruning, a 5s git-ops wait, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The strip of terminal homes and dependency folders is included. The base_red resume sweep still runs.
+Evidence-branch pruning (30 days) runs only with an explicit `factory gc`. Schedule a daily `factory gc --scheduled` with the LaunchAgent below ([docs/GC_RETENTION.md](docs/GC_RETENTION.md)). The built-in profile default remains `dry_run: true` until you flip it after reviewing `$FACTORY_HOME/gc.log`.
+
+Package downloads for setup, checks and agents share `$FACTORY_HOME/cache` (`UV_CACHE_DIR`, `npm_config_cache`, `PIP_CACHE_DIR`, `XDG_CACHE_HOME`). `HOME` stays the per-run directory, so credentials are not shared. The Linux jail bind-mounts that cache read-write and still hides the rest of `$FACTORY_HOME`.
+
+Daily gc on macOS, `~/Library/LaunchAgents/com.factory.gc.plist` (04:30; `factory` on `PATH` or an absolute path):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factory.gc</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>exec "$HOME/.local/bin/factory" gc --scheduled</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+</dict>
+</plist>
+```
+
+```
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.factory.gc.plist
+```
+
+`--scheduled` never forces. It stays dry-run while `gc.retention.dry_run` is true.
 `factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.
 
 ## JSON contracts

@@ -1,43 +1,16 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import type { GcOptions, GcReport } from "../commands/gc.js";
-import { git, repoLockId, tryRepoGitOps } from "../git.js";
-import { acquireRepoLock, activeHolders } from "../pipeline/lock.js";
-import { loadRepoConfig } from "../schemas/repo.js";
+import { git, tryRepoGitOps } from "../git.js";
+import { activeHolders } from "../pipeline/lock.js";
 import { listRuns } from "../runs.js";
-import { isProtectedFactoryPath, type GcRetention } from "./retention-config.js";
+import { isProtectedFactoryPath } from "./retention-config.js";
 import type { RunRecord } from "../runs.js";
-import {
-  DAY,
-  HOUR,
-  dirBytes,
-  homeEligible,
-  isResumeResult,
-  lastActivity,
-  metadataArchiveBlocked,
-  metadataRetentionMs,
-  protectedIdleRun,
-  protectedMetadataRunIds,
-  resolveGcPrState,
-} from "./retention-helpers.js";
+import { branchHasUnpushedCommits, dirBytes, isResumeResult } from "./retention-helpers.js";
 
-function lockMaxRuns(repo: string): number {
-  try {
-    return loadRepoConfig(repo).concurrency.max_runs;
-  } catch {
-    return 1;
-  }
-}
-
-function baseRedHours(repo: string): number {
-  try {
-    if (existsSync(repo)) return loadRepoConfig(repo).limits.base_red_resume_hours;
-  } catch {
-    // default
-  }
-  return 48;
-}
+/** Regenerable dependency folders (`setup` recreates them), anywhere under the worktree. */
+export const HEAVY_DIRS = ["node_modules", ".venv", ".nox"] as const;
+const HEAVY = new Set<string>(HEAVY_DIRS);
 
 /**
  * True when `path` is a real directory (not a symlink) whose resolved location is strictly inside the resolved
@@ -54,195 +27,122 @@ export function realDirInside(root: string, path: string): boolean {
   }
 }
 
-/**
- * Takes every lock slot of the run's repository for `fn` (metadata archive). Returns false when a slot
- * is held. Sandbox `home/` does not use this: that directory is the run's cache, not a git operation.
- */
-async function withRunRepoLock(opts: GcOptions, run: RunRecord, tag: string, fn: () => void): Promise<boolean> {
-  const repo = run.state!.repo;
-  let id = repo;
-  try {
-    if (existsSync(repo)) id = await repoLockId(repo);
-  } catch {
-    // fall back to the path
-  }
-  const release = acquireRepoLock(opts.factoryHome, id, `${tag}-${run.run_id}`, { maxRuns: existsSync(repo) ? lockMaxRuns(repo) : 1, exclusive: true });
-  if (!release) return false;
-  try {
-    fn();
-  } finally {
-    release();
-  }
-  return true;
-}
-
 function runIsLive(factoryHome: string, runId: string): boolean {
   return activeHolders(factoryHome).some((h) => h.runId === runId);
 }
 
+/** A progress event recorded a successful evidence publish (`data.evidence.sha`). */
+export function evidencePublished(runDir: string): boolean {
+  const path = join(runDir, "events.jsonl");
+  if (!existsSync(path)) return false;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.includes('"sha"')) continue;
+    try {
+      const ev = JSON.parse(line) as { data?: { evidence?: { sha?: string } } };
+      if (ev.data?.evidence?.sha) return true;
+    } catch {
+      // a torn line is not a publish
+    }
+  }
+  return false;
+}
+
+function heavyUnder(worktree: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (name === ".git") continue;
+      const p = join(dir, name);
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      if (HEAVY.has(name)) {
+        if (realDirInside(worktree, p)) out.push(relative(worktree, p));
+        continue;
+      }
+      walk(p);
+    }
+  };
+  walk(worktree);
+  return out;
+}
+
 /**
- * Removes eligible `runs/<id>/home` directories. No repo lock: the directory is that run's sandbox
- * cache. A live holder is kept. Resume-status runs (`needs_input` / `needs_human` / `base_red`) keep
- * `home/` while the PR is open or missing; a merged or closed PR is treated like a terminal run after
- * `home_hours`. Worktree and metadata retention for those runs is unchanged.
+ * Terminal run whose branch is pushed, or that has no PR: the heavy data may go.
+ * Resume-status runs (`needs_input` / `needs_human` / `base_red`) and live runs keep worktree and home.
+ * A PR whose branch still has unpushed commits is not stripped (the push check fails closed).
  */
-export async function gcRunHomes(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): Promise<void> {
+async function stripEligible(opts: GcOptions, run: RunRecord): Promise<"strip" | "live" | "keep"> {
+  const st = run.state;
+  if (!st || st.result === null) return "keep";
+  if (runIsLive(opts.factoryHome, run.run_id)) return "live";
+  if (st.result === "locked" || isResumeResult(st.result)) return "keep";
+  if (!st.pr) return "strip";
+  if (!st.branch || !existsSync(st.repo)) return "keep";
+  const unpushed = await branchHasUnpushedCommits(st.repo, st.branch);
+  return unpushed.unpushed ? "keep" : "strip";
+}
+
+function dropDir(path: string, dryRun: boolean): void {
+  if (!dryRun) rmSync(path, { recursive: true, force: true });
+}
+
+/**
+ * Deletes regenerable weight from a terminal run: `home/`, published `evidence/`, service logs, and every
+ * `node_modules` / `.venv` / `.nox` under the worktree. Keeps `events.jsonl`, `result.json`, `state.json`,
+ * `plan.json`, `pr.md`, review and gate reports. Does not remove the worktree (the worktree stage does that
+ * when the PR is merged or closed). No repo lock: these paths are cache, not a git operation.
+ */
+export async function gcStripTerminal(opts: GcOptions, report: GcReport): Promise<void> {
   const runsRoot = join(opts.factoryHome, "runs");
-  const now = nowMs();
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
     if (!st) continue;
-    const home = join(run.dir, "home");
-    if (!existsSync(home)) continue;
-    let reason = `terminal run idle ≥ ${cfg.home_hours}h; sandbox home is cache`;
-    if (isResumeResult(st.result)) {
-      // Open and missing PRs stay protected past the resume window too: only a finished PR makes home cache.
-      if (!st.pr || now - lastActivity(run) < cfg.home_hours * HOUR) continue;
-      const looked = await resolveGcPrState(opts.github, st.repo, st.pr);
-      if (looked.state === "unknown") {
-        report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: looked.reason });
-        continue;
-      }
-      if (looked.state !== "merged" && looked.state !== "closed") continue;
-      if (!homeEligible(run, now, cfg.home_hours, { prTerminal: true })) continue;
-      reason = `resume run idle ≥ ${cfg.home_hours}h and PR is ${looked.state}; sandbox home is cache`;
-    } else {
-      if (protectedIdleRun(run, now, cfg.worktree_resume_days)) continue;
-      if (!homeEligible(run, now, cfg.home_hours)) continue;
-    }
-    if (isProtectedFactoryPath(opts.factoryHome, home)) continue;
-    if (!realDirInside(runsRoot, home)) {
-      report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "home/ is a symlink or outside $FACTORY_HOME/runs; kept" });
-      continue;
-    }
-    const bytes = dirBytes(home);
-    const entry = { run_id: run.run_id, repo: st.repo, bytes, reason };
-    // The holder list is the live-run guard. A resume takes its slot before it recreates home/.
-    if (runIsLive(opts.factoryHome, run.run_id)) {
+    const eligible = await stripEligible(opts, run);
+    if (eligible === "keep") continue;
+    if (eligible === "live") {
       report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "run is live; home/ kept" });
       continue;
     }
-    if (opts.dryRun) {
-      report.home_removed.push(entry);
-      continue;
-    }
-    rmSync(home, { recursive: true, force: true });
-    report.home_removed.push(entry);
-  }
-}
-
-/**
- * Moves old run metadata into `$FACTORY_HOME/archive/runs/<id>.tar.gz` (without `home/` and `worktree/`).
- * The tarball is written to a temp name, listed back with `tar -tzf`, then renamed; the run directory is removed
- * only after that. A run whose recorded worktree still exists is skipped (the worktree stage owns it).
- */
-export async function gcMetadataArchive(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): Promise<void> {
-  const runs = listRuns(opts.factoryHome);
-  const protectedIds = protectedMetadataRunIds(runs, cfg.metadata_min_per_repo);
-  const live = new Set(activeHolders(opts.factoryHome).map((h) => h.runId).filter((id): id is string => !!id));
-  const runsRoot = join(opts.factoryHome, "runs");
-  const archiveRoot = join(opts.factoryHome, "archive", "runs");
-  const now = nowMs();
-  for (const run of runs) {
-    const st = run.state;
-    if (!st || live.has(run.run_id) || protectedIds.has(run.run_id)) continue;
-    if (protectedIdleRun(run, now, cfg.worktree_resume_days)) continue;
-    if (metadataArchiveBlocked(run, now, baseRedHours(st.repo))) continue;
-    if (now - lastActivity(run) < metadataRetentionMs(run, cfg)) continue;
-    const skip = (reason: string) => void report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason });
-    if (st.worktree && existsSync(st.worktree)) {
-      skip("worktree still exists; metadata kept until the worktree is collected");
-      continue;
-    }
-    if (!realDirInside(runsRoot, run.dir) || dirname(run.dir) !== runsRoot) {
-      skip("run directory is a symlink or outside $FACTORY_HOME/runs; kept");
-      continue;
-    }
-    const tarball = join(archiveRoot, `${run.run_id}.tar.gz`);
-    if (isProtectedFactoryPath(opts.factoryHome, tarball)) continue;
-    const bytes = dirBytes(run.dir);
-    const entry = { run_id: run.run_id, repo: st.repo, tarball, bytes, reason: "metadata past retention; tarball to archive/runs" };
-    if (opts.dryRun) {
-      report.metadata_moved.push(entry);
-      continue;
-    }
-    const out = { failure: "" };
-    const done = await withRunRepoLock(opts, run, "gc-meta", () => {
-      const tmp = `${tarball}.tmp-${process.pid}`;
-      try {
-        mkdirSync(archiveRoot, { recursive: true });
-        const name = basename(run.dir);
-        execFileSync("tar", ["-czf", tmp, "--exclude", `${name}/home`, "--exclude", `${name}/worktree`, "-C", runsRoot, name], { stdio: "ignore" });
-        const listing = execFileSync("tar", ["-tzf", tmp], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-        if (!listing.split("\n").includes(`${name}/state.json`)) throw new Error("tarball does not contain state.json");
-        renameSync(tmp, tarball);
-      } catch (e) {
-        try {
-          rmSync(tmp, { force: true });
-        } catch {
-          // nothing was written
-        }
-        out.failure = (e as Error).message.slice(0, 200) || "tar failed";
-        return;
+    const home = join(run.dir, "home");
+    if (existsSync(home)) {
+      if (isProtectedFactoryPath(opts.factoryHome, home) || !realDirInside(runsRoot, home)) {
+        report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "home/ is a symlink or outside $FACTORY_HOME/runs; kept" });
+      } else {
+        const bytes = dirBytes(home);
+        dropDir(home, opts.dryRun === true);
+        report.home_removed.push({
+          run_id: run.run_id,
+          repo: st.repo,
+          bytes,
+          reason: st.pr ? "terminal run, branch pushed; sandbox home is cache" : "terminal run, no PR; sandbox home is cache",
+        });
       }
-      rmSync(run.dir, { recursive: true, force: true });
-    });
-    if (!done) {
-      skip("repository is locked by a running factory process; metadata kept");
-      continue;
     }
-    if (out.failure) {
-      skip(`tarball failed; run directory kept (${out.failure})`);
-      continue;
+    const evidence = join(run.dir, "evidence");
+    if (existsSync(evidence) && evidencePublished(run.dir) && realDirInside(runsRoot, evidence) && !isProtectedFactoryPath(opts.factoryHome, evidence)) {
+      dropDir(evidence, opts.dryRun === true);
     }
-    report.metadata_moved.push(entry);
-  }
-}
-
-/** Purges old tarballs and heavy dirs under `$FACTORY_HOME/archive/runs`. */
-export function gcArchiveRuns(opts: GcOptions, report: GcReport, cfg: GcRetention, nowMs: () => number): void {
-  const root = join(opts.factoryHome, "archive", "runs");
-  if (!existsSync(root)) return;
-  const cutoff = nowMs() - cfg.archive_tarball_days * DAY;
-  for (const name of readdirSync(root)) {
-    const path = join(root, name);
-    if (isProtectedFactoryPath(opts.factoryHome, path)) continue;
-    const st = lstatSync(path);
-    const mtime = st.mtimeMs;
-    if (st.isDirectory()) {
-      for (const heavy of ["home", "worktree"] as const) {
-        const sub = join(path, heavy);
-        if (!existsSync(sub)) continue;
-        const bytes = dirBytes(sub);
-        const reason = `strip ${heavy}/ from archived run dir`;
-        if (opts.dryRun) {
-          report.archive_purged.push({ path: sub, bytes, reason });
-          continue;
-        }
-        rmSync(sub, { recursive: true, force: true });
-        report.archive_purged.push({ path: sub, bytes, reason });
-      }
-      if (mtime >= cutoff) continue;
-      const bytes = dirBytes(path);
-      const reason = `archived run dir older than ${cfg.archive_tarball_days} days`;
-      if (opts.dryRun) {
-        report.archive_purged.push({ path, bytes, reason });
-        continue;
-      }
-      rmSync(path, { recursive: true, force: true });
-      report.archive_purged.push({ path, bytes, reason });
-      continue;
+    const services = join(run.dir, "services");
+    if (existsSync(services) && realDirInside(runsRoot, services) && !isProtectedFactoryPath(opts.factoryHome, services)) {
+      dropDir(services, opts.dryRun === true);
     }
-    if (!name.endsWith(".tar.gz")) continue;
-    if (mtime >= cutoff) continue;
-    const bytes = st.size;
-    const reason = `metadata tarball older than ${cfg.archive_tarball_days} days`;
-    if (opts.dryRun) {
-      report.archive_purged.push({ path, bytes, reason });
-      continue;
-    }
-    rmSync(path, { force: true });
-    report.archive_purged.push({ path, bytes, reason });
+    const wt = st.worktree && existsSync(st.worktree) ? st.worktree : null;
+    if (!wt) continue;
+    const heavy = heavyUnder(wt).sort();
+    if (!heavy.length) continue;
+    if (opts.dryRun !== true) for (const rel of heavy) rmSync(join(wt, rel), { recursive: true, force: true });
+    report.stripped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed: heavy });
   }
 }
 

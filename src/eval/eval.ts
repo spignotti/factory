@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, globSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import { buildAgentEnv, prepareAgentHome } from "../agents/env.js";
+import { buildAgentEnv, ensureSharedCache, prepareAgentHome } from "../agents/env.js";
 import type { AgentRunner } from "../agents/runner.js";
 import { type Layer, loadLayers, resolveProfile } from "../config.js";
 import type { FactoryEvent, RunResult } from "../events.js";
@@ -155,11 +155,11 @@ interface Env {
 
 function envFor(deps: EvalDeps, repo: RepoConfig, root: string, cwd: string): Env {
   const home = prepareAgentHome(join(root, "check"));
-  const env = buildAgentEnv(deps.parentEnv ?? process.env, { home, extra: repo.agent_env });
+  const env = buildAgentEnv(deps.parentEnv ?? process.env, { home, factoryHome: deps.factoryHome, extra: repo.agent_env });
   const sandbox = deps.sandbox;
   if (!sandbox || sandbox.mode === "off") return { env, home };
   const common = gitCommonDir(cwd);
-  return { env, home, jail: { sandbox, rw: [cwd, home], ro: common ? [common] : [], hide: [deps.factoryHome, join(root, "home")] } };
+  return { env, home, jail: { sandbox, rw: [cwd, home, ensureSharedCache(deps.factoryHome)], ro: common ? [common] : [], hide: [deps.factoryHome, join(root, "home")] } };
 }
 
 /** Dependency dirs `setup` recreates. The pipeline's copies point at the run HOME, which the check jail hides. */

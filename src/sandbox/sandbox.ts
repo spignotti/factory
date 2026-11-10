@@ -11,7 +11,7 @@ import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
  *   same paths, so in-process tools and bash agree on paths); the worktree's `.git` file and the main
  *   repo's git dir read-only (git is read-only for agents; a writable gitdir could set hooks or
  *   `core.fsmonitor` that would run on the host); a private /tmp. Never bound: /run (docker socket),
- *   other homes, `$FACTORY_HOME` (auth.json) except the run's own dirs.
+ *   other homes, `$FACTORY_HOME` (auth.json) except the run's own dirs and `$FACTORY_HOME/cache`.
  * - Network: own namespace through pasta without host loopback (`--no-map-gw`, no port forwards in
  *   either direction except a service's explicit ports) and
  *   with blackhole routes for private, link-local and CGNAT ranges, no on-link subnet and IPv6 off, so

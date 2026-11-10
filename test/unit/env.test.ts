@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -26,6 +26,20 @@ describe("agent env allowlist", () => {
     expect(env).not.toHaveProperty("DATABASE_URL");
     expect(env).not.toHaveProperty("GH_TOKEN");
     expect(Object.values(env)).not.toContain("fake-foo-secret-value");
+  });
+
+  it("points package caches at $FACTORY_HOME/cache and keeps HOME isolated", () => {
+    const fh = mkdtempSync(join(tmpdir(), "fh-cache-"));
+    const env = buildAgentEnv(parent, { home, factoryHome: fh });
+    const cache = join(fh, "cache");
+    expect(env.UV_CACHE_DIR).toBe(cache);
+    expect(env.npm_config_cache).toBe(cache);
+    expect(env.PIP_CACHE_DIR).toBe(cache);
+    expect(env.XDG_CACHE_HOME).toBe(cache);
+    expect(env.HOME).toBe(home);
+    expect(env.HOME).not.toBe(cache);
+    expect(existsSync(cache)).toBe(true);
+    rmSync(fh, { recursive: true, force: true });
   });
 
   it("isolates HOME, git and gh config", () => {

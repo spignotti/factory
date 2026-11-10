@@ -1,4 +1,4 @@
-import { existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Sleep } from "../agents/fake-runner.js";
 import type { GitHub } from "../gh.js";
@@ -12,7 +12,7 @@ import { BERLIN, workingDaysElapsed } from "../working-days.js";
 import { deploySelfBusy, loadGcRetention } from "../gc/retention-config.js";
 import { branchHasUnpushedCommits, HOUR as MS_HOUR, lastActivity, protectedIdleRun, resolveGcPrState, worktreeRetentionMs } from "../gc/retention-helpers.js";
 import { appendGcLog } from "../gc/retention-log.js";
-import { gcArchiveRuns, gcMetadataArchive, gcRunHomes, pruneFactoryWorktrees } from "../gc/retention-stages.js";
+import { gcStripTerminal, pruneFactoryWorktrees } from "../gc/retention-stages.js";
 import type { Io } from "./gates.js";
 import { abandonRun } from "./abandon.js";
 import type { z } from "zod";
@@ -56,14 +56,8 @@ function markCollected(run: RunRecord, at: string): void {
 
 /** Default worktree retention for failed no-PR runs when `--retention-days` is omitted. */
 export const GC_RETENTION_DAYS = 7;
-/** @deprecated Use profile `gc.retention.metadata_days` (default 90). CLI `--archive-days` overrides metadata retention. */
-export const ARCHIVE_RETENTION_DAYS = 90;
 /** A needs_input run with no answer for this many Mon–Fri days (Europe/Berlin) is abandoned. */
 export const NEEDS_INPUT_WORKING_DAYS = 2;
-/** Finished runs with an open PR keep their worktree but lose the regenerable dependency folders after this. */
-export const GC_STRIP_AFTER_HOURS = 12;
-/** Regenerable dependency folders at the worktree root (`setup` recreates them). */
-export const HEAVY_DIRS = ["node_modules", ".venv", ".nox"] as const;
 
 export interface GcOptions {
   factoryHome: string;
@@ -72,17 +66,12 @@ export interface GcOptions {
   force?: boolean;
   now?: () => number;
   retentionDays?: number;
-  stripAfterHours?: number;
   /** Evidence-branch retention (a commit and a push per repository); off for the automatic gc of `factory run`. */
   evidence?: boolean;
-  /** Override profile `gc.retention.metadata_days` for metadata tarball moves. */
-  archiveDays?: number;
-  /** When true, default dry-run comes from profile `gc.retention.dry_run` (for cron). */
+  /** When true, default dry-run comes from profile `gc.retention.dry_run` (for cron / LaunchAgent). */
   scheduled?: boolean;
   /** Pre-loaded retention config (tests). */
   retention?: ReturnType<typeof loadGcRetention>;
-  /** Home/metadata/archive stages and gc.log (off for automatic gc at run start). */
-  retentionStages?: boolean;
   writeLog?: boolean;
   /** needs_input with no answer for this many working days (Mon–Fri, Europe/Berlin) is abandoned. Default 2. */
   needsInputWorkingDays?: number;
@@ -111,10 +100,21 @@ function emptyReport(dryRun: boolean): GcReport {
     evidence: [],
     abandoned: [],
     home_removed: [],
-    metadata_moved: [],
-    archive_purged: [],
     worktree_pruned: [],
   };
+}
+
+/**
+ * Scheduled gc is dry-run when the profile says so, even if the CLI default is live.
+ * A dry-run must not resume `base_red` runs (`resumesBaseRedAfterGc`).
+ */
+export function effectiveGcDryRun(opts: { dryRun?: boolean; scheduled?: boolean }, retentionDryRun: boolean): boolean {
+  return opts.scheduled ? opts.dryRun === true || retentionDryRun : (opts.dryRun ?? false);
+}
+
+/** True when `factory gc` should continue waiting GitHub-CI `base_red` runs. Scheduled dry-run does not. */
+export function resumesBaseRedAfterGc(opts: { dryRun?: boolean; scheduled?: boolean }, retentionDryRun: boolean): boolean {
+  return !effectiveGcDryRun(opts, retentionDryRun);
 }
 
 /**
@@ -123,29 +123,29 @@ function emptyReport(dryRun: boolean): GcReport {
  *   `git push --delete`, no force.
  * - No PR (failed, needs_input, needs_human, interrupted) and idle for `retentionDays` (default 7): removes the
  *   worktree only; the local branch and its commits stay. Such a run can no longer be resumed.
- * - PR open and the run finished, idle for `stripAfterHours` (default 12): deletes only `node_modules`, `.venv`
- *   and `.nox` at the worktree root; the worktree stays.
+ * - A terminal run whose branch is pushed, or that has no PR: deletes `home/`, published `evidence/`,
+ *   service logs, and every `node_modules` / `.venv` / `.nox` under the worktree. The run directory keeps
+ *   `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md` and review/gate reports. Resume-status
+ *   runs keep the worktree and `home/`. This strip also runs from the automatic gc at `factory run` start.
+ * - PR open: the worktree stays (dependency folders are already stripped when the run is terminal and pushed).
  * A dirty worktree is kept unless `force`. A run that holds a lock slot is left untouched. Worktree removal
  * and local branch deletion take the per-repo git-ops lock (not a run slot), so they proceed while another
  * run of the same repo is active; PR state is looked up before that lock, so a parallel `factory run` is
- * never blocked by a network call. Sandbox `home/` is removed with no repo lock: terminal runs after
- * `home_hours`, and resume-status runs the same way once their PR is merged or closed.
+ * never blocked by a network call. The strip takes no repo lock.
  * Evidence retention: run folders older than 30 days leave the `factory-evidence`
  * branch of every repository the factory ran in, with a normal commit and a plain push.
  * needs_input with no answer for 2 working days (Mon–Fri, Europe/Berlin) is abandoned and the owner is notified.
- * Run directories idle for `archiveDays` (default 14) keep the result summary and logs; active runs are not touched.
+ * Run directories are not archived and are not deleted by age; status and stats keep seeing them.
  */
 export async function gc(opts: GcOptions): Promise<GcReport> {
-  let cfg = opts.retention ?? loadGcRetention(opts.factoryHome);
-  if (opts.archiveDays !== undefined) cfg = { ...cfg, metadata_days: opts.archiveDays };
-  // `--scheduled` (cron) is dry-run whenever the profile says so, even though the CLI passes dryRun=false by
-  // default, and it never forces: dirty worktrees are always kept on the scheduled path.
-  const dryRun = opts.scheduled ? opts.dryRun === true || cfg.dry_run : (opts.dryRun ?? false);
+  const cfg = opts.retention ?? loadGcRetention(opts.factoryHome);
+  // `--scheduled` (LaunchAgent / cron) is dry-run whenever the profile says so, even though the CLI passes
+  // dryRun=false by default, and it never forces: dirty worktrees are always kept on the scheduled path.
+  const dryRun = effectiveGcDryRun(opts, cfg.dry_run);
   if (opts.scheduled) opts = { ...opts, force: false };
   const report = emptyReport(dryRun);
   const nowMs = () => opts.now?.() ?? Date.now();
   const now = () => new Date(nowMs()).toISOString();
-  const stripMs = (opts.stripAfterHours ?? GC_STRIP_AFTER_HOURS) * MS_HOUR;
   const dirty = async (wt: string) => !opts.force && (await git(wt, ["status", "--porcelain"]).catch(() => "")).trim() !== "";
   const deployBusy = deploySelfBusy();
   if (deployBusy) {
@@ -194,13 +194,6 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
       continue;
     }
     if (st.pr && prState === "open") {
-      if (wt && st.step === "finished" && idle >= stripMs) {
-        const heavy = HEAVY_DIRS.filter((d) => existsSync(join(wt, d)));
-        if (heavy.length) {
-          if (!dryRun) for (const d of heavy) rmSync(join(wt, d), { recursive: true, force: true });
-          report.stripped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed: [...heavy] });
-        }
-      }
       skip("PR is open");
       continue;
     }
@@ -313,12 +306,8 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
     }
     report.cleaned.push(entry);
   }
+  await gcStripTerminal({ ...opts, dryRun }, report);
   await abandonUnanswered({ ...opts, dryRun }, report, nowMs);
-  if (opts.retentionStages ?? true) {
-    await gcRunHomes({ ...opts, dryRun }, report, cfg, nowMs);
-    await gcMetadataArchive({ ...opts, dryRun }, report, cfg, nowMs);
-    gcArchiveRuns({ ...opts, dryRun }, report, cfg, nowMs);
-  }
   if (opts.evidence ?? true) {
     const repos = [...new Set(listRuns(opts.factoryHome).flatMap((r) => (r.state?.repo && existsSync(r.state.repo) ? [r.state.repo] : [])))];
     for (const repo of repos) report.evidence.push(await evidenceRetention(repo, nowMs(), dryRun));
@@ -341,13 +330,13 @@ export async function autoGc(opts: { factoryHome: string; github: GitHub; timeou
       timer.unref();
     });
     const r = await Promise.race([
-      gc({ factoryHome: opts.factoryHome, github: opts.github, evidence: false, retentionStages: false, writeLog: false, gitOpsWaitMs: AUTO_GC_GIT_OPS_WAIT_MS }),
+      gc({ factoryHome: opts.factoryHome, github: opts.github, evidence: false, writeLog: false, gitOpsWaitMs: AUTO_GC_GIT_OPS_WAIT_MS }),
       timeout,
     ]);
     if (!r) opts.log?.("factory: automatic gc timed out; run `factory gc` by hand\n");
-    else if (r.cleaned.length || r.stripped.length || r.abandoned.length || r.home_removed.length || r.metadata_moved.length) {
+    else if (r.cleaned.length || r.stripped.length || r.abandoned.length || r.home_removed.length) {
       opts.log?.(
-        `factory: gc cleaned ${r.cleaned.length} worktree(s), stripped dependency folders in ${r.stripped.length}, abandoned ${r.abandoned.length}, removed ${r.home_removed.length} home dir(s), archived ${r.metadata_moved.length} run metadata tarball(s) (factory gc --dry-run shows details)\n`,
+        `factory: gc cleaned ${r.cleaned.length} worktree(s), stripped dependency folders in ${r.stripped.length}, abandoned ${r.abandoned.length}, removed ${r.home_removed.length} home dir(s) (factory gc --dry-run shows details)\n`,
       );
     }
     return r;
@@ -417,19 +406,8 @@ export async function gcCommand(opts: GcOptions & { json: boolean }, io: Io): Pr
     for (const e of r.evidence) if (e.removed.length) io.out(`${r.dry_run ? "would remove" : "removed"} ${e.removed.length} evidence folder(s) older than ${EVIDENCE_RETENTION_DAYS} days in ${e.repo}\n`);
     for (const a of r.abandoned) io.out(`${r.dry_run ? "would abandon" : "abandoned"} ${a.run_id}: ${a.reason}${a.notified ? " (owner notified)" : ""}\n`);
     for (const h of r.home_removed) io.out(`${r.dry_run ? "would remove" : "removed"} home/ for ${h.run_id} (${h.bytes} bytes)\n`);
-    for (const m of r.metadata_moved) io.out(`${r.dry_run ? "would move" : "moved"} metadata for ${m.run_id} to ${m.tarball}\n`);
-    for (const p of r.archive_purged) io.out(`${r.dry_run ? "would purge" : "purged"} ${p.path} (${p.bytes} bytes): ${p.reason}\n`);
     if (r.log_path) io.out(`gc report appended to ${r.log_path}\n`);
-    if (
-      !r.cleaned.length &&
-      !r.skipped.length &&
-      !r.stripped.length &&
-      !r.abandoned.length &&
-      !r.home_removed.length &&
-      !r.metadata_moved.length &&
-      !r.archive_purged.length
-    )
-      io.out("nothing to clean\n");
+    if (!r.cleaned.length && !r.skipped.length && !r.stripped.length && !r.abandoned.length && !r.home_removed.length) io.out("nothing to clean\n");
   }
   return 0;
 }
