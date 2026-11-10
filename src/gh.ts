@@ -5,6 +5,11 @@ import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
 
 const execFileP = promisify(execFile);
 
+async function hasRemote(repoDir: string): Promise<boolean> {
+  const { stdout } = await execFileP("git", ["remote"], { cwd: repoDir, timeout: 60_000 });
+  return stdout.trim() !== "";
+}
+
 export type BaseStatus = "green" | "red" | "pending" | "none";
 
 export interface Issue {
@@ -456,6 +461,8 @@ export class GhCli implements GitHub {
   }
 
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
+    // A repo without remotes has no GitHub checks (local probe runs).
+    if (!(await hasRemote(repoDir))) return "none";
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id}]"]);
     const raw = JSON.parse(out || "[]") as { name?: string; status?: string; conclusion?: string | null; started_at?: string | null; id?: number; suite?: number | null }[];
     const suites = await workflowSuites(repoDir, sha);
@@ -493,6 +500,8 @@ export class GhCli implements GitHub {
   }
 
   async openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]> {
+    // A repo without remotes has no PRs to overlap (local probe runs).
+    if (!(await hasRemote(repoDir))) return [];
     // UNVERIFIED: `files[].path` from `gh pr list --json files` (docs/VERIFY.md). The page is not a clearance when it hits the limit.
     const out = await gh(repoDir, openFactoryPrListArgs());
     return readOpenFactoryPrs(JSON.parse(out || "[]"));

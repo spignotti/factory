@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { concurrencyCheck } from "../../src/commands/doctor.js";
 import { acquireRepoLock, acquireRepoLockWithRetry, attemptAcquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
 import { factoryPrOverlapReason, factoryPrOverlaps, needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
-import { IncompletePrListError, OPEN_FACTORY_PR_LIMIT, openFactoryPrListArgs, parseOpenFactoryPrs, readOpenFactoryPrs } from "../../src/gh.js";
+import { GhCli, IncompletePrListError, OPEN_FACTORY_PR_LIMIT, openFactoryPrListArgs, parseOpenFactoryPrs, readOpenFactoryPrs } from "../../src/gh.js";
 import { claimsConflict, pathsOverlap, touchesExclusive } from "../../src/pipeline/overlap.js";
 import { riskReasonLine, securityRows } from "../../src/pipeline/risk.js";
 import { validatePlan } from "../../src/schemas/plan.js";
@@ -291,5 +291,18 @@ describe("risk and host steps", () => {
       // released guard and no .stale leftovers
       expect(readdirSync(join(old, "locks")).filter((n) => n.endsWith(".alloc") || n.endsWith(".stale"))).toEqual([]);
     });
+  });
+});
+
+describe("open factory PR lookup", () => {
+  it("returns no PRs and no CI for a repo without remotes instead of calling gh", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-noremote-"));
+    try {
+      await new Promise<void>((done, fail) => spawn("git", ["init", "-q", dir]).on("exit", (c) => (c === 0 ? done() : fail(new Error(`git init ${c}`)))));
+      await expect(new GhCli().openFactoryPrFiles(dir)).resolves.toEqual([]);
+      await expect(new GhCli().baseStatus(dir, "0".repeat(40))).resolves.toBe("none");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
