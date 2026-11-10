@@ -181,8 +181,9 @@ export function execFileTimed(
       untrack();
       fn();
     };
-    const take = (chunk: Buffer, which: "stdout" | "stderr") => {
-      const next = (which === "stdout" ? stdout : stderr) + chunk.toString();
+    // setEncoding gives each stream a stateful UTF-8 decoder, so a character split across chunks stays intact.
+    const take = (chunk: string, which: "stdout" | "stderr") => {
+      const next = (which === "stdout" ? stdout : stderr) + chunk;
       if (Buffer.byteLength(next) > maxBuffer) {
         killProcessGroup(child.pid);
         finish(() => reject(Object.assign(new Error(`${file} ${args[0] ?? ""} exceeded maxBuffer`), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout, stderr })));
@@ -191,8 +192,10 @@ export function execFileTimed(
       if (which === "stdout") stdout = next;
       else stderr = next;
     };
-    child.stdout?.on("data", (d: Buffer) => take(d, "stdout"));
-    child.stderr?.on("data", (d: Buffer) => take(d, "stderr"));
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (d: string) => take(d, "stdout"));
+    child.stderr?.on("data", (d: string) => take(d, "stderr"));
     child.on("error", (e) => finish(() => reject(e)));
     child.on("close", (code, signal) => {
       if (timedOut) {

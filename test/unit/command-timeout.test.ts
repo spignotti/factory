@@ -55,3 +55,13 @@ describe("command timeouts for the github cli", () => {
     );
   });
 });
+
+describe("execFileTimed output decoding", () => {
+  it("keeps a multi-byte character that is split across chunks", async () => {
+    const { execFileTimed } = await import("../../src/exec.js");
+    // Write the two bytes of "ä" (0xC3 0xA4) in separate writes with a pause between them.
+    const script = "process.stdout.write(Buffer.from([0xc3])); setTimeout(() => process.stdout.write(Buffer.from([0xa4])), 50);";
+    const out = await execFileTimed(process.execPath, ["-e", script], { timeoutMs: 10_000 });
+    expect(out.stdout).toBe("ä");
+  });
+});
