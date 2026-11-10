@@ -538,9 +538,9 @@ ${fixed}` } };
     expect(r.file("gates-1.json")).toContain("test lines not counted");
   });
 
-  it("fast lane escalates after implement when the diff is too big: full review, medium risk, PR names the reasons", async () => {
+  it("fast lane escalates after implement when the diff is too big: full review, PR names the reasons, risk stays on the diff", async () => {
     const r = await runScenario({ script: "clean.json", options: { lane: "fast" }, patch: (c) => void (c.fast_lane = { max_diff_lines: 3 }), steps: (s) => s.map((x) => (x.role === "plan_high" ? { ...x, role: "plan_normalize" } : x)) });
-    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "medium" });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "low" });
     expect(r.runner.remaining()).toEqual({});
     const esc = eventsOf(r, "lane_escalated");
     expect(esc).toHaveLength(1);
@@ -548,7 +548,7 @@ ${fixed}` } };
     expect((esc[0]!.data.reasons as string[])[0]).toMatch(/^diff \d+ lines > fast_lane.max_diff_lines 3$/);
     expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data).toMatchObject({ mode: "full" });
     expect(r.github.prs[0]?.body).toMatch(/- lane: fast → standard \(diff \d+ lines/);
-    expect(r.github.prs[0]?.body).toContain("fast-lane escalation");
+    expect(r.github.prs[0]?.body).not.toContain("fast-lane escalation");
     expect(JSON.parse(r.file("state.json"))).toMatchObject({ lane: "standard" });
   });
 
@@ -558,6 +558,17 @@ ${fixed}` } };
     expect(r.runner.remaining()).toEqual({});
     expect(eventsOf(r, "lane_escalated")[0]).toMatchObject({ step: "intake" });
     expect((eventsOf(r, "lane_escalated")[0]!.data.reasons as string[])[0]).toMatch(/^plan_normalize output invalid/);
+  });
+
+  it("fast lane: normalize failure, small diff, no sensitive paths -> risk low; escalation stays in result.json", async () => {
+    const r = await runScenario({ script: "invented-normalize.json", options: { lane: "fast" } });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "low" });
+    expect(r.resultFile).toMatchObject({ lane: "standard", risk: "low" });
+    expect(r.runner.calls.map((c) => c.role).slice(0, 3)).toEqual(["plan_normalize", "plan_normalize", "plan_medium"]);
+    const reasons = eventsOf(r, "lane_escalated")[0]!.data.reasons as string[];
+    expect(reasons[0]).toMatch(/^plan_normalize output invalid/);
+    expect(r.github.prs[0]?.body).toContain("plan_normalize output invalid");
+    expect(r.github.prs[0]?.body).not.toContain("fast-lane escalation");
   });
 
   it("fallback: capacity error -> backoff retry on the same model -> fallback", async () => {
