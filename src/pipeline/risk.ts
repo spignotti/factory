@@ -61,8 +61,8 @@ export function riskReasonLine(risk: RiskAssessment): string {
   return line.length > 300 ? `${line.slice(0, 297)}...` : line;
 }
 
-/** Risk classification, in code. */
-export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig; laneEscalated?: boolean }): RiskAssessment {
+/** Risk classification, in code. Lane escalation is not a reason: only paths, diff size and protected files. */
+export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig }): RiskAssessment {
   const { changed, diffLines, repo } = input;
   const hits = (globs: string[]) => changed.filter((f) => matchesAny(f, globs));
   const humanOnly = changed.filter((f) => isProtected(f, repo.human_only_paths));
@@ -77,7 +77,6 @@ export function riskClass(input: { changed: string[]; diffLines: number; repo: R
   const migrations = hits(MIGRATION_GLOBS);
   if (migrations.length) reasons.push(`migrations: ${migrations.join(", ")}`);
   if (diffLines > repo.merge.low_max_diff_lines) reasons.push(`diff ${diffLines} lines > ${repo.merge.low_max_diff_lines}`);
-  if (input.laneEscalated) reasons.push("fast-lane escalation");
   return reasons.length ? { risk: "medium", reasons } : { risk: "low", reasons: [] };
 }
 

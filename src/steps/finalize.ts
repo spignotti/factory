@@ -346,7 +346,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ctx.events.diffCount = diffReport;
     ctx.events.emit({ step: "finalize", event: "progress", data: { ...diffReport } });
   }
-  const risk = riskClass({ changed, diffLines, repo: ctx.repo, laneEscalated: ctx.laneEscalation.length > 0 });
+  const risk = riskClass({ changed, diffLines, repo: ctx.repo });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);

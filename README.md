@@ -740,7 +740,7 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Fast lane
 
-`factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when the task needs more than one package or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged and listed in the PR.
+`factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when `plan_normalize` stays schema-invalid (it then falls back to the planner), when the task needs more than one package, or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged, listed in the PR and recorded as `lane: standard` in `result.json`. They are not a risk reason: risk is paths, diff size (`merge.low_max_diff_lines`) and protected files only.
 
 ## Reviewers
 
