@@ -1,13 +1,25 @@
-import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
-import { git } from "./git.js";
+import { execFileSync } from "node:child_process";
+import { CommandTimeoutError, execFileTimed } from "./exec.js";
+import { GIT_LOCAL_TIMEOUT_MS, git } from "./git.js";
 import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
 
-const execFileP = promisify(execFile);
-
 async function hasRemote(repoDir: string): Promise<boolean> {
-  const { stdout } = await execFileP("git", ["remote"], { cwd: repoDir, timeout: 60_000 });
+  const stdout = await git(repoDir, ["remote"]);
   return stdout.trim() !== "";
+}
+
+/** `gh` calls. A hang is killed; the error names the timeout instead of waiting forever. */
+export const GH_TIMEOUT_MS = 2 * 60_000;
+
+export async function ghCommand(cwd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<string> {
+  const timeoutMs = opts?.timeoutMs ?? GH_TIMEOUT_MS;
+  try {
+    const { stdout } = await execFileTimed("gh", args, { cwd, timeoutMs, maxBuffer: 16 * 1024 * 1024, env: opts?.env });
+    return stdout;
+  } catch (e) {
+    if (e instanceof CommandTimeoutError) throw new Error(e.message, { cause: e });
+    throw e;
+  }
 }
 
 export type BaseStatus = "green" | "red" | "pending" | "none";
@@ -308,8 +320,7 @@ export function prStatusFromView(raw: {
 }
 
 async function gh(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileP("gh", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-  return stdout;
+  return ghCommand(cwd, args);
 }
 
 /** Check suite id → workflow run `created_at` and workflow `name`. One page: a SHA does not have 100 runs. */
@@ -495,7 +506,7 @@ export class GhCli implements GitHub {
   }
 
   async remoteBranchSha(repoDir: string, branch: string): Promise<string | null> {
-    const { stdout } = await execFileP("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`], { cwd: repoDir, timeout: 60_000 });
+    const stdout = await git(repoDir, ["ls-remote", "--heads", "origin", `refs/heads/${branch}`]);
     return /^([0-9a-f]{40,64})\s/m.exec(stdout)?.[1] ?? null;
   }
 
@@ -584,6 +595,8 @@ function committedDiffNames(repoDir: string, base: string): string[] {
       const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=ACMRTUXB", spec], {
         cwd: repoDir,
         encoding: "utf8",
+        timeout: GIT_LOCAL_TIMEOUT_MS,
+        killSignal: "SIGKILL",
         stdio: ["ignore", "pipe", "ignore"],
       });
       const files = out.split("\n").filter(Boolean);
@@ -619,7 +632,7 @@ export class FakeGitHub implements GitHub {
   async push(repoDir: string, branch: string): Promise<void> {
     this.pushes.push(branch);
     try {
-      this.remoteShas.set(branch, execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+      this.remoteShas.set(branch, execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8", timeout: GIT_LOCAL_TIMEOUT_MS, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"] }).trim());
     } catch {
       // not a git dir (unit tests): nothing to record
     }

@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { killRunningCommands, resetKilledCommands, sh } from "../../src/exec.js";
-import { changedFiles, discardChanges, git, remoteBranchExists, stageAll, withBaseWorktree } from "../../src/git.js";
+import { GIT_LOCAL_TIMEOUT_MS, GIT_NETWORK_TIMEOUT_MS, changedFiles, discardChanges, git, gitTimeoutMs, remoteBranchExists, stageAll, withBaseWorktree } from "../../src/git.js";
 import { addOrigin, createFixtureRepo, gitIn } from "../helpers/repo.js";
 
 describe("git helpers", () => {
@@ -51,6 +51,46 @@ describe("git errors and worktrees", () => {
       expect(listed).toContain("a.txt");
     } finally {
       process.chdir(prev);
+    }
+  });
+});
+
+describe("git timeouts", () => {
+  it("uses 1 min for local git and 5 min for network git", () => {
+    expect(GIT_LOCAL_TIMEOUT_MS).toBe(60_000);
+    expect(GIT_NETWORK_TIMEOUT_MS).toBe(5 * 60_000);
+    expect(gitTimeoutMs(["status"])).toBe(GIT_LOCAL_TIMEOUT_MS);
+    expect(gitTimeoutMs(["-c", "user.name=t", "commit", "-q"])).toBe(GIT_LOCAL_TIMEOUT_MS);
+    expect(gitTimeoutMs(["fetch", "--quiet", "origin", "main"])).toBe(GIT_NETWORK_TIMEOUT_MS);
+    expect(gitTimeoutMs(["push", "-q", "-u", "origin", "factory/x"])).toBe(GIT_NETWORK_TIMEOUT_MS);
+    expect(gitTimeoutMs(["ls-remote", "--heads", "origin", "refs/heads/main"])).toBe(GIT_NETWORK_TIMEOUT_MS);
+  });
+
+  it("kills the process group and reports a timeout", async () => {
+    const bin = mkdtempSync(join(tmpdir(), "git-timeout-"));
+    const pidFile = join(bin, "pid");
+    const childFile = join(bin, "child");
+    const script = join(bin, "git");
+    writeFileSync(script, `#!/bin/sh\necho $$ > ${pidFile}\nsleep 30 &\necho $! > ${childFile}\nwait\n`);
+    chmodSync(script, 0o755);
+    const prev = process.env.PATH;
+    process.env.PATH = `${bin}:${prev ?? ""}`;
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    };
+    try {
+      const started = Date.now();
+      await expect(git(bin, ["fetch"], { timeoutMs: 300 })).rejects.toThrow(/git fetch timed out after 300ms \(process killed\)/);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(alive(Number(readFileSync(pidFile, "utf8")))).toBe(false);
+      expect(alive(Number(readFileSync(childFile, "utf8")))).toBe(false);
+    } finally {
+      process.env.PATH = prev;
     }
   });
 });

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner } from "../../src/agents/fake-runner.js";
-import { backoffMs, billedUsage, callModel, chainFor, classifyError, InvalidOutputError, TransientAgentError } from "../../src/agents/models.js";
+import { backoffMs, billedUsage, callModel, chainFor, classifyError, parseRetryAfterText, providerRetryAfterMs, InvalidOutputError, TransientAgentError } from "../../src/agents/models.js";
 import { AgentError } from "../../src/agents/runner.js";
 import { EventLog } from "../../src/events.js";
 import { loadProfile, parseProfile, PROFILE_ROLES } from "../../src/schemas/profile.js";
@@ -40,6 +40,11 @@ const req = (role: string) => ({ role, cwd: "/tmp", system: "", prompt: "p", too
 describe("error classification", () => {
   it.each([
     [new AgentError("Model is at capacity"), "capacity"],
+    [new AgentError("The model is currently at capacity due to high demand"), "capacity"],
+    [new AgentError("The model is currently at capacity due to high demand. Please try again later.", undefined, 429), "capacity"],
+    [new AgentError("Your team has either used all available credits or reached its monthly spending limit."), "limit"],
+    [new AgentError("xAI API error (403): Your team has either used all available credits or reached its monthly spending limit. To continue making API requests, please purchase more credits or raise your spending limit.", undefined, 403), "limit"],
+    [new AgentError("Team usage limit reached", undefined, 429, 5_000), "limit"],
     [new AgentError("error: ttft_admission_refused"), "capacity"],
     [new AgentError("503 Service Unavailable, please retry shortly", undefined, 503), "capacity"],
     [new AgentError("429", undefined, 429, 5000), "capacity"],
@@ -265,6 +270,40 @@ describe("fallback", () => {
 
   it("caps the backoff at max_ms", () => {
     expect([0, 1, 2, 3].map((a) => backoffMs(a, profile.retry))).toEqual([100, 200, 250, 250]);
+  });
+
+  it("waits at least the provider retry-after, capped at max_ms * 2", () => {
+    expect(backoffMs(0, profile.retry, 400)).toBe(400);
+    expect(backoffMs(0, profile.retry, 10_000)).toBe(500);
+    expect(backoffMs(1, profile.retry, 50)).toBe(200);
+    expect(parseRetryAfterText("please try again in 2 seconds")).toBe(2_000);
+    expect(parseRetryAfterText("Please try again in 7.648s.")).toBe(7648);
+    expect(parseRetryAfterText("503 overloaded\nretry-after: 0.4")).toBe(400);
+    expect(parseRetryAfterText("retry-after-ms: 1500")).toBe(1500);
+    expect(providerRetryAfterMs(new AgentError("at capacity", undefined, 503, 400))).toBe(400);
+  });
+
+  it("same-model backoff uses retry-after from the field and from the error text", async () => {
+    const field = setup([
+      { role: "plan_high", model: "openai/sol", error: { message: "at capacity", status: 503, retry_after_ms: 400 } },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    await callModel(field.deps, "plan", req("plan_high"));
+    expect(field.slept).toEqual([400]);
+
+    const text = setup([
+      { role: "plan_high", model: "openai/sol", error: { message: "at capacity, try again in 30 seconds", status: 503 } },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    await callModel(text.deps, "plan", req("plan_high"));
+    expect(text.slept).toEqual([500]);
+
+    const header = setup([
+      { role: "plan_high", model: "openai/sol", error: { message: "503 overloaded\nretry-after: 0.4", status: 503 } },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    await callModel(header.deps, "plan", req("plan_high"));
+    expect(header.slept).toEqual([400]);
   });
 });
 

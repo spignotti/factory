@@ -1,20 +1,45 @@
-import { execFile } from "node:child_process";
 import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
+import { CommandTimeoutError, execFileTimed, isCommandTimeout } from "./exec.js";
 import { tryPathLock } from "./pipeline/lock.js";
 import { LOCK_GLOBS } from "./paths.js";
 import { matchesAny } from "./schemas/plan.js";
 
-const execFileP = promisify(execFile);
+/** Local git (status, diff, commit). A hang is killed rather than blocking the run. */
+export const GIT_LOCAL_TIMEOUT_MS = 60_000;
+/** Network git (fetch, push, pull, clone, ls-remote). */
+export const GIT_NETWORK_TIMEOUT_MS = 5 * 60_000;
+const GIT_NETWORK = new Set(["fetch", "push", "pull", "clone", "ls-remote"]);
+
+/** First non-option argument, skipping `-c` / `-C` values. */
+export function gitSubcommand(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return args[i + 1];
+    if (a === "-c" || a === "-C") {
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    return a;
+  }
+  return undefined;
+}
+
+export function gitTimeoutMs(args: string[]): number {
+  const sub = gitSubcommand(args);
+  return sub !== undefined && GIT_NETWORK.has(sub) ? GIT_NETWORK_TIMEOUT_MS : GIT_LOCAL_TIMEOUT_MS;
+}
 
 /** Git for the factory process itself (its own env). Agents never get this. */
-export async function git(cwd: string, args: string[]): Promise<string> {
+export async function git(cwd: string, args: string[], opts?: { timeoutMs?: number }): Promise<string> {
+  const timeoutMs = opts?.timeoutMs ?? gitTimeoutMs(args);
   try {
-    const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024 });
     return stdout;
   } catch (e) {
+    if (e instanceof CommandTimeoutError) throw new Error(e.message, { cause: e });
     const err = e as { stderr?: string; message?: string };
     // A missing cwd makes Node set stderr to "" and put `spawn git ENOENT` on `message`.
     // `??` would keep the empty stderr and hide that (eval recorded `git ls-files failed: `).
@@ -53,9 +78,14 @@ export async function baseRef(repoDir: string, branch: string): Promise<string> 
 export async function remoteBranchExists(repoDir: string, branch: string): Promise<boolean> {
   if (!(await gitOk(repoDir, ["remote", "get-url", "origin"]))) return false;
   try {
-    await execFileP("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], { cwd: repoDir, timeout: 60_000 });
+    await execFileTimed("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], {
+      cwd: repoDir,
+      timeoutMs: gitTimeoutMs(["ls-remote"]),
+    });
     return true;
   } catch (e) {
+    // A timeout or any failure other than "no such ref" (exit 2): the remote cannot be asked.
+    if (isCommandTimeout(e)) return true;
     return (e as { code?: unknown }).code !== 2;
   }
 }
