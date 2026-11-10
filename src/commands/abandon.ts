@@ -118,6 +118,7 @@ function abandonedResult(run: RunRecord, reason: string): RunResult {
     lane: st.lane ?? prev?.lane ?? "standard",
     result: "abandoned",
     risk: prev?.risk ?? null,
+    ...(prev?.risk_reasons ? { risk_reasons: prev.risk_reasons } : {}),
     merge_policy: prev?.merge_policy ?? null,
     pr: st.pr,
     rounds: prev?.rounds ?? st.rounds ?? 0,

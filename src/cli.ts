@@ -49,10 +49,12 @@ const USAGE = `usage:
                CI stub hash; --ping sends one tiny request per configured model;
                --services starts and stops each service and the ui once in a clean base worktree)
   models: built-in < $FACTORY_HOME/profile.yaml < --profile <file> < repo.yaml models: (see README)
-  factory status [--json]
-              (running, waiting for a human, interrupted runs; open factory PRs)
+  factory status [--since <duration>] [--json]
+              (running, waiting for a human, interrupted runs; open factory PRs;
+               --since 12h adds finished runs from result.json: merged, human_review, blocked, failed, base_red, needs_input)
   factory stats [--since 7d] [--repo <path>] [--json]
-              (results, rounds, gates, providers, cost; this period vs the previous one)
+              (results, rounds, gates, providers, cost; this period vs the previous one;
+               text includes top gate failures and reasons)
   factory gc [--dry-run] [--scheduled] [--force] [--retention-days N] [--json]
               (worktree and branch of merged/closed PRs; terminal runs lose home/, published evidence
                and service logs; done/abandoned also lose dependency folders; failed keeps them until
@@ -372,8 +374,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       return r.ok ? 0 : 1;
     }
     if (command === "status") {
-      const { values } = parseArgs({ args: rest, options: { json: { type: "boolean", default: false } } });
-      return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), json: values.json }, io);
+      const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, json: { type: "boolean", default: false } } });
+      return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), since: values.since, json: values.json }, io);
     }
     if (command === "stats") {
       const { values } = parseArgs({

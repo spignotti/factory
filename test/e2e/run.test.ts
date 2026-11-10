@@ -187,7 +187,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
 
   it("clean pass: PR assembled, human_review by default", async () => {
     const r = await runScenario({ script: "clean.json" });
-    expect(r.result).toMatchObject({ result: "done", type: "feature", lane: "standard", risk: "low", merge_policy: "human_review", rounds: 1 });
+    expect(r.result).toMatchObject({ result: "done", type: "feature", lane: "standard", risk: "low", risk_reasons: [], merge_policy: "human_review", rounds: 1 });
     expect(r.resultFile).toEqual(r.result);
     expect(ResultSchema.parse(r.resultFile).pr).toBe("https://github.test/pr/1");
     expect(r.runner.remaining()).toEqual({});
@@ -530,6 +530,7 @@ ${fixed}` } };
     const riskLines = r.result.counted_lines! + r.result.excluded_test_lines!;
     expect(riskLines).toBeGreaterThan(30);
     expect(r.result.risk).toBe("medium");
+    expect(r.result.risk_reasons).toContain(`diff ${riskLines} lines > 30`);
     expect(r.github.prs[0]?.body).toContain(`diff ${riskLines} lines > 30`);
     expect(r.resultFile).toEqual(r.result);
     const gateEvents = eventsOf(r, "gate_result").filter((e) => e.data.check === "max_diff_lines");

@@ -493,6 +493,263 @@
         ],
         "additionalProperties": false
       }
+    },
+    "since": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "since": {
+              "type": "string"
+            },
+            "from": {
+              "type": "string"
+            },
+            "merged": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "pr": {
+                    "type": "string"
+                  },
+                  "pr_state": {
+                    "type": "string",
+                    "enum": [
+                      "merged",
+                      "closed"
+                    ]
+                  },
+                  "result": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "repo",
+                  "task",
+                  "pr",
+                  "pr_state",
+                  "result"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "human_review": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "pr": {
+                    "type": "string"
+                  },
+                  "risk": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "review_reasons": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "repo",
+                  "task",
+                  "pr",
+                  "risk",
+                  "review_reasons"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "blocked": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "pr": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "blockers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "repo",
+                  "task",
+                  "pr",
+                  "blockers",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "failed": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "pr": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "repo",
+                  "task",
+                  "reason",
+                  "pr"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "base_red": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "repo",
+                  "task",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "needs_input": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string"
+                  },
+                  "repo": {
+                    "type": "string"
+                  },
+                  "task": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "questions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "run_id",
+                  "repo",
+                  "task",
+                  "reason",
+                  "questions"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "since",
+            "from",
+            "merged",
+            "human_review",
+            "blocked",
+            "failed",
+            "base_red",
+            "needs_input"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -504,7 +761,8 @@
     "orphaned",
     "stalled",
     "prs",
-    "audit_tickets"
+    "audit_tickets",
+    "since"
   ],
   "additionalProperties": false
 }

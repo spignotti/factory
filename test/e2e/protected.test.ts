@@ -38,7 +38,12 @@ describe("protected config changes (human_only_paths)", () => {
       steps: protectedRun(REPO_YAML, () => withRedCheck(repoDir)),
     });
     // The branch adds a check that always fails; it must not judge its own run.
-    expect(r.result).toMatchObject({ result: "done", risk: "high", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({
+      result: "done",
+      risk: "high",
+      merge_policy: "human_review",
+      risk_reasons: expect.arrayContaining([expect.stringMatching(/^human_only_paths: /), "changes protected config (CI / factory)"]),
+    });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.labels).toEqual([{ pr: r.github.prs[0]!.url, label: "factory:protected-config" }]);
     const body = r.github.prs[0]!.body;

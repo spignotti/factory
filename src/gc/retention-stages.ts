@@ -81,8 +81,10 @@ function heavyUnder(worktree: string): string[] {
  * Terminal run whose branch is pushed, or that has no PR: `home/` and published caches may go.
  * Resume-status runs (`needs_input` / `needs_human` / `base_red`), interrupted runs and live runs keep them.
  * A PR whose push check fails, finds no ref, or sees unpushed commits is not stripped (fails closed).
- * Dependency folders of a `failed` run are not part of this decision: `gcStripTerminal` leaves them until
- * the worktree itself goes.
+ * This check does not repeat the worktree stage's merged `refs/pull/<n>/head` exception. That stage
+ * strips with the removal it already decided, so a pruned remote branch cannot leave caches behind
+ * after the local ref is deleted.
+ * Dependency folders of a `failed` run are not part of this decision: they go only with the worktree.
  */
 async function stripEligible(opts: GcOptions, run: RunRecord): Promise<"strip" | "live" | "keep"> {
   const st = run.state;
@@ -100,14 +102,67 @@ function dropDir(path: string, dryRun: boolean): void {
 }
 
 /**
+ * Deletes regenerable weight the caller already decided to collect: `home/`, published `evidence/`,
+ * service logs, and — when `heavy` — every `node_modules` / `.venv` / `.nox` under the worktree.
+ * Does not remove the worktree and does not re-check whether the branch is pushed. Safe to call again
+ * in the same report (including dry-run, where the directories are still there).
+ */
+export function applyTerminalStrip(opts: GcOptions, report: GcReport, run: RunRecord, heavy: boolean): void {
+  const st = run.state;
+  if (!st) return;
+  const runsRoot = join(opts.factoryHome, "runs");
+  const dry = opts.dryRun === true;
+  const home = join(run.dir, "home");
+  const homeKept = report.skipped.some((s) => s.run_id === run.run_id && s.reason.startsWith("home/ is a symlink"));
+  if (existsSync(home) && !homeKept && !report.home_removed.some((h) => h.run_id === run.run_id)) {
+    if (isProtectedFactoryPath(opts.factoryHome, home) || !realDirInside(runsRoot, home)) {
+      report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "home/ is a symlink or outside $FACTORY_HOME/runs; kept" });
+    } else {
+      const bytes = dirBytes(home);
+      dropDir(home, dry);
+      report.home_removed.push({
+        run_id: run.run_id,
+        repo: st.repo,
+        bytes,
+        reason: st.pr ? "terminal run, branch pushed; sandbox home is cache" : "terminal run, no PR; sandbox home is cache",
+      });
+    }
+  }
+  const prior = report.run_dirs_removed.find((c) => c.run_id === run.run_id);
+  const already = new Set(prior?.removed ?? []);
+  const removed: ("evidence/" | "services/")[] = [];
+  const evidence = join(run.dir, "evidence");
+  if (!already.has("evidence/") && existsSync(evidence) && evidencePublished(run.dir) && realDirInside(runsRoot, evidence) && !isProtectedFactoryPath(opts.factoryHome, evidence)) {
+    dropDir(evidence, dry);
+    removed.push("evidence/");
+  }
+  const services = join(run.dir, "services");
+  if (!already.has("services/") && existsSync(services) && realDirInside(runsRoot, services) && !isProtectedFactoryPath(opts.factoryHome, services)) {
+    dropDir(services, dry);
+    removed.push("services/");
+  }
+  if (removed.length) {
+    if (prior) prior.removed.push(...removed);
+    else report.run_dirs_removed.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed });
+  }
+  if (!heavy || report.stripped.some((s) => s.run_id === run.run_id)) return;
+  const wt = st.worktree && existsSync(st.worktree) ? st.worktree : null;
+  if (!wt) return;
+  const dirs = heavyUnder(wt).sort();
+  if (!dirs.length) return;
+  if (!dry) for (const rel of dirs) rmSync(join(wt, rel), { recursive: true, force: true });
+  report.stripped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed: dirs });
+}
+
+/**
  * Deletes regenerable weight from a terminal run: `home/`, published `evidence/`, service logs, and — except
  * for a `failed` run — every `node_modules` / `.venv` / `.nox` under the worktree. `failed` is resumable and
- * setup does not run again, so those folders stay until the worktree goes (PR merged/closed, or the no-PR
- * failed retention). Keeps `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md`, review and gate
- * reports. Does not remove the worktree. No repo lock: these paths are cache, not a git operation.
+ * setup does not run again, so those folders stay until the worktree stage removes the worktree (same
+ * pushed/merged decision, including `refs/pull/<n>/head`). Keeps `events.jsonl`, `result.json`, `state.json`,
+ * `plan.json`, `pr.md`, review and gate reports. Does not remove the worktree. No repo lock: these paths
+ * are cache, not a git operation.
  */
 export async function gcStripTerminal(opts: GcOptions, report: GcReport): Promise<void> {
-  const runsRoot = join(opts.factoryHome, "runs");
   for (const run of listRuns(opts.factoryHome)) {
     const st = run.state;
     if (!st) continue;
@@ -117,41 +172,8 @@ export async function gcStripTerminal(opts: GcOptions, report: GcReport): Promis
       report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "run is live; home/ kept" });
       continue;
     }
-    const home = join(run.dir, "home");
-    if (existsSync(home)) {
-      if (isProtectedFactoryPath(opts.factoryHome, home) || !realDirInside(runsRoot, home)) {
-        report.skipped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, reason: "home/ is a symlink or outside $FACTORY_HOME/runs; kept" });
-      } else {
-        const bytes = dirBytes(home);
-        dropDir(home, opts.dryRun === true);
-        report.home_removed.push({
-          run_id: run.run_id,
-          repo: st.repo,
-          bytes,
-          reason: st.pr ? "terminal run, branch pushed; sandbox home is cache" : "terminal run, no PR; sandbox home is cache",
-        });
-      }
-    }
-    const removed: ("evidence/" | "services/")[] = [];
-    const evidence = join(run.dir, "evidence");
-    if (existsSync(evidence) && evidencePublished(run.dir) && realDirInside(runsRoot, evidence) && !isProtectedFactoryPath(opts.factoryHome, evidence)) {
-      dropDir(evidence, opts.dryRun === true);
-      removed.push("evidence/");
-    }
-    const services = join(run.dir, "services");
-    if (existsSync(services) && realDirInside(runsRoot, services) && !isProtectedFactoryPath(opts.factoryHome, services)) {
-      dropDir(services, opts.dryRun === true);
-      removed.push("services/");
-    }
-    if (removed.length) report.run_dirs_removed.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed });
-    // Resume of `failed` does not re-run setup. The worktree stage removes these with the worktree.
-    if (st.result === "failed") continue;
-    const wt = st.worktree && existsSync(st.worktree) ? st.worktree : null;
-    if (!wt) continue;
-    const heavy = heavyUnder(wt).sort();
-    if (!heavy.length) continue;
-    if (opts.dryRun !== true) for (const rel of heavy) rmSync(join(wt, rel), { recursive: true, force: true });
-    report.stripped.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed: heavy });
+    // Resume of `failed` does not re-run setup. Dependency folders wait for the worktree stage.
+    applyTerminalStrip(opts, report, run, st.result !== "failed");
   }
 }
 

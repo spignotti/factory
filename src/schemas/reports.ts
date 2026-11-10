@@ -57,6 +57,65 @@ export const StatusReportSchema = z.strictObject({
   ),
   /** Open audit proposals, one row per proposal, across every repo in `$FACTORY_HOME`. */
   audit_tickets: z.array(OpenAuditTicketSchema),
+  /**
+   * Finished runs in `factory status --since`. Null when the flag is omitted.
+   * Built from `result.json` (mtime is the finish time) plus live PR state, not from `events.jsonl`.
+   */
+  since: z
+    .strictObject({
+      since: z.string(),
+      from: z.string(),
+      merged: z.array(
+        z.strictObject({
+          run_id: z.string(),
+          repo: z.string(),
+          task: z.string(),
+          pr: z.string(),
+          pr_state: z.enum(["merged", "closed"]),
+          result: z.string(),
+        }),
+      ),
+      /** Open, CI green, not behind or conflicting, `merge_policy` human_review. `none` and a missing rollup are not green. */
+      human_review: z.array(
+        z.strictObject({
+          run_id: z.string(),
+          repo: z.string(),
+          task: z.string(),
+          pr: z.string(),
+          risk: z.enum(["low", "medium", "high"]).nullable(),
+          /** `risk`, `diff size`, `protected paths`, plus the `risk_reasons` they came from. Not the review-exit `reason`. */
+          review_reasons: z.array(z.string()),
+        }),
+      ),
+      /**
+       * Blocked by draft, CI, behind/conflicting, or a needs_human result.
+       * A thrown `prStatus` is also here (`pr status unknown` plus `error`) and is not a confirmed open PR.
+       */
+      blocked: z.array(
+        z.strictObject({
+          run_id: z.string(),
+          repo: z.string(),
+          task: z.string(),
+          pr: nullableStr,
+          blockers: z.array(z.string()),
+          reason: z.string(),
+          /** `prStatus` failure text. Present only when the live state could not be read. */
+          error: z.string().optional(),
+        }),
+      ),
+      failed: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), reason: z.string(), pr: nullableStr })),
+      base_red: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), reason: z.string() })),
+      needs_input: z.array(
+        z.strictObject({
+          run_id: z.string(),
+          repo: z.string(),
+          task: z.string(),
+          reason: z.string(),
+          questions: z.array(z.string()),
+        }),
+      ),
+    })
+    .nullable(),
 });
 
 const quantiles = z.strictObject({ median: z.number().nullable(), p90: z.number().nullable() });

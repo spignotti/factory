@@ -18,7 +18,7 @@ Guards:
 - **Strip** takes **no repo lock**. Only real directories inside the run (not a symlink) are removed. Unpublished `evidence/` stays. A run that currently holds a lock slot is skipped (`run is live; home/ kept`).
 - **Worktrees and `factory/*` branches** (merged/closed PRs, and no-PR runs past retention) take a short lock file `factory.gitops.lock` in the checkout's git common dir, not a run slot. Manual and scheduled gc wait up to 60s for it; the automatic gc at the start of `factory run` waits 5s. If it stays busy, that worktree is skipped until the next gc. A live run's worktree is never removed.
 - **deploy-self:** gc skips deletions only while `deploy-self.sh once` holds `flock` on `$FACTORY_RELEASES/.deploy.lock`. That flock is on the process fd and is released when `once` exits, including a crash. A leftover lock file with nobody holding it does not block gc. A missing `flock` binary does not block gc either (macOS has no `flock`).
-- No `--force` on the scheduled path. Dirty worktrees and branches with unpushed commits are skipped for worktree removal. The strip also skips an unpushed branch.
+- No `--force` on the scheduled path. Dirty worktrees and branches with unpushed commits are skipped for worktree removal. The strip also skips an unpushed branch. A merged PR whose remote branch is gone is still pushed when `refs/pull/<n>/head` matches the local tip. That is the worktree stage's decision: `home/`, published `evidence/` and `services/`, and a `failed` run's dependency folders, are removed with the worktree — not by a second push check that would fail closed once the local branch is deleted.
 
 ## Shared cache
 

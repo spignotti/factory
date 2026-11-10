@@ -62,6 +62,12 @@
         }
       ]
     },
+    "risk_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "merge_policy": {
       "anyOf": [
         {

@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { concurrencyCheck } from "../../src/commands/doctor.js";
 import { acquireRepoLock, acquireRepoLockWithRetry, attemptAcquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
-import { needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
+import { factoryPrOverlapReason, factoryPrOverlaps, needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
+import { IncompletePrListError, OPEN_FACTORY_PR_LIMIT, openFactoryPrListArgs, parseOpenFactoryPrs, readOpenFactoryPrs } from "../../src/gh.js";
 import { claimsConflict, pathsOverlap, touchesExclusive } from "../../src/pipeline/overlap.js";
 import { riskReasonLine, securityRows } from "../../src/pipeline/risk.js";
 import { validatePlan } from "../../src/schemas/plan.js";
@@ -199,6 +200,30 @@ describe("risk and host steps", () => {
     expect(concurrencyCheck(repo)).toEqual({ name: "concurrency", status: "ok", detail: "max_runs 1" });
     const parallel = parseRepoConfig("concurrency: { max_runs: 2 }\n");
     expect(concurrencyCheck(parallel).detail).toBe("max_runs 2; exclusive_paths (none)");
+  });
+
+  it("open factory PR files ignore other branches and overlap like path claims", () => {
+    const parsed = parseOpenFactoryPrs([
+      { number: 12, headRefName: "factory/old", files: [{ path: "a.py" }] },
+      { number: 3, headRefName: "feature/a", files: [{ path: "a.py" }] },
+      { number: 4, headRefName: "factory/fork", isCrossRepository: true, files: [{ path: "a.py" }] },
+      { number: 5, headRefName: "factory/nested", files: { nodes: [{ filename: "src/auth/login.ts" }] } },
+    ]);
+    expect(parsed.map((p) => p.number)).toEqual([12, 5]);
+    const hits = factoryPrOverlaps(parsed, ["a.py", "src/auth"], "factory/nested");
+    expect(hits).toEqual([{ number: 12, files: ["a.py"] }]);
+    expect(factoryPrOverlapReason("planned", hits)).toBe("planned paths overlap open factory PR #12 (a.py)");
+    expect(factoryPrOverlaps(parsed, ["b.py"])).toEqual([]);
+  });
+
+  it("an open PR list that fills the page is not a clearance", () => {
+    expect(openFactoryPrListArgs()).toContain(String(OPEN_FACTORY_PR_LIMIT));
+    expect(OPEN_FACTORY_PR_LIMIT).toBe(1000);
+    const page = Array.from({ length: OPEN_FACTORY_PR_LIMIT }, (_, i) => ({ number: i + 1, headRefName: "feature/x", files: [{ path: "a.py" }] }));
+    expect(() => readOpenFactoryPrs(page)).toThrow(IncompletePrListError);
+    expect(() => readOpenFactoryPrs(page)).toThrow(/hit the limit \(1000\)/);
+    expect(readOpenFactoryPrs(page.slice(0, OPEN_FACTORY_PR_LIMIT - 1))).toEqual([]);
+    expect(() => readOpenFactoryPrs({ items: [] })).toThrow(/not a JSON array/);
   });
 
   it("needsConcurrencyPathClaim when max_runs>1 or exclusive_paths set", () => {

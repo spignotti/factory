@@ -12,7 +12,7 @@ import { BERLIN, workingDaysElapsed } from "../working-days.js";
 import { deploySelfBusy, loadGcRetention } from "../gc/retention-config.js";
 import { branchHasUnpushedCommits, HOUR as MS_HOUR, lastActivity, protectedIdleRun, resolveGcPrState, worktreeRetentionMs } from "../gc/retention-helpers.js";
 import { appendGcLog } from "../gc/retention-log.js";
-import { gcStripTerminal, pruneFactoryWorktrees } from "../gc/retention-stages.js";
+import { applyTerminalStrip, gcStripTerminal, pruneFactoryWorktrees } from "../gc/retention-stages.js";
 import type { Io } from "./gates.js";
 import { abandonRun } from "./abandon.js";
 import type { z } from "zod";
@@ -126,11 +126,14 @@ export function resumesBaseRedAfterGc(opts: { dryRun?: boolean; scheduled?: bool
  *   worktree only; the local branch and its commits stay. Such a run can no longer be resumed.
  * - A terminal run whose branch is pushed, or that has no PR: deletes `home/`, published `evidence/`,
  *   and service logs. `done` and `abandoned` also lose every `node_modules` / `.venv` / `.nox` under the
- *   worktree. A `failed` run keeps those folders until the worktree goes (merged/closed PR, or the no-PR
- *   failed retention): resume does not run setup again. The run directory keeps `events.jsonl`,
- *   `result.json`, `state.json`, `plan.json`, `pr.md` and review/gate reports. Resume-status runs keep the
- *   worktree and `home/`. This strip also runs from the automatic gc at `factory run` start. The push check
- *   fails closed (git error or a missing ref keeps the run).
+ *   worktree. A `failed` run keeps those folders until this stage removes the worktree (merged/closed PR,
+ *   or the no-PR failed retention): resume does not run setup again. That removal uses one pushed/merged
+ *   decision, including a merged PR whose remote branch is gone but `refs/pull/<n>/head` still matches the
+ *   local tip. Caches and, for `failed`, dependency folders are stripped with that decision — not by a
+ *   second push check that would fail closed after the local branch is deleted. The run directory keeps
+ *   `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md` and review/gate reports.
+ *   Resume-status runs keep the worktree and `home/`. This strip also runs from the automatic gc at
+ *   `factory run` start. The push check fails closed (git error or a missing ref keeps the run).
  * - PR open: the worktree stays (`done` / `abandoned` dependency folders are already stripped when the branch is pushed; `failed` keeps them).
  * A dirty worktree is kept unless `force`. A run that holds a lock slot is left untouched. Worktree removal
  * and local branch deletion take the per-repo git-ops lock (not a run slot), so they proceed while another
@@ -158,7 +161,8 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
     return report;
   }
   // Strip before worktree removal. That stage deletes the local branch, and a missing ref keeps the run,
-  // so the push check has to see the ref that still exists.
+  // so the push check has to see the ref that still exists. The merged refs/pull/<n>/head case is not
+  // decided here: the worktree stage strips those runs with the removal it already authorized.
   await gcStripTerminal({ ...opts, dryRun }, report);
   const prunedRepos = new Set<string>();
   // One timeout per repo per gc. A lock that stays busy does not cost 60s on every later run.
@@ -208,16 +212,27 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
       skip("worktree has uncommitted changes (use --force)");
       continue;
     }
+    let viaPullHead = false;
     if (st.branch) {
       const unpushed = await branchHasUnpushedCommits(st.repo, st.branch);
       // A merged PR whose head branch GitHub auto-deleted (and a pruned fetch dropped) is still pushed:
       // GitHub keeps refs/pull/<n>/head. Fails closed when that ref cannot be read.
-      if (unpushed.unpushed && st.pr && prState === "merged" && (await pullHeadMatches(st.repo, st.pr, st.branch))) unpushed.unpushed = false;
+      if (unpushed.unpushed && st.pr && prState === "merged" && (await pullHeadMatches(st.repo, st.pr, st.branch))) {
+        unpushed.unpushed = false;
+        viaPullHead = true;
+      }
       if (unpushed.unpushed) {
         skip(unpushed.reason ?? "branch has unpushed commits");
         continue;
       }
     }
+    // Same decision as the check above — no second unpushed read. A failed run's dependency folders, and
+    // caches the early strip kept (it does not see refs/pull/<n>/head), go only with this removal.
+    const stripWithRemoval = () => {
+      if (st.result !== "done" && st.result !== "failed" && st.result !== "abandoned") return;
+      if (!viaPullHead && st.result !== "failed") return;
+      applyTerminalStrip({ ...opts, dryRun }, report, run, st.result === "failed" || viaPullHead);
+    };
     if (!st.pr) {
       const entry = {
         run_id: run.run_id,
@@ -233,6 +248,7 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
         const op = await withGcGitOps(st.repo, async () => {
           if (runIsLive(opts.factoryHome, run.run_id)) return "live" as const;
           if (await dirty(wt!)) return "dirty" as const;
+          stripWithRemoval();
           await git(st.repo, ["worktree", "remove", ...(opts.force ? ["--force"] : []), wt!]);
           return "ok" as const;
         });
@@ -250,7 +266,7 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
         }
         markCollected(run, now());
         prunedRepos.add(st.repo);
-      }
+      } else stripWithRemoval();
       report.cleaned.push(entry);
       continue;
     }
@@ -273,6 +289,7 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
       const op = await withGcGitOps(st.repo, async () => {
         if (runIsLive(opts.factoryHome, run.run_id)) return "live" as const;
         if (wt && (await dirty(wt))) return "dirty" as const;
+        stripWithRemoval();
         if (wt) {
           await git(st.repo, ["worktree", "remove", ...(opts.force ? ["--force"] : []), wt]);
           entry.worktree_removed = true;
@@ -307,6 +324,7 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
       }
       markCollected(run, now());
     } else {
+      stripWithRemoval();
       entry.worktree_removed = wt !== null;
       entry.branch_deleted = factoryBranch && local !== null;
       entry.remote_branch_deleted = factoryBranch && local !== null && remote === local;

@@ -100,6 +100,10 @@ export interface RunContext {
   maxRuns?: number;
   /** Whether `--wait` was set at intake. */
   wait?: boolean;
+  /** Drops the repo slot. A path-claim wait must not keep it. */
+  releaseLock?: () => void;
+  /** Takes a slot again after that wait and updates `lockSlot`. Undefined when none could be taken. */
+  reacquireLock?: () => Promise<number | undefined>;
 }
 
 export type Lane = "standard" | "fast";
