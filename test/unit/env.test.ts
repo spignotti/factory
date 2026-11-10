@@ -48,10 +48,11 @@ describe("agent env allowlist", () => {
   });
 
   it("never passes the factory's own provider credentials, even when a repo asks for them", () => {
-    const withKeys = { ...parent, OPENCODE_API_KEY: "k-opencode", OPENAI_API_KEY: "k-openai", FACTORY_HOME: "/f" };
-    const env = buildAgentEnv(withKeys, { home, extra: ["OPENCODE_API_KEY", "OPENAI_API_KEY", "FACTORY_HOME"] });
+    const withKeys = { ...parent, OPENCODE_API_KEY: "k-opencode", OPENAI_API_KEY: "k-openai", XAI_API_KEY: "k-xai", FACTORY_HOME: "/f" };
+    const env = buildAgentEnv(withKeys, { home, extra: ["OPENCODE_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "FACTORY_HOME"] });
     expect(env).not.toHaveProperty("OPENCODE_API_KEY");
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
+    expect(env).not.toHaveProperty("XAI_API_KEY");
     expect(env).not.toHaveProperty("FACTORY_HOME");
   });
 });

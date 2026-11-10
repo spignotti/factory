@@ -188,8 +188,9 @@ export class PiRunner implements AgentRunner {
 
 /**
  * Custom tools replace the built-ins of the same name (AgentSession._refreshToolRegistry).
- * bash: exactly the allowlisted env, jailed by bwrap/pasta when a jail is given; the
- * in-process file tools go through a PathGuard confined to the session cwd.
+ * bash: exactly the allowlisted env, jailed by bwrap/pasta when a jail is given.
+ * File tools always go through a PathGuard confined to the session cwd, whether or not a
+ * process sandbox is active (`sandbox: off` and a degraded `preferred` are equally unjailed).
  */
 export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail" | "commandTimeoutMs">, tools: string[]): ToolDefinition[] {
   const { cwd, env, jail } = req;
@@ -198,18 +199,16 @@ export function toolDefinitions(req: Pick<AgentRequest, "cwd" | "env" | "jail" |
     const bash = createBashToolDefinition(cwd, { exposeSessionEnvironment: false, spawnHook: bashSpawnHook(env, jail) });
     defs.push(req.commandTimeoutMs ? withCommandTimeout(bash, req.commandTimeoutMs) : bash);
   }
-  if (jail) {
-    const guard = new PathGuard([cwd]);
-    const make: Record<string, () => unknown> = {
-      read: () => createReadToolDefinition(cwd, { operations: guard.readOps() }),
-      write: () => createWriteToolDefinition(cwd, { operations: guard.writeOps() }),
-      edit: () => createEditToolDefinition(cwd, { operations: guard.editOps() }),
-      grep: () => createGrepToolDefinition(cwd, { operations: guard.grepOps() }),
-      find: () => createFindToolDefinition(cwd, { operations: guard.findOps() }),
-      ls: () => createLsToolDefinition(cwd, { operations: guard.lsOps() }),
-    };
-    for (const t of tools) if (make[t]) defs.push(make[t]());
-  }
+  const guard = new PathGuard([cwd]);
+  const make: Record<string, () => unknown> = {
+    read: () => createReadToolDefinition(cwd, { operations: guard.readOps() }),
+    write: () => createWriteToolDefinition(cwd, { operations: guard.writeOps() }),
+    edit: () => createEditToolDefinition(cwd, { operations: guard.editOps() }),
+    grep: () => createGrepToolDefinition(cwd, { operations: guard.grepOps() }),
+    find: () => createFindToolDefinition(cwd, { operations: guard.findOps() }),
+    ls: () => createLsToolDefinition(cwd, { operations: guard.lsOps() }),
+  };
+  for (const t of tools) if (make[t]) defs.push(make[t]());
   // Variance of the render callbacks only; the SDK registers its tools the same way internally.
   return defs as ToolDefinition[];
 }
