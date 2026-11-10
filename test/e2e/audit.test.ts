@@ -201,7 +201,15 @@ describe("factory audit", () => {
     const runGh = new FakeGitHub();
     const result = await runFactory(
       { repo, planFile: planPath },
-      { runner: new FakeRunner(script), github: runGh, profile: loadProfile(join(FIXTURES, "profile.yaml")), factoryHome, parentEnv: process.env },
+      {
+        runner: new FakeRunner(script),
+        github: runGh,
+        profile: loadProfile(join(FIXTURES, "profile.yaml")),
+        factoryHome,
+        parentEnv: process.env,
+        // PR CI polls `none`; this test is not about that wait.
+        sleep: async () => undefined,
+      },
     );
     expect(result.result).toBe("done");
     expect(result.pr).toBeTruthy();
