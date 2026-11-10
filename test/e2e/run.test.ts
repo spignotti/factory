@@ -436,40 +436,77 @@ ${fixed}` } };
     expect(second.github.prs[0]?.body).not.toContain(text);
   });
 
-  it("security and checklist reviewers join when the diff touches sensitive paths and unmarked checklist items exist", async () => {
-    const checklist = "- Every exported function has a test\n- No TODO comments <!-- check: lint -->\n";
+  it("standards reviewer joins for unmarked rules in standards.md and uses its severity section", async () => {
+    const standards = [
+      "# Standards",
+      "",
+      "- Every exported function has a test",
+      "- No TODO comments <!-- check: lint -->",
+      "",
+      "## Severity",
+      "",
+      "- custom-severity-token: repo-specific",
+      "",
+    ].join("\n");
     const r = await runScenario({
       script: "clean.json",
-      setup: (repo) => commitFile(repo, ".factory/checklist.md", checklist),
+      setup: (repo) => commitFile(repo, ".factory/standards.md", standards),
       steps: (steps) => {
-        // Not in the plan (a sensitive plan file needs a risk criterion): the diff decides, not the plan.
         steps[1]!.writes = { ...steps[1]!.writes, "src/auth/session.js": "export const ttl = 60;\n" };
         return [
           ...steps,
           { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } },
-          { role: "review_checklist", output: { reviewer: "checklist", prior: [], findings: [] } },
+          { role: "review_standards", output: { reviewer: "standards", prior: [], findings: [] } },
         ];
       },
     });
     expect(r.result.result).toBe("done");
     expect(r.runner.remaining()).toEqual({});
-    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "security", "checklist"]);
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "security", "standards"]);
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.standards_deprecated).toBeUndefined();
     const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
     expect(prompt("review_security")).toMatch(/security_trigger_files[\s\S]*src\/auth\/session\.js/);
-    expect(prompt("review_checklist")).toContain("C1 (checklist.md:1): Every exported function has a test");
-    expect(prompt("review_checklist")).not.toContain("No TODO comments");
-    expect(prompt("review_plan")).not.toContain("checklist_items");
-    expect(prompt("plan_high")).toMatch(/checklist_items[\s\S]*Every exported function has a test/);
+    expect(prompt("review_standards")).toContain("S1 (standards.md:3): Every exported function has a test");
+    expect(prompt("review_standards")).not.toContain("No TODO comments");
+    expect(prompt("review_standards")).toContain("custom-severity-token");
+    expect(prompt("review_plan")).toContain("custom-severity-token");
+    expect(prompt("review_plan")).not.toContain("standards_items");
+    expect(prompt("review_plan")).not.toContain("Style is never a `bug`");
+    expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
     expect(prompt("plan_high")).not.toContain("No TODO comments");
   });
 
-  it("no security reviewer for ordinary files; no checklist reviewer when review.checklist is off or all items are marked", async () => {
+  it("falls back to checklist.md and review-rules.md when standards.md is missing", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      setup: (repo) => {
+        commitFile(repo, ".factory/checklist.md", "- Every exported function has a test\n- No TODO comments <!-- check: lint -->\n");
+        commitFile(repo, ".factory/review-rules.md", "# Review rules\n\n- legacy-severity-token\n");
+      },
+      steps: (steps) => [
+        ...steps,
+        { role: "review_standards", output: { reviewer: "standards", prior: [], findings: [] } },
+      ],
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.remaining()).toEqual({});
+    const started = eventsOf(r, "step_started").find((e) => e.step === "review");
+    expect(started?.data.reviewers).toEqual(["plan", "simplicity", "standards"]);
+    expect(started?.data.standards_deprecated).toMatch(/factory standards migrate/);
+    const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
+    expect(prompt("review_standards")).toContain("S1 (checklist.md:1): Every exported function has a test");
+    expect(prompt("review_standards")).not.toContain("No TODO comments");
+    expect(prompt("review_standards")).toContain("legacy-severity-token");
+    expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
+  });
+
+  it("no security reviewer for ordinary files; no standards reviewer when review.checklist is off or all items are marked", async () => {
     const off = await runScenario({
       script: "clean.json",
       patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
-      setup: (repo) => commitFile(repo, ".factory/checklist.md", "- Every exported function has a test\n"),
+      setup: (repo) => commitFile(repo, ".factory/standards.md", "- Every exported function has a test\n"),
     });
-    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/checklist.md", "- Tests pass <!-- check: unit -->\n") });
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: unit -->\n") });
     for (const r of [off, marked]) {
       expect(r.result.result).toBe("done");
       expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);

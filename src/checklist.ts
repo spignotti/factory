@@ -1,8 +1,8 @@
 /**
- * `.factory/checklist.md`: one item per Markdown list item. An item that a
- * deterministic check already enforces carries a marker `<!-- check: <check name> -->`; marked items
- * are skipped by the checklist reviewer and by `harden`. Continuation lines (indented, no bullet)
- * belong to the item above; headings, blank lines and other text are ignored.
+ * One rule per Markdown list item (`.factory/standards.md`, or the deprecated `.factory/checklist.md`).
+ * An item that a deterministic check already enforces carries a marker `<!-- check: <check name> -->`;
+ * marked items are skipped by the standards reviewer and by improve/harden. Continuation lines
+ * (indented, no bullet) belong to the item above; headings, blank lines and other text are ignored.
  */
 export interface ChecklistItem {
   /** 1-based line of the bullet. */

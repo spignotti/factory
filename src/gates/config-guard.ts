@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { diffText, git, mergeBase } from "../git.js";
 import { matchesAny, type Plan, redGreenLoosening } from "../schemas/plan.js";
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
+import { describeStandardsRemoval, STANDARDS_REL, standardsRemovalDeclared, standardsRemovals, type StandardsRemoval } from "../standards.js";
 import type { BuiltinResult } from "./builtin.js";
 
 /**
@@ -249,6 +250,18 @@ function planText(plan: Plan, packages: string[]): string {
   return [...ps.flatMap((p) => [p.title, p.description]), ...plan.acceptance.filter((a) => packages.includes(a.package)).map((a) => a.text)].join("\n").toLowerCase();
 }
 
+/** Whole plan, not only the packages of this gate: a standards removal is one diff, declared once. */
+function standardsPlanText(plan: Plan): string {
+  return [
+    plan.goal,
+    plan.context,
+    ...plan.packages.flatMap((p) => [p.title, p.description]),
+    ...plan.acceptance.map((a) => a.text),
+    ...(plan.protected_changes ?? []).flatMap((c) => [c.file, c.change, c.reason]),
+    ...(plan.out_of_scope ?? []),
+  ].join("\n");
+}
+
 /** The gate over precomputed inputs (pure, for tests). */
 export function configGuard(input: {
   plan: Plan;
@@ -257,17 +270,23 @@ export function configGuard(input: {
   suppressions: { file: string; marker: string; line: string }[];
   /** repo.yaml loosening: fails even when the plan declares the file a protected change. */
   loosening?: string[];
+  /** Rule or marker removed from standards.md. Passes only when the plan names that removal. */
+  standardsRemovals?: StandardsRemoval[];
   /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
   labels?: string[];
 }): BuiltinResult {
   const files = input.plan.packages.filter((p) => input.packages.includes(p.id)).flatMap((p) => p.files);
   const text = planText(input.plan, input.packages);
+  const standardsText = standardsPlanText(input.plan);
   const inScope = (f: string) => files.includes(f) || matchesAny(f, files);
   const exemption = redGreenLoosening(input.plan, input.labels ?? []);
   const bad = [
     ...input.configChanges.filter((c) => !inScope(c.file)).map((c) => `${c.file}: ${c.why} (not in the plan's files)`),
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
     ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
+    ...(input.standardsRemovals ?? [])
+      .filter((r) => !standardsRemovalDeclared(standardsText, r))
+      .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; declare the removal in the plan)`),
     ...(exemption.fail ? [exemption.fail] : []),
   ];
   const note = exemption.note ?? "";
@@ -279,16 +298,18 @@ export function configGuard(input: {
 }
 
 /** Collects config changes and added suppressions in a worktree against `base` (stage first). */
-export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening">> {
+export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "standardsRemovals">> {
   const mb = await mergeBase(cwd, base);
   const configChanges: { file: string; why: string }[] = [];
   let loosening: string[] = [];
+  let standards: StandardsRemoval[] = [];
   for (const file of changed) {
     const before = await git(cwd, ["show", `${mb}:${file}`]).catch(() => undefined);
     const after = await readFile(join(cwd, file), "utf8").catch(() => undefined);
     const why = configChange(file, before, after);
     if (why) configChanges.push({ file, why });
     if (file === REPO_CONFIG_PATH) loosening = repoConfigLoosening(before, after);
+    if (file === STANDARDS_REL) standards = standardsRemovals(before, after);
   }
-  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening };
+  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, standardsRemovals: standards };
 }

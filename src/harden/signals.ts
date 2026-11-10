@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseChecklist, unmarkedItems } from "../checklist.js";
+import { unmarkedStandardRules } from "../standards.js";
 import { CI_STUB_PATH, pinnedRefs } from "../ci.js";
 import type { CiRun } from "../gh.js";
 import { git } from "../git.js";
@@ -38,11 +38,13 @@ export function findingSignals(mem: MemoryFile): FindingSignal[] {
     .map((e) => ({ key: e.key, text: e.text, reviewer: e.reviewer, count: e.count, checkable: e.checkable, check_sketch: e.check_sketch, flaky: e.key.startsWith("flaky:") }));
 }
 
-/** Checklist items without a `<!-- check: … -->` marker. */
+/**
+ * Unmarked standards rules. improve's findings aspect and harden propose making each a check and
+ * cleaning up existing violations. `standards.md` wins over the deprecated checklist.
+ */
 export function checklistSignals(repoDir: string, repo: RepoConfig): string[] {
-  const path = join(repoDir, ".factory", "checklist.md");
-  if (!repo.review.checklist || !existsSync(path)) return [];
-  return unmarkedItems(parseChecklist(readFileSync(path, "utf8"))).map((i) => i.text);
+  if (!repo.review.checklist) return [];
+  return unmarkedStandardRules(repoDir);
 }
 
 function quantile(values: number[], q: number): number | null {

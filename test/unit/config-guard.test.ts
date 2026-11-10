@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { addedSuppressions, configChange, configGuard, configGuardInputs } from "../../src/gates/config-guard.js";
+import { standardsRemovals } from "../../src/standards.js";
 import type { Plan } from "../../src/schemas/plan.js";
 import { gitIn } from "../helpers/repo.js";
 import { makeRepo } from "../helpers/adopt-repo.js";
@@ -130,6 +131,31 @@ describe("config guard: scope", () => {
     expect(labeled).toMatchObject({ ok: true, detail: "loosening: red_green not_applicable — issue label" });
   });
 
+  it("a removed standards rule or marker is a loosening unless the plan names it", () => {
+    const before = "# Standards\n\n- no console.log\n- tests pass <!-- check: unit -->\n\n## Severity\n\n- bug: a defect\n";
+    const ruleGone = before.replace("- no console.log\n", "");
+    const markerGone = before.replace(" <!-- check: unit -->", "");
+    const severityOnly = before.replace("a defect", "a real defect");
+    expect(standardsRemovals(before, severityOnly)).toEqual([]);
+    expect(standardsRemovals(before, before + "\n- new rule\n")).toEqual([]);
+    const rule = standardsRemovals(before, ruleGone);
+    const marker = standardsRemovals(before, markerGone);
+    expect(rule).toEqual([{ kind: "rule", text: "no console.log" }]);
+    expect(marker).toEqual([{ kind: "marker", text: "tests pass", check: "unit" }]);
+    const undeclared = configGuard({ plan: plan(["src/a.py"]), packages: ["P1"], configChanges: [], suppressions: [], standardsRemovals: [...rule, ...marker] });
+    expect(undeclared.ok).toBe(false);
+    expect(undeclared.detail).toContain(".factory/standards.md: rule removed: no console.log");
+    expect(undeclared.detail).toContain(".factory/standards.md: check marker removed: unit");
+    const declared = configGuard({
+      plan: plan(["src/a.py"], "Remove the rule no console.log and drop <!-- check: unit -->"),
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      standardsRemovals: [...rule, ...marker],
+    });
+    expect(declared.ok).toBe(true);
+  });
+
   it("collects both from a worktree against the base (new files included once staged)", async () => {
     const dir = makeRepo({ "pyproject.toml": '[project]\nname = "a"\n', "src/a.py": "x = 1\n" });
     const base = gitIn(dir, "rev-parse", "HEAD").trim();
@@ -139,5 +165,17 @@ describe("config guard: scope", () => {
     const got = await configGuardInputs(dir, base, ["pyproject.toml", "src/b.py"]);
     expect(got.configChanges).toEqual([{ file: "pyproject.toml", why: "[tool.*] lint/type/test config in pyproject.toml changed" }]);
     expect(got.suppressions).toEqual([{ file: "src/b.py", marker: "noqa", line: "import os  # noqa" }]);
+  });
+
+  it("collects a standards.md rule removal from the worktree", async () => {
+    const dir = makeRepo({ ".factory/standards.md": "- no console.log\n- tests pass <!-- check: unit -->\n" });
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    writeFileSync(join(dir, ".factory", "standards.md"), "- tests pass\n");
+    gitIn(dir, "add", "-A");
+    const got = await configGuardInputs(dir, base, [".factory/standards.md"]);
+    expect(got.standardsRemovals).toEqual([
+      { kind: "rule", text: "no console.log" },
+      { kind: "marker", text: "tests pass", check: "unit" },
+    ]);
   });
 });

@@ -61,6 +61,7 @@ export const PROMPT_NAMES = [
   "review-plan",
   "review-simplicity",
   "review-security",
+  "review-standards",
   "review-checklist",
   "review-common",
 ] as const;

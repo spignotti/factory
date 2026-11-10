@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigError, describeProfile, type Layer, loadLayers, parseLayer, resolveProfile, withRepoModels } from "../../src/config.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
-import { billingOf } from "../../src/schemas/profile.js";
+import { billingOf, profileRoleOf } from "../../src/schemas/profile.js";
 
 const home = (profile?: string) => {
   const dir = mkdtempSync(join(tmpdir(), "fh-"));
@@ -95,6 +95,15 @@ describe("layered model config", () => {
   it("rejects unknown roles and keys in a layer", () => {
     expect(() => parseLayer("user", "p.yaml", `roles:\n  review: [{ model: openai/x }]\n`)).toThrow(/review/);
     expect(() => parseLayer("user", "p.yaml", `modles: {}\n`)).toThrow(ConfigError);
+  });
+
+  it("review_checklist is an alias of review_standards; the new name wins when both are set", () => {
+    const p = resolveProfile(loadLayers({ factoryHome: home("roles:\n  review_checklist: [{ model: openai/gpt-6-luna }]\n") }));
+    expect(p.roles.review_standards[0]!.model).toBe("openai/gpt-6-luna");
+    expect(p.roles).not.toHaveProperty("review_checklist");
+    expect(profileRoleOf("review_checklist")).toBe("review_standards");
+    const both = resolveProfile(loadLayers({ factoryHome: home("roles:\n  review_standards: [{ model: openai/a }]\n  review_checklist: [{ model: openai/b }]\n") }));
+    expect(both.roles.review_standards[0]!.model).toBe("openai/a");
   });
 
   it("describeProfile lists every role with its models and layer", () => {

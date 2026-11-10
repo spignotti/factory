@@ -25,6 +25,7 @@ import { redact } from "../events.js";
 import { notifyChecks, notifyDoctorChecks } from "../notify.js";
 import { defaultSecretsFile, isInside, looseMode, MIN_REDACT_LENGTH, type ResolvedSecrets, resolveSecrets, SecretsError, secretsFile } from "../secrets.js";
 import { nodeCheck } from "../node-runtime.js";
+import { standardsDoctorNotes } from "../standards.js";
 
 /** `info` is a hint only (GitHub settings); only `fail` makes doctor exit 1. */
 export type CheckStatus = "ok" | "warn" | "fail" | "info";
@@ -556,6 +557,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       const repo = loadRepoConfig(repoDir);
       checks.push(concurrencyCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
+      checks.push(...standardsDoctorNotes(repoDir, repo.checks.map((c) => c.name)));
       checks.push(...baselineConfigChecks(repoDir, repo, await probeBaselineTools()));
       checks.push(...serviceConfigChecks(repo));
       const sec = await secretsChecks(repoDir, repo, opts.factoryHome);

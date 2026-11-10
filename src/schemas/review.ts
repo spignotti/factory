@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-export const ReviewerSchema = z.enum(["plan", "simplicity", "security", "checklist", "evaluator"]);
+/** `checklist` is the old name of the standards reviewer. */
+export const ReviewerSchema = z.preprocess(
+  (v) => (v === "checklist" ? "standards" : v),
+  z.enum(["plan", "simplicity", "security", "standards", "evaluator"]),
+);
 export type Reviewer = z.infer<typeof ReviewerSchema>;
 
 export const SeveritySchema = z.enum(["bug", "suggestion", "nit"]);

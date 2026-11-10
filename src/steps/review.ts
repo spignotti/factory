@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
-import { type ChecklistItem, parseChecklist, unmarkedItems } from "../checklist.js";
+import { type ChecklistItem } from "../checklist.js";
 import { InvalidOutputError } from "../agents/models.js";
 import { changedFiles, diffText, git, stageAll } from "../git.js";
 import { callAgent, type RunContext, writeJson, writeRunFile } from "../pipeline/context.js";
@@ -10,6 +10,7 @@ import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny, planReviewNotes } from "../schemas/plan.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema, LeanOutputSchema } from "../schemas/review.js";
+import { CHECKLIST_REL, resolveStandards, REVIEW_RULES_REL, STANDARDS_REL, type ResolvedStandards } from "../standards.js";
 import { skippedSecurityGates, type GateReport, visibleGateDetail } from "./gates.js";
 
 
@@ -17,37 +18,59 @@ export interface ReviewerPlan {
   reviewers: Reviewer[];
   /** Why `security` is active: matching changed files (empty = inactive). */
   security: string[];
-  /** Unmarked checklist items given to `checklist` (empty = inactive). */
-  checklist: ChecklistItem[];
+  /** Unmarked standards rules given to `standards` (empty = inactive). */
+  standards: ChecklistItem[];
+  /** `standards.md` or the deprecated `checklist.md`, for citations. */
+  standardsFile: string;
+  /** Review rules from the base commit (severity section, old file, or the global default). */
+  reviewRules: string;
+  /** Set when the base still uses the deprecated files. */
+  deprecated?: string;
 }
 
-/** Checklist from the base commit (like review rules: not editable by the implementer). */
-async function baseChecklist(ctx: RunContext): Promise<ChecklistItem[]> {
-  if (!ctx.repo.review.checklist) return [];
-  const text = await git(ctx.worktree, ["show", `${ctx.baseSha}:.factory/checklist.md`]).catch(() => "");
-  return unmarkedItems(parseChecklist(text));
+async function showAt(cwd: string, sha: string, path: string): Promise<string | undefined> {
+  try {
+    return await git(cwd, ["show", `${sha}:${path}`]);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Standards and review rules from the base commit: the implementer must not rewrite its reviewers' rules. */
+async function baseStandards(ctx: RunContext): Promise<ResolvedStandards> {
+  const standards = await showAt(ctx.worktree, ctx.baseSha, STANDARDS_REL);
+  const resolved = resolveStandards({
+    standards,
+    checklist: standards === undefined && ctx.repo.review.checklist ? await showAt(ctx.worktree, ctx.baseSha, CHECKLIST_REL) : undefined,
+    reviewRules: standards === undefined ? await showAt(ctx.worktree, ctx.baseSha, REVIEW_RULES_REL) : undefined,
+    defaultReviewRules: asset("standards/review-rules.md"),
+  });
+  if (!ctx.repo.review.checklist) return { ...resolved, items: [], unmarked: [] };
+  return resolved;
 }
 
 /** Reviewers decided in code, on the whole change since base. */
 export async function planReviewers(ctx: RunContext, round: number): Promise<ReviewerPlan> {
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const security = changed.filter((f) => matchesAny(f, ctx.repo.sensitive_paths) || matchesAny(f, DEPENDENCY_GLOBS));
-  const checklist = await baseChecklist(ctx);
+  const standards = await baseStandards(ctx);
   const reviewers: Reviewer[] = ["plan", "simplicity"];
   // A reviewer that ran once stays for the rest of the run: its open findings need its verdicts.
   if (security.length || reviewedBefore(ctx, "security", round)) reviewers.push("security");
-  if (checklist.length || reviewedBefore(ctx, "checklist", round)) reviewers.push("checklist");
-  return { reviewers, security, checklist };
+  if (standards.unmarked.length || reviewedBefore(ctx, "standards", round)) reviewers.push("standards");
+  return {
+    reviewers,
+    security,
+    standards: standards.unmarked,
+    standardsFile: standards.source === "checklist.md" ? "checklist.md" : "standards.md",
+    reviewRules: standards.reviewRules,
+    ...(standards.deprecated ? { deprecated: standards.deprecated } : {}),
+  };
 }
 
 const REVIEW_SHAPE = `Reply with a single \`\`\`json block:
 {"reviewer":"<name>","prior":[{"finding_id":"<id of a prior finding you were given>","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
  "findings":[{"severity":"bug|suggestion|nit","file":"","line":0,"claim":"","evidence":"","fix":"","checkable":"lint|test|script|no","check_sketch":""}]}`;
-
-/** Rules from the base commit: the implementer must not be able to rewrite its reviewers' rules. */
-async function reviewRules(ctx: RunContext): Promise<string> {
-  return git(ctx.worktree, ["show", `${ctx.baseSha}:.factory/review-rules.md`]).catch(() => asset("standards/review-rules.md"));
-}
 
 export interface ReviewInput {
   round: number;
@@ -59,14 +82,18 @@ export interface ReviewInput {
 
 /** A reviewer that joins after round 1 (e.g. a fix touched a lockfile) gets the full round-1 input. */
 function reviewedBefore(ctx: RunContext, reviewer: Reviewer, round: number): boolean {
-  for (let n = 1; n < round; n++) if (existsSync(join(ctx.runDir, `review-${n}-${reviewer}.json`))) return true;
+  // `checklist` is the old reviewer id; a resumed run still owes that reviewer its verdicts.
+  const names = reviewer === "standards" ? ["standards", "checklist"] : [reviewer];
+  for (let n = 1; n < round; n++) {
+    if (names.some((name) => existsSync(join(ctx.runDir, `review-${n}-${name}.json`)))) return true;
+  }
   return false;
 }
 
 function reviewerExtras(ctx: RunContext, reviewer: Reviewer, plan: ReviewerPlan): string {
   if (reviewer === "security") return asData("security_trigger_files", plan.security.join("\n"));
-  if (reviewer === "checklist") {
-    return asData("checklist_items", plan.checklist.map((i, n) => `C${n + 1} (checklist.md:${i.line}): ${i.text}`).join("\n"));
+  if (reviewer === "standards") {
+    return asData("standards_items", plan.standards.map((i, n) => `S${n + 1} (${plan.standardsFile}:${i.line}): ${i.text}`).join("\n"));
   }
   if (reviewer === "plan") {
     const notes = planReviewNotes(ctx.plan, ctx.task.text, ctx.task.labels);
@@ -119,7 +146,7 @@ function gateResultsJson(gates: GateReport, continued: boolean): string {
   }, null, 2);
 }
 
-async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<string> {
+async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, plan: ReviewerPlan): Promise<string> {
   const continued = input.round > 1 && input.lastReviewedSha && s.reviewers.every((r) => reviewedBefore(ctx, r, input.round));
   if (!continued) {
     return [
@@ -128,7 +155,7 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
       asData("diff", await diffs.full()),
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", gateResultsJson(input.gates, false)),
-      `Review rules:\n${rules}`,
+      `Review rules:\n${plan.reviewRules}`,
       ...s.reviewers.map((r) => reviewerExtras(ctx, r, plan)),
       ctx.briefing ? `Recurring findings in this repo (check whether this diff repeats them):\n${asData("findings_briefing", ctx.briefing)}` : "",
       // Prior findings of a reviewer joining late: open ones still need its verdict.
@@ -181,9 +208,9 @@ function checkPriorIds(out: ReturnType<typeof parseSession>, input: ReviewInput,
   return { ok: false, errors: [`prior verdicts name unknown finding ids: ${unknown.join(", ")} (judge only the prior findings you were given${known.size ? "" : "; there are none, so prior must be []"})`] };
 }
 
-async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, rules: string, plan: ReviewerPlan): Promise<ReviewOutput[]> {
+async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, plan: ReviewerPlan): Promise<ReviewOutput[]> {
   const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`, ctx.deps.prompts)), rolePrompt("review-common", ctx.deps.prompts)].join("\n\n");
-  let prompt = await reviewPrompt(ctx, s, input, diffs, rules, plan);
+  let prompt = await reviewPrompt(ctx, s, input, diffs, plan);
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     const res = await callAgent(ctx, "review", { role: s.role, cwd: ctx.worktree, tools: "read_only", system, prompt, sessionKey: `${ctx.runId}-review-${s.key}` });
@@ -211,7 +238,8 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
     event: "step_started",
     data: {
       round: input.round, reviewers: plan.reviewers, mode: ctx.lane === "fast" ? "lean" : "full",
-      security_files: plan.security.length, checklist_items: plan.checklist.length,
+      security_files: plan.security.length, checklist_items: plan.standards.length, standards_items: plan.standards.length,
+      ...(plan.deprecated ? { standards_deprecated: plan.deprecated } : {}),
       ...(planChecks ? { plan_checks: planChecks } : {}),
     },
   });
@@ -221,9 +249,8 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
   let full: Promise<string> | undefined;
   const diffs: Diffs = { incremental, full: () => (full ??= first ? Promise.resolve(incremental) : diffText(ctx.worktree, ctx.baseSha, skip)) };
   writeRunFile(ctx, `diff-${input.round}.patch`, incremental);
-  const rules = await reviewRules(ctx);
   // allSettled: a failing reviewer must not leave its sibling running after the run has finished.
-  const settled = await Promise.allSettled(sessions.map((s) => runSession(ctx, s, input, diffs, rules, plan)));
+  const settled = await Promise.allSettled(sessions.map((s) => runSession(ctx, s, input, diffs, plan)));
   const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
   if (failed) throw failed.reason;
   const outputs = settled.flatMap((s) => (s as PromiseFulfilledResult<ReviewOutput[]>).value);

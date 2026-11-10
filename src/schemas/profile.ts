@@ -67,8 +67,21 @@ export type ModelEntry = z.infer<typeof ModelEntrySchema>;
 
 const Chain = z.array(ModelEntrySchema).min(1);
 
-/** Reviewer roles; each reviewer has its own model chain. */
-export const REVIEW_ROLES = ["review_plan", "review_simplicity", "review_security", "review_checklist"] as const;
+/** Reviewer roles; each reviewer has its own model chain. `review_checklist` is an alias of `review_standards`. */
+export const REVIEW_ROLES = ["review_plan", "review_simplicity", "review_security", "review_standards"] as const;
+
+/** Old role name → current role. Applied before a layer or a full profile is validated. */
+const ROLE_ALIASES: Record<string, string> = { review_checklist: "review_standards" };
+
+function foldRoleAliases(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const rec = { ...(value as Record<string, unknown>) };
+  for (const [alias, canon] of Object.entries(ROLE_ALIASES)) {
+    if (rec[canon] === undefined && rec[alias] !== undefined) rec[canon] = rec[alias];
+    delete rec[alias];
+  }
+  return rec;
+}
 
 export const PROFILE_ROLES = [
   "plan_high",
@@ -99,7 +112,10 @@ export const RetrySchema = z.object({
   attempts: z.number().int().min(1).default(4),
 });
 
-const RolesSchema = z.object(Object.fromEntries(PROFILE_ROLES.map((r) => [r, Chain])) as Record<ProfileRole, typeof Chain>);
+const RolesSchema = z.preprocess(
+  foldRoleAliases,
+  z.object(Object.fromEntries(PROFILE_ROLES.map((r) => [r, Chain])) as Record<ProfileRole, typeof Chain>).strict(),
+);
 
 /**
  * Safety rules on a complete set of role chains. Also applied after the
@@ -210,16 +226,25 @@ export function loadProfile(nameOrPath: string): Profile {
   return parseProfile(readFileSync(path, "utf8"));
 }
 
-/** Logical runner role -> profile role. */
+/** Logical runner role -> profile role. `review_checklist` still resolves to `review_standards`. */
 export function profileRoleOf(role: string): ProfileRole {
-  if (!(PROFILE_ROLES as readonly string[]).includes(role)) throw new Error(`unknown role ${role}`);
-  return role as ProfileRole;
+  const name = ROLE_ALIASES[role] ?? role;
+  if (!(PROFILE_ROLES as readonly string[]).includes(name)) throw new Error(`unknown role ${role}`);
+  return name as ProfileRole;
 }
 
-/** Partial role → chain map: a layer replaces whole chains, role by role. */
-export const RoleOverridesSchema = z.object(
-  Object.fromEntries(PROFILE_ROLES.map((r) => [r, Chain.optional()])) as Record<ProfileRole, z.ZodOptional<typeof Chain>>,
-).strict();
+/** Partial role → chain map: a layer replaces whole chains, role by role. `review_checklist` is the alias. */
+export const RoleOverridesSchema = z
+  .object({
+    ...(Object.fromEntries(PROFILE_ROLES.map((r) => [r, Chain.optional()])) as Record<ProfileRole, z.ZodOptional<typeof Chain>>),
+    review_checklist: Chain.optional(),
+  })
+  .strict()
+  .transform((roles) => {
+    const { review_checklist, ...rest } = roles;
+    if (rest.review_standards === undefined && review_checklist !== undefined) return { ...rest, review_standards: review_checklist };
+    return rest;
+  });
 export type RoleOverrides = z.infer<typeof RoleOverridesSchema>;
 
 /** One config layer: built-in default, user profile (`~/.factory/profile.yaml`) or `--profile`. */
