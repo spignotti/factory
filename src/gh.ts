@@ -217,6 +217,31 @@ function suiteOf(row: Record<string, unknown>): number | undefined {
   return run ? Number(run[1]) : undefined;
 }
 
+/** Workflow `name:` when the payload has it. Absent means ci-status falls back to job names. */
+function workflowOf(row: Record<string, unknown>): string | null {
+  const direct = text(row.workflow) || text(row.workflowName) || text(row.workflow_name);
+  if (direct) return direct;
+  const nested = row.checkSuite ?? row.check_suite;
+  if (!nested || typeof nested !== "object") return null;
+  const run = (nested as Record<string, unknown>).workflowRun ?? (nested as Record<string, unknown>).workflow_run;
+  if (!run || typeof run !== "object") return null;
+  const record = run as Record<string, unknown>;
+  const wf = record.workflow;
+  if (wf && typeof wf === "object") {
+    const name = text((wf as Record<string, unknown>).name);
+    if (name) return name;
+  }
+  return text(record.name) || text(record.workflowName) || null;
+}
+
+/** Check suite creation time, when the payload nests it. Not the check run's own timestamp. */
+function suiteCreated(row: Record<string, unknown>): string | null {
+  const nested = row.checkSuite ?? row.check_suite;
+  if (!nested || typeof nested !== "object") return null;
+  const suite = nested as Record<string, unknown>;
+  return text(suite.createdAt) || text(suite.created_at) || null;
+}
+
 /** GraphQL rollup (upper-case, `startedAt`) and REST check-runs (`started_at`) into one shape. */
 function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
   const runs: CheckRunView[] = [];
@@ -241,8 +266,10 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
       status: mappedStatus,
       conclusion: mappedConclusion,
       started_at: text(row.started_at) || text(row.startedAt) || null,
+      created_at: suiteCreated(row),
       id: num(row.id) ?? num(row.databaseId),
       suite: suiteOf(row),
+      workflow: workflowOf(row),
     });
   }
   return runs;
@@ -250,7 +277,7 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
 
 /**
  * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
- * CI uses `aggregateCheckRuns`: latest run of each name, draft hold, skipped `done` is not green.
+ * CI uses `aggregateCheckRuns`: latest event of each name, draft hold, skipped `done` is not green.
  * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
  */
 export function prStatusFromView(raw: {
@@ -278,6 +305,40 @@ export function prStatusFromView(raw: {
 async function gh(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileP("gh", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
+}
+
+/** Check suite id → workflow run `created_at` and workflow `name`. One page: a SHA does not have 100 runs. */
+interface WorkflowSuite {
+  created_at: string | null;
+  name: string | null;
+}
+
+/**
+ * Join key is the check suite (`check_suite_id` on the workflow run, `check_suite.id` on the check run).
+ * `name` is the workflow file's `name:` (not `display_title`). A missing Actions API leaves the map empty:
+ * event order uses suite id, and ci-status falls back to job names. UNVERIFIED live.
+ */
+async function workflowSuites(repoDir: string, sha: string): Promise<Map<number, WorkflowSuite>> {
+  const map = new Map<number, WorkflowSuite>();
+  try {
+    const out = await gh(repoDir, [
+      "api",
+      `repos/{owner}/{repo}/actions/runs?head_sha=${sha}&per_page=100`,
+      "--jq",
+      "[.workflow_runs[] | {suite: .check_suite_id, created_at, name}]",
+    ]);
+    const rows = JSON.parse(out || "[]") as { suite?: number | null; created_at?: string | null; name?: string | null }[];
+    if (!Array.isArray(rows)) return map;
+    for (const row of rows) {
+      if (typeof row?.suite !== "number") continue;
+      const prev = map.get(row.suite);
+      const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : (prev?.name ?? null);
+      map.set(row.suite, { created_at: row.created_at || prev?.created_at || null, name });
+    }
+  } catch {
+    // Event order falls back to check suite id. This must not hide the check runs themselves.
+  }
+  return map;
 }
 
 /** GitHub reports secret scanning as "enabled" or "disabled"; anything else is unknown. */
@@ -397,10 +458,21 @@ export class GhCli implements GitHub {
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id}]"]);
     const raw = JSON.parse(out || "[]") as { name?: string; status?: string; conclusion?: string | null; started_at?: string | null; id?: number; suite?: number | null }[];
+    const suites = await workflowSuites(repoDir, sha);
     const runs: CheckRunView[] = [];
     for (const run of raw) {
       if (!run.name || !run.status) continue;
-      runs.push({ name: run.name, status: run.status, conclusion: run.conclusion || null, started_at: run.started_at, id: run.id, suite: run.suite });
+      const meta = run.suite != null ? suites.get(run.suite) : undefined;
+      runs.push({
+        name: run.name,
+        status: run.status,
+        conclusion: run.conclusion || null,
+        started_at: run.started_at,
+        created_at: meta?.created_at ?? null,
+        id: run.id,
+        suite: run.suite,
+        workflow: meta?.name ?? null,
+      });
     }
     return aggregateCheckRuns(runs);
   }

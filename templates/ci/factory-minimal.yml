@@ -1,0 +1,58 @@
+# Generated from spignotti/factory templates/ci/factory-minimal.yml. Do not edit by hand:
+# `factory doctor --repo .` compares this file's hash with the template for the pinned ref.
+# Render a new one with `factory ci-stub --ref <tag>`; bumping the ref is a deliberate PR.
+# No check runs in CI (each is local_only, or there is none). This stub does not install the
+# factory and has no select or check job. `draft` runs only on a draft pull request and must
+# succeed before `done`: that check-run name is how ci-status tells a draft hold from a settled
+# red. A ready run skips `draft`, so a failed or cancelled `done` there is red. `done` fails on
+# a draft or a cancelled run and succeeds on a ready pull request, a tag and a manual run. A
+# skipped `done` would count as passed, so it still runs. Draft and ready events share one
+# concurrency group: a ready event cancels the in-flight draft run, whose `done` would otherwise
+# start later (it waited on `draft`) and become the latest failure. Nothing is skipped because of
+# author, branch, labels, or the PR body.
+# github:spignotti/factory#@FACTORY_REF@
+name: factory
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+# One group for every event on this ref, so ready_for_review cancels an in-flight draft run.
+# Split groups let that draft `done` finish after the ready `done` and stick as a failure.
+# `done` still runs when this run is cancelled and exits non-zero: a skipped `done` would count
+# as passed. A manual run and a tag are never cancelled.
+concurrency:
+  group: factory-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  # Marker only, not a required check. The job id is the check-run name (`draft`). It runs on a
+  # draft and is skipped otherwise. `done` needs it so the marker exists before `done` completes.
+  draft:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "draft hold, checks wait until the pull request is ready for review"
+  # The single status check, named `done`. It gates nothing beside the repo's own jobs: there
+  # is no matrix. always(): a skipped `done` is a successful required check. Draft and cancelled
+  # runs exit 1 instead. `cancelled()` is legal only in an `if`.
+  done:
+    needs: [draft]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: cancelled()
+        run: |
+          echo "cancelled: not a successful check"
+          exit 1
+      - env:
+          DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
+        run: |
+          set -eu
+          if [ "$DRAFT" = "true" ]; then
+            echo "draft: checks are not run until the pull request is ready for review"
+            exit 1
+          fi
+          echo "no CI checks"

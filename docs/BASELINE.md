@@ -7,14 +7,22 @@ copy a workflow per tool.
 
 ## CI: one stub, not a reusable workflow
 
-`factory ci-stub` renders `templates/ci/factory.yml`. Doctor hashes that one file. Branch protection
-requires one status, `done`, which is red when selection or any check fails. `pull_request` has no
-branch filter. A draft event does not run select/check, but `done` still runs and fails, so a draft
-is never a skipped (and therefore passing) required check. Dependabot and other ready pull requests
-run the full matrix. Nothing is skipped because of author, branch, labels, or the PR body.
+`factory ci-stub` renders `templates/ci/factory.yml` when a check is not `local_only` (including
+`tier: manual`, so `workflow_dispatch` can run it), and `templates/ci/factory-minimal.yml` when every
+check is `local_only` (or there is none).
+Doctor hashes the rendering that matches the repo. Branch protection requires one status, `done`,
+when the stub runs checks; that status is red when selection or any check fails. When the stub is
+minimal, `done` gates nothing beside the repo's own jobs, so doctor and adopt do not suggest
+requiring it. `pull_request` has no branch filter. A draft event does not run select/check (the
+minimal stub runs a `draft` marker instead), but `done` still runs and fails, so a draft is never a
+skipped (and therefore passing) required check. On that stub, draft and ready events share one
+concurrency group: marking ready cancels the in-flight draft run. A failed or cancelled `done` on a
+ready pull request is red: the marker is skipped there, so that failure is not a draft hold. Dependabot and other ready
+pull requests run the full matrix when there is one. Nothing is skipped because of author, branch,
+labels, or the PR body.
 
-A reusable workflow would be a second file and a second required check. The stub stays identical in
-every repo; the tool commands live in `.factory/repo.yaml` `checks`.
+A reusable workflow would be a second file and a second required check. The tool commands live in
+`.factory/repo.yaml` `checks`; the stub file is one of the two renderings, not a copy per tool.
 
 The stub runs on pull requests, on tags `v*` (a release), and on `workflow_dispatch` (a deploy). It
 does not run on pushes to the base branch: that commit was already checked as a PR, and a base

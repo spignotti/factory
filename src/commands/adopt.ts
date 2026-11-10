@@ -7,7 +7,7 @@ import { classifyLegacy, isReviewFile, type LegacyReport, withMigratedReviewRule
 import { type Detection, detect } from "../adopt/detect.js";
 import { agentsTemplate, type DraftCheck, draftChecks, draftRepoYaml, dropMutating, projectPurpose, testStrategySection, withTestStrategy } from "../adopt/draft.js";
 import { type MeasureResult, measureChecks } from "../adopt/measure.js";
-import { CI_STUB_PATH, renderCiStub, REQUIRED_CHECK } from "../ci.js";
+import { CI_STUB_PATH, type CiStubMode, ciStubMode, LEGACY_REQUIRED_CHECK, renderCiStubFor, REQUIRED_CHECK } from "../ci.js";
 import { describeToolchains, detectToolchains } from "../toolchains.js";
 import type { Io } from "./gates.js";
 import type { GitHub, RepoSettings } from "../gh.js";
@@ -73,10 +73,15 @@ async function freeBranch(repoDir: string, stem: string): Promise<string> {
 }
 
 /** Printed hints only: adopt never changes repository settings (no admin token, works without GitHub Pro). */
-export function settingsHints(s: RepoSettings, base: string): string[] {
+export function settingsHints(s: RepoSettings, base: string, mode: CiStubMode = "full"): string[] {
   const hints: string[] = [];
   const required = s.required_checks ?? [];
-  if (s.branch_protected === false || (s.branch_protected && !required.includes(REQUIRED_CHECK))) {
+  // `done` on the minimal stub succeeds on every ready PR, so requiring it gates nothing beside the repo's own jobs.
+  if (mode === "minimal") {
+    if (required.includes(LEGACY_REQUIRED_CHECK)) {
+      hints.push(`Remove the required status check "${LEGACY_REQUIRED_CHECK}" on ${base}: no check run reports it, so every PR stays blocked. "${REQUIRED_CHECK}" gates nothing here (no check runs in CI).`);
+    }
+  } else if (s.branch_protected === false || (s.branch_protected && !required.includes(REQUIRED_CHECK))) {
     hints.push(
       `Protect ${base}: require the status check "${REQUIRED_CHECK}" (the CI stub's job name, as GitHub Actions reports it) and dismiss stale approvals on new commits (Settings → Branches or Rulesets).` +
         (s.private ? " Private repos need GitHub Pro/Team for this; without it the factory's merge policy (human review) still applies." : ""),
@@ -184,7 +189,6 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
   const date = now.toISOString().slice(0, 10);
   const baseBranch = opts.base ?? (await defaultBranch(repoDir));
   const sha = await revParse(repoDir, await baseRef(repoDir, baseBranch));
-  const ciStub = renderCiStub(opts.ref);
   if (!opts.force && (await gitOk(repoDir, ["cat-file", "-e", `${sha}:${REPO_CONFIG_PATH}`]))) {
     throw new Error(`${REPO_CONFIG_PATH} already exists on ${baseBranch}; the repo is adopted (use --force to draft again)`);
   }
@@ -209,6 +213,8 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     const toolchainNotes: string[] = [];
     const ciToolchains = describeToolchains(detectToolchains(wt, toolchainNotes));
     const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: repoName(repoDir), toolchains: ciToolchains });
+    const stubMode = ciStubMode(config.checks);
+    const ciStub = renderCiStubFor(opts.ref, stubMode);
     const agentsPath = join(wt, "AGENTS.md");
     const agentsMd = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : undefined;
     const read = (rel: string) => {
@@ -267,7 +273,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       setup_seconds: measured?.setup?.seconds ?? null,
       proposal: null,
       plan_error: null,
-      hints: settingsHints(settings, baseBranch),
+      hints: settingsHints(settings, baseBranch, stubMode),
       ci_toolchains: ciToolchains,
     };
     if (detection.tests.globs.length && !detection.tests.run) {

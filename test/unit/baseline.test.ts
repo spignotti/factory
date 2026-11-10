@@ -274,6 +274,18 @@ describe("doctor baseline checks", () => {
     expect(baselineGithubChecks(dir, { ...base, branch_protected: false }).some((c) => c.name === "required checks")).toBe(false);
   });
 
+  it("required checks: does not suggest done when the stub gates nothing beside the repo's own jobs", () => {
+    const dir = tree({
+      ".github/workflows/factory.yml": "on: [pull_request]\njobs:\n  done: {}\n",
+      ".github/workflows/lint.yml": "on:\n  pull_request:\njobs:\n  lint:\n    name: Lint\n",
+    });
+    const settings = { private: true, auto_merge_allowed: null, branch_protected: true, required_checks: ["Lint"] };
+    expect(at(baselineGithubChecks(dir, settings, { factoryDoneGates: false }), "required checks")).toMatchObject({ status: "ok", detail: expect.stringMatching(/Lint/) });
+    const missing = at(baselineGithubChecks(dir, { ...settings, required_checks: [] }, { factoryDoneGates: false }), "required checks");
+    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/Lint/) });
+    expect(missing!.detail).not.toMatch(/done/);
+  });
+
   it("required checks: a ruleset covers gating jobs and ignores release, publish and automerge helpers", async () => {
     const ci = [
       "name: ci",

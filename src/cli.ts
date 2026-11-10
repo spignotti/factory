@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join, resolve } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
-import { defaultRef, renderCiStub } from "./ci.js";
+import { ciStubModeAt, defaultRef, renderCiStubFor } from "./ci.js";
 
 export { defaultRef };
 import { doctorCommand } from "./commands/doctor.js";
@@ -91,8 +91,10 @@ const USAGE = `usage:
                doctor lists configured repos and target names, never URLs)
   factory notify flush [--json]
               (retry pending notifications from $FACTORY_HOME/outbox/; also runs at the start of every run and resume)
-  factory ci-stub [--ref <tag>]
-              (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; doctor checks its hash)
+  factory ci-stub [--ref <tag>] [--repo <path>]
+              (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; a repo whose
+               checks are all local_only, or there are none, gets the minimal stub, no npx; a manual
+               check keeps the full stub so workflow_dispatch can run it; doctor checks its hash)
 `;
 
 function exitCode(result: string, signal: AbortSignal): number {
@@ -323,8 +325,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       }
     }
     if (command === "ci-stub") {
-      const { values } = parseArgs({ args: rest, options: { ref: { type: "string" } } });
-      io.out(renderCiStub(values.ref ?? defaultRef()));
+      const { values } = parseArgs({ args: rest, options: { ref: { type: "string" }, repo: { type: "string" } } });
+      io.out(renderCiStubFor(values.ref ?? defaultRef(), ciStubModeAt(resolve(values.repo ?? "."))));
       return 0;
     }
     if (command === "doctor") {
