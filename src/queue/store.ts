@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
-import { repoLockId } from "../git.js";
+import { repoLockId, type GitCallOptions } from "../git.js";
 import { lockRepoKey, tryPathLock } from "../pipeline/lock.js";
 
 /** Issue must carry this label before `queue add` accepts it. */
@@ -65,8 +65,8 @@ export function queuePath(factoryHome: string, key: string): string {
 }
 
 /** Same key as the repo lock: origin URL, else the path. One queue per repository. */
-export async function repoQueueKey(repoDir: string): Promise<string> {
-  return lockRepoKey(await repoLockId(resolve(repoDir)));
+export async function repoQueueKey(repoDir: string, opts?: GitCallOptions): Promise<string> {
+  return lockRepoKey(await repoLockId(resolve(repoDir), opts));
 }
 
 export function parseQueue(text: string, path: string): QueueFile {
@@ -113,9 +113,9 @@ export function loadAllQueues(factoryHome: string): QueueFile[] {
  * Read-modify-write under a short lock so `queue add` and the worker do not drop each other's entries.
  * Creates the file on first use.
  */
-export async function updateQueue<T>(factoryHome: string, repoDir: string, fn: (q: QueueFile) => Promise<T> | T): Promise<T> {
+export async function updateQueue<T>(factoryHome: string, repoDir: string, fn: (q: QueueFile) => Promise<T> | T, opts?: GitCallOptions): Promise<T> {
   const repo = resolve(repoDir);
-  const key = await repoQueueKey(repo);
+  const key = await repoQueueKey(repo, opts);
   const dir = queueDir(factoryHome);
   mkdirSync(dir, { recursive: true });
   const held = await tryPathLock(

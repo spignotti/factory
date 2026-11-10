@@ -67,6 +67,8 @@ Unverified (needs a real provider):
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).
 - `getIssue` also reads `state` (`OPEN` / `CLOSED`) for `queue add`. UNVERIFIED against a live `gh`.
+- `findFactoryPr` lists with `gh pr list --state all --search head:factory/<issue> --json number,state,headRefName`
+  and keeps only a head that is exactly `factory/<issue>` or `factory/<issue>-*`. UNVERIFIED against a live `gh`.
 - `updateBranch` runs `gh pr update-branch <pr>` (merge from the base, no `--rebase`, no force-push)
   so a behind factory PR can auto-merge after CI. UNVERIFIED against a live `gh`. Tests use `FakeGitHub`.
 - `openFactoryPrFiles` uses `gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository,files`.

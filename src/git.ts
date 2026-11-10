@@ -9,39 +9,48 @@ import { matchesAny } from "./schemas/plan.js";
 
 const execFileP = promisify(execFile);
 
+export interface GitCallOptions {
+  /** Kills the git process when set. Callers that must not hang (the queue worker) pass this. */
+  timeout?: number;
+}
+
+function gitTimeout(opts?: GitCallOptions): number | undefined {
+  return opts?.timeout;
+}
+
 /** Git for the factory process itself (its own env). Agents never get this. */
-export async function git(cwd: string, args: string[]): Promise<string> {
+export async function git(cwd: string, args: string[], opts?: GitCallOptions): Promise<string> {
   try {
-    const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, timeout: gitTimeout(opts) });
     return stdout;
   } catch (e) {
-    const err = e as { stderr?: string; message?: string };
+    const err = e as { stderr?: string; message?: string; killed?: boolean };
     // A missing cwd makes Node set stderr to "" and put `spawn git ENOENT` on `message`.
     // `??` would keep the empty stderr and hide that (eval recorded `git ls-files failed: `).
     const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
-    const detail = stderr || (err.message ?? String(e)).trim();
+    const detail = err.killed ? "timed out" : stderr || (err.message ?? String(e)).trim();
     throw new Error(`git ${args[0]} failed: ${detail}`, { cause: e });
   }
 }
 
-export async function gitOk(cwd: string, args: string[]): Promise<boolean> {
+export async function gitOk(cwd: string, args: string[], opts?: GitCallOptions): Promise<boolean> {
   try {
-    await git(cwd, args);
+    await git(cwd, args, opts);
     return true;
   } catch {
     return false;
   }
 }
 
-export async function revParse(cwd: string, ref: string): Promise<string> {
-  return (await git(cwd, ["rev-parse", "--verify", `${ref}^{commit}`])).trim();
+export async function revParse(cwd: string, ref: string, opts?: GitCallOptions): Promise<string> {
+  return (await git(cwd, ["rev-parse", "--verify", `${ref}^{commit}`], opts)).trim();
 }
 
 /** Remote base ref when an `origin` remote exists, else the local branch. */
-export async function baseRef(repoDir: string, branch: string): Promise<string> {
-  if (await gitOk(repoDir, ["remote", "get-url", "origin"])) {
-    await gitOk(repoDir, ["fetch", "--quiet", "origin", branch]);
-    if (await gitOk(repoDir, ["rev-parse", "--verify", `origin/${branch}`])) return `origin/${branch}`;
+export async function baseRef(repoDir: string, branch: string, opts?: GitCallOptions): Promise<string> {
+  if (await gitOk(repoDir, ["remote", "get-url", "origin"], opts)) {
+    await gitOk(repoDir, ["fetch", "--quiet", "origin", branch], opts);
+    if (await gitOk(repoDir, ["rev-parse", "--verify", `origin/${branch}`], opts)) return `origin/${branch}`;
   }
   return branch;
 }
@@ -319,13 +328,13 @@ export async function headSha(cwd: string): Promise<string> {
   return revParse(cwd, "HEAD");
 }
 
-export async function originUrl(repoDir: string): Promise<string> {
-  return (await git(repoDir, ["remote", "get-url", "origin"]).catch(() => "")).trim();
+export async function originUrl(repoDir: string, opts?: GitCallOptions): Promise<string> {
+  return (await git(repoDir, ["remote", "get-url", "origin"], opts).catch(() => "")).trim();
 }
 
 /** Repo lock id: the origin URL, else the path (one factory process per repository). */
-export async function repoLockId(repoDir: string): Promise<string> {
-  return (await originUrl(repoDir)) || repoDir;
+export async function repoLockId(repoDir: string, opts?: GitCallOptions): Promise<string> {
+  return (await originUrl(repoDir, opts)) || repoDir;
 }
 
 /**

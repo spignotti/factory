@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,9 +9,9 @@ import { renderStatus, statusReport } from "../../src/commands/status.js";
 import type { Io } from "../../src/commands/gates.js";
 import type { RunResult } from "../../src/events.js";
 import { FakeGitHub, type Issue } from "../../src/gh.js";
-import { activeHolders } from "../../src/pipeline/lock.js";
+import { activeHolders, tryPathLock } from "../../src/pipeline/lock.js";
 import { runFactory } from "../../src/pipeline/run.js";
-import { loadQueueByKey, repoQueueKey, updateQueue, type QueueEntry } from "../../src/queue/store.js";
+import { loadQueueByKey, queueDir, repoQueueKey, updateQueue, type QueueEntry } from "../../src/queue/store.js";
 import { runQueue, type StartRun } from "../../src/queue/worker.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { FIXTURES, createFixtureRepo } from "../helpers/repo.js";
@@ -172,7 +173,7 @@ describe("factory queue", () => {
     const g = gate();
     const ctl = new AbortController();
     const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
-    const transient = () => outcome(repo, 1, "needs_human", "transient capacity error after retries: overloaded");
+    const transient = () => Object.assign(outcome(repo, 1, "needs_human", "transient capacity error after retries: overloaded"), { transient: true });
     try {
       await waitFor("first", () => g.calls.length === 1);
       g.release(1, transient());
@@ -456,7 +457,78 @@ describe("factory queue", () => {
     expect((await entries(factoryHome, repo))[0]).toMatchObject({ status: "parked", run_id: newId, reason: "run ended without result.json" });
   });
 
-  it("SIGTERMs a run whose events.jsonl has not grown for stall_minutes x 2", async () => {
+  it("keeps the slot after a stall until the process exits, then SIGKILLs and parks", async () => {
+    const repo = createFixtureRepo((c) => {
+      const limits = (c.limits ?? {}) as Record<string, unknown>;
+      limits.stall_minutes = 1;
+      c.limits = limits;
+    });
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1, 2]);
+    const runId = "20261029-140000-cccccc";
+    mkdirSync(join(factoryHome, "runs", runId), { recursive: true });
+    writeFileSync(join(factoryHome, "runs", runId, "events.jsonl"), "{\"event\":\"progress\"}\n");
+    const signals: NodeJS.Signals[] = [];
+    let resolveDone: (r: RunResult) => void = () => undefined;
+    let clock = 1_700_000_000_000;
+    let step = false;
+    const ctl = new AbortController();
+    const g = gate();
+    const worker = runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 20,
+      now: () => {
+        if (step) clock += 10_000;
+        return clock;
+      },
+      signal: ctl.signal,
+      io: capture().io,
+      start: ({ issue }) => {
+        if (issue === 2) return g.start({ repo, issue, factoryHome });
+        return {
+          done: new Promise<RunResult>((r) => {
+            resolveDone = r;
+          }),
+          pid: 0,
+          runId: () => runId,
+          kill: (signal) => {
+            signals.push(signal ?? "SIGTERM");
+            if (signal === "SIGKILL") resolveDone(outcome(repo, 1, "failed", "killed"));
+          },
+          unref: () => undefined,
+        };
+      },
+    });
+    try {
+      await waitFor("run id recorded", async () => (await entries(factoryHome, repo))[0]?.run_id === runId);
+      step = true;
+      await waitFor("sigterm", () => signals.includes("SIGTERM"));
+      await new Promise((r) => setTimeout(r, 40));
+      expect(signals).toEqual(["SIGTERM"]);
+      expect(g.calls).toEqual([]);
+      expect((await entries(factoryHome, repo)).find((e) => e.issue === 1)?.status).toBe("running");
+      expect((await entries(factoryHome, repo)).find((e) => e.issue === 2)?.status).toBe("pending");
+      await waitFor("sigkill", () => signals.includes("SIGKILL"));
+      await waitFor("issue 2", () => g.calls.includes(2));
+      g.release(2, outcome(repo, 2, "done", "", { pr: "https://github.test/pr/2" }));
+      await worker;
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(g.calls).toEqual([2]);
+      const rows = await entries(factoryHome, repo);
+      expect(rows.find((e) => e.issue === 1)).toMatchObject({ status: "parked" });
+      expect(rows.find((e) => e.issue === 1)?.reason).toMatch(/stalled/);
+      expect(rows.find((e) => e.issue === 2)?.status).toBe("done");
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("does not stall a run when the wall clock jumps by much more than the tick", async () => {
     const repo = createFixtureRepo((c) => {
       const limits = (c.limits ?? {}) as Record<string, unknown>;
       limits.stall_minutes = 1;
@@ -465,10 +537,10 @@ describe("factory queue", () => {
     const factoryHome = home();
     const github = new FakeGitHub();
     await enqueue(factoryHome, repo, github, [1]);
-    const runId = "20261029-140000-cccccc";
+    const runId = "20261029-140001-cccccd";
     mkdirSync(join(factoryHome, "runs", runId), { recursive: true });
     writeFileSync(join(factoryHome, "runs", runId, "events.jsonl"), "{\"event\":\"progress\"}\n");
-    let killed: NodeJS.Signals | undefined;
+    let killed = false;
     let clock = 1_700_000_000_000;
     const ctl = new AbortController();
     const worker = runQueue({
@@ -481,25 +553,349 @@ describe("factory queue", () => {
       signal: ctl.signal,
       io: capture().io,
       start: () => ({
-        done: new Promise(() => undefined),
+        done: new Promise<RunResult>(() => undefined),
         pid: 0,
         runId: () => runId,
-        kill: (signal) => {
-          killed = signal;
+        kill: () => {
+          killed = true;
         },
         unref: () => undefined,
       }),
     });
     try {
       await waitFor("run id recorded", async () => (await entries(factoryHome, repo))[0]?.run_id === runId);
-      clock += 3 * 60_000;
-      await waitFor("stalled", () => killed !== undefined);
-      await worker;
-      expect(killed).toBe("SIGTERM");
-      expect((await entries(factoryHome, repo))[0]?.status).toBe("parked");
-      expect((await entries(factoryHome, repo))[0]?.reason).toMatch(/stalled/);
+      clock += 10 * 60_000;
+      await new Promise((r) => setTimeout(r, 80));
+      expect(killed).toBe(false);
+      expect((await entries(factoryHome, repo))[0]?.status).toBe("running");
     } finally {
       ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("requeues a stream abort from state.json transient, not from the reason text", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1, 2]);
+    const runId = "20261029-120000-abcdef";
+    const g = gate();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
+    try {
+      await waitFor("first", () => g.calls.length === 1);
+      const runDir = join(factoryHome, "runs", runId);
+      mkdirSync(runDir, { recursive: true });
+      const statePath = join(runDir, "state.json");
+      writeFileSync(statePath, JSON.stringify({ version: 1, run_id: runId, repo, task: { ref: "#1", issue: 1, title: "t", text: "", labels: [] }, result: "needs_human", transient: true }) + "\n");
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(statePath, old, old);
+      g.release(1, outcome(repo, 1, "needs_human", "provider stream aborted after 3 retries: reset; factory resume " + runId, { run_id: runId }));
+      await waitFor("second issue first", () => g.calls.length === 2);
+      expect(g.calls).toEqual([1, 2]);
+      g.release(2, outcome(repo, 2, "done", "", { pr: "https://github.test/pr/2" }));
+      await waitFor("requeued", () => g.calls.length === 3);
+      expect(g.calls).toEqual([1, 2, 1]);
+      g.release(1, outcome(repo, 1, "done", "", { pr: "https://github.test/pr/1" }));
+      await worker;
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("puts a repo-lock locked result back to pending instead of parking it", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [2]);
+    const g = gate();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
+    try {
+      await waitFor("started", () => g.calls.length === 1);
+      g.release(2, outcome(repo, 2, "locked", "repo abc is locked by run 20261029-140000-cccccc (pid 99)"));
+      await waitFor("retried", () => g.calls.length === 2);
+      expect((await entries(factoryHome, repo))[0]?.status).not.toBe("parked");
+      g.release(2, outcome(repo, 2, "done", "", { pr: "https://github.test/pr/2" }));
+      await worker;
+      expect((await entries(factoryHome, repo))[0]?.status).toBe("done");
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("does not update-branch a PR whose number is only a suffix of a done run's URL", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    const runId = "20261029-160000-aaaaaa";
+    mkdirSync(join(factoryHome, "runs", runId), { recursive: true });
+    writeFileSync(
+      join(factoryHome, "runs", runId, "result.json"),
+      JSON.stringify(outcome(repo, 17, "done", "", { run_id: runId, pr: "https://github.test/pull/17", branch: "factory/17-goal" })) + "\n",
+    );
+    github.factoryPrs.push({ number: 7, branch: "factory/7-other", files: ["src/a.js"] });
+    github.prStates.set("7", { state: "open", draft: false, behind: true });
+    github.factoryPrs.push({ number: 17, branch: "factory/17-goal", files: ["src/b.js"] });
+    github.prStates.set("17", { state: "open", draft: false, behind: true });
+    await runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
+    expect(github.updatedBranches).toEqual(["17"]);
+  });
+
+  it("retries a failed behind update and still updates the other PRs", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    for (const [id, issue, pr, branch] of [
+      ["20261029-170000-aaaaaa", 7, "7", "factory/7-a"],
+      ["20261029-170001-bbbbbb", 9, "9", "factory/9-b"],
+    ] as const) {
+      mkdirSync(join(factoryHome, "runs", id), { recursive: true });
+      writeFileSync(join(factoryHome, "runs", id, "result.json"), JSON.stringify(outcome(repo, issue, "done", "", { run_id: id, pr: `https://github.test/pull/${pr}`, branch })) + "\n");
+      github.factoryPrs.push({ number: Number(pr), branch, files: ["src/a.js"] });
+      github.prStates.set(pr, { state: "open", draft: false, behind: true });
+    }
+    const orig = github.updateBranch.bind(github);
+    const attempts = new Map<string, number>();
+    github.updateBranch = async (dir, pr) => {
+      attempts.set(pr, (attempts.get(pr) ?? 0) + 1);
+      if (pr === "7" && attempts.get(pr) === 1) throw new Error("network down");
+      return orig(dir, pr);
+    };
+    const cap = capture();
+    await runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: cap.io });
+    expect(attempts.get("7")).toBe(2);
+    expect(github.updatedBranches).toEqual(["9", "7"]);
+    expect(cap.err()).toContain("update-branch #7 failed");
+  });
+
+  it("with --until stays up while a done factory PR is open, and without it exits when nothing is behind", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    const runId = "20261029-180000-aaaaaa";
+    mkdirSync(join(factoryHome, "runs", runId), { recursive: true });
+    writeFileSync(join(factoryHome, "runs", runId, "result.json"), JSON.stringify(outcome(repo, 7, "done", "", { run_id: runId, pr: "https://github.test/pull/7", branch: "factory/7-goal" })) + "\n");
+    github.factoryPrs.push({ number: 7, branch: "factory/7-goal", files: ["src/a.js"] });
+    github.prStates.set("7", { state: "open", draft: false, behind: false });
+    const idle = capture();
+    await runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: idle.io });
+    expect(idle.out()).toContain("queue: idle");
+    expect(github.updatedBranches).toEqual([]);
+
+    let clock = 1_700_000_000_000;
+    let polls = 0;
+    const until = capture();
+    await runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 15,
+      untilMs: clock + 60_000,
+      now: () => clock,
+      sleep: async () => {
+        polls += 1;
+        if (polls === 2) github.prStates.set("7", { state: "open", draft: false, behind: true });
+        if (polls >= 4) clock += 60_000;
+      },
+      start: () => { throw new Error("should not start"); },
+      io: until.io,
+    });
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(github.updatedBranches).toEqual(["7"]);
+    expect(until.out()).toContain("queue: until reached");
+  });
+
+  it("uses result.json on restart even when the stored pid is alive, and ignores a pid whose command line is not the run", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const runId = "20261029-190000-aaaaaa";
+    const runDir = join(factoryHome, "runs", runId);
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "result.json"), JSON.stringify(outcome(repo, 1, "done", "", { run_id: runId, pr: "https://github.test/pr/1" })) + "\n");
+    writeFileSync(join(runDir, "state.json"), JSON.stringify({ version: 1, run_id: runId, repo, task: { ref: "#1", issue: 1, title: "t", text: "", labels: [] }, result: "done" }) + "\n");
+    const sleeper = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      await updateQueue(factoryHome, repo, (q) => {
+        q.entries[0]!.status = "running";
+        q.entries[0]!.run_id = runId;
+        q.entries[0]!.pid = sleeper.pid;
+      });
+      let calls = 0;
+      await runQueue({
+        factoryHome,
+        github,
+        repo,
+        slots: 1,
+        pollMs: 15,
+        start: () => {
+          calls += 1;
+          return { done: new Promise(() => undefined), pid: 0, runId: () => undefined, kill: () => undefined, unref: () => undefined };
+        },
+        io: capture().io,
+      });
+      expect(calls).toBe(0);
+      expect((await entries(factoryHome, repo))[0]).toMatchObject({ status: "done", run_id: runId });
+      expect(sleeper.exitCode).toBeNull();
+    } finally {
+      sleeper.kill("SIGKILL");
+    }
+
+    const repo2 = createFixtureRepo();
+    const home2 = home();
+    const gh2 = new FakeGitHub();
+    await enqueue(home2, repo2, gh2, [3]);
+    const foreign = spawn("sleep", ["30"], { stdio: "ignore" });
+    const missed = "20261029-190001-bbbbbb";
+    try {
+      await updateQueue(home2, repo2, (q) => {
+        q.entries[0]!.status = "running";
+        q.entries[0]!.run_id = missed;
+        q.entries[0]!.pid = foreign.pid;
+      });
+      await runQueue({ factoryHome: home2, github: gh2, repo: repo2, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
+      expect((await entries(home2, repo2))[0]).toMatchObject({ status: "parked", reason: "run ended without result.json" });
+      expect(foreign.exitCode).toBeNull();
+    } finally {
+      foreign.kill("SIGKILL");
+    }
+
+    const repo3 = createFixtureRepo();
+    const home3 = home();
+    const gh3 = new FakeGitHub();
+    await enqueue(home3, repo3, gh3, [4]);
+    const liveId = "20261029-190002-cccccc";
+    // A second command keeps bash from execing sleep, so `ps` still shows the run id.
+    const live = spawn("bash", ["-c", `sleep 30; echo ${liveId}`], { stdio: "ignore", detached: true });
+    const ctl = new AbortController();
+    try {
+      await updateQueue(home3, repo3, (q) => {
+        q.entries[0]!.status = "running";
+        q.entries[0]!.run_id = liveId;
+        q.entries[0]!.pid = live.pid;
+      });
+      let calls = 0;
+      const worker = runQueue({
+        factoryHome: home3,
+        github: gh3,
+        repo: repo3,
+        slots: 1,
+        pollMs: 15,
+        signal: ctl.signal,
+        start: () => {
+          calls += 1;
+          return { done: new Promise(() => undefined), pid: 0, runId: () => undefined, kill: () => undefined, unref: () => undefined };
+        },
+        io: capture().io,
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      expect(calls).toBe(0);
+      expect((await entries(home3, repo3))[0]?.status).toBe("running");
+      ctl.abort();
+      await worker;
+      expect(live.exitCode).toBeNull();
+    } finally {
+      ctl.abort();
+      if (live.pid) {
+        try {
+          process.kill(-live.pid, "SIGKILL");
+        } catch {
+          live.kill("SIGKILL");
+        }
+      }
+    }
+  });
+
+  it("starts --after when the dependency is not queued but the issue is closed or its factory PR is merged", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    github.issues.set(120, ready(120, { state: "closed" }));
+    await enqueue(factoryHome, repo, github, [130], 120);
+    const g = gate();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
+    try {
+      await waitFor("closed dependency started", () => g.calls.length === 1);
+      g.release(130, outcome(repo, 130, "done", "", { pr: "https://github.test/pr/130" }));
+      await worker;
+      expect((await entries(factoryHome, repo))[0]?.status).toBe("done");
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+
+    const repo2 = createFixtureRepo();
+    const home2 = home();
+    const gh2 = new FakeGitHub();
+    gh2.issues.set(120, ready(120, { state: "open" }));
+    gh2.factoryPrByIssue.set(120, { number: 4, state: "merged" });
+    await enqueue(home2, repo2, gh2, [131], 120);
+    const g2 = gate();
+    const ctl2 = new AbortController();
+    const worker2 = runQueue({ factoryHome: home2, github: gh2, repo: repo2, slots: 1, pollMs: 15, signal: ctl2.signal, start: g2.start, io: capture().io });
+    try {
+      await waitFor("merged dependency started", () => g2.calls.includes(131));
+      g2.release(131, outcome(repo2, 131, "done", "", { pr: "https://github.test/pr/131" }));
+      await worker2;
+    } finally {
+      ctl2.abort();
+      await worker2.catch(() => undefined);
+    }
+
+    const repo3 = createFixtureRepo();
+    const home3 = home();
+    const gh3 = new FakeGitHub();
+    gh3.issues.set(120, ready(120, { state: "open" }));
+    await enqueue(home3, repo3, gh3, [132], 120);
+    const g3 = gate();
+    const ctl3 = new AbortController();
+    const worker3 = runQueue({ factoryHome: home3, github: gh3, repo: repo3, slots: 1, pollMs: 15, signal: ctl3.signal, start: g3.start, io: capture().io });
+    try {
+      await new Promise((r) => setTimeout(r, 60));
+      expect(g3.calls).toEqual([]);
+      expect((await entries(home3, repo3))[0]?.status).toBe("pending");
+    } finally {
+      ctl3.abort();
+      await worker3;
+    }
+  });
+
+  it("does not hold the queue write lock across a github call, and a hung call does not freeze the worker", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const key = await repoQueueKey(repo);
+    let sawLockFree = false;
+    let calls = 0;
+    const orig = github.getIssue.bind(github);
+    github.getIssue = async (dir, n) => {
+      calls += 1;
+      const probe = await tryPathLock(join(queueDir(factoryHome), `${key}.write.lock`), "probe", () => "free", { waitMs: 0 });
+      sawLockFree = probe.ok;
+      if (calls === 1) await new Promise((r) => setTimeout(r, 5_000));
+      return orig(dir, n);
+    };
+    const g = gate();
+    const started = Date.now();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, netTimeoutMs: 80, start: g.start, io: capture().io });
+    try {
+      await waitFor("started despite hung getIssue", () => g.calls.length === 1, 3_000);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(sawLockFree).toBe(true);
+      g.release(1, outcome(repo, 1, "done", "", { pr: "https://github.test/pr/1" }));
+      await worker;
+    } finally {
       await worker.catch(() => undefined);
     }
   });

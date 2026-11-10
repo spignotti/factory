@@ -36,6 +36,11 @@ export interface PrRequest {
 export interface GitHub {
   baseStatus(repoDir: string, sha: string): Promise<BaseStatus>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
+  /**
+   * Factory PR for this issue (`factory/<n>` or `factory/<n>-*`), any state. Null when there is none.
+   * Queue `--after` when the dependency is not in the queue. Open wins over merged.
+   */
+  findFactoryPr(repoDir: string, issue: number): Promise<FactoryPrRef | null>;
   push(repoDir: string, branch: string): Promise<void>;
   createPr(req: PrRequest): Promise<string>;
   /** Sha of `branch` on origin, null when it does not exist there. Throws when origin cannot be asked. */
@@ -189,6 +194,11 @@ export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
   return out;
 }
 
+export interface FactoryPrRef {
+  number: number;
+  state: "open" | "merged" | "closed";
+}
+
 export interface PrStatus {
   state: "open" | "merged" | "closed";
   draft: boolean;
@@ -198,6 +208,26 @@ export interface PrStatus {
   behind?: boolean;
   /** `mergeable` CONFLICTING or `mergeStateStatus` DIRTY. */
   conflicting?: boolean;
+}
+
+function factoryIssueNumber(branch: string): number | undefined {
+  const m = /^factory\/(\d+)(?:-|$)/.exec(branch);
+  return m ? Number(m[1]) : undefined;
+}
+
+function pickFactoryPr(raw: unknown, issue: number): FactoryPrRef | null {
+  if (!Array.isArray(raw)) return null;
+  const mine: FactoryPrRef[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const pr = row as { number?: unknown; state?: unknown; headRefName?: unknown };
+    if (typeof pr.number !== "number" || typeof pr.headRefName !== "string") continue;
+    if (factoryIssueNumber(pr.headRefName) !== issue) continue;
+    const rawState = String(pr.state ?? "open").toLowerCase();
+    const state: FactoryPrRef["state"] = rawState === "merged" || rawState === "closed" ? rawState : "open";
+    mine.push({ number: pr.number, state });
+  }
+  return mine.find((p) => p.state === "open") ?? mine.find((p) => p.state === "merged") ?? mine[0] ?? null;
 }
 
 function rollupNodes(rollup: unknown): unknown[] {
@@ -314,8 +344,11 @@ export function prStatusFromView(raw: {
   };
 }
 
+/** Caps every `gh` call so a stuck CLI cannot freeze the queue worker. */
+const GH_TIMEOUT_MS = 60_000;
+
 async function gh(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileP("gh", args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await execFileP("gh", args, { cwd, maxBuffer: 16 * 1024 * 1024, timeout: GH_TIMEOUT_MS });
   return stdout;
 }
 
@@ -503,6 +536,13 @@ export class GhCli implements GitHub {
     };
   }
 
+  async findFactoryPr(repoDir: string, issue: number): Promise<FactoryPrRef | null> {
+    if (!(await hasRemote(repoDir))) return null;
+    // UNVERIFIED: `gh pr list --search head:factory/N` (docs/VERIFY.md). Client-side filter is exact.
+    const out = await gh(repoDir, ["pr", "list", "--state", "all", "--limit", "20", "--json", "number,state,headRefName", "--search", `head:factory/${issue}`]);
+    return pickFactoryPr(JSON.parse(out || "[]"), issue);
+  }
+
   async push(repoDir: string, branch: string): Promise<void> {
     await git(repoDir, ["push", "-q", "-u", "origin", branch]);
   }
@@ -630,6 +670,16 @@ export class FakeGitHub implements GitHub {
     const issue = this.issues.get(n);
     if (!issue) throw new Error(`issue #${n} not found`);
     return { ...issue, state: issue.state ?? "open" };
+  }
+
+  /** Planted factory PR for `--after` when the dependency is not queued. Open `factoryPrs` are also seen. */
+  readonly factoryPrByIssue = new Map<number, FactoryPrRef>();
+
+  async findFactoryPr(_repoDir: string, issue: number): Promise<FactoryPrRef | null> {
+    const planted = this.factoryPrByIssue.get(issue);
+    if (planted) return planted;
+    const open = this.factoryPrs.find((p) => factoryIssueNumber(p.branch) === issue);
+    return open ? { number: open.number, state: "open" } : null;
   }
 
   /** Branch → sha on the fake origin; a push records the worktree's HEAD. */

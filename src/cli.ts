@@ -59,8 +59,9 @@ const USAGE = `usage:
   factory queue run [--repo <path>] [--slots N] [--until HH:MM]
               (one worker: min(slots, concurrency.max_runs) runs per repo, default slots 2;
                factory run --issue N --no-notify; parks needs_human/needs_input/failed/base_red;
-               transient needs_human requeues at most twice; updates behind factory PRs;
-               --until is local time, no new starts after it, live runs finish)
+               transient needs_human (state.json transient flag) requeues at most twice;
+               updates every behind factory PR (one at a time; a failure is retried, it does not stop the others);
+               --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish)
   factory status [--since <duration>] [--json]
               (running, waiting for a human, interrupted runs; queues; open factory PRs;
                --since 12h adds finished runs from result.json: merged, human_review, blocked, failed, base_red, needs_input)
