@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -64,6 +64,38 @@ describe("evidence branch", () => {
     expect(gitIn(bare, "ls-tree", "-r", "--name-only", EVIDENCE_BRANCH).trim()).toBe("");
     expect(gitIn(bare, "rev-parse", `${EVIDENCE_BRANCH}^`).trim()).toBe(c.sha);
   }, 30_000);
+
+  it("a hanging evidence fetch is killed and reported as a timeout", async () => {
+    const repo = createFixtureRepo();
+    const bin = mkdtempSync(join(tmpdir(), "evidence-git-"));
+    const pidFile = join(bin, "pid");
+    const script = join(bin, "git");
+    writeFileSync(script, `#!/bin/sh\necho $$ > ${JSON.stringify(pidFile)}\nsleep 30\n`);
+    chmodSync(script, 0o755);
+    const prev = process.env.PATH;
+    process.env.PATH = `${bin}:${prev ?? ""}`;
+    const run = publishEvidence(repo, { runId: "r", dir: evidence({ "a.png": "a" }), files: ["a.png"], author, timeoutMs: 10_000 });
+    try {
+      const start = Date.now();
+      while (!existsSync(pidFile)) {
+        if (Date.now() - start > 4_000) throw new Error("evidence git never started");
+        run.catch(() => {});
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await expect(run).rejects.toThrow(/git ls-remote timed out after 10s \(process killed\)/);
+      const alive = (() => {
+        try {
+          process.kill(Number(readFileSync(pidFile, "utf8")), 0);
+          return true;
+        } catch (e) {
+          return (e as NodeJS.ErrnoException).code === "EPERM";
+        }
+      })();
+      expect(alive).toBe(false);
+    } finally {
+      process.env.PATH = prev;
+    }
+  });
 
   it("publishing without an origin fails with a git error", async () => {
     const repo = createFixtureRepo();

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { normalizeClaim, type TrackedFinding } from "./pipeline/merge.js";
@@ -125,26 +125,157 @@ export function observations(findings: TrackedFinding[], flakyChecks: string[]):
   return out;
 }
 
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function readLockPid(path: string): number | undefined {
+  try {
+    const pid = Number(readFileSync(path, "utf8").split("\n")[0]?.trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A live holder is never stale, however old the file is. A missing or dead pid is a crashed writer. */
+function holderAlive(path: string): boolean {
+  const pid = readLockPid(path);
+  return pid !== undefined && pidAlive(pid);
+}
+
+let claimSeq = 0;
+
+/** Hard-link claim. The lock file names the holder before it is visible, so a waiter never sees an empty lock. */
+function tryClaimMemoryLock(lock: string): boolean {
+  const tmp = `${lock}.${process.pid}.${++claimSeq}`;
+  try {
+    writeFileSync(tmp, `${process.pid}\n`);
+    try {
+      linkSync(tmp, lock);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      return false;
+    }
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * Runs after the observed inode was renamed aside, before it is deleted or restored.
+ * Tests use it to plant a replacement at the original path.
+ */
+export type AfterLockRename = (trash: string) => void;
+
+function asideName(path: string, kind: string): string {
+  return `${path}.${process.pid}.${Date.now()}.${++claimSeq}.${kind}`;
+}
+
+/**
+ * Drop a dead lock or takeover file without unlinking a replacement another waiter just created.
+ * Same rename-aside as the repo lock: move the inode, re-read the pid, delete only the trash name.
+ * Returns whether `path` is absent afterwards.
+ */
+export function discardDeadLockFile(path: string, afterRename?: AfterLockRename): boolean {
+  if (!existsSync(path)) return true;
+  if (holderAlive(path)) return false;
+  const trash = asideName(path, "stale");
+  try {
+    renameSync(path, trash);
+  } catch {
+    return !existsSync(path);
+  }
+  afterRename?.(trash);
+  try {
+    if (holderAlive(trash)) {
+      try {
+        linkSync(trash, path);
+      } catch {
+        // a newer file exists at path; it wins
+      }
+      rmSync(trash, { force: true });
+      return false;
+    }
+  } catch {
+    // unreadable trash: drop it
+  }
+  rmSync(trash, { force: true });
+  return !existsSync(path);
+}
+
+/** Release a file this process created. A replacement at `path` (different pid) is left in place. */
+export function releaseOwnedLockFile(path: string, afterRename?: AfterLockRename): void {
+  const trash = asideName(path, "release");
+  try {
+    renameSync(path, trash);
+  } catch {
+    return;
+  }
+  afterRename?.(trash);
+  try {
+    if (readLockPid(trash) !== process.pid) {
+      try {
+        linkSync(trash, path);
+      } catch {
+        // a newer file exists; it wins
+      }
+    }
+  } catch {
+    // unreadable: drop the trash
+  }
+  rmSync(trash, { force: true });
+}
+
+/**
+ * Take a lock whose holder is gone. The `.takeover` guard serializes two waiters so one cannot
+ * delete a lock the other just created. A live guard holder is left alone. A dead guard is renamed
+ * aside (not unlinked by path) so two waiters cannot delete each other's guard.
+ */
+function stealDeadMemoryLock(lock: string): void {
+  if (!existsSync(lock) || holderAlive(lock)) return;
+  const guard = `${lock}.takeover`;
+  if (existsSync(guard)) {
+    if (holderAlive(guard)) return;
+    if (!discardDeadLockFile(guard)) return;
+  }
+  try {
+    writeFileSync(guard, `${process.pid}\n`, { flag: "wx" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    return;
+  }
+  try {
+    if (existsSync(lock) && !holderAlive(lock)) discardDeadLockFile(lock);
+  } finally {
+    releaseOwnedLockFile(guard);
+  }
+}
+
+/**
+ * Exclusive lock for one memory file. The file holds the holder's pid.
+ * A live pid is never taken over — not after 10 s of waiting, and not because the file is old.
+ * A dead or missing pid is taken over, same liveness check as a repo lock.
+ */
 function withLock<T>(path: string, fn: () => T): T {
   mkdirSync(join(path, ".."), { recursive: true });
   const lock = `${path}.lock`;
-  const started = Date.now();
   for (;;) {
-    try {
-      closeSync(openSync(lock, "wx"));
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // A lock older than 30 s belongs to a crashed writer.
-      const age = Date.now() - (statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-      if (age > 30_000 || Date.now() - started > 10_000) rmSync(lock, { force: true });
-      else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
+    if (tryClaimMemoryLock(lock)) break;
+    stealDeadMemoryLock(lock);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
   try {
     return fn();
   } finally {
-    rmSync(lock, { force: true });
+    // By inode, not by path: a successor's lock must survive this release.
+    releaseOwnedLockFile(lock);
   }
 }
 

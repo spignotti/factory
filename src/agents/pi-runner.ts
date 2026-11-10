@@ -156,6 +156,8 @@ export class PiRunner implements AgentRunner {
     try {
       await session.prompt(req.prompt);
       const usage = diffUsage(statsUsage(session), kept.usageBefore);
+      // Pi does not put response headers on the assistant message (`formatProviderError` is status + body).
+      // A header-only Retry-After cannot be recovered here; `classifyError` parses the text form.
       if (lastError) throw new AgentError(lastError.message, usage, statusFromMessage(lastError.message));
       if (req.signal?.aborted) throw new AgentError("aborted", usage);
       if (key) this.sessions.set(key, kept);
@@ -267,8 +269,9 @@ export function bashSpawnHook(env: Record<string, string>, jail: Jail | undefine
   });
 }
 
-// UNVERIFIED: Pi reports provider errors as text in AssistantMessage.errorMessage; the HTTP status is
-// recovered from that text. See docs/VERIFY.md.
+// UNVERIFIED against a live provider: Pi reports errors as AssistantMessage.errorMessage text.
+// Checked against the installed SDK: formatProviderError includes status and body, not headers,
+// so Retry-After is only visible when the body says so. See docs/VERIFY.md.
 function statusFromMessage(message: string): number | undefined {
   const m = /\b(4\d\d|5\d\d)\b/.exec(message);
   return m ? Number(m[1]) : undefined;
