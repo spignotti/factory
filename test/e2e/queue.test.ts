@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner } from "../../src/agents/fake-runner.js";
-import { queueAdd, queueCommand, queueList, queueRemove } from "../../src/commands/queue.js";
+import { queueAdd, queueList, queueRemove } from "../../src/commands/queue.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import type { Io } from "../../src/commands/gates.js";
 import type { RunResult } from "../../src/events.js";
@@ -401,6 +401,11 @@ describe("factory queue", () => {
     github.prStates.set("8", { state: "open", draft: false, behind: true });
     github.factoryPrs.push({ number: 7, branch: "factory/99-goal", files: ["src/a.js"] });
     github.prStates.set("7", { state: "open", draft: false, behind: true });
+    const otherId = "20261029-130001-dddddd";
+    mkdirSync(join(factoryHome, "runs", otherId), { recursive: true });
+    writeFileSync(join(factoryHome, "runs", otherId, "result.json"), JSON.stringify(outcome(repo, 100, "done", "", { run_id: otherId, pr: "https://github.test/pr/9", branch: "factory/101-goal" })) + "\n");
+    github.factoryPrs.push({ number: 9, branch: "factory/101-goal", files: ["src/c.js"] });
+    github.prStates.set("9", { state: "open", draft: false, behind: true });
     const g = gate();
     const ctl = new AbortController();
     const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
@@ -408,11 +413,47 @@ describe("factory queue", () => {
       await waitFor("issue started", () => g.calls.length === 1);
       g.release(1, outcome(repo, 1, "done", "", { pr: "https://github.test/pr/1" }));
       await worker;
-      expect(github.updatedBranches).toEqual(["7"]);
+      expect(github.updatedBranches).toEqual(["7", "9"]);
     } finally {
       ctl.abort();
       await worker.catch(() => undefined);
     }
+  });
+
+  it("does not treat an older result.json as the outcome of a later run that wrote none", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const oldId = "20261029-120000-aaaaaa";
+    const newId = "20261029-150000-bbbbbb";
+    mkdirSync(join(factoryHome, "runs", oldId), { recursive: true });
+    writeFileSync(join(factoryHome, "runs", oldId, "result.json"), JSON.stringify(outcome(repo, 1, "done", "", { run_id: oldId, pr: "https://github.test/pr/1" })) + "\n");
+    writeFileSync(join(factoryHome, "runs", oldId, "state.json"), JSON.stringify({ version: 1, run_id: oldId, repo, task: { ref: "#1", issue: 1, title: "t", text: "", labels: [] }, result: "done" }) + "\n");
+    const fresh = join(factoryHome, "runs", newId);
+    mkdirSync(fresh, { recursive: true });
+    writeFileSync(join(fresh, "state.json"), JSON.stringify({ version: 1, run_id: newId, repo, task: { ref: "#1", issue: 1, title: "t", text: "", labels: [] }, result: null, step: "implement" }) + "\n");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(join(fresh, "state.json"), old, old);
+    await updateQueue(factoryHome, repo, (q) => {
+      q.entries[0]!.status = "running";
+      q.entries[0]!.run_id = newId;
+    });
+    let calls = 0;
+    await runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 15,
+      start: () => {
+        calls += 1;
+        return { done: new Promise(() => undefined), pid: 0, runId: () => undefined, kill: () => undefined, unref: () => undefined };
+      },
+      io: capture().io,
+    });
+    expect(calls).toBe(0);
+    expect((await entries(factoryHome, repo))[0]).toMatchObject({ status: "parked", run_id: newId, reason: "run ended without result.json" });
   });
 
   it("SIGTERMs a run whose events.jsonl has not grown for stall_minutes x 2", async () => {

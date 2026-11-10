@@ -1,9 +1,9 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ResultSchema, type RunResult } from "../events.js";
-import { listRuns } from "../runs.js";
+import { listRuns, type RunRecord } from "../runs.js";
 import type { StartedRun } from "./worker.js";
 
 /** `dist/cli.js` next to this module when the built CLI runs; the built file when tests import the source. */
@@ -17,23 +17,16 @@ export function factoryCliScript(): string {
 
 /**
  * Real `queue run` child: `node dist/cli.js run --issue N --no-notify`.
- * Detached so the worker can exit (restart, Ctrl-C) and the run keeps its lock. The next worker adopts it.
+ * Detached, stdio ignored, so the worker can exit (restart, Ctrl-C) without closing the child's pipes
+ * and the run keeps its lock. The next worker adopts it. Outcome is `result.json`, not stdout.
  */
 export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome: string }): StartedRun {
+  const prior = new Set(issueRuns(req.factoryHome, req.repo, req.issue).map((r) => r.run_id));
   const child = spawn(process.execPath, [factoryCliScript(), "run", "--repo", req.repo, "--issue", String(req.issue), "--no-notify"], {
     cwd: req.repo,
     env: { ...process.env, FACTORY_HOME: req.factoryHome },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: "ignore",
     detached: true,
-  });
-  let out = "";
-  child.stdout?.on("data", (d: Buffer) => {
-    out += d.toString();
-    if (out.length > 1_000_000) out = out.slice(-200_000);
-  });
-  child.stderr?.on("data", (d: Buffer) => {
-    const line = d.toString();
-    if (line) process.stderr.write(line);
   });
   let runId: string | undefined;
   const done = new Promise<RunResult>((resolveResult, reject) => {
@@ -41,7 +34,7 @@ export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome:
     const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
-      const parsed = parseStdout(out) ?? readIssueResult(req.factoryHome, req.repo, req.issue);
+      const parsed = readNewResult(req.factoryHome, req.repo, req.issue, prior);
       if (parsed) {
         runId = parsed.run_id;
         resolveResult(parsed);
@@ -55,48 +48,36 @@ export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome:
   return {
     done,
     pid: child.pid ?? 0,
-    runId: () => runId ?? discoverRunId(req.factoryHome, req.repo, req.issue),
+    runId: () => runId ?? discoverRunId(req.factoryHome, req.repo, req.issue, prior),
     kill: (signal = "SIGTERM") => {
       if (!child.pid) return;
       try {
-        process.kill(child.pid, signal);
+        process.kill(-child.pid, signal);
       } catch {
-        // already gone
+        try {
+          process.kill(child.pid, signal);
+        } catch {
+          // already gone
+        }
       }
     },
-    unref: () => detach(child),
+    unref: () => child.unref(),
   };
 }
 
-function detach(child: ChildProcess): void {
-  child.stdout?.destroy();
-  child.stderr?.destroy();
-  child.unref();
-}
-
-function parseStdout(text: string): RunResult | undefined {
-  for (const line of text.split("\n").reverse()) {
-    const t = line.trim();
-    if (!t.startsWith("{")) continue;
-    try {
-      const parsed = ResultSchema.safeParse(JSON.parse(t));
-      if (parsed.success) return parsed.data;
-    } catch {
-      // not JSON
-    }
-  }
-  return undefined;
-}
-
-function discoverRunId(factoryHome: string, repo: string, issue: number): string | undefined {
-  const matches = listRuns(factoryHome).filter((r) => r.state?.task.issue === issue && sameRepo(r.state?.repo ?? r.result?.repo, repo) && !r.result);
+function discoverRunId(factoryHome: string, repo: string, issue: number, prior: Set<string>): string | undefined {
+  const matches = issueRuns(factoryHome, repo, issue).filter((r) => !r.result && !prior.has(r.run_id));
   return matches.at(-1)?.run_id;
 }
 
-function readIssueResult(factoryHome: string, repo: string, issue: number): RunResult | undefined {
-  const matches = listRuns(factoryHome).filter((r) => r.state?.task.issue === issue && sameRepo(r.state?.repo ?? r.result?.repo, repo) && r.result);
-  const parsed = ResultSchema.safeParse(matches.at(-1)?.result);
+function readNewResult(factoryHome: string, repo: string, issue: number, prior: Set<string>): RunResult | undefined {
+  const mine = issueRuns(factoryHome, repo, issue).filter((r) => !prior.has(r.run_id) && r.result);
+  const parsed = ResultSchema.safeParse(mine.at(-1)?.result);
   return parsed.success ? parsed.data : undefined;
+}
+
+function issueRuns(factoryHome: string, repo: string, issue: number): RunRecord[] {
+  return listRuns(factoryHome).filter((r) => (r.state?.task.issue === issue || r.result?.task === `#${issue}`) && sameRepo(r.state?.repo ?? r.result?.repo, repo));
 }
 
 function sameRepo(a: string | undefined, b: string): boolean {

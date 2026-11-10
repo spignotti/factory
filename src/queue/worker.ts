@@ -210,7 +210,8 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
       continue;
     }
     if (entry.status !== "running") continue;
-    const finished = asResult(related.find((r) => r.run_id === entry.run_id)?.result ?? related.filter((r) => r.result).at(-1)?.result);
+    const own = entry.run_id ? related.find((r) => r.run_id === entry.run_id) : undefined;
+    const finished = asResult(own?.result ?? (entry.run_id ? undefined : related.filter((r) => r.result).at(-1)?.result));
     if (finished) {
       applyOutcome(q, entry, finished);
       continue;
@@ -250,11 +251,25 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io): voi
   }
 }
 
-function eventsSize(factoryHome: string, runId: string): number | undefined {
+function eventsSize(factoryHome: string, runId: string): number {
   try {
     return statSync(join(factoryHome, "runs", runId, "events.jsonl")).size;
   } catch {
-    return undefined;
+    return 0;
+  }
+}
+
+/** Detached runs are their own process group. Signal the group, then the pid if it is not a leader. */
+function signalPid(pid: number, signal: NodeJS.Signals): void {
+  if (!pid || pid === process.pid) return;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // already gone
+    }
   }
 }
 
@@ -263,13 +278,7 @@ function terminate(tracked: Tracked | undefined, pid: number | undefined): void 
     tracked.kill("SIGTERM");
     return;
   }
-  if (pid && pid !== process.pid && alive(pid)) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {
-      // already gone
-    }
-  }
+  if (pid && alive(pid)) signalPid(pid, "SIGTERM");
 }
 
 function considerStall(entry: QueueEntry, repo: string, factoryHome: string, nowMs: number, watch: Map<string, StallWatch>, tracked: Tracked | undefined, io: Io): void {
@@ -281,7 +290,6 @@ function considerStall(entry: QueueEntry, repo: string, factoryHome: string, now
     return;
   }
   const size = eventsSize(factoryHome, entry.run_id);
-  if (size === undefined) return;
   const prev = watch.get(entry.run_id);
   if (!prev || prev.size !== size) {
     watch.set(entry.run_id, { size, since: nowMs });
@@ -375,14 +383,14 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
   });
 }
 
-/** One behind `factory/*` PR per repo per tick, and only when its run ended `done`. Merge, never rebase. */
-async function updateOneBehind(github: GitHub, repo: string, factoryHome: string, updated: Set<string>, io: Io): Promise<void> {
+/** One behind `factory/*` PR per repo per tick, and only when its run ended `done`. Merge, never rebase. True when one was updated (more may remain). */
+async function updateOneBehind(github: GitHub, repo: string, factoryHome: string, updated: Set<string>, io: Io): Promise<boolean> {
   let prs: OpenFactoryPr[];
   try {
     prs = await github.openFactoryPrFiles(repo);
   } catch (e) {
     io.err(`factory: open PR list failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
-    return;
+    return false;
   }
   const runs = listRuns(factoryHome).filter((r) => sameRepo(r, repo));
   for (const pr of prs) {
@@ -404,12 +412,13 @@ async function updateOneBehind(github: GitHub, repo: string, factoryHome: string
       await github.updateBranch(repo, key);
     } catch (e) {
       io.err(`factory: update-branch #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-      return;
+      return false;
     }
     updated.add(key);
     io.out(`queue: updated PR #${pr.number} (behind)\n`);
-    return;
+    return true;
   }
+  return false;
 }
 
 function track(started: StartedRun, repo: string, issue: number): Tracked {
@@ -538,7 +547,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       });
     }
   }
-  await updateOneBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.io);
+  const updatedBehind = await updateOneBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.io);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
   const pending = q.entries.some((e) => e.status === "pending");
@@ -546,7 +555,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const overlap = q.entries.some((e) => e.status === "parked" && (e.blocked_by?.length ?? 0) > 0);
   const live = [...ctx.handles.values()].some((h) => resolve(h.repo) === resolve(repo) && h.settled === undefined && !h.failed && !h.ignoreResult);
   if (ctx.pastUntil) return running || live;
-  return pending || running || overlap || live;
+  return pending || running || overlap || live || updatedBehind;
 }
 
 async function reposFor(opts: RunQueueOptions): Promise<string[]> {
@@ -556,7 +565,8 @@ async function reposFor(opts: RunQueueOptions): Promise<string[]> {
 
 /**
  * One worker. Fills slots in queue order, classifies `result.json` when a run ends, updates behind PRs.
- * Stops when nothing is pending or running (overlap parks keep polling until the blocking PR closes)
+ * Stops when nothing is pending or running (overlap parks keep polling until the blocking PR closes;
+ * a successful behind-PR update keeps the worker for another tick so the next PR can be updated)
  * or at `untilMs` once live runs have finished. A second worker is refused.
  */
 export async function runQueue(opts: RunQueueOptions): Promise<void> {
