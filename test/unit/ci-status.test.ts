@@ -83,4 +83,31 @@ describe("aggregateCheckRuns", () => {
     expect(aggregateCheckRuns([run({ name: "select", status: "completed", conclusion: "cancelled", id: 1 })])).toBe("red");
     expect(aggregateCheckRuns([run({ name: "lint", status: "completed", conclusion: "failure", suite: 9, id: 1 })])).toBe("red");
   });
+
+  it("a done-only failure or cancel is red; the minimal stub's draft marker keeps the hold pending", () => {
+    expect(aggregateCheckRuns([run({ name: "done", status: "completed", conclusion: "failure", suite: 1, id: 1 })])).toBe("red");
+    expect(aggregateCheckRuns([run({ name: "done", status: "completed", conclusion: "cancelled", suite: 2, id: 2 })])).toBe("red");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "draft", status: "completed", conclusion: "success", suite: 1, id: 1 }),
+        run({ name: "done", status: "completed", conclusion: "failure", suite: 1, id: 2, started_at: "2026-11-06T00:00:01Z" }),
+      ]),
+    ).toBe("pending");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "draft", status: "completed", conclusion: "success", suite: 1, id: 1 }),
+        run({ name: "done", status: "completed", conclusion: "failure", suite: 1, id: 2, started_at: "2026-11-06T00:00:01Z" }),
+        run({ name: "draft", status: "completed", conclusion: "skipped", suite: 2, id: 3, started_at: "2026-11-06T00:01:00Z" }),
+        run({ name: "done", status: "completed", conclusion: "cancelled", suite: 2, id: 4, started_at: "2026-11-06T00:01:01Z" }),
+      ]),
+    ).toBe("red");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "draft", status: "completed", conclusion: "success", suite: 1, id: 1 }),
+        run({ name: "done", status: "completed", conclusion: "failure", suite: 1, id: 2, started_at: "2026-11-06T00:00:01Z" }),
+        run({ name: "draft", status: "completed", conclusion: "skipped", suite: 2, id: 3, started_at: "2026-11-06T00:01:00Z" }),
+        run({ name: "done", status: "completed", conclusion: "success", suite: 2, id: 4, started_at: "2026-11-06T00:01:01Z" }),
+      ]),
+    ).toBe("green");
+  });
 });

@@ -87,7 +87,8 @@ const USAGE = `usage:
               (retry pending notifications from $FACTORY_HOME/outbox/; also runs at the start of every run and resume)
   factory ci-stub [--ref <tag>] [--repo <path>]
               (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; a repo whose
-               non-manual checks are all local_only gets the minimal stub, no npx; doctor checks its hash)
+               checks are all local_only, or there are none, gets the minimal stub, no npx; a manual
+               check keeps the full stub so workflow_dispatch can run it; doctor checks its hash)
 `;
 
 function exitCode(result: string, signal: AbortSignal): number {

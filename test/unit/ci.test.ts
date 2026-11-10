@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CI_STUB_PATH, CI_TEMPLATE, ciStubCheck, ciStubMode, otherPrWorkflows, renderCiStub, renderCiStubFor, sha256 } from "../../src/ci.js";
+import { DRAFT_HOLD_JOB } from "../../src/pipeline/ci-status.js";
 import { defaultRef, main } from "../../src/cli.js";
 import { settingsHints } from "../../src/commands/adopt.js";
 import { ciChecks, githubChecks } from "../../src/commands/doctor.js";
@@ -172,8 +173,9 @@ describe("CI stub", () => {
     expect(checks.map((c) => [c.name, c.status])).toEqual([["ci stub", "ok"], ["ci toolchains", "ok"], ["ci stub", "warn"], ["other workflows", "info"]]);
   });
 
-  it("minimal stub: done only, no npx; fails on draft and cancelled, succeeds on ready", () => {
-    expect(ciStubMode([{ tier: "full", local_only: true }, { tier: "manual" }])).toBe("minimal");
+  it("minimal stub: no npx; draft marker; fails on draft and cancelled, succeeds on ready", () => {
+    expect(ciStubMode([{ tier: "full", local_only: true }, { tier: "manual", local_only: true }])).toBe("minimal");
+    expect(ciStubMode([{ tier: "manual" }])).toBe("full");
     expect(ciStubMode([])).toBe("minimal");
     expect(ciStubMode([{ tier: "fast" }])).toBe("full");
     const text = renderCiStubFor("v1.2.3", "minimal");
@@ -183,8 +185,9 @@ describe("CI stub", () => {
     expect(text).not.toContain("check:");
     expect(text).toContain("github:spignotti/factory#v1.2.3");
     const wf = parse(text) as { jobs: Record<string, { needs?: string[]; if?: string; steps: { if?: string; run?: string }[] }>; concurrency: Record<string, unknown> };
-    expect(Object.keys(wf.jobs)).toEqual(["done"]);
-    expect(wf.jobs.done!.needs).toBeUndefined();
+    expect(Object.keys(wf.jobs)).toEqual([DRAFT_HOLD_JOB, "done"]);
+    expect(wf.jobs[DRAFT_HOLD_JOB]!.if).toContain("github.event.pull_request.draft");
+    expect(wf.jobs.done!.needs).toEqual([DRAFT_HOLD_JOB]);
     expect(wf.jobs.done!.if).toBe("always()");
     expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
     const outside: string[] = [];
@@ -211,9 +214,7 @@ describe("CI stub", () => {
 
   it("hash check: a repo with no CI check accepts the minimal stub and rejects the full one", () => {
     const repo = createFixtureRepo((c) => {
-      for (const check of c.checks as { tier?: string; local_only?: boolean }[]) {
-        if (check.tier !== "manual") check.local_only = true;
-      }
+      for (const check of c.checks as { local_only?: boolean }[]) check.local_only = true;
     });
     const cfg = loadRepoConfig(repo);
     const minimal = renderCiStubFor("v0.2.0", "minimal");
@@ -225,17 +226,33 @@ describe("CI stub", () => {
     const withCi = createFixtureRepo();
     write(withCi, CI_STUB_PATH, renderCiStubFor(defaultRef(), "minimal"));
     expect(ciChecks(withCi, loadRepoConfig(withCi))[0]).toMatchObject({ status: "fail", detail: expect.stringMatching(/differs from the template/) });
+    const manualCi = createFixtureRepo((c) => {
+      for (const check of c.checks as { tier?: string; local_only?: boolean }[]) {
+        if (check.tier !== "manual") check.local_only = true;
+      }
+    });
+    write(manualCi, CI_STUB_PATH, renderCiStubFor(defaultRef(), "minimal"));
+    expect(ciChecks(manualCi, loadRepoConfig(manualCi))[0]).toMatchObject({ status: "fail", detail: expect.stringMatching(/differs from the template/) });
   });
 
   it("doctor and adopt do not suggest requiring done when it gates nothing", async () => {
     const repo = createFixtureRepo((c) => {
       for (const check of c.checks as { local_only?: boolean }[]) check.local_only = true;
     });
+    write(repo, ".github/workflows/lint.yml", "on:\n  pull_request:\njobs:\n  lint:\n    name: Lint\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo lint\n");
+    write(repo, CI_STUB_PATH, renderCiStubFor("v0.2.0", "minimal"));
     const gh = new FakeGitHub();
     gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["Lint"] };
     const checks = await githubChecks(gh, repo, loadRepoConfig(repo));
     expect(checks.map((c) => c.detail).join("\n")).not.toMatch(/require the status check "done"|not a required check yet/);
-    expect(checks.find((c) => c.name === "required checks")).toMatchObject({ status: "ok" });
+    expect(checks.find((c) => c.name === "required checks")).toMatchObject({ status: "ok", detail: expect.stringMatching(/\bLint\b/) });
+    gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: [] };
+    const missing = (await githubChecks(gh, repo, loadRepoConfig(repo))).find((c) => c.name === "required checks");
+    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/Lint/) });
+    expect(missing!.detail).not.toMatch(/\bdone\b/);
+    const gated = (await githubChecks(gh, repo, loadRepoConfig(createFixtureRepo()))).find((c) => c.name === "required checks");
+    expect(gated).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
+    expect(gated!.detail).toMatch(/Lint/);
     const hints = settingsHints({ private: false, auto_merge_allowed: true, branch_protected: false, required_checks: ["Lint"] }, "main", "minimal");
     expect(hints.join("\n")).not.toContain('status check "done"');
     expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main", "minimal")[0]).toMatch(/Remove the required status check "factory \/ done"/);

@@ -7,9 +7,10 @@ import { loadRepoConfig, REPO_CONFIG_PATH } from "./schemas/repo.js";
 
 /**
  * CI stub: `.github/workflows/factory.yml` is a template with the pinned factory ref filled in.
- * Repos with a non-manual check that is not `local_only` get `templates/ci/factory.yml` (select,
- * check, done). Repos where no such check would run in CI get `templates/ci/factory-minimal.yml`
- * (`done` only, no npx). `doctor` compares hashes against the rendering that matches the repo.
+ * Repos with a check that is not `local_only` get `templates/ci/factory.yml` (select, check, done),
+ * including `tier: manual`, so `workflow_dispatch` can still run it. Repos where every check is
+ * `local_only` (or there is none) get `templates/ci/factory-minimal.yml` (a draft marker and `done`, no npx).
+ * `doctor` compares hashes against the rendering that matches the repo.
  * Pull requests, release tags and workflow_dispatch run it; pushes to the base branch do not.
  * One file, not a reusable workflow, so branch protection has a single status name (`done`) when
  * the stub actually runs checks.
@@ -28,16 +29,16 @@ const REF_MARK = "@FACTORY_REF@";
 const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const PINNED = /github:spignotti\/factory#([^\s"']+)/g;
 
-/** `full`: select/check/done. `minimal`: `done` only, no factory install. */
+/** `full`: select/check/done. `minimal`: draft marker and `done`, no factory install. */
 export type CiStubMode = "full" | "minimal";
 
 /**
- * A non-manual check that is not `local_only` can run on a pull request or a tag (tier full).
- * Manual checks are not that matrix. When none would run, the select job would only install the
- * factory and print `[]`.
+ * A check that is not `local_only` can run in CI: fast and full on a pull request or a tag,
+ * manual on `workflow_dispatch` (the full stub's tier input, default manual). When every check
+ * is `local_only` (or there is none), the select job would only install the factory and print `[]`.
  */
 export function ciStubMode(checks: { tier: string; local_only?: boolean }[]): CiStubMode {
-  return checks.some((c) => c.tier !== "manual" && c.local_only !== true) ? "full" : "minimal";
+  return checks.some((c) => c.local_only !== true) ? "full" : "minimal";
 }
 
 /** Rendering for the repo's checks. Missing `repo.yaml` keeps the full stub (do not drop checks we cannot see). */

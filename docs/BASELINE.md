@@ -7,15 +7,18 @@ copy a workflow per tool.
 
 ## CI: one stub, not a reusable workflow
 
-`factory ci-stub` renders `templates/ci/factory.yml` when a non-manual check runs in CI, and
-`templates/ci/factory-minimal.yml` when every non-manual check is `local_only` (or there is none).
+`factory ci-stub` renders `templates/ci/factory.yml` when a check is not `local_only` (including
+`tier: manual`, so `workflow_dispatch` can run it), and `templates/ci/factory-minimal.yml` when every
+check is `local_only` (or there is none).
 Doctor hashes the rendering that matches the repo. Branch protection requires one status, `done`,
 when the stub runs checks; that status is red when selection or any check fails. When the stub is
 minimal, `done` gates nothing beside the repo's own jobs, so doctor and adopt do not suggest
 requiring it. `pull_request` has no branch filter. A draft event does not run select/check (the
-minimal stub has neither job), but `done` still runs and fails, so a draft is never a skipped (and
-therefore passing) required check. Dependabot and other ready pull requests run the full matrix
-when there is one. Nothing is skipped because of author, branch, labels, or the PR body.
+minimal stub runs a `draft` marker instead), but `done` still runs and fails, so a draft is never a
+skipped (and therefore passing) required check. A failed or cancelled `done` on a ready pull request
+is red: the marker is skipped there, so that failure is not a draft hold. Dependabot and other ready
+pull requests run the full matrix when there is one. Nothing is skipped because of author, branch,
+labels, or the PR body.
 
 A reusable workflow would be a second file and a second required check. The tool commands live in
 `.factory/repo.yaml` `checks`; the stub file is one of the two renderings, not a copy per tool.
