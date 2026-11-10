@@ -25,7 +25,7 @@ jobs:
     # filled the whole job before typecheck, lint, or tests started.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: scope
