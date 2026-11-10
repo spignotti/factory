@@ -155,7 +155,17 @@ export function statsReport(opts: { factoryHome: string; since?: string; repo?: 
   };
 }
 
-export function statsCommand(opts: { factoryHome: string; since?: string; repo?: string; json: boolean }, io: Io): number {
+function formatCounts(label: string, counts: Record<string, number>, limit = 8): string {
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit);
+  return `${label}: ${top.length ? top.map(([k, v]) => `${k} ${v}`).join(", ") : "–"}`;
+}
+
+function formatReasons(reasons: StatsPeriod["reasons"], limit = 8): string {
+  const top = reasons.slice(0, limit);
+  return `reasons: ${top.length ? top.map((r) => `${r.result} (${r.count}) ${r.reason || "–"}`).join("; ") : "–"}`;
+}
+
+export function statsCommand(opts: { factoryHome: string; since?: string; repo?: string; json: boolean; now?: () => number }, io: Io): number {
   const s = statsReport(opts);
   if (opts.json) {
     io.out(JSON.stringify(s) + "\n");
@@ -172,6 +182,8 @@ export function statsCommand(opts: { factoryHome: string; since?: string; repo?:
       `subscription tokens: ${c.subscription_tokens.tokens_in} in / ${c.subscription_tokens.tokens_out} out (previous ${s.previous.subscription_tokens.tokens_in} / ${s.previous.subscription_tokens.tokens_out})`,
       `cost (metered providers): $${c.cost_usd.toFixed(4)} (previous $${s.previous.cost_usd.toFixed(4)})`,
       `lane escalations ${c.lane_escalations}, watchdog aborts ${c.watchdog_aborts}`,
+      formatCounts("gate failures", c.gate_failures),
+      formatReasons(c.reasons),
       s.audit_tickets.length
         ? `open audit tickets:\n${s.audit_tickets.map((t) => `  ${t.repo} [${t.type}] ${t.id} — ${t.goal}`).join("\n")}`
         : "open audit tickets: 0",

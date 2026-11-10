@@ -196,6 +196,11 @@ export const ResultSchema = z.object({
   lane: z.enum(["standard", "fast"]),
   result: z.enum(RESULTS),
   risk: z.enum(["low", "medium", "high"]).nullable(),
+  /**
+   * Why `riskClass` rated the diff (paths, diff size, protected files). Empty when nothing raised
+   * the rating. Omitted on results written before this field. Not the review-exit `reason`.
+   */
+  risk_reasons: z.array(z.string()).optional(),
   merge_policy: z.enum(["auto", "bot_review", "human_review"]).nullable(),
   pr: z.string().nullable(),
   rounds: z.number().int().min(0),

@@ -180,6 +180,99 @@ export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
 export interface PrStatus {
   state: "open" | "merged" | "closed";
   draft: boolean;
+  /** Head checks. Absent when this status was stored without a rollup (older callers). */
+  ci?: "green" | "red" | "pending" | "none";
+  /** `mergeStateStatus` BEHIND. */
+  behind?: boolean;
+  /** `mergeable` CONFLICTING or `mergeStateStatus` DIRTY. */
+  conflicting?: boolean;
+}
+
+function rollupNodes(rollup: unknown): unknown[] {
+  if (Array.isArray(rollup)) return rollup;
+  if (rollup && typeof rollup === "object" && Array.isArray((rollup as { nodes?: unknown }).nodes)) return (rollup as { nodes: unknown[] }).nodes;
+  return [];
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function num(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Check suite, or the Actions run id in `detailsUrl` when `gh pr view` omits the suite. */
+function suiteOf(row: Record<string, unknown>): number | undefined {
+  const direct = num(row.suite) ?? num(row.checkSuiteId);
+  if (direct !== undefined) return direct;
+  const nested = row.checkSuite ?? row.check_suite;
+  if (nested && typeof nested === "object") {
+    const suite = nested as Record<string, unknown>;
+    const id = num(suite.databaseId) ?? num(suite.id);
+    if (id !== undefined) return id;
+  }
+  const url = text(row.detailsUrl) || text(row.details_url) || text(row.targetUrl);
+  const run = /\/actions\/runs\/(\d+)/.exec(url) ?? /\/runs\/(\d+)/.exec(url);
+  return run ? Number(run[1]) : undefined;
+}
+
+/** GraphQL rollup (upper-case, `startedAt`) and REST check-runs (`started_at`) into one shape. */
+function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
+  const runs: CheckRunView[] = [];
+  for (const [index, item] of nodes.entries()) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const conclusion = text(row.conclusion).toLowerCase();
+    const status = text(row.status).toLowerCase();
+    const state = text(row.state).toLowerCase();
+    const name = text(row.name) || text(row.context);
+    if (!name && !conclusion && !status && !state) continue;
+    let mappedStatus = status === "complete" ? "completed" : status;
+    let mappedConclusion: string | null = conclusion || null;
+    if (!mappedStatus && (state === "success" || state === "failure" || state === "error" || state === "pending" || state === "expected")) {
+      mappedStatus = state === "pending" || state === "expected" ? "pending" : "completed";
+    }
+    if (!mappedConclusion && (state === "failure" || state === "error")) mappedConclusion = "failure";
+    if (!mappedConclusion && state === "success") mappedConclusion = "success";
+    if (!mappedStatus) mappedStatus = mappedConclusion ? "completed" : "pending";
+    runs.push({
+      name: name || `check-${index}`,
+      status: mappedStatus,
+      conclusion: mappedConclusion,
+      started_at: text(row.started_at) || text(row.startedAt) || null,
+      id: num(row.id) ?? num(row.databaseId),
+      suite: suiteOf(row),
+    });
+  }
+  return runs;
+}
+
+/**
+ * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
+ * CI uses `aggregateCheckRuns`: latest run of each name, draft hold, skipped `done` is not green.
+ * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
+ */
+export function prStatusFromView(raw: {
+  state?: string;
+  isDraft?: boolean;
+  mergeable?: string | null;
+  mergeStateStatus?: string | null;
+  statusCheckRollup?: unknown;
+}): PrStatus {
+  const stateRaw = (raw.state ?? "open").toLowerCase();
+  const state = stateRaw === "merged" || stateRaw === "closed" ? stateRaw : "open";
+  const fromRuns = aggregateCheckRuns(rollupToCheckRuns(rollupNodes(raw.statusCheckRollup)));
+  const mergeable = (raw.mergeable ?? "").toUpperCase();
+  const mergeState = (raw.mergeStateStatus ?? "").toUpperCase();
+  const ci: NonNullable<PrStatus["ci"]> = mergeState === "UNSTABLE" && fromRuns !== "pending" ? "red" : fromRuns;
+  return {
+    state,
+    draft: raw.isDraft === true,
+    ci,
+    behind: mergeState === "BEHIND",
+    conflicting: mergeable === "CONFLICTING" || mergeState === "DIRTY",
+  };
 }
 
 async function gh(cwd: string, args: string[]): Promise<string> {
@@ -398,9 +491,8 @@ export class GhCli implements GitHub {
   }
 
   async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
-    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft"])) as { state: string; isDraft: boolean };
-    const state = j.state.toLowerCase();
-    return { state: state === "merged" || state === "closed" ? state : "open", draft: j.isDraft };
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"]));
+    return prStatusFromView(j);
   }
 }
 
