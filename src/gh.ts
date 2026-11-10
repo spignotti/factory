@@ -35,6 +35,11 @@ export interface GitHub {
   remoteBranchSha(repoDir: string, branch: string): Promise<string | null>;
   /** The open PR whose head is `branch` (same repo), null when there is none. */
   findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null>;
+  /**
+   * Open pull requests on `factory/*` branches in this repo, with the files each one changes.
+   * A finished run no longer holds a path claim; these files still block another run on the same paths.
+   */
+  openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]>;
   enableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
@@ -107,6 +112,69 @@ export interface OpenPr {
   draft: boolean;
   /** Head commit as GitHub sees it. */
   headSha: string | null;
+}
+
+/** An open PR on a `factory/*` branch, and the files it changes. */
+export interface OpenFactoryPr {
+  number: number;
+  /** Head branch (`factory/…`). */
+  branch: string;
+  files: string[];
+}
+
+function filePaths(files: unknown): string[] {
+  const rows = Array.isArray(files) ? files : files && typeof files === "object" && Array.isArray((files as { nodes?: unknown }).nodes) ? (files as { nodes: unknown[] }).nodes : [];
+  const out: string[] = [];
+  for (const file of rows) {
+    if (typeof file === "string" && file) out.push(file);
+    else if (file && typeof file === "object") {
+      const path = (file as { path?: unknown; filename?: unknown }).path ?? (file as { filename?: unknown }).filename;
+      if (typeof path === "string" && path) out.push(path);
+    }
+  }
+  return out;
+}
+
+/** `gh pr list` page size for the overlap check. Hitting it means the page is not the full open set. */
+export const OPEN_FACTORY_PR_LIMIT = 1000;
+
+/** The open-PR list filled the page, so a later factory PR may be missing. Not a clearance. */
+export class IncompletePrListError extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`open PR list hit the limit (${limit}); refusing to treat it as complete`);
+    this.name = "IncompletePrListError";
+    this.limit = limit;
+  }
+}
+
+export function openFactoryPrListArgs(limit = OPEN_FACTORY_PR_LIMIT): string[] {
+  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", "number,headRefName,isCrossRepository,files"];
+}
+
+/**
+ * `gh pr list --json number,headRefName,isCrossRepository,files`.
+ * Keeps same-repo `factory/*` heads. `files` may be a flat list or `{ nodes: [...] }`.
+ * A payload that is not an array, or that fills `limit`, is incomplete: callers must block, not treat it as every open PR.
+ */
+export function readOpenFactoryPrs(payload: unknown, limit = OPEN_FACTORY_PR_LIMIT): OpenFactoryPr[] {
+  if (!Array.isArray(payload)) throw new Error("open PR list was not a JSON array");
+  if (payload.length >= limit) throw new IncompletePrListError(limit);
+  return parseOpenFactoryPrs(payload);
+}
+
+export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
+  if (!Array.isArray(payload)) return [];
+  const out: OpenFactoryPr[] = [];
+  for (const row of payload) {
+    if (!row || typeof row !== "object") continue;
+    const pr = row as { number?: unknown; headRefName?: unknown; isCrossRepository?: unknown; files?: unknown };
+    if (pr.isCrossRepository === true) continue;
+    if (typeof pr.number !== "number" || !Number.isInteger(pr.number) || pr.number <= 0) continue;
+    if (typeof pr.headRefName !== "string" || !pr.headRefName.startsWith("factory/")) continue;
+    out.push({ number: pr.number, branch: pr.headRefName, files: filePaths(pr.files) });
+  }
+  return out;
 }
 
 export interface PrStatus {
@@ -259,6 +327,12 @@ export class GhCli implements GitHub {
     return /^([0-9a-f]{40,64})\s/m.exec(stdout)?.[1] ?? null;
   }
 
+  async openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]> {
+    // UNVERIFIED: `files[].path` from `gh pr list --json files` (docs/VERIFY.md). The page is not a clearance when it hits the limit.
+    const out = await gh(repoDir, openFactoryPrListArgs());
+    return readOpenFactoryPrs(JSON.parse(out || "[]"));
+  }
+
   async findOpenPr(repoDir: string, branch: string): Promise<OpenPr | null> {
     const list = JSON.parse(await gh(repoDir, ["pr", "list", "--head", branch, "--state", "open", "--limit", "5", "--json", "url,isDraft,headRefOid,headRefName"]) || "[]") as {
       url: string;
@@ -330,6 +404,24 @@ export class GhCli implements GitHub {
   }
 }
 
+/** Files a new PR would report: committed diff against `base`, empty when this is not a git checkout. */
+function committedDiffNames(repoDir: string, base: string): string[] {
+  for (const spec of [`${base}...HEAD`, base]) {
+    try {
+      const out = execFileSync("git", ["diff", "--name-only", "--diff-filter=ACMRTUXB", spec], {
+        cwd: repoDir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const files = out.split("\n").filter(Boolean);
+      if (files.length) return files;
+    } catch {
+      // missing base, or not a git dir (unit tests)
+    }
+  }
+  return [];
+}
+
 /** In-memory GitHub for tests: no network, no `gh`. */
 export class FakeGitHub implements GitHub {
   status: BaseStatus = "none";
@@ -369,10 +461,20 @@ export class FakeGitHub implements GitHub {
     return pr ? { url: pr.url, draft: this.prStates.get(pr.url)?.draft ?? pr.draft, headSha: this.remoteShas.get(branch) ?? null } : null;
   }
 
+  /** Open `factory/*` PRs and the files they change. Tests plant a finished run's PR here. */
+  readonly factoryPrs: OpenFactoryPr[] = [];
+
+  async openFactoryPrFiles(): Promise<OpenFactoryPr[]> {
+    return this.factoryPrs.map((p) => ({ number: p.number, branch: p.branch, files: [...p.files] }));
+  }
+
   async createPr(req: PrRequest): Promise<string> {
-    const url = `https://github.test/pr/${this.prs.length + 1}`;
+    const number = this.prs.length + 1;
+    const url = `https://github.test/pr/${number}`;
     this.prs.push({ ...req, url });
     this.prStates.set(url, { state: "open", draft: req.draft });
+    // A finished run drops its slot; the PR it just opened still occupies those files.
+    if (req.head.startsWith("factory/")) this.factoryPrs.push({ number, branch: req.head, files: committedDiffNames(req.repoDir, req.base) });
     for (const label of req.labels ?? []) await this.addLabel(req.repoDir, url, label);
     return url;
   }

@@ -182,6 +182,74 @@ describe("factory resume", () => {
     expect(r3.events.some((e) => e.step === "resume" && e.data.remote_branch_merged)).toBe(true);
   });
 
+  it("a resume that cannot take the repo lock drafts an existing ready PR", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "red");
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    const url = r.result.pr!;
+    r.github.prStates.set(url, { state: "open", draft: false });
+    const release = acquireRepoLock(r.factoryHome, r.repo, "20261029-000000-eeeeee")!;
+    try {
+      const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
+      expect(r2.result.result).toBe("locked");
+      expect(r2.github.drafted).toContain(url);
+      expect(r2.github.prStates.get(url)?.draft).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  it("a resume whose planned paths hit a new factory PR drafts the existing ready PR", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "red");
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    const url = r.result.pr!;
+    r.github.prStates.set(url, { state: "open", draft: false });
+    r.github.openFactoryPrFiles = async () => [{ number: 44, branch: "factory/other", files: ["src/math.js"] }];
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
+    expect(r2.result.result).toBe("locked");
+    expect(r2.result.reason).toContain("#44");
+    expect(r2.github.drafted).toContain(url);
+    expect(r2.github.prStates.get(url)?.draft).toBe(true);
+    expect(r2.github.pushes).toEqual(r.github.pushes);
+  });
+
+  it("a resume that locks on a new factory PR at finalize drafts the existing ready PR", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "red");
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    const url = r.result.pr!;
+    r.github.prStates.set(url, { state: "open", draft: false });
+    let listed = 0;
+    const orig = r.github.openFactoryPrFiles.bind(r.github);
+    r.github.openFactoryPrFiles = async () => {
+      listed++;
+      if (listed === 1) return orig();
+      return [{ number: 44, branch: "factory/other", files: ["src/math.js"] }];
+    };
+    const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
+    expect(r2.result.result).toBe("locked");
+    expect(r2.result.reason).toContain("#44");
+    expect(r2.github.drafted).toContain(url);
+    expect(r2.github.prStates.get(url)?.draft).toBe(true);
+    expect(r2.github.pushes).toEqual(r.github.pushes);
+  });
+
   it("a PR marked ready by hand is converted back to draft when resume still cannot merge", async () => {
     const r = await runScenario({
       script: "clean.json",
