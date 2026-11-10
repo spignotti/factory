@@ -43,6 +43,7 @@ export function runsFor(p: ProposalItem, createdAt: string, runs: RunRecord[]): 
  * Lifecycle of earlier proposals, each on its own: a merged factory PR resolves the proposal and its
  * entries; an improve issue closed without that PR, a PR closed unmerged, or no merged/open PR within
  * `STALE_DAYS`, drops it and reopens its `proposed` entries (only those it still owns: `ref` = its id).
+ * A `gh` error while reading the issue is unknown: the proposal stays as it is, and is not dropped.
  */
 export async function resolveProposals(opts: { factoryHome: string; repoId: string; repoDir: string; runs: RunRecord[]; github: GitHub; now: Date }): Promise<LifecycleChange[]> {
   const changes: LifecycleChange[] = [];
@@ -93,8 +94,13 @@ async function decide(
   const ageDays = (opts.now.getTime() - Date.parse(createdAt)) / 86_400_000;
   if (merged) return { id: p.id, status: "resolved", reason: "factory PR merged", pr: merged.pr, run_id: merged.run_id };
   if (p.issue) {
-    const issue = await opts.github.getIssue(opts.repoDir, p.issue).catch(() => undefined);
-    if (!issue || issue.state === "closed") {
+    // A failed read is unknown, not closed. Do not drop, and do not fall through to the stale drop.
+    const issue = await opts.github.getIssue(opts.repoDir, p.issue).then(
+      (found) => found,
+      () => undefined,
+    );
+    if (issue === undefined) return undefined;
+    if (issue.state === "closed") {
       return { id: p.id, status: "dropped", reason: "issue closed without merged PR", pr: prs.at(-1)?.pr ?? null, run_id: prs.at(-1)?.run_id ?? null };
     }
   }

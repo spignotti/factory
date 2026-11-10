@@ -43,9 +43,12 @@ is an optional short note injected only into that aspect's prompt. It is not a c
 contain secrets or customer data.
 
 Each proposal becomes a GitHub issue labelled `factory-proposal` and `improve:<aspect>`, with the plan in
-a `factory-plan` block. An open issue for the same proposal key or the same findings is updated. The bot
-does not start the run from the label `factory-proposal`. Promoting it is a relabel to `factory-ready`;
-`factory queue add` accepts only that label.
+a `factory-plan` block and a hidden `<!-- factory-proposal: <key> -->` marker. The key is the aspect plus
+the sorted finding keys, or a hash of the sorted file paths when the plan resolves none. An open issue with
+that marker is updated, including after a relabel to `factory-ready`. If the open-issue list may be
+incomplete, no new issue is created. The bot does not start the run from the label `factory-proposal`.
+Promoting it is a relabel to `factory-ready`; `factory queue add` accepts only that label. `--dry-run` does
+not call `gh`.
 
 ```bash
 factory queue add --repo /path/to/checkout <issue>

@@ -8,13 +8,13 @@ import type { GitHub, Issue } from "../gh.js";
 import { originUrl } from "../git.js";
 import { resolveProposals } from "../harden/lifecycle.js";
 import { ASPECTS, collectAspect } from "../improve/aspects.js";
-import { FACTORY_PROPOSAL_LABEL, issueWrite, matchingIssue, parseProposalIssue, proposalLabels } from "../improve/issues.js";
+import { dedupeProposals, issueWrite, matchingIssue, parseProposalIssue, proposalLabels } from "../improve/issues.js";
 import { canonicalRepoId, markFindingsProposed, updateMemory } from "../memory.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { listProposals, nextProposalId, proposalsDir, saveProposal, writeProposal } from "../proposals.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { type ImproveAspectResult, type ImproveIssue, type ImproveReport, ImproveReportSchema, type ProposalItem } from "../schemas/proposal.js";
-import type { Profile, ProfileRole } from "../schemas/profile.js";
+import { THINKING_LEVELS, type Profile, type ProfileRole } from "../schemas/profile.js";
 import {
   type AuditType,
   DEFAULT_IMPROVE_THINKING,
@@ -92,7 +92,14 @@ export function resolveImproveConfig(repo: RepoConfig, raw: Record<string, unkno
   if (hasAudit) {
     thinking.security = repo.audit.thinking.security;
     thinking.performance = repo.audit.thinking.performance;
-    thinking.structure = repo.audit.types.includes("refactor") ? repo.audit.thinking.refactor : repo.audit.thinking.simplify;
+    // Structure is both audit types. Use the higher level that is actually enabled, not refactor's alone.
+    const structureLevels = [
+      repo.audit.types.includes("refactor") ? repo.audit.thinking.refactor : undefined,
+      repo.audit.types.includes("simplify") ? repo.audit.thinking.simplify : undefined,
+    ].filter((level): level is (typeof THINKING_LEVELS)[number] => level !== undefined);
+    if (structureLevels.length) {
+      thinking.structure = structureLevels.reduce((a, b) => (THINKING_LEVELS.indexOf(a) >= THINKING_LEVELS.indexOf(b) ? a : b));
+    }
     if (repo.audit.focus.security) focus.security = repo.audit.focus.security;
     if (repo.audit.focus.performance) focus.performance = repo.audit.focus.performance;
     const notes = [repo.audit.types.includes("refactor") ? repo.audit.focus.refactor : undefined, repo.audit.types.includes("simplify") ? repo.audit.focus.simplify : undefined].filter((n): n is string => !!n);
@@ -198,6 +205,7 @@ async function publish(
   aspect: ImproveAspect,
   items: ProposalItem[],
   open: Issue[],
+  issuesComplete: boolean,
 ): Promise<{ items: ProposalItem[]; issues: ImproveIssue[]; error: string | null }> {
   const labels = proposalLabels(aspect);
   try {
@@ -209,8 +217,11 @@ async function publish(
   const next = [...items];
   for (let i = 0; i < next.length; i++) {
     const item = next[i]!;
-    const write = issueWrite(aspect, item.rationale, item.plan, item.references.findings);
-    const match = matchingIssue(open, aspect, write.key, item.references.findings);
+    const write = issueWrite(aspect, item.rationale, item.plan);
+    const match = matchingIssue(open, write.key);
+    if (!match && !issuesComplete) {
+      return { items: next, issues, error: `open issue list may be incomplete; not creating an issue for ${item.plan.goal}` };
+    }
     try {
       const issue = match
         ? await github.updateIssue(repoDir, match.number, write)
@@ -273,7 +284,8 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
   const aspects = requested ?? resolved.aspects;
   const max = opts.max ?? resolved.maxProposals;
   const runs = repoRuns(deps.factoryHome, repoDir);
-  const lifecycle = await resolveProposals({ factoryHome: deps.factoryHome, repoId, repoDir, runs, github: deps.github, now });
+  // `--dry-run` writes proposal files only. Lifecycle reads issue and PR state from `gh`; skip it entirely.
+  const lifecycle = dryRun ? [] : await resolveProposals({ factoryHome: deps.factoryHome, repoId, repoDir, runs, github: deps.github, now });
   const compact = opts.compact ?? aspects.includes("findings");
   let compaction = { merged: 0, error: null as string | null };
   const logDir = join(deps.factoryHome, "improve", repoId.replace(/[^\w.-]+/g, "_"));
@@ -286,9 +298,12 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
     }
   }
   let openIssues: Issue[] = [];
+  let issuesComplete = true;
   if (!dryRun) {
     try {
-      openIssues = await deps.github.listIssues(repoDir, { label: FACTORY_PROPOSAL_LABEL, state: "open" });
+      const listed = await deps.github.listOpenIssues(repoDir);
+      openIssues = listed.issues;
+      issuesComplete = listed.complete;
     } catch (e) {
       return blank(now, repoId, { aspects, warnings: resolved.warnings, dry_run: dryRun, lifecycle, compaction, error: `listing proposal issues failed: ${(e as Error).message.slice(0, 200)}` });
     }
@@ -300,7 +315,7 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
     const refresh = refreshKeys(deps.factoryHome, repoId, aspect, openIssues);
     let input;
     try {
-      input = await collectAspect(aspect, { repoDir, repo, factoryHome: deps.factoryHome, repoId, now, github: deps.github, runs, refresh });
+      input = await collectAspect(aspect, { repoDir, repo, factoryHome: deps.factoryHome, repoId, now, github: deps.github, runs, refresh, dryRun });
     } catch (e) {
       results.push({ aspect, signals: {}, ticket: null, path: null, rejected: [], issues: [], error: `${aspect} signals failed: ${(e as Error).message.slice(0, 200)}` });
       continue;
@@ -317,6 +332,8 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
         results.push({ aspect, signals: input.signals, ticket: null, path: null, rejected: [], issues: [], error: chosen.error });
         continue;
       }
+      const unique = dedupeProposals(aspect, chosen.accepted);
+      const rejected = [...chosen.rejected, ...unique.dropped];
       const id = nextProposalId(proposalsDir(deps.factoryHome, repoId), now.toISOString().slice(0, 10), "improve", undefined, aspect);
       let ticket = writeProposal(deps.factoryHome, {
         version: 1,
@@ -324,10 +341,10 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
         id,
         repo: repoId,
         created_at: now.toISOString(),
-        proposals: chosen.accepted.map((c) => ({
+        proposals: unique.kept.map((c) => ({
           status: "open" as const,
           aspect,
-          key: issueWrite(aspect, c.rationale, c.plan, c.plan.resolves_findings ?? []).key,
+          key: issueWrite(aspect, c.rationale, c.plan).key,
           issue: null,
           rationale: c.rationale,
           plan: c.plan,
@@ -340,7 +357,7 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
       let issues: ImproveIssue[] = [];
       let error: string | null = null;
       if (!dryRun) {
-        const published = await publish(deps.github, repoDir, aspect, ticket.proposals, openIssues);
+        const published = await publish(deps.github, repoDir, aspect, ticket.proposals, openIssues, issuesComplete);
         ticket = { ...ticket, proposals: published.items };
         saveProposal(deps.factoryHome, ticket);
         issues = published.issues;
@@ -350,7 +367,7 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
         if (!dryRun) for (const p of ticket.proposals) if (p.issue) replaceOpenMatches(deps.factoryHome, repoId, p, now);
         markFindingsProposed(deps.factoryHome, repoId, new Map(ticket.proposals.flatMap((p) => p.references.findings.map((k) => [k, p.id] as const))));
       }
-      results.push({ aspect, signals: input.signals, ticket, path: join(proposalsDir(deps.factoryHome, repoId), `${ticket.id}.json`), rejected: chosen.rejected, issues, error });
+      results.push({ aspect, signals: input.signals, ticket, path: join(proposalsDir(deps.factoryHome, repoId), `${ticket.id}.json`), rejected, issues, error });
     } finally {
       shot.close();
     }
@@ -375,6 +392,7 @@ export async function improveCommand(opts: ImproveOptions & { json: boolean }, d
           io.out(`  ${p.rank}. ${p.plan.goal}${issue ? ` (#${issue.number} ${issue.action})` : ""}\n`);
         }
         for (const x of result.rejected) io.out(`  rejected: ${x}\n`);
+        if (result.error) io.out(`  ${result.error}\n`);
       } else io.out(result.error ? `aspect ${result.aspect}: no proposal: ${result.error}\n` : `aspect ${result.aspect}: no proposal: no signals\n`);
     }
     if (r.error && !r.results.some((result) => result.error === r.error)) io.out(`no proposal: ${r.error}\n`);

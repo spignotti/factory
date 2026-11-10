@@ -30,7 +30,7 @@ export const ProposalItemSchema = z
     type: AuditTypeSchema.optional(),
     /** Set on improve proposals. */
     aspect: ImproveAspectSchema.optional(),
-    /** Stable identity for the GitHub issue (`<aspect>:<goal slug>`). */
+    /** Stable identity: `<aspect>:<sorted finding keys>`, or `<aspect>:<sha256 of sorted file paths>` when it resolves none. */
     key: z.string().min(1).optional(),
     /** GitHub issue opened for this proposal. Null until published; absent on older tickets. */
     issue: z.number().int().positive().nullable().optional(),

@@ -711,10 +711,16 @@ Aspects:
 
 Each valid proposal (same plan validation as before, one retry; overlapping or invalid ones are dropped and
 listed) is written under `$FACTORY_HOME/memory/<repo>/proposals/<date>-improve-<aspect>.json` and opened as
-a GitHub issue (`gh` must be authenticated; `--dry-run` does not call it): the goal as title, a short
-rationale, the plan in a `factory-plan` block (intake uses that block as the plan), labels `factory-proposal`
-(created if missing) and `improve:<aspect>`. An open issue with the same proposal key or any of the same
-findings is updated, not created again. `--dry-run` writes the proposal files only.
+a GitHub issue (`gh` must be authenticated): the goal as title, a short rationale, the plan in a
+`factory-plan` block (intake uses that block as the plan), labels `factory-proposal` (created if missing) and
+`improve:<aspect>`. The body ends with a hidden marker `<!-- factory-proposal: <key> -->`. The key is the
+aspect plus the sorted finding keys the plan resolves, or, when it resolves none, the aspect plus a sha256
+of the sorted file paths it changes. An open issue with that marker is updated, whatever its labels (a
+relabel to `factory-ready` is still the same proposal). Open issues are listed with no label filter, page by
+page; if that list may be incomplete, no new issue is created and the run reports it. Two proposals with the
+same key in one run: the first is kept, the second is dropped and listed. `--dry-run` writes the proposal
+files only and does not call `gh`, including lifecycle. A `gh` error while reading an issue's state leaves
+that proposal as it is.
 
 Lifecycle, on the next `factory improve`: a merged factory PR (matched by plan file, goal or
 `resolves_findings`) resolves the proposal and its findings; an issue closed without that PR, a PR closed

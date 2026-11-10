@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { FakeRunner, type FakeStep } from "../../src/agents/fake-runner.js";
 import { main } from "../../src/cli.js";
 import { auditAlias, hardenAlias, improve, improveCommand } from "../../src/commands/improve.js";
-import { FakeGitHub } from "../../src/gh.js";
+import { FakeGitHub, type GitHub } from "../../src/gh.js";
+import { resolveProposals } from "../../src/harden/lifecycle.js";
 import { canonicalRepoId, loadMemory } from "../../src/memory.js";
 import { listProposals } from "../../src/proposals.js";
 import { loadProfile } from "../../src/schemas/profile.js";
@@ -88,6 +89,7 @@ describe("factory improve", () => {
     const block = /```factory-plan\n([\s\S]*?)```/.exec(issue.body);
     expect(JSON.parse(block?.[1] ?? "")).toMatchObject({ goal: "Lint rule for a", resolves_findings: ["a"] });
     expect(issue.body).toContain("Because Lint rule for a.");
+    expect(issue.body).toContain("<!-- factory-proposal: findings:a -->");
     expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings.1" });
 
     const second = deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh);
@@ -168,6 +170,7 @@ describe("factory improve", () => {
     expect(both.deps.runner.calls[1]!.prompt).toContain("boundaries");
     expect(both.deps.runner.calls[1]!.prompt).toContain("dead code");
     expect(both.deps.runner.calls[1]!.prompt).toContain("Up to 4 structure proposals");
+    expect(both.deps.runner.calls[1]!.thinking).toBe("high");
     expect(warn.join("")).toMatch(/harden: and audit: are deprecated/);
     expect(out.join("")).toMatch(/aspect findings/);
     expect(out.join("")).toMatch(/aspect structure/);
@@ -197,4 +200,162 @@ describe("factory improve", () => {
     expect(await main(["improve", "--repo", ctx.repo, "--aspect", "ci"], { out: () => {}, err: (s) => err.push(s) })).toBe(2);
     expect(err.join("")).toMatch(/factory improve/);
   });
+
+  it("updates a relabelled issue by marker, and does not create when the open-issue list may be incomplete", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const gh = new FakeGitHub();
+    const opened = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps);
+    expect(opened.results[0]!.issues[0]).toMatchObject({ number: 1, action: "created" });
+    gh.issues.get(1)!.labels = ["factory-ready"];
+
+    const updated = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh).deps);
+    expect(updated.error).toBeNull();
+    expect(updated.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings-2.1", number: 1, action: "updated" }]);
+    expect(gh.issues.size).toBe(1);
+    expect(gh.issues.get(1)!.labels).toEqual(expect.arrayContaining(["factory-ready", "factory-proposal"]));
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings-2.1" });
+    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === "2026-10-29-improve-findings.1")!.status).toBe("dropped");
+
+    const fresh = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(fresh.factoryHome, fresh.repoId, [entry("a", { count: 2 })]);
+    const partial = new FakeGitHub();
+    partial.openIssuesComplete = false;
+    const out: string[] = [];
+    const code = await improveCommand(
+      { repo: fresh.repo, json: false },
+      deps(fresh, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], partial).deps,
+      { out: (s) => out.push(s), err: () => {} },
+    );
+    expect(code).toBe(1);
+    expect(out.join("")).toContain("open issue list may be incomplete; not creating an issue for Lint rule for a");
+    expect(out.join("")).toContain("Lint rule for a");
+    expect(partial.issues.size).toBe(0);
+    expect(loadMemory(fresh.factoryHome, fresh.repoId).entries[0]!.status).toBe("open");
+  });
+
+  it("keeps the first proposal when two share a key, and matches later runs by files not by goal text", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [security]\n`);
+    const gh = new FakeGitHub();
+    const files = ["src/auth.ts", "src/log.ts"];
+    const out: string[] = [];
+    const code = await improveCommand(
+      { repo: ctx.repo, aspects: ["security"], json: false },
+      deps(ctx, [{ role: "audit_security", output: selection(withFiles("Stop logging tokens", files), withFiles("Do not log auth tokens", files)) }], gh).deps,
+      { out: (s) => out.push(s), err: () => {} },
+    );
+    expect(code).toBe(0);
+    expect(gh.issues.size).toBe(1);
+    expect(gh.issueEdits).toHaveLength(0);
+    expect(gh.issues.get(1)!.title).toBe("Stop logging tokens");
+    expect(gh.issues.get(1)!.body).not.toContain("Do not log auth tokens");
+    expect(out.join("")).toMatch(/rejected: dropped duplicate proposal key security:[0-9a-f]{64}: Do not log auth tokens/);
+    expect(out.join("")).not.toMatch(/2\. Do not log auth tokens/);
+
+    gh.issues.get(1)!.labels = ["factory-ready"];
+    const updated = await improve(
+      { repo: ctx.repo, aspects: ["security"] },
+      deps(ctx, [{ role: "audit_security", output: selection(withFiles("Do not log auth tokens", ["src/log.ts", "src/auth.ts"])) }], gh).deps,
+    );
+    expect(updated.error).toBeNull();
+    expect(updated.results[0]!.issues).toEqual([expect.objectContaining({ number: 1, action: "updated" })]);
+    expect(gh.issues.size).toBe(1);
+    expect(gh.issues.get(1)!.title).toBe("Do not log auth tokens");
+
+    const created = await improve(
+      { repo: ctx.repo, aspects: ["security"] },
+      deps(ctx, [{ role: "audit_security", output: selection(withFiles("Add rate limiting", ["src/rate.ts"])) }], gh).deps,
+    );
+    expect(created.results[0]!.issues).toEqual([expect.objectContaining({ number: 2, action: "created" })]);
+    expect(gh.issues.size).toBe(2);
+    expect(created.results[0]!.ticket!.proposals[0]!.key).not.toBe(updated.results[0]!.ticket!.proposals[0]!.key);
+  });
+
+  it("keeps a proposal when gh cannot read the issue, and dry-run makes no gh calls", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings, performance]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const gh = new FakeGitHub();
+    const opened = await improve({ repo: ctx.repo, aspects: ["findings"] }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps);
+    expect(opened.results[0]!.issues[0]!.number).toBe(1);
+
+    gh.getIssueError = "gh issue view failed: API rate limit exceeded";
+    const changes = await resolveProposals({
+      factoryHome: ctx.factoryHome,
+      repoId: ctx.repoId,
+      repoDir: ctx.repo,
+      runs: [],
+      github: gh,
+      now: new Date("2026-12-29T12:00:00.000Z"),
+    });
+    expect(changes).toEqual([]);
+    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === "2026-10-29-improve-findings.1")!.status).toBe("open");
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings.1" });
+
+    gh.getIssueError = null;
+    gh.issues.get(1)!.state = "closed";
+    const calls: string[] = [];
+    const github = new Proxy(gh, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof prop !== "string" || typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          calls.push(prop);
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as GitHub;
+    const dryReport = await improve(
+      { repo: ctx.repo, dryRun: true, aspects: ["findings", "performance"] },
+      {
+        ...deps(ctx, [
+          { role: "harden", output: selection(item("Lint rule for a", ["a"])) },
+          { role: "audit_performance", output: answer },
+        ]).deps,
+        github,
+      },
+    );
+    expect(calls).toEqual([]);
+    expect(dryReport.lifecycle).toEqual([]);
+    expect(dryReport.error).toBeNull();
+    expect(dryReport.results.map((r) => r.aspect)).toEqual(["findings", "performance"]);
+    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === "2026-10-29-improve-findings.1")!.status).toBe("open");
+  });
+
+  it("prints create and update failures, and exits non-zero", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const gh = new FakeGitHub();
+    gh.createIssueError = "HTTP 502";
+    const out: string[] = [];
+    const code = await improveCommand(
+      { repo: ctx.repo, json: false },
+      deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps,
+      { out: (s) => out.push(s), err: () => {} },
+    );
+    expect(code).toBe(1);
+    expect(out.join("")).toContain("issue create failed: HTTP 502");
+    expect(out.join("")).toContain("Lint rule for a");
+    expect(gh.issues.size).toBe(0);
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]!.status).toBe("open");
+
+    const gh2 = new FakeGitHub();
+    const opened = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh2).deps);
+    expect(opened.error).toBeNull();
+    gh2.updateIssueError = "API rate limit exceeded";
+    const out2: string[] = [];
+    const code2 = await improveCommand(
+      { repo: ctx.repo, json: false },
+      deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh2).deps,
+      { out: (s) => out2.push(s), err: () => {} },
+    );
+    expect(code2).toBe(1);
+    expect(out2.join("")).toContain("issue update failed: API rate limit exceeded");
+    expect(gh2.issues.get(1)!.title).toBe("Lint rule for a");
+    expect(gh2.issueEdits).toHaveLength(0);
+  });
 });
+
+function withFiles(goal: string, files: string[], resolves: string[] = []) {
+  const plan = PLAN(goal, resolves);
+  return { rationale: `Because ${goal}.`, checklist: [] as string[], plan: { ...plan, packages: [{ ...plan.packages[0]!, files }] } };
+}

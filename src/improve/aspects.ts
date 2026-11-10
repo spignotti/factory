@@ -51,6 +51,8 @@ export interface AspectContext {
   runs: RunRecord[];
   /** Findings already named by an open proposal or issue of this aspect (a refresh, not a new key). */
   refresh: string[];
+  /** `improve --dry-run`: do not call GitHub. */
+  dryRun?: boolean;
 }
 
 function openFindings(mem: MemoryFile) {
@@ -74,15 +76,19 @@ export async function collectAspect(aspect: ImproveAspect, ctx: AspectContext): 
   const metrics = latestMetrics(ctx.factoryHome, ctx.repoId);
   const signals: Record<string, unknown> = { findings, metrics, refresh_findings: refresh };
   if (aspect === "performance") {
-    const since = new Date(ctx.now.getTime() - WINDOW_DAYS * 86_400_000).toISOString();
-    try {
-      const [ciRuns, latest] = await Promise.all([
-        ctx.github.ciRuns(ctx.repoDir, since, CI_RUN_LIMIT),
-        ctx.github.latestTag(ctx.repoDir, FACTORY_REPO).catch(() => null),
-      ]);
-      signals.ci = ciAudit(ciRuns, ctx.repo, stubText(ctx.repoDir), latest);
-    } catch (e) {
-      signals.ci = { error: (e as Error).message.split("\n")[0]!.slice(0, 200) };
+    if (ctx.dryRun) {
+      signals.ci = { error: "dry-run: no gh calls" };
+    } else {
+      const since = new Date(ctx.now.getTime() - WINDOW_DAYS * 86_400_000).toISOString();
+      try {
+        const [ciRuns, latest] = await Promise.all([
+          ctx.github.ciRuns(ctx.repoDir, since, CI_RUN_LIMIT),
+          ctx.github.latestTag(ctx.repoDir, FACTORY_REPO).catch(() => null),
+        ]);
+        signals.ci = ciAudit(ciRuns, ctx.repo, stubText(ctx.repoDir), latest);
+      } catch (e) {
+        signals.ci = { error: (e as Error).message.split("\n")[0]!.slice(0, 200) };
+      }
     }
   }
   return {
