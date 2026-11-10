@@ -15,6 +15,7 @@ import { gatesCommand, type Io } from "./commands/gates.js";
 import { abandonRun } from "./commands/abandon.js";
 import { autoGc, gcCommand, resumesBaseRedAfterGc } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
+import { queueCommand } from "./commands/queue.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
 import { auditCommand } from "./commands/audit.js";
@@ -49,8 +50,19 @@ const USAGE = `usage:
                CI stub hash; --ping sends one tiny request per configured model;
                --services starts and stops each service and the ui once in a clean base worktree)
   models: built-in < $FACTORY_HOME/profile.yaml < --profile <file> < repo.yaml models: (see README)
+  factory queue add --repo <path> <issue...> [--after <issue>]
+              (append in order; refuses closed, missing factory-ready, or needs-plan;
+               --after N starts only once issue N's factory PR is merged)
+  factory queue list [--repo <path>] [--json]
+              (pending, running with run id, done with PR, parked with reason, in queue order)
+  factory queue remove --repo <path> <issue...>
+  factory queue run [--repo <path>] [--slots N] [--until HH:MM]
+              (one worker: min(slots, concurrency.max_runs) runs per repo, default slots 2;
+               factory run --issue N --no-notify; parks needs_human/needs_input/failed/base_red;
+               transient needs_human requeues at most twice; updates behind factory PRs;
+               --until is local time, no new starts after it, live runs finish)
   factory status [--since <duration>] [--json]
-              (running, waiting for a human, interrupted runs; open factory PRs;
+              (running, waiting for a human, interrupted runs; queues; open factory PRs;
                --since 12h adds finished runs from result.json: merged, human_review, blocked, failed, base_red, needs_input)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one;
@@ -374,6 +386,16 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const r = await notifyTest(repo, { factoryHome: factoryHomeOf(), notifyTarget: values.target });
       (r.ok ? io.out : io.err)(`${r.ok ? "" : "factory: "}${r.message}\n`);
       return r.ok ? 0 : 1;
+    }
+    if (command === "queue") {
+      const factoryHome = factoryHomeOf();
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      try {
+        return await queueCommand(rest, { factoryHome, github: new GhCli(), io, signal: controller.signal });
+      } finally {
+        uninstall();
+      }
     }
     if (command === "status") {
       const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, json: { type: "boolean", default: false } } });

@@ -110,7 +110,8 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
-| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, `--since` finished runs, period stats, cleanup |
+| `factory queue add\|list\|remove\|run` | ordered issue queue per repo; overnight worker (`--slots`, `--until`) |
+| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), queues, PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
@@ -786,10 +787,38 @@ when that repo has none.
 Log in once for the factory: `PI_CODING_AGENT_DIR=~/.factory/pi npx pi`, then `/login` (ChatGPT for OpenAI,
 API key for OpenCode Go).
 
+## Queue
+
+An ordered list of issues per repository, in `$FACTORY_HOME/queue/<repo key>.json` (atomic writes). A restarted `queue run` continues that list and does not start an issue that already has a live run.
+
+Evening, queue the night's issues. Closed, missing `factory-ready`, or carrying `needs-plan` is refused:
+
+```
+factory queue add --repo ~/code/app 120 121 122
+factory queue add --repo ~/code/app 130 --after 120
+```
+
+`--after 120` leaves #130 pending until issue 120's factory PR is merged.
+
+Overnight, one worker under `caffeinate` so the machine stays awake. It starts `factory run --issue N --no-notify` up to `min(--slots, concurrency.max_runs)` per repo (default `--slots 2`), in queue order. It starts nothing for a repo while the base branch CI is red, and it skips an issue that is closed or already has an open factory PR. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. Any other `needs_human`, `needs_input`, `failed` or `base_red` is parked with the reason and is not resumed. A `locked` overlap with an open factory PR stays parked until that PR is merged or closed. Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time, so auto-merge can proceed after CI. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until` is local time: no new starts after it; live runs finish.
+
+```
+caffeinate -i factory queue run --slots 2 --until 07:00
+```
+
+Morning:
+
+```
+factory status --since 12h
+factory queue list
+```
+
+`factory queue remove --repo <path> <issue...>` drops entries. `factory queue list --json` is the same list for scripts.
+
 ## Status, stats, cleanup
 
 ```
-factory status [--since 12h] [--json]        # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
+factory status [--since 12h] [--json]        # running, queued, stalled, orphaned, waiting, interrupted; queues; open factory PRs; open audit tickets
 factory stats --since 7d [--repo <path>] [--json]  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
 factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs

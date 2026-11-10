@@ -66,6 +66,9 @@ Unverified (needs a real provider):
 - `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue`, `updatePr`, `markReady` and
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).
+- `getIssue` also reads `state` (`OPEN` / `CLOSED`) for `queue add`. UNVERIFIED against a live `gh`.
+- `updateBranch` runs `gh pr update-branch <pr>` (merge from the base, no `--rebase`, no force-push)
+  so a behind factory PR can auto-merge after CI. UNVERIFIED against a live `gh`. Tests use `FakeGitHub`.
 - `openFactoryPrFiles` uses `gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository,files`.
   UNVERIFIED against a live `gh`: `files` is an exportable field; the parser accepts `{path}` / `{filename}`
   and a `{nodes}` wrapper. A page that hits 1000 is incomplete: the run blocks instead of treating it as every open PR.
