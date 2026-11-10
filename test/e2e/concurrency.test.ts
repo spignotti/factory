@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner, FakeScriptSchema, type FakeStep } from "../../src/agents/fake-runner.js";
-import { FakeGitHub } from "../../src/gh.js";
+import { FakeGitHub, IncompletePrListError } from "../../src/gh.js";
 import { activeHolders, acquireRepoLock, decidePathClaim } from "../../src/pipeline/lock.js";
 import { runFactory } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
@@ -41,6 +41,22 @@ class BlockingGitHub extends FakeGitHub {
   }
 }
 
+function publishedClaimPaths(home: string): string[] {
+  const locks = join(home, "locks");
+  if (!existsSync(locks)) return [];
+  const out: string[] = [];
+  for (const name of readdirSync(locks)) {
+    if (!name.endsWith(".paths")) continue;
+    try {
+      const stored = JSON.parse(readFileSync(join(locks, name), "utf8")) as { paths?: unknown };
+      if (Array.isArray(stored.paths)) for (const p of stored.paths) if (typeof p === "string") out.push(p);
+    } catch {
+      // a claim file mid-write is not published yet
+    }
+  }
+  return out;
+}
+
 async function finalizeWaiter(home: string): Promise<string> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
@@ -56,6 +72,23 @@ async function finalizeWaiter(home: string): Promise<string> {
     await new Promise((r) => setTimeout(r, 15));
   }
   throw new Error("timed out waiting for a finalize path-claim wait");
+}
+
+async function prOverlapQueued(home: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const runs = join(home, "runs");
+    if (existsSync(runs)) {
+      for (const id of readdirSync(runs)) {
+        const events = join(runs, id, "events.jsonl");
+        if (!existsSync(events)) continue;
+        const text = readFileSync(events, "utf8");
+        if (text.includes('"event":"queued"') && text.includes("shared.py") && /#\d+/.test(text)) return;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error("timed out waiting for an open-PR overlap queue");
 }
 
 function withHostSteps(steps: FakeStep[]): FakeStep[] {
@@ -258,6 +291,140 @@ describe("parallel runs and host steps", () => {
     }
   });
 
+  it("publishes the planned claim before listing open factory PRs", async () => {
+    let home = "";
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 2 }),
+      before: (_repo, h) => {
+        home = h;
+      },
+      github: (gh) => {
+        // The overlapping PR becomes visible only once this run's claim is already published.
+        // A list that runs first returns empty, and the later claim check would also miss.
+        gh.openFactoryPrFiles = async () => {
+          if (!publishedClaimPaths(home).includes("src/math.js")) return [];
+          return [{ number: 77, branch: "factory/handover", files: ["src/math.js"] }];
+        };
+      },
+    });
+    expect(r.result.result).toBe("locked");
+    expect(r.result.reason).toContain("#77");
+    expect(r.github.pushes).toEqual([]);
+    expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
+  });
+
+  it("publishes the changed-file claim before listing open factory PRs", async () => {
+    let home = "";
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 2 }),
+      before: (_repo, h) => {
+        home = h;
+      },
+      github: (gh) => {
+        gh.openFactoryPrFiles = async () => {
+          if (!publishedClaimPaths(home).includes("a.py")) return [];
+          return [{ number: 77, branch: "factory/handover", files: ["a.py"] }];
+        };
+      },
+      steps: (steps) =>
+        steps.map((s) => {
+          if (s.role === "plan_high") return { ...s, output: planWithFiles(s.output, ["b.py"]) };
+          if (s.role === "implement") return { ...s, writes: { ...(s.writes ?? {}), "a.py": "x = 1\n" } };
+          return s;
+        }),
+    });
+    expect(r.result.result).toBe("locked");
+    expect(r.result.reason).toContain("#77");
+    expect(r.result.reason).toContain("a.py");
+    expect(r.github.pushes).toEqual([]);
+    expect(r.runner.calls.some((c) => c.role === "implement")).toBe(true);
+  });
+
+  it("a factory PR list that hits the limit blocks before push", async () => {
+    let calls = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 2 }),
+      github: (gh) => {
+        gh.openFactoryPrFiles = async () => {
+          calls++;
+          if (calls === 1) return [];
+          throw new IncompletePrListError(1000);
+        };
+      },
+    });
+    expect(r.result.result).toBe("locked");
+    expect(r.result.reason).toMatch(/hit the limit \(1000\)/);
+    expect(r.github.pushes).toEqual([]);
+  });
+
+  it("a failing factory PR list at finalize is a resumable PR-step failure", async () => {
+    let calls = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 2 }),
+      github: (gh) => {
+        gh.openFactoryPrFiles = async () => {
+          calls++;
+          if (calls === 1) return [];
+          throw new Error("gh: HTTP 502");
+        };
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    expect(r.result.reason).toMatch(/PR step failed: gh: HTTP 502/);
+    expect(r.github.pushes).toEqual([]);
+    expect(r.file("pr.md").length).toBeGreaterThan(0);
+    expect(r.events.some((e) => e.step === "finalize" && typeof e.data.pr_error === "string")).toBe(true);
+    expect(JSON.parse(r.file("state.json")).step).not.toBe("finished");
+  });
+
+  it("reacquiring a slot at finalize stops at max_wall_minutes", async () => {
+    const repo = createFixtureRepo((c) => {
+      c.concurrency = { max_runs: 2 };
+      (c.limits as Record<string, unknown>).max_wall_minutes = 0.25;
+    });
+    const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const blocker = acquireRepoLock(factoryHome, repo, "blocker", { maxRuns: 2 })!;
+    expect(decidePathClaim(factoryHome, repo, blocker.slot, "blocker", { paths: ["shared.py"], exclusive: false }).ok).toBe(true);
+    const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", "clean.json"), "utf8"))).steps;
+    const profile = loadProfile(join(FIXTURES, "profile.yaml"));
+    let snatched: (() => void) | undefined;
+    const run = runFactory(
+      { repo, textFile: join(FIXTURES, "tasks", "multiply.md"), wait: true },
+      {
+        runner: new FakeRunner(growInto(scripted, "left.txt", "shared.py")),
+        github: new FakeGitHub(),
+        profile,
+        factoryHome,
+        parentEnv: process.env,
+        sleep: async () => {},
+        lockPollMs: 400,
+      },
+    );
+    try {
+      await finalizeWaiter(factoryHome);
+      const until = Date.now() + 3_000;
+      while (!snatched && Date.now() < until) {
+        snatched = acquireRepoLock(factoryHome, repo, "snatcher", { maxRuns: 2 });
+        if (!snatched) await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(snatched).toBeTypeOf("function");
+      const result = await Promise.race([
+        run,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("reacquire ignored the wall deadline")), 20_000)),
+      ]);
+      expect(result.result).toBe("needs_human");
+      expect(result.reason).toMatch(/max_wall_minutes/);
+    } finally {
+      snatched?.();
+      blocker();
+      await run.catch(() => undefined);
+    }
+  });
+
   it("two runs that both grow into the same path at finalize do not both hold slots while waiting", async () => {
     const repo = createFixtureRepo((c) => void (c.concurrency = { max_runs: 2 }));
     const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
@@ -284,9 +451,14 @@ describe("parallel runs and host steps", () => {
       expect(holders.map((h) => h.runId)).not.toContain(waitingId);
       expect(holders).toHaveLength(1);
       github.releasePush();
+      await prOverlapQueued(factoryHome);
+      expect(github.pushes).toHaveLength(1);
+      expect(github.factoryPrs.some((p) => p.files.includes("shared.py"))).toBe(true);
+      github.factoryPrs.length = 0;
       const results = await runs;
       expect(results.map((r) => r.result).sort()).toEqual(["done", "done"]);
     } finally {
+      github.factoryPrs.length = 0;
       github.releasePush();
     }
   });

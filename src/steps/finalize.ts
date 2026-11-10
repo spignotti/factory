@@ -352,12 +352,32 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   let blockPush = false;
+  let githubClaimError: string | undefined;
   if (!input.noPr && hasCommits) {
     const claim = await ensureChangedPathClaim(ctx, changed, ctx.wait ?? false);
     if (!claim.ok && claim.kind === "pr") {
-      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft: input.existingPr?.draft ?? null };
+      // A ready PR must not stay ready when this resume stops locked (gates may already have failed).
+      let draft: boolean | null = input.existingPr?.draft ?? null;
+      if (input.existingPr) {
+        try {
+          const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, input.existingPr);
+          draft = held.draft;
+          if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
+        } catch (e) {
+          const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
+          ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
+          return { result: "needs_human", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...skippedField(gates) };
+        }
+      }
+      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft };
     }
-    if (!claim.ok) {
+    if (!claim.ok && claim.kind === "github") {
+      githubClaimError = `PR step failed: ${claim.reason.slice(0, 300)}`;
+      reason = result === "done" ? githubClaimError : `${reason}; ${githubClaimError}`;
+      result = "needs_human";
+      policy = "human_review";
+      blockPush = true;
+    } else if (!claim.ok) {
       result = "needs_human";
       reason = claim.reason;
       policy = "human_review";
@@ -387,6 +407,10 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
       return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
     }
+  }
+  if (githubClaimError) {
+    ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: githubClaimError } });
+    return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
   }
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";

@@ -66,9 +66,10 @@ Unverified (needs a real provider):
 - `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue`, `updatePr`, `markReady` and
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).
-- `openFactoryPrFiles` uses `gh pr list --state open --limit 100 --json number,headRefName,isCrossRepository,files`.
+- `openFactoryPrFiles` uses `gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository,files`.
   UNVERIFIED against a live `gh`: `files` is an exportable field; the parser accepts `{path}` / `{filename}`
-  and a `{nodes}` wrapper. The list is capped at 100 open PRs and whatever file page `gh` requests.
+  and a `{nodes}` wrapper. A page that hits 1000 is incomplete: the run blocks instead of treating it as every open PR.
+  Whatever file page `gh` requests is still a separate cap.
 - Branch protection and auto-merge hints on a private repository without GitHub Pro.
 
 ## Evaluate

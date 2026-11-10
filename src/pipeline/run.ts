@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { BaseStatus } from "../gh.js";
+import { IncompletePrListError, type BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
 import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
@@ -162,22 +162,40 @@ async function ensurePathClaim(
     return true;
   };
   for (;;) {
-    const hits = await openFactoryPrOverlap(deps.github, repoDir, paths, ownBranch);
+    const slot = f.release?.slot;
+    if (slot === undefined) return false;
+    // Publish before the PR list. Otherwise a neighbor can open its PR and drop its slot in the gap
+    // and both checks miss.
+    const decision = decidePathClaim(deps.factoryHome, raw, slot, runId, { paths, exclusive });
+    if (!decision.ok) {
+      if (decision.kind === "busy") {
+        await realSleep(poll, deps.signal);
+        continue;
+      }
+      const reason = `planned paths overlap active runs: ${decision.conflicts.join("; ")}`;
+      if (!(await yieldSlot(reason, decision.conflicts))) return false;
+      continue;
+    }
+    let hits: Awaited<ReturnType<typeof openFactoryPrOverlap>>;
+    try {
+      hits = await openFactoryPrOverlap(deps.github, repoDir, paths, ownBranch);
+    } catch (e) {
+      if (e instanceof WallTimeExceeded || e instanceof Interrupted || deps.signal?.aborted) throw e;
+      if (e instanceof IncompletePrListError) {
+        if (!(await yieldSlot(e.message, [e.message]))) return false;
+        continue;
+      }
+      f.release?.();
+      f.release = undefined;
+      f.set({ result: "needs_human", reason: `PR step failed: ${(e as Error).message.slice(0, 300)}` });
+      return false;
+    }
     if (hits.length) {
       const reason = factoryPrOverlapReason("planned", hits);
       if (!(await yieldSlot(reason, hits.map((h) => `#${h.number} (${h.files.slice(0, 8).join(", ")})`)))) return false;
       continue;
     }
-    const slot = f.release?.slot;
-    if (slot === undefined) return false;
-    const decision = decidePathClaim(deps.factoryHome, raw, slot, runId, { paths, exclusive });
-    if (decision.ok) return true;
-    if (decision.kind === "busy") {
-      await realSleep(poll, deps.signal);
-      continue;
-    }
-    const reason = `planned paths overlap active runs: ${decision.conflicts.join("; ")}`;
-    if (!(await yieldSlot(reason, decision.conflicts))) return false;
+    return true;
   }
 }
 
@@ -188,12 +206,22 @@ function bindLockWait(f: RunFrame, ctx: RunContext): void {
     f.release = undefined;
   };
   ctx.reacquireLock = async () => {
-    const again = await takeRepoLock(ctx.deps, ctx.repoDir, ctx.runId, ctx.events, true, f.maxRuns);
-    if (!again.release) return undefined;
-    f.release = again.release;
-    f.lockSlot = again.release.slot;
-    ctx.lockSlot = again.release.slot;
-    return again.release.slot;
+    // Non-waiting attempts only. `takeRepoLock(..., true)` waits in `waitForRepoLock` with no deadline,
+    // so a full slot set would outrun max_wall_minutes until some other run released.
+    const poll = ctx.deps.lockPollMs ?? 15_000;
+    for (;;) {
+      checkDeadline(ctx);
+      const again = await takeRepoLock(ctx.deps, ctx.repoDir, ctx.runId, ctx.events, false, f.maxRuns);
+      if (again.release) {
+        f.release = again.release;
+        f.lockSlot = again.release.slot;
+        ctx.lockSlot = again.release.slot;
+        return again.release.slot;
+      }
+      const left = ctx.deadline.at - Date.now();
+      if (left <= 0) checkDeadline(ctx);
+      await realSleep(Math.min(poll, left), ctx.deps.signal);
+    }
   };
 }
 
@@ -824,9 +852,11 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   const checkout = loadRepoConfig(st.repo);
   const lock = await takeRepoLock(deps, st.repo, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
   if (!lock.release) {
+    f.state = st;
+    const draftError = await keepDraft(f);
     const locked: RunResult = {
-      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
-      pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: lock.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
+      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: st.lane ?? "standard", result: draftError ? "needs_human" : "locked", risk: null, merge_policy: null,
+      pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: draftError ? `${lock.reason}; ${draftError}` : lock.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
     };
     await notifyFinished(locked, deps, events);
     return locked;
@@ -844,9 +874,13 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   }
   try {
     if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false, st.branch ?? undefined))) {
+      f.state = st;
+      const draftError = await keepDraft(f);
+      const queryFailed = f.out.result === "needs_human";
+      const reason = draftError ? `${f.out.reason}; ${draftError}` : f.out.reason;
       const locked: RunResult = {
-        run_id: runId, repo: st.repo, task: st.task.ref, type: plan.type, lane: st.lane ?? "standard", result: "locked", risk: null, merge_policy: null,
-        pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: f.out.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
+        run_id: runId, repo: st.repo, task: st.task.ref, type: plan.type, lane: st.lane ?? "standard", result: queryFailed || draftError ? "needs_human" : "locked", risk: null, merge_policy: null,
+        pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
       };
       await notifyFinished(locked, deps, events);
       return locked;
