@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CI_STUB_PATH, CI_TEMPLATE, ciStubCheck, ciStubMode, otherPrWorkflows, renderCiStub, renderCiStubFor, sha256 } from "../../src/ci.js";
-import { DRAFT_HOLD_JOB } from "../../src/pipeline/ci-status.js";
+import { DRAFT_HOLD_JOB, FACTORY_WORKFLOW } from "../../src/pipeline/ci-status.js";
 import { defaultRef, main } from "../../src/cli.js";
 import { settingsHints } from "../../src/commands/adopt.js";
 import { ciChecks, githubChecks } from "../../src/commands/doctor.js";
@@ -45,6 +45,7 @@ describe("CI stub", () => {
     expect(wf.concurrency.group).toContain("converted_to_draft");
     expect(wf.concurrency.group).toContain("'draft'");
     expect(wf.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
+    expect((wf as { name?: string }).name).toBe(FACTORY_WORKFLOW);
     expect(Object.keys(wf.jobs)).toEqual(["select", "check", "done"]);
     expect(wf.jobs.select!.if).toContain("github.event.pull_request.draft == false");
     expect(wf.jobs.check!.if).toContain("github.event.pull_request.draft == false");
@@ -185,6 +186,7 @@ describe("CI stub", () => {
     expect(text).not.toContain("check:");
     expect(text).toContain("github:spignotti/factory#v1.2.3");
     const wf = parse(text) as { jobs: Record<string, { needs?: string[]; if?: string; steps: { if?: string; run?: string }[] }>; concurrency: Record<string, unknown> };
+    expect((wf as { name?: string }).name).toBe(FACTORY_WORKFLOW);
     expect(Object.keys(wf.jobs)).toEqual([DRAFT_HOLD_JOB, "done"]);
     expect(wf.jobs[DRAFT_HOLD_JOB]!.if).toContain("github.event.pull_request.draft");
     expect(wf.jobs.done!.needs).toEqual([DRAFT_HOLD_JOB]);

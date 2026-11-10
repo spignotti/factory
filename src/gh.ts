@@ -217,6 +217,23 @@ function suiteOf(row: Record<string, unknown>): number | undefined {
   return run ? Number(run[1]) : undefined;
 }
 
+/** Workflow `name:` when the payload has it. Absent means ci-status falls back to job names. */
+function workflowOf(row: Record<string, unknown>): string | null {
+  const direct = text(row.workflow) || text(row.workflowName) || text(row.workflow_name);
+  if (direct) return direct;
+  const nested = row.checkSuite ?? row.check_suite;
+  if (!nested || typeof nested !== "object") return null;
+  const run = (nested as Record<string, unknown>).workflowRun ?? (nested as Record<string, unknown>).workflow_run;
+  if (!run || typeof run !== "object") return null;
+  const record = run as Record<string, unknown>;
+  const wf = record.workflow;
+  if (wf && typeof wf === "object") {
+    const name = text((wf as Record<string, unknown>).name);
+    if (name) return name;
+  }
+  return text(record.name) || text(record.workflowName) || null;
+}
+
 /** Check suite creation time, when the payload nests it. Not the check run's own timestamp. */
 function suiteCreated(row: Record<string, unknown>): string | null {
   const nested = row.checkSuite ?? row.check_suite;
@@ -252,6 +269,7 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
       created_at: suiteCreated(row),
       id: num(row.id) ?? num(row.databaseId),
       suite: suiteOf(row),
+      workflow: workflowOf(row),
     });
   }
   return runs;
@@ -289,23 +307,33 @@ async function gh(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+/** Check suite id → workflow run `created_at` and workflow `name`. One page: a SHA does not have 100 runs. */
+interface WorkflowSuite {
+  created_at: string | null;
+  name: string | null;
+}
+
 /**
- * Check suite id → workflow `created_at` (event order). One page: a single SHA does not have 100 runs.
- * A missing Actions API leaves the map empty; aggregation then uses suite id, then job `started_at`.
+ * Join key is the check suite (`check_suite_id` on the workflow run, `check_suite.id` on the check run).
+ * `name` is the workflow file's `name:` (not `display_title`). A missing Actions API leaves the map empty:
+ * event order uses suite id, and ci-status falls back to job names. UNVERIFIED live.
  */
-async function workflowSuiteCreatedAt(repoDir: string, sha: string): Promise<Map<number, string>> {
-  const map = new Map<number, string>();
+async function workflowSuites(repoDir: string, sha: string): Promise<Map<number, WorkflowSuite>> {
+  const map = new Map<number, WorkflowSuite>();
   try {
     const out = await gh(repoDir, [
       "api",
       `repos/{owner}/{repo}/actions/runs?head_sha=${sha}&per_page=100`,
       "--jq",
-      "[.workflow_runs[] | {suite: .check_suite_id, created_at}]",
+      "[.workflow_runs[] | {suite: .check_suite_id, created_at, name}]",
     ]);
-    const rows = JSON.parse(out || "[]") as { suite?: number | null; created_at?: string | null }[];
+    const rows = JSON.parse(out || "[]") as { suite?: number | null; created_at?: string | null; name?: string | null }[];
     if (!Array.isArray(rows)) return map;
     for (const row of rows) {
-      if (typeof row?.suite === "number" && row.created_at) map.set(row.suite, row.created_at);
+      if (typeof row?.suite !== "number") continue;
+      const prev = map.get(row.suite);
+      const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : (prev?.name ?? null);
+      map.set(row.suite, { created_at: row.created_at || prev?.created_at || null, name });
     }
   } catch {
     // Event order falls back to check suite id. This must not hide the check runs themselves.
@@ -430,18 +458,20 @@ export class GhCli implements GitHub {
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id}]"]);
     const raw = JSON.parse(out || "[]") as { name?: string; status?: string; conclusion?: string | null; started_at?: string | null; id?: number; suite?: number | null }[];
-    const createdAt = await workflowSuiteCreatedAt(repoDir, sha);
+    const suites = await workflowSuites(repoDir, sha);
     const runs: CheckRunView[] = [];
     for (const run of raw) {
       if (!run.name || !run.status) continue;
+      const meta = run.suite != null ? suites.get(run.suite) : undefined;
       runs.push({
         name: run.name,
         status: run.status,
         conclusion: run.conclusion || null,
         started_at: run.started_at,
-        created_at: run.suite != null ? (createdAt.get(run.suite) ?? null) : null,
+        created_at: meta?.created_at ?? null,
         id: run.id,
         suite: run.suite,
+        workflow: meta?.name ?? null,
       });
     }
     return aggregateCheckRuns(runs);

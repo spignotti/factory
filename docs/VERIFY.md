@@ -71,6 +71,9 @@ Unverified (needs a real provider):
   and a `{nodes}` wrapper. A page that hits 1000 is incomplete: the run blocks instead of treating it as every open PR.
   Whatever file page `gh` requests is still a separate cap.
 - Branch protection and auto-merge hints on a private repository without GitHub Pro.
+- `baseStatus` joins check runs to workflow runs by `check_suite_id` and reads workflow run `name` as the
+  workflow file's `name:` (not `display_title`). UNVERIFIED against a live repository. A missing name keeps
+  the job-name recognition.
 
 ## Evaluate
 

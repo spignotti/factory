@@ -14,7 +14,15 @@ export interface CheckRunView {
   id?: number;
   /** Workflow suite. Draft and ready runs on one SHA are different suites. */
   suite?: number | null;
+  /**
+   * Workflow `name:` (`templates/ci/factory.yml` is `factory`). Absent when the payload did not
+   * include it: that run keeps the job-name recognition below.
+   */
+  workflow?: string | null;
 }
+
+/** Workflow `name:` of both CI stubs. Job names (`check`, `done`, `draft`) are not unique to it. */
+export const FACTORY_WORKFLOW = "factory";
 
 const FAIL = new Set(["failure", "timed_out", "cancelled", "action_required"]);
 
@@ -70,22 +78,63 @@ function factorySignal(name: string): boolean {
   return name === "done" || name === DRAFT_HOLD_JOB || isGate(name);
 }
 
+/** Named factory workflow, or a run whose workflow name was not in the payload. */
+function factoryRun(run: CheckRunView): boolean {
+  const name = run.workflow?.trim();
+  return !name || name === FACTORY_WORKFLOW;
+}
+
+function worse(a: BaseStatus, b: BaseStatus): BaseStatus {
+  if (a === "red" || b === "red") return "red";
+  if (a === "pending" || b === "pending") return "pending";
+  if (a === "green" || b === "green") return "green";
+  return "none";
+}
+
 /**
  * CI on one commit.
  *
- * The latest run of each check name wins by workflow event order (`created_at`, else suite id),
- * not by when the job started. A draft `done` can start after the ready `done` and must not stick;
- * a cancelled draft run is not latest after a later ready run. Inside one event, a re-run's later
- * `started_at` still wins. A failed `done` is a draft hold only when its own suite shows it:
- * select/check were skipped, or the minimal stub's `draft` job succeeded. It is not a pass, and it
- * is not a settled red while a later factory event has started but not reported `done` (cancelling
- * the draft run can fail `done` before the ready check run exists). A failed or cancelled `done`
- * with neither signal is red, including the minimal stub on a ready pull request (that stub has
- * no select/check, so absence of those jobs is not a draft). Once a real suite has succeeded, a
- * newer draft hold (the PR was converted back to draft) is red. A skipped `done` is red: GitHub
- * treats a skipped required check as passed.
+ * Draft-hold and latest-event logic apply only to the factory workflow (`name: factory`). A run
+ * with no workflow name keeps the previous job-name recognition. Other workflows are a plain
+ * rollup: latest of each name, a failure is red, anything still running is pending. They are not
+ * a draft hold and do not hide a factory `done`.
+ *
+ * Inside the factory workflow, the latest run of each check name wins by workflow event order
+ * (`created_at`, else suite id), not by when the job started. A draft `done` can start after the
+ * ready `done` and must not stick; a cancelled draft run is not latest after a later ready run.
+ * Inside one event, a re-run's later `started_at` still wins. A failed `done` is a draft hold only
+ * when its own suite shows it: select/check were skipped, or the minimal stub's `draft` job
+ * succeeded. It is not a pass, and it is not a settled red while a later factory event has started
+ * but not reported `done` (cancelling the draft run can fail `done` before the ready check run
+ * exists). A failed or cancelled `done` with neither signal is red, including the minimal stub on
+ * a ready pull request (that stub has no select/check, so absence of those jobs is not a draft).
+ * Once a real suite has succeeded, a newer draft hold (the PR was converted back to draft) is red.
+ * A skipped `done` is red: GitHub treats a skipped required check as passed.
  */
 export function aggregateCheckRuns(runs: CheckRunView[]): BaseStatus {
+  if (runs.length === 0) return "none";
+  const factory: CheckRunView[] = [];
+  const other: CheckRunView[] = [];
+  for (const run of runs) (factoryRun(run) ? factory : other).push(run);
+  return worse(aggregateFactoryRuns(factory), aggregateOtherRuns(other));
+}
+
+/** Other workflows: no draft hold, no factory event order. Latest of a name still wins a re-run. */
+function aggregateOtherRuns(runs: CheckRunView[]): BaseStatus {
+  if (runs.length === 0) return "none";
+  const latest = new Map<string, CheckRunView>();
+  for (const run of runs) {
+    const prev = latest.get(run.name);
+    if (!prev || after(run, prev)) latest.set(run.name, run);
+  }
+  for (const run of latest.values()) {
+    if (run.conclusion && FAIL.has(run.conclusion)) return "red";
+  }
+  if (runs.some((run) => run.status !== "completed")) return "pending";
+  return "green";
+}
+
+function aggregateFactoryRuns(runs: CheckRunView[]): BaseStatus {
   if (runs.length === 0) return "none";
   const latest = new Map<string, CheckRunView>();
   for (const run of runs) {

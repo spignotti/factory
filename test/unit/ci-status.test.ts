@@ -147,4 +147,32 @@ describe("aggregateCheckRuns", () => {
       ]),
     ).toBe("red");
   });
+
+  it("a finished foreign workflow with a job named check is not a factory run", () => {
+    const foreign = [
+      run({ name: "check", status: "completed", conclusion: "success", workflow: "ci", suite: 9, id: 1, created_at: "2026-11-06T00:05:00Z" }),
+      run({ name: "done", status: "completed", conclusion: "success", workflow: "ci", suite: 9, id: 2, created_at: "2026-11-06T00:04:00Z" }),
+    ];
+    expect(aggregateCheckRuns(foreign)).toBe("green");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "select", status: "completed", conclusion: "success", workflow: "factory", suite: 1, id: 3, created_at: "2026-11-06T00:00:00Z" }),
+        run({ name: "done", status: "completed", conclusion: "success", workflow: "factory", suite: 1, id: 4, created_at: "2026-11-06T00:00:00Z" }),
+        ...foreign,
+      ]),
+    ).toBe("green");
+    // A later foreign `check` must not hide a settled factory failure, and a factory-named suite still holds.
+    expect(
+      aggregateCheckRuns([
+        run({ name: "done", status: "completed", conclusion: "failure", workflow: "factory", suite: 1, id: 4, created_at: "2026-11-06T00:00:00Z" }),
+        run({ name: "check", status: "completed", conclusion: "success", workflow: "ci", suite: 9, id: 5, created_at: "2026-11-06T00:05:00Z" }),
+      ]),
+    ).toBe("red");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "draft", status: "completed", conclusion: "success", workflow: "factory", suite: 1, id: 1 }),
+        run({ name: "done", status: "completed", conclusion: "failure", workflow: "factory", suite: 1, id: 2 }),
+      ]),
+    ).toBe("pending");
+  });
 });
