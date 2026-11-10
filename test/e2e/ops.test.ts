@@ -115,11 +115,21 @@ describe("factory status", () => {
     fakeRun(home, "20261029-080000-0000b2", { result: { result: "done", pr: "https://pr/closed", reason: "closed without merge" } });
     gh.prStates.set("https://pr/closed", { state: "closed", draft: false });
 
-    fakeRun(home, "20261029-080000-0000c3", { result: { result: "done", merge_policy: "human_review", risk: "medium", reason: "", pr: "https://pr/risk" } });
+    // Pipeline shape: review-exit `reason` is not why the PR was held. Causes live in `risk_reasons`.
+    fakeRun(home, "20261029-080000-0000c3", { result: { result: "done", merge_policy: "human_review", risk: "medium", reason: "no open findings", risk_reasons: ["sensitive_paths: src/auth.ts"], pr: "https://pr/risk" } });
     open("https://pr/risk");
-    fakeRun(home, "20261029-080000-0000c2", { result: { result: "done", merge_policy: "human_review", risk: null, reason: "diff 400 lines > 300", pr: "https://pr/diff" } });
+    fakeRun(home, "20261029-080000-0000c2", { result: { result: "done", merge_policy: "human_review", risk: "medium", reason: "no open findings", risk_reasons: ["diff 400 lines > 300"], pr: "https://pr/diff" } });
     open("https://pr/diff");
-    fakeRun(home, "20261029-080000-0000c1", { result: { result: "done", merge_policy: "human_review", risk: null, reason: "protected paths", pr: "https://pr/prot" } });
+    fakeRun(home, "20261029-080000-0000c1", {
+      result: {
+        result: "done",
+        merge_policy: "human_review",
+        risk: "high",
+        reason: "max rounds reached, no open bug",
+        risk_reasons: ["human_only_paths: .github/workflows/ci.yml", "changes protected config (CI / factory)"],
+        pr: "https://pr/prot",
+      },
+    });
     open("https://pr/prot");
 
     fakeRun(home, "20261029-080000-0000d5", { result: { result: "done", merge_policy: "human_review", risk: "low", reason: "", pr: "https://pr/draft" } });
@@ -163,9 +173,9 @@ describe("factory status", () => {
       ["20261028-220000-0000b1", "merged", "https://pr/merged"],
     ]);
     expect(s.since?.human_review.map((r) => [r.run_id, r.review_reasons, r.risk])).toEqual([
-      ["20261029-080000-0000c3", ["risk"], "medium"],
-      ["20261029-080000-0000c2", ["diff size"], null],
-      ["20261029-080000-0000c1", ["protected paths"], null],
+      ["20261029-080000-0000c3", ["risk", "sensitive_paths: src/auth.ts"], "medium"],
+      ["20261029-080000-0000c2", ["diff size", "diff 400 lines > 300"], "medium"],
+      ["20261029-080000-0000c1", ["protected paths", "human_only_paths: .github/workflows/ci.yml", "changes protected config (CI / factory)"], "high"],
     ]);
     expect(s.since?.blocked.map((r) => [r.run_id, r.blockers, r.reason])).toEqual([
       ["20261029-080000-0000d5", ["draft"], ""],
@@ -193,9 +203,11 @@ describe("factory status", () => {
     expect(rendered).toContain("20261028-220000-0000b1 text:20261028-220000-0000b1.md — merged https://pr/merged");
     expect(rendered).toContain("20261029-080000-0000b2 text:20261029-080000-0000b2.md — closed https://pr/closed");
     expect(rendered).toContain("open, green, human_review (3):");
-    expect(rendered).toContain("20261029-080000-0000c3 text:20261029-080000-0000c3.md — risk medium https://pr/risk");
-    expect(rendered).toContain("20261029-080000-0000c2 text:20261029-080000-0000c2.md — diff size https://pr/diff");
-    expect(rendered).toContain("20261029-080000-0000c1 text:20261029-080000-0000c1.md — protected paths https://pr/prot");
+    expect(rendered).toContain("20261029-080000-0000c3 text:20261029-080000-0000c3.md — risk medium, sensitive_paths: src/auth.ts https://pr/risk");
+    expect(rendered).toContain("20261029-080000-0000c2 text:20261029-080000-0000c2.md — diff size, diff 400 lines > 300 https://pr/diff");
+    expect(rendered).toContain("20261029-080000-0000c1 text:20261029-080000-0000c1.md — protected paths, human_only_paths: .github/workflows/ci.yml, changes protected config (CI / factory) https://pr/prot");
+    expect(rendered).not.toContain("no open findings");
+    expect(rendered).not.toContain("max rounds reached, no open bug");
     expect(rendered).toContain("open, blocked (5):");
     expect(rendered).toContain("20261029-080000-0000d5 text:20261029-080000-0000d5.md — draft https://pr/draft");
     expect(rendered).toContain("20261029-080000-0000d4 text:20261029-080000-0000d4.md — CI red https://pr/red");
@@ -217,6 +229,58 @@ describe("factory status", () => {
     const off = await statusReport({ factoryHome: home, github: gh, now: () => now });
     expect(off.since).toBeNull();
     expect(renderStatus(off)).not.toContain("since 12h:");
+  });
+
+  it("--since does not treat none, missing CI, or a thrown prStatus as an open green PR", async () => {
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const gh = new FakeGitHub();
+    const now = Date.parse("2026-10-29T12:00:00Z");
+    const touch = (id: string) => {
+      const t = new Date("2026-10-29T08:00:00Z");
+      utimesSync(join(home, "runs", id, "result.json"), t, t);
+    };
+    // Review-exit text must not become the hold reason when risk_reasons is empty.
+    fakeRun(home, "20261029-080000-0000aa", {
+      state: { result: "done", pr: "https://pr/low" },
+      result: { result: "done", merge_policy: "human_review", risk: "low", reason: "no open findings", risk_reasons: [], pr: "https://pr/low" },
+    });
+    gh.prStates.set("https://pr/low", { state: "open", draft: false, ci: "green" });
+    fakeRun(home, "20261029-080000-0000ab", { result: { result: "done", merge_policy: "human_review", risk: "low", reason: "", pr: "https://pr/none" } });
+    gh.prStates.set("https://pr/none", { state: "open", draft: false, ci: "none" });
+    fakeRun(home, "20261029-080000-0000ac", { result: { result: "done", merge_policy: "human_review", risk: "low", reason: "", pr: "https://pr/noci" } });
+    gh.prStates.set("https://pr/noci", { state: "open", draft: false });
+    fakeRun(home, "20261029-080000-0000ad", {
+      state: { result: "done", pr: "https://pr/missing" },
+      result: { result: "done", merge_policy: "human_review", risk: "low", reason: "no open findings", pr: "https://pr/missing" },
+    });
+    for (const id of ["20261029-080000-0000aa", "20261029-080000-0000ab", "20261029-080000-0000ac", "20261029-080000-0000ad"]) touch(id);
+
+    const s = await statusReport({ factoryHome: home, github: gh, since: "12h", now: () => now });
+    expect(s.since?.human_review.map((r) => [r.pr, r.review_reasons])).toEqual([["https://pr/low", ["human_review"]]]);
+    expect(s.since?.merged.map((r) => r.pr)).not.toContain("https://pr/missing");
+    expect(s.since?.blocked.map((r) => [r.pr, r.blockers, r.error])).toEqual([
+      ["https://pr/missing", ["pr status unknown"], "PR https://pr/missing not found"],
+      ["https://pr/noci", ["CI missing"], undefined],
+      ["https://pr/none", ["CI none"], undefined],
+    ]);
+    expect(s.prs).toEqual([
+      expect.objectContaining({ pr: "https://pr/low", state: "open" }),
+      expect.objectContaining({ pr: "https://pr/missing", state: "unknown", error: "PR https://pr/missing not found" }),
+    ]);
+
+    const text: string[] = [];
+    await statusCommand({ factoryHome: home, github: gh, since: "12h", json: false, now: () => now }, { out: (line) => text.push(line), err: () => {} });
+    const rendered = text.join("");
+    expect(rendered).toContain("20261029-080000-0000aa text:20261029-080000-0000aa.md — human_review https://pr/low");
+    expect(rendered).not.toContain("no open findings");
+    expect(rendered).toContain("open, blocked (2):");
+    expect(rendered).toContain("20261029-080000-0000ab text:20261029-080000-0000ab.md — CI none https://pr/none");
+    expect(rendered).toContain("20261029-080000-0000ac text:20261029-080000-0000ac.md — CI missing https://pr/noci");
+    expect(rendered).toContain("pr status unknown (1):");
+    expect(rendered).toContain("20261029-080000-0000ad text:20261029-080000-0000ad.md — PR https://pr/missing not found https://pr/missing");
+    const openBlocked = rendered.slice(rendered.indexOf("open, blocked"), rendered.indexOf("pr status unknown"));
+    expect(openBlocked).not.toContain("0000ad");
+    expect(openBlocked).not.toContain("https://pr/missing");
   });
 });
 

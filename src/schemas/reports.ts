@@ -75,7 +75,7 @@ export const StatusReportSchema = z.strictObject({
           result: z.string(),
         }),
       ),
-      /** Open, CI not red or pending, not behind or conflicting, `merge_policy` human_review. */
+      /** Open, CI green, not behind or conflicting, `merge_policy` human_review. `none` and a missing rollup are not green. */
       human_review: z.array(
         z.strictObject({
           run_id: z.string(),
@@ -83,11 +83,14 @@ export const StatusReportSchema = z.strictObject({
           task: z.string(),
           pr: z.string(),
           risk: z.enum(["low", "medium", "high"]).nullable(),
-          /** `risk`, `diff size`, `protected paths` (from result.json risk and reason). */
+          /** `risk`, `diff size`, `protected paths`, plus the `risk_reasons` they came from. Not the review-exit `reason`. */
           review_reasons: z.array(z.string()),
         }),
       ),
-      /** Open PR blocked by draft, CI, behind/conflicting, or a needs_human result. */
+      /**
+       * Blocked by draft, CI, behind/conflicting, or a needs_human result.
+       * A thrown `prStatus` is also here (`pr status unknown` plus `error`) and is not a confirmed open PR.
+       */
       blocked: z.array(
         z.strictObject({
           run_id: z.string(),
@@ -96,6 +99,8 @@ export const StatusReportSchema = z.strictObject({
           pr: nullableStr,
           blockers: z.array(z.string()),
           reason: z.string(),
+          /** `prStatus` failure text. Present only when the live state could not be read. */
+          error: z.string().optional(),
         }),
       ),
       failed: z.array(z.strictObject({ run_id: z.string(), repo: z.string(), task: z.string(), reason: z.string(), pr: nullableStr })),

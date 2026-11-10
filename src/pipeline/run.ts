@@ -173,6 +173,8 @@ interface Outcome {
   reason: string;
   type: RunResult["type"];
   risk: RunResult["risk"];
+  /** `riskClass` reasons. Absent until finalize classifies the diff. */
+  risk_reasons?: string[];
   merge_policy: RunResult["merge_policy"];
   pr: string | null;
   rounds: number;
@@ -271,6 +273,7 @@ class RunFrame {
       lane: this.lane,
       result: out.result,
       risk: out.risk,
+      risk_reasons: out.risk_reasons ?? [],
       merge_policy: out.merge_policy,
       pr: out.pr,
       rounds: out.rounds,
@@ -716,7 +719,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   st.pr_draft = fin.draft;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
-  f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
+  f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
 }
 
 /**

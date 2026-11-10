@@ -785,7 +785,7 @@ factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-aft
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
 
-`factory status --since 12h` (off unless passed; `24h`, `7d`, `4w` as in `stats`) adds what finished in that window. The window is each `result.json` mtime, not a scan of `events.jsonl`: merged and closed PRs, open green PRs still on `human_review` (reason from `result.json`: risk, diff size, protected paths), open PRs blocked by draft, red CI, behind or conflicting, or a `needs_human` reason, plus `failed`, `base_red` and `needs_input` with no PR. Live PR state (merged, draft, checks, behind) still comes from GitHub. Text `factory stats` prints the top gate failures and reasons; `--json` already had both.
+`factory status --since 12h` (off unless passed; `24h`, `7d`, `4w` as in `stats`) adds what finished in that window. The window is each `result.json` mtime, not a scan of `events.jsonl`: merged and closed PRs, open green PRs still on `human_review` (reason from `result.json` `risk_reasons`: risk, diff size, protected paths), open PRs blocked by draft, red CI, behind or conflicting, or a `needs_human` reason, plus `failed`, `base_red` and `needs_input` with no PR. Live PR state (merged, draft, checks, behind) still comes from GitHub. Text `factory stats` prints the top gate failures and reasons; `--json` already had both.
 
 What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.

@@ -120,17 +120,70 @@ export interface PrStatus {
   conflicting?: boolean;
 }
 
-const PR_CI_FAIL = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure", "error", "stale"]);
-
 function rollupNodes(rollup: unknown): unknown[] {
   if (Array.isArray(rollup)) return rollup;
   if (rollup && typeof rollup === "object" && Array.isArray((rollup as { nodes?: unknown }).nodes)) return (rollup as { nodes: unknown[] }).nodes;
   return [];
 }
 
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function num(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Check suite, or the Actions run id in `detailsUrl` when `gh pr view` omits the suite. */
+function suiteOf(row: Record<string, unknown>): number | undefined {
+  const direct = num(row.suite) ?? num(row.checkSuiteId);
+  if (direct !== undefined) return direct;
+  const nested = row.checkSuite ?? row.check_suite;
+  if (nested && typeof nested === "object") {
+    const suite = nested as Record<string, unknown>;
+    const id = num(suite.databaseId) ?? num(suite.id);
+    if (id !== undefined) return id;
+  }
+  const url = text(row.detailsUrl) || text(row.details_url) || text(row.targetUrl);
+  const run = /\/actions\/runs\/(\d+)/.exec(url) ?? /\/runs\/(\d+)/.exec(url);
+  return run ? Number(run[1]) : undefined;
+}
+
+/** GraphQL rollup (upper-case, `startedAt`) and REST check-runs (`started_at`) into one shape. */
+function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
+  const runs: CheckRunView[] = [];
+  for (const [index, item] of nodes.entries()) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const conclusion = text(row.conclusion).toLowerCase();
+    const status = text(row.status).toLowerCase();
+    const state = text(row.state).toLowerCase();
+    const name = text(row.name) || text(row.context);
+    if (!name && !conclusion && !status && !state) continue;
+    let mappedStatus = status === "complete" ? "completed" : status;
+    let mappedConclusion: string | null = conclusion || null;
+    if (!mappedStatus && (state === "success" || state === "failure" || state === "error" || state === "pending" || state === "expected")) {
+      mappedStatus = state === "pending" || state === "expected" ? "pending" : "completed";
+    }
+    if (!mappedConclusion && (state === "failure" || state === "error")) mappedConclusion = "failure";
+    if (!mappedConclusion && state === "success") mappedConclusion = "success";
+    if (!mappedStatus) mappedStatus = mappedConclusion ? "completed" : "pending";
+    runs.push({
+      name: name || `check-${index}`,
+      status: mappedStatus,
+      conclusion: mappedConclusion,
+      started_at: text(row.started_at) || text(row.startedAt) || null,
+      id: num(row.id) ?? num(row.databaseId),
+      suite: suiteOf(row),
+    });
+  }
+  return runs;
+}
+
 /**
  * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
- * Check conclusions are upper-case in the GraphQL rollup and lower-case in the REST check-runs API.
+ * CI uses `aggregateCheckRuns`: latest run of each name, draft hold, skipped `done` is not green.
+ * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
  */
 export function prStatusFromView(raw: {
   state?: string;
@@ -141,31 +194,10 @@ export function prStatusFromView(raw: {
 }): PrStatus {
   const stateRaw = (raw.state ?? "open").toLowerCase();
   const state = stateRaw === "merged" || stateRaw === "closed" ? stateRaw : "open";
-  const nodes = rollupNodes(raw.statusCheckRollup);
-  let failed = false;
-  let pending = false;
-  for (const item of nodes) {
-    if (!item || typeof item !== "object") continue;
-    const row = item as { conclusion?: string | null; status?: string | null; state?: string | null };
-    const conclusion = (row.conclusion ?? "").toLowerCase();
-    const status = (row.status ?? "").toLowerCase();
-    const ctx = (row.state ?? "").toLowerCase();
-    if (PR_CI_FAIL.has(conclusion) || ctx === "failure" || ctx === "error") {
-      failed = true;
-      break;
-    }
-    const done =
-      status === "completed" ||
-      status === "complete" ||
-      conclusion === "success" ||
-      conclusion === "skipped" ||
-      conclusion === "neutral" ||
-      ctx === "success";
-    if (!done) pending = true;
-  }
+  const fromRuns = aggregateCheckRuns(rollupToCheckRuns(rollupNodes(raw.statusCheckRollup)));
   const mergeable = (raw.mergeable ?? "").toUpperCase();
   const mergeState = (raw.mergeStateStatus ?? "").toUpperCase();
-  const ci: NonNullable<PrStatus["ci"]> = failed || mergeState === "UNSTABLE" ? "red" : !nodes.length ? "none" : pending ? "pending" : "green";
+  const ci: NonNullable<PrStatus["ci"]> = mergeState === "UNSTABLE" && fromRuns !== "pending" ? "red" : fromRuns;
   return {
     state,
     draft: raw.isDraft === true,

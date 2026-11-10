@@ -18,16 +18,29 @@ const repoOf = (r: RunRecord) => r.state?.repo ?? r.result?.repo ?? "";
 const taskOf = (r: RunRecord) => r.state?.task.ref ?? r.result?.task ?? "";
 
 const RISK = new Set(["low", "medium", "high"]);
+const DIFF_REASON = /^diff \d+ lines > \d+$/;
 
-/** Why a done `human_review` PR is not auto-merged, from `result.json` only. */
-function humanReviewReasons(input: { reason?: string; risk?: string | null }): string[] {
-  const reason = input.reason ?? "";
+/** Bucket a `riskClass` reason. The review-exit `reason` is not a risk cause. */
+function riskCause(reason: string): "diff size" | "protected paths" | "risk" {
+  if (DIFF_REASON.test(reason) || /\bdiff size\b|max_diff_lines/i.test(reason)) return "diff size";
+  if (/human_only_paths|protected/i.test(reason)) return "protected paths";
+  return "risk";
+}
+
+/**
+ * Why a done `human_review` PR is not auto-merged, from `result.json` `risk_reasons` only.
+ * Labels are `risk`, `diff size`, `protected paths`; the `riskClass` strings follow so a medium
+ * rating is not collapsed to `risk`. A low rating with no reasons is the policy, not the review exit.
+ */
+function humanReviewReasons(input: { risk_reasons?: string[]; risk?: string | null }): string[] {
+  const reasons = input.risk_reasons ?? [];
+  const causes = new Set(reasons.map(riskCause));
   const out: string[] = [];
-  if (input.risk === "medium" || input.risk === "high" || /\brisk\b/i.test(reason)) out.push("risk");
-  if (/\bdiff size\b|max_diff_lines|diff\s+\d+\s+lines\s*>/i.test(reason)) out.push("diff size");
-  if (/\bprotected\b|human_only_paths/i.test(reason)) out.push("protected paths");
-  if (!out.length) out.push(reason.trim() || "human_review");
-  return out;
+  if (causes.has("risk") || ((input.risk === "medium" || input.risk === "high") && reasons.length === 0)) out.push("risk");
+  if (causes.has("diff size")) out.push("diff size");
+  if (causes.has("protected paths")) out.push("protected paths");
+  if (!out.length) out.push("human_review");
+  return [...out, ...reasons];
 }
 
 function resultFinishedMs(run: RunRecord): number | undefined {
@@ -39,11 +52,13 @@ function resultFinishedMs(run: RunRecord): number | undefined {
   }
 }
 
-function blockersOf(result: string, live: PrStatus | undefined, prError: boolean): string[] {
+function blockersOf(result: string, live: PrStatus | undefined, prError: string | undefined): string[] {
   const out: string[] = [];
   if (live?.draft) out.push("draft");
   if (live?.ci === "red") out.push("CI red");
   if (live?.ci === "pending") out.push("CI pending");
+  // `none` and a rollup that was not read are not green: an empty check list must not land in human_review.
+  if (live && live.ci !== "green" && live.ci !== "red" && live.ci !== "pending") out.push(live.ci === "none" ? "CI none" : "CI missing");
   if (live?.behind) out.push("behind");
   if (live?.conflicting) out.push("conflicting");
   if (result === "needs_human") out.push("needs_human");
@@ -102,25 +117,25 @@ async function sinceFinished(
     }
     if (kind !== "done" && kind !== "needs_human") continue;
     let live: PrStatus | undefined;
-    let prError = false;
+    let prError: string | undefined;
     if (res.pr) {
       const got = await opts.loadPr(res.repo ?? "", res.pr);
-      if (got instanceof Error) prError = true;
+      if (got instanceof Error) prError = got.message.slice(0, 200);
       else live = got;
     }
+    // A thrown prStatus is not proof the PR is still open (it may already be merged).
     if (live && live.state !== "open" && res.pr) {
       view.merged.push({ ...row, pr: res.pr, pr_state: live.state === "closed" ? "closed" : "merged", result: kind });
       continue;
     }
     const blockers = blockersOf(kind, live, prError);
     if (blockers.length && (res.pr || kind === "needs_human")) {
-      view.blocked.push({ ...row, pr: res.pr ?? null, blockers, reason });
+      view.blocked.push({ ...row, pr: res.pr ?? null, blockers, reason, ...(prError ? { error: prError } : {}) });
       continue;
     }
-    const ciClear = live?.ci !== "red" && live?.ci !== "pending";
-    if (live?.state === "open" && res.pr && kind === "done" && res.merge_policy === "human_review" && ciClear && !live.behind && !live.conflicting) {
+    if (live?.state === "open" && res.pr && kind === "done" && res.merge_policy === "human_review" && live.ci === "green" && !live.behind && !live.conflicting) {
       const risk = res.risk && RISK.has(res.risk) ? res.risk : null;
-      view.human_review.push({ ...row, pr: res.pr, risk, review_reasons: humanReviewReasons({ reason, risk: res.risk }) });
+      view.human_review.push({ ...row, pr: res.pr, risk, review_reasons: humanReviewReasons({ risk_reasons: res.risk_reasons, risk: res.risk }) });
     }
   }
   return view;
@@ -246,11 +261,19 @@ export function renderStatus(s: StatusReport): string {
     out.push(`since ${fin.since}:`);
     section("merged", fin.merged.map((r) => `${r.run_id} ${r.task} — ${r.pr_state} ${r.pr}`));
     section("open, green, human_review", fin.human_review.map((r) => `${r.run_id} ${r.task} — ${reviewText(r.review_reasons, r.risk)} ${r.pr}`));
-    section("open, blocked", fin.blocked.map((r) => {
+    const unknownPr = fin.blocked.filter((r) => r.blockers.includes("pr status unknown"));
+    const openBlocked = fin.blocked.filter((r) => !r.blockers.includes("pr status unknown"));
+    section("open, blocked", openBlocked.map((r) => {
       const why = r.blockers.join(", ");
       const reason = r.blockers.includes("needs_human") && r.reason ? `: ${r.reason}` : "";
       return `${r.run_id} ${r.task} — ${why}${reason}${r.pr ? ` ${r.pr}` : ""}`;
     }));
+    if (unknownPr.length) {
+      section("pr status unknown", unknownPr.map((r) => {
+        const human = r.blockers.includes("needs_human") && r.reason ? `; needs_human: ${r.reason}` : "";
+        return `${r.run_id} ${r.task} — ${r.error ?? "pr status unknown"}${human}${r.pr ? ` ${r.pr}` : ""}`;
+      }));
+    }
     section("failed", fin.failed.map((r) => `${r.run_id} ${r.task} — ${r.reason}`));
     section("base_red", fin.base_red.map((r) => `${r.run_id} ${r.task} — ${r.reason}`));
     section("needs_input", fin.needs_input.map((r) => `${r.run_id} ${r.task} — ${r.reason}${r.questions.length ? ` (${r.questions.join("; ")})` : ""}`));

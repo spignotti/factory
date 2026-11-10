@@ -622,6 +622,9 @@
                   },
                   "reason": {
                     "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
                   }
                 },
                 "required": [
