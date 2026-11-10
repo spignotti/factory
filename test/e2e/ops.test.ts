@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { abandonRun } from "../../src/commands/abandon.js";
 import { autoGc, gc } from "../../src/commands/gc.js";
 import { publishEvidence } from "../../src/evaluate/evidence.js";
-import { aggregate, parseSince, statsReport } from "../../src/commands/stats.js";
-import { renderStatus, statusReport } from "../../src/commands/status.js";
+import { aggregate, parseSince, statsCommand, statsReport } from "../../src/commands/stats.js";
+import { renderStatus, statusCommand, statusReport } from "../../src/commands/status.js";
+import { StatusReportSchema } from "../../src/schemas/reports.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { repoLockId, tryRepoGitOps } from "../../src/git.js";
 import { acquireRepoLock, repoLockPath } from "../../src/pipeline/lock.js";
@@ -91,6 +92,132 @@ describe("factory status", () => {
     expect(s.prs).toEqual([expect.objectContaining({ pr: r.result.pr, state: "open", draft: true, merge_policy: "human_review" })]);
     expect(s.running).toEqual([]);
   });
+
+  it("--since summarizes finished runs from result.json (text and json), not events.jsonl", async () => {
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const gh = new FakeGitHub();
+    const now = Date.parse("2026-10-29T12:00:00Z");
+    const inside = "2026-10-29T08:00:00Z";
+    const outside = "2026-10-28T18:00:00Z";
+    const touch = (id: string, iso: string) => {
+      const t = new Date(iso);
+      utimesSync(join(home, "runs", id, "result.json"), t, t);
+    };
+    const open = (pr: string, extra: { draft?: boolean; ci?: "green" | "red" | "pending" | "none"; behind?: boolean; conflicting?: boolean } = {}) =>
+      gh.prStates.set(pr, { state: "open", draft: false, ci: "green", behind: false, conflicting: false, ...extra });
+
+    // Started before the window, finished inside it: mtime counts, not the run id and not events.
+    fakeRun(home, "20261028-220000-0000b1", {
+      result: { result: "done", merge_policy: "auto", risk: "low", pr: "https://pr/merged", reason: "FROM_RESULT" },
+      events: [{ event: "run_finished", data: { reason: "FROM_EVENTS" } }],
+    });
+    gh.prStates.set("https://pr/merged", { state: "merged", draft: false });
+    fakeRun(home, "20261029-080000-0000b2", { result: { result: "done", pr: "https://pr/closed", reason: "closed without merge" } });
+    gh.prStates.set("https://pr/closed", { state: "closed", draft: false });
+
+    fakeRun(home, "20261029-080000-0000c3", { result: { result: "done", merge_policy: "human_review", risk: "medium", reason: "", pr: "https://pr/risk" } });
+    open("https://pr/risk");
+    fakeRun(home, "20261029-080000-0000c2", { result: { result: "done", merge_policy: "human_review", risk: null, reason: "diff 400 lines > 300", pr: "https://pr/diff" } });
+    open("https://pr/diff");
+    fakeRun(home, "20261029-080000-0000c1", { result: { result: "done", merge_policy: "human_review", risk: null, reason: "protected paths", pr: "https://pr/prot" } });
+    open("https://pr/prot");
+
+    fakeRun(home, "20261029-080000-0000d5", { result: { result: "done", merge_policy: "human_review", risk: "low", reason: "", pr: "https://pr/draft" } });
+    open("https://pr/draft", { draft: true });
+    fakeRun(home, "20261029-080000-0000d4", { result: { result: "done", merge_policy: "auto", risk: "low", reason: "", pr: "https://pr/red" } });
+    open("https://pr/red", { ci: "red" });
+    fakeRun(home, "20261029-080000-0000d3", { result: { result: "done", merge_policy: "auto", risk: "low", reason: "", pr: "https://pr/behind" } });
+    open("https://pr/behind", { behind: true });
+    fakeRun(home, "20261029-080000-0000d2", { result: { result: "done", merge_policy: "auto", risk: "low", reason: "", pr: "https://pr/conflict" } });
+    open("https://pr/conflict", { conflicting: true });
+    fakeRun(home, "20261029-080000-0000d1", {
+      state: { result: "needs_human", reason: "FROM_RESULT", pr: "https://pr/human" },
+      result: { result: "needs_human", merge_policy: "human_review", risk: "low", reason: "FROM_RESULT", pr: "https://pr/human" },
+      events: [{ event: "run_finished", data: { reason: "FROM_EVENTS" } }],
+    });
+    open("https://pr/human");
+
+    fakeRun(home, "20261029-080000-0000e1", { result: { result: "failed", reason: "implement crashed", pr: null } });
+    fakeRun(home, "20261029-080000-0000e2", { result: { result: "base_red", reason: "CI on main is red", pr: null } });
+    fakeRun(home, "20261029-080000-0000e3", { result: { result: "needs_input", reason: "plan needs input", questions: ["which file?"], pr: null } });
+
+    // Still open and green, but auto: already in the live PR list, not in the since buckets.
+    fakeRun(home, "20261029-080000-0000a9", {
+      state: { result: "done", pr: "https://pr/auto" },
+      result: { result: "done", merge_policy: "auto", risk: "low", reason: "", pr: "https://pr/auto" },
+    });
+    open("https://pr/auto");
+
+    // Finished before the window, even though the run id is newer.
+    fakeRun(home, "20261029-110000-0000f1", { result: { result: "failed", reason: "too old", pr: null } });
+
+    for (const id of ["20261028-220000-0000b1", "20261029-080000-0000b2", "20261029-080000-0000c3", "20261029-080000-0000c2", "20261029-080000-0000c1", "20261029-080000-0000d5", "20261029-080000-0000d4", "20261029-080000-0000d3", "20261029-080000-0000d2", "20261029-080000-0000d1", "20261029-080000-0000e1", "20261029-080000-0000e2", "20261029-080000-0000e3", "20261029-080000-0000a9"]) {
+      touch(id, inside);
+    }
+    touch("20261029-110000-0000f1", outside);
+
+    const s = await statusReport({ factoryHome: home, github: gh, since: "12h", now: () => now });
+    expect(s.since?.from).toBe("2026-10-29T00:00:00.000Z");
+    expect(s.since?.merged.map((r) => [r.run_id, r.pr_state, r.pr])).toEqual([
+      ["20261029-080000-0000b2", "closed", "https://pr/closed"],
+      ["20261028-220000-0000b1", "merged", "https://pr/merged"],
+    ]);
+    expect(s.since?.human_review.map((r) => [r.run_id, r.review_reasons, r.risk])).toEqual([
+      ["20261029-080000-0000c3", ["risk"], "medium"],
+      ["20261029-080000-0000c2", ["diff size"], null],
+      ["20261029-080000-0000c1", ["protected paths"], null],
+    ]);
+    expect(s.since?.blocked.map((r) => [r.run_id, r.blockers, r.reason])).toEqual([
+      ["20261029-080000-0000d5", ["draft"], ""],
+      ["20261029-080000-0000d4", ["CI red"], ""],
+      ["20261029-080000-0000d3", ["behind"], ""],
+      ["20261029-080000-0000d2", ["conflicting"], ""],
+      ["20261029-080000-0000d1", ["needs_human"], "FROM_RESULT"],
+    ]);
+    expect(s.since?.failed.map((r) => r.run_id)).toEqual(["20261029-080000-0000e1"]);
+    expect(s.since?.base_red.map((r) => r.reason)).toEqual(["CI on main is red"]);
+    expect(s.since?.needs_input).toEqual([
+      expect.objectContaining({ run_id: "20261029-080000-0000e3", reason: "plan needs input", questions: ["which file?"] }),
+    ]);
+    expect(JSON.stringify(s.since)).not.toContain("0000f1");
+    expect(JSON.stringify(s.since)).not.toContain("FROM_EVENTS");
+    expect(JSON.stringify(s.since)).not.toContain("https://pr/auto");
+    expect(s.prs.map((p) => p.pr)).toEqual(["https://pr/auto", "https://pr/human"]);
+
+    const text: string[] = [];
+    const io = { out: (line: string) => text.push(line), err: () => {} };
+    expect(await statusCommand({ factoryHome: home, github: gh, since: "12h", json: false, now: () => now }, io)).toBe(0);
+    const rendered = text.join("");
+    expect(rendered).toContain("since 12h:");
+    expect(rendered).toContain("merged (2):");
+    expect(rendered).toContain("20261028-220000-0000b1 text:20261028-220000-0000b1.md — merged https://pr/merged");
+    expect(rendered).toContain("20261029-080000-0000b2 text:20261029-080000-0000b2.md — closed https://pr/closed");
+    expect(rendered).toContain("open, green, human_review (3):");
+    expect(rendered).toContain("20261029-080000-0000c3 text:20261029-080000-0000c3.md — risk medium https://pr/risk");
+    expect(rendered).toContain("20261029-080000-0000c2 text:20261029-080000-0000c2.md — diff size https://pr/diff");
+    expect(rendered).toContain("20261029-080000-0000c1 text:20261029-080000-0000c1.md — protected paths https://pr/prot");
+    expect(rendered).toContain("open, blocked (5):");
+    expect(rendered).toContain("20261029-080000-0000d5 text:20261029-080000-0000d5.md — draft https://pr/draft");
+    expect(rendered).toContain("20261029-080000-0000d4 text:20261029-080000-0000d4.md — CI red https://pr/red");
+    expect(rendered).toContain("20261029-080000-0000d3 text:20261029-080000-0000d3.md — behind https://pr/behind");
+    expect(rendered).toContain("20261029-080000-0000d2 text:20261029-080000-0000d2.md — conflicting https://pr/conflict");
+    expect(rendered).toContain("20261029-080000-0000d1 text:20261029-080000-0000d1.md — needs_human: FROM_RESULT https://pr/human");
+    expect(rendered).toContain("failed (1):");
+    expect(rendered).toContain("base_red (1):");
+    expect(rendered).toContain("needs_input (1):");
+    expect(rendered).toContain("which file?");
+    expect(rendered).not.toContain("FROM_EVENTS");
+    expect(rendered).not.toContain("0000f1");
+
+    text.length = 0;
+    expect(await statusCommand({ factoryHome: home, github: gh, since: "12h", json: true, now: () => now }, io)).toBe(0);
+    const json = JSON.parse(text.join("")) as { since: unknown };
+    expect(StatusReportSchema.parse(json).since).toEqual(s.since);
+
+    const off = await statusReport({ factoryHome: home, github: gh, now: () => now });
+    expect(off.since).toBeNull();
+    expect(renderStatus(off)).not.toContain("since 12h:");
+  });
 });
 
 describe("factory stats", () => {
@@ -147,6 +274,15 @@ describe("factory stats", () => {
     expect(c).toMatchObject({ lane_escalations: 1, watchdog_aborts: 1, merge_policy: { auto: 1, human_review: 1 }, auto_merged: 1, reverted: null });
     expect(s.previous).toMatchObject({ runs: 1, by_result: { failed: 1 }, done_rate: 0 });
     expect(s.delta).toEqual({ runs: 3, done_rate: 0.5, cost_usd: 0.02, subscription_tokens: 112, median_rounds: -1 });
+    const lines: string[] = [];
+    statsCommand({ factoryHome: home, since: "7d", json: false, now: () => Date.parse("2026-10-29T00:00:00Z") }, { out: (line) => lines.push(line), err: () => {} });
+    const text = lines.join("");
+    expect(text).toContain("gate failures: unit 1");
+    expect(text).toContain("reasons: needs_human (1) stalemate: x");
+    const empty: string[] = [];
+    statsCommand({ factoryHome: mkdtempSync(join(tmpdir(), "factory-home-")), since: "7d", json: false }, { out: (line) => empty.push(line), err: () => {} });
+    expect(empty.join("")).toContain("gate failures: –");
+    expect(empty.join("")).toContain("reasons: –");
   });
 
   it("--repo filters by resolved path", () => {

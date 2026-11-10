@@ -20,8 +20,8 @@ factory run --repo /path/to/checkout --plan plan.md --wait --notify <target>    
 - `--wait` queues behind another run on the same repo instead of ending `locked`.
 - The run id is printed at the start and is the directory name under `~/.factory/runs/<run-id>/`.
   Note it in the bot's memory/notes with the task, so a wake can be matched to the work.
-- `factory status` lists running, queued (`--wait`), stalled, orphaned, interrupted and finished runs, and open audit tickets.
-- `factory stats` lists the same open audit tickets (with `--repo`, only that repository).
+- `factory status` lists running, queued (`--wait`), stalled, orphaned, interrupted and finished runs, and open audit tickets. `factory status --since 12h` adds what finished in that window (merged and closed PRs, open green `human_review`, open blocked, `failed`, `base_red`, `needs_input`) from each run's `result.json`, not from `events.jsonl`.
+- `factory stats` lists the same open audit tickets (with `--repo`, only that repository). Its text output includes the top gate failures and reasons (the same fields as `--json`).
 - `factory run` refuses to start when the repo has no notify hook unless you pass `--no-notify` (see below);
   a `--no-notify` run sends no webhook and writes no outbox entry (its `notify` event says `disabled`).
 

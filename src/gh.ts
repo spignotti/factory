@@ -112,6 +112,67 @@ export interface OpenPr {
 export interface PrStatus {
   state: "open" | "merged" | "closed";
   draft: boolean;
+  /** Head checks. Absent when this status was stored without a rollup (older callers). */
+  ci?: "green" | "red" | "pending" | "none";
+  /** `mergeStateStatus` BEHIND. */
+  behind?: boolean;
+  /** `mergeable` CONFLICTING or `mergeStateStatus` DIRTY. */
+  conflicting?: boolean;
+}
+
+const PR_CI_FAIL = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure", "error", "stale"]);
+
+function rollupNodes(rollup: unknown): unknown[] {
+  if (Array.isArray(rollup)) return rollup;
+  if (rollup && typeof rollup === "object" && Array.isArray((rollup as { nodes?: unknown }).nodes)) return (rollup as { nodes: unknown[] }).nodes;
+  return [];
+}
+
+/**
+ * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
+ * Check conclusions are upper-case in the GraphQL rollup and lower-case in the REST check-runs API.
+ */
+export function prStatusFromView(raw: {
+  state?: string;
+  isDraft?: boolean;
+  mergeable?: string | null;
+  mergeStateStatus?: string | null;
+  statusCheckRollup?: unknown;
+}): PrStatus {
+  const stateRaw = (raw.state ?? "open").toLowerCase();
+  const state = stateRaw === "merged" || stateRaw === "closed" ? stateRaw : "open";
+  const nodes = rollupNodes(raw.statusCheckRollup);
+  let failed = false;
+  let pending = false;
+  for (const item of nodes) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { conclusion?: string | null; status?: string | null; state?: string | null };
+    const conclusion = (row.conclusion ?? "").toLowerCase();
+    const status = (row.status ?? "").toLowerCase();
+    const ctx = (row.state ?? "").toLowerCase();
+    if (PR_CI_FAIL.has(conclusion) || ctx === "failure" || ctx === "error") {
+      failed = true;
+      break;
+    }
+    const done =
+      status === "completed" ||
+      status === "complete" ||
+      conclusion === "success" ||
+      conclusion === "skipped" ||
+      conclusion === "neutral" ||
+      ctx === "success";
+    if (!done) pending = true;
+  }
+  const mergeable = (raw.mergeable ?? "").toUpperCase();
+  const mergeState = (raw.mergeStateStatus ?? "").toUpperCase();
+  const ci: NonNullable<PrStatus["ci"]> = failed || mergeState === "UNSTABLE" ? "red" : !nodes.length ? "none" : pending ? "pending" : "green";
+  return {
+    state,
+    draft: raw.isDraft === true,
+    ci,
+    behind: mergeState === "BEHIND",
+    conflicting: mergeable === "CONFLICTING" || mergeState === "DIRTY",
+  };
 }
 
 async function gh(cwd: string, args: string[]): Promise<string> {
@@ -324,9 +385,8 @@ export class GhCli implements GitHub {
   }
 
   async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
-    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft"])) as { state: string; isDraft: boolean };
-    const state = j.state.toLowerCase();
-    return { state: state === "merged" || state === "closed" ? state : "open", draft: j.isDraft };
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"]));
+    return prStatusFromView(j);
   }
 }
 

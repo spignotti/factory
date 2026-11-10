@@ -108,7 +108,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
-| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, period stats, cleanup |
+| `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
 | `factory harden --repo <p>` | signals → ranked proposals |
@@ -774,11 +774,13 @@ API key for OpenCode Go).
 ## Status, stats, cleanup
 
 ```
-factory status [--json]                     # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
-factory stats --since 7d [--repo <path>] --json  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
+factory status [--since 12h] [--json]        # running, queued, stalled, orphaned, waiting, interrupted; open factory PRs; open audit tickets
+factory stats --since 7d [--repo <path>] [--json]  # results, rounds, gates, providers, cost vs the previous 7 days; open audit tickets
 factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--strip-after-hours 12] [--archive-days 90] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
+
+`factory status --since 12h` (off unless passed; `24h`, `7d`, `4w` as in `stats`) adds what finished in that window. The window is each `result.json` mtime, not a scan of `events.jsonl`: merged and closed PRs, open green PRs still on `human_review` (reason from `result.json`: risk, diff size, protected paths), open PRs blocked by draft, red CI, behind or conflicting, or a `needs_human` reason, plus `failed`, `base_red` and `needs_input` with no PR. Live PR state (merged, draft, checks, behind) still comes from GitHub. Text `factory stats` prints the top gate failures and reasons; `--json` already had both.
 
 What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.
