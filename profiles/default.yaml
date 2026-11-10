@@ -21,6 +21,8 @@ roles:
   audit_refactor:    [{ model: openai/gpt-6.1-sol, thinking: medium }]
   audit_simplify:    [{ model: openai/gpt-6.1-sol, thinking: medium }]
 # Scheduled `factory gc --scheduled` defaults to dry-run until you flip this after a week of log review.
+# home_hours, metadata_* and archive_tarball_days are still accepted so older profiles load; gc does not
+# wait on them and does not write metadata tarballs.
 gc:
   retention:
     dry_run: true

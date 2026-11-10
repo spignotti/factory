@@ -1,5 +1,4 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,45 +75,27 @@ describe("gc retention safety", () => {
     const dir = writeRun(fh, { result: "done", idleDays: 5 });
     mkdirSync(join(dir, "home"));
     writeFileSync(join(dir, "home", "c"), "x");
+    writeFileSync(join(dir, "events.jsonl"), "{}\n");
     const r = await gc({ factoryHome: fh, github: new FakeGitHub(), dryRun: false, scheduled: true, evidence: false, retention: retention({ dry_run: true }) });
     expect(r.dry_run).toBe(true);
-    expect(r.metadata_moved.length).toBe(1);
+    expect(r.home_removed.length).toBe(1);
     expect(existsSync(join(dir, "home", "c"))).toBe(true);
     expect(existsSync(dir)).toBe(true);
+    expect(existsSync(join(fh, "archive"))).toBe(false);
   });
 
-  it("tarballs metadata without home/ and worktree/, then removes the run dir", async () => {
+  it("does not archive a terminal run; the run directory and its logs stay", async () => {
     const fh = home();
     const dir = writeRun(fh, { result: "done", idleDays: 5 });
     mkdirSync(join(dir, "worktree"));
     writeFileSync(join(dir, "worktree", "big"), "y");
+    writeFileSync(join(dir, "plan.json"), "{}");
     const r = await gc({ factoryHome: fh, github: new FakeGitHub(), evidence: false, retention: retention({ home_hours: 1e9 }) });
-    const tarball = join(fh, "archive", "runs", `${RUN}.tar.gz`);
-    expect(r.metadata_moved.map((m) => m.tarball)).toEqual([tarball]);
-    const listing = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" });
-    expect(listing).toContain(`${RUN}/state.json`);
-    expect(listing).not.toContain("worktree");
-    expect(existsSync(dir)).toBe(false);
-  });
-
-  it("keeps the run dir when the tarball cannot be written", async () => {
-    const fh = home();
-    const dir = writeRun(fh, { result: "done", idleDays: 5 });
-    writeFileSync(join(fh, "archive"), "not a dir");
-    const r = await gc({ factoryHome: fh, github: new FakeGitHub(), evidence: false, retention: retention() });
-    expect(r.metadata_moved).toEqual([]);
-    expect(r.skipped.some((s) => s.reason.startsWith("tarball failed"))).toBe(true);
-    expect(readFileSync(join(dir, "state.json"), "utf8")).toContain(RUN);
-  });
-
-  it("skips metadata while the recorded worktree still exists", async () => {
-    const fh = home();
-    const wt = join(fh, "wt");
-    mkdirSync(wt);
-    const dir = writeRun(fh, { result: "done", idleDays: 5, worktree: wt });
-    const r = await gc({ factoryHome: fh, github: new FakeGitHub(), evidence: false, retention: retention() });
-    expect(r.metadata_moved).toEqual([]);
-    expect(existsSync(dir)).toBe(true);
+    expect(r.home_removed).toEqual([]);
+    expect(existsSync(join(dir, "state.json"))).toBe(true);
+    expect(existsSync(join(dir, "plan.json"))).toBe(true);
+    expect(existsSync(join(dir, "events.jsonl"))).toBe(true);
+    expect(existsSync(join(fh, "archive"))).toBe(false);
   });
 
   it("never follows a symlinked home/ out of $FACTORY_HOME", async () => {

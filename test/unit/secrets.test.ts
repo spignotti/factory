@@ -131,8 +131,13 @@ describe("secrets never reach agents", () => {
     expect(a.DB_PASSWORD).toBeUndefined();
     expect(a.WRAP_CLIENT_SECRET).toBeUndefined();
     expect(a.OTHER).toBe("ok");
+    expect(a.UV_CACHE_DIR).toBe("/f/cache");
+    expect(a.HOME).toBe("/h");
     const c = commandEnv(ctx);
     expect(c.DB_PASSWORD).toBe(DB);
+    expect(c.npm_config_cache).toBe("/f/cache");
+    expect(c.PIP_CACHE_DIR).toBe("/f/cache");
+    expect(c.XDG_CACHE_HOME).toBe("/f/cache");
     expect(c.WRAP_CLIENT_SECRET).toBeUndefined();
   });
 

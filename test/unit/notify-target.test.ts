@@ -265,7 +265,6 @@ describe("named notify targets", () => {
       factoryHome,
       github: new FakeGitHub(),
       evidence: false,
-      retentionStages: false,
       writeLog: false,
       needsInputWorkingDays: 0,
       notifyFetch: fetch2,

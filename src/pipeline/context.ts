@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildAgentEnv } from "../agents/env.js";
+import { buildAgentEnv, ensureSharedCache } from "../agents/env.js";
 import type { Sleep } from "../agents/fake-runner.js";
 import { callModel, type ModelRequest, type ModelResponse } from "../agents/models.js";
 import { type Context7Client, docsTools } from "../docs/context7.js";
@@ -141,7 +141,12 @@ export function writeRunFile(ctx: Pick<RunContext, "runDir" | "events">, name: s
 export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "secrets">, role?: string): Record<string, string> {
   const roleEnv = role ? (ctx.deps.profile.env[profileRoleOf(role)] ?? []) : [];
   const exclude = [...(ctx.repo.secrets?.names ?? []), ...(ctx.secrets?.names ?? [])];
-  return buildAgentEnv(ctx.deps.parentEnv ?? process.env, { home: ctx.agentHome, extra: [...ctx.repo.agent_env, ...roleEnv], exclude });
+  return buildAgentEnv(ctx.deps.parentEnv ?? process.env, {
+    home: ctx.agentHome,
+    factoryHome: ctx.deps.factoryHome,
+    extra: [...ctx.repo.agent_env, ...roleEnv],
+    exclude,
+  });
 }
 
 /** Env for repo commands the factory runs itself (checks, red-green tests, services, the ui, flows): agentEnv plus the repo secrets. */
@@ -151,13 +156,13 @@ export function commandEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" |
 
 /**
  * Jail for agent bash and repo commands with `cwd` writable (worktree or a temp base worktree), the
- * agent HOME writable and the main repo git dir read-only. Undefined when the sandbox is off.
+ * agent HOME and `$FACTORY_HOME/cache` writable, and the main repo git dir read-only. Undefined when the sandbox is off.
  */
 export function jailFor(ctx: Pick<RunContext, "deps" | "agentHome" | "secrets">, cwd: string): Jail | undefined {
   const sandbox = ctx.deps.sandbox;
   if (!sandbox || sandbox.mode === "off") return undefined;
   const common = gitCommonDir(cwd);
-  return { sandbox, rw: [cwd, ctx.agentHome], ro: common ? [common] : [], hide: [ctx.deps.factoryHome, ...(ctx.secrets?.files ?? [])] };
+  return { sandbox, rw: [cwd, ctx.agentHome, ensureSharedCache(ctx.deps.factoryHome)], ro: common ? [common] : [], hide: [ctx.deps.factoryHome, ...(ctx.secrets?.files ?? [])] };
 }
 
 export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "agentDir" | "jail" | "docs">;
