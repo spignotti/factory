@@ -1,43 +1,70 @@
-import { execFile } from "node:child_process";
 import { rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
+import { CommandTimeoutError, execFileTimed, isCommandTimeout } from "./exec.js";
 import { tryPathLock } from "./pipeline/lock.js";
 import { LOCK_GLOBS } from "./paths.js";
 import { matchesAny } from "./schemas/plan.js";
 
-const execFileP = promisify(execFile);
+/** Local git (status, diff, commit). A hang is killed rather than blocking the run. */
+export const GIT_LOCAL_TIMEOUT_MS = 60_000;
+/** Network git (fetch, push, pull, clone, ls-remote). */
+export const GIT_NETWORK_TIMEOUT_MS = 5 * 60_000;
+const GIT_NETWORK = new Set(["fetch", "push", "pull", "clone", "ls-remote"]);
 
-export interface GitCallOptions {
-  /** Kills the git process when set. Callers that must not hang (the queue worker) pass this. */
-  timeout?: number;
+/** First non-option argument, skipping `-c` / `-C` values. */
+export function gitSubcommand(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return args[i + 1];
+    if (a === "-c" || a === "-C") {
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    return a;
+  }
+  return undefined;
 }
 
-function gitTimeout(opts?: GitCallOptions): number | undefined {
-  return opts?.timeout;
+export function gitTimeoutMs(args: string[]): number {
+  const sub = gitSubcommand(args);
+  return sub !== undefined && GIT_NETWORK.has(sub) ? GIT_NETWORK_TIMEOUT_MS : GIT_LOCAL_TIMEOUT_MS;
+}
+
+export interface GitCallOptions {
+  /** Overrides the default local/network timeout (the queue worker passes a shorter one). */
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
 }
 
 /** Git for the factory process itself (its own env). Agents never get this. */
 export async function git(cwd: string, args: string[], opts?: GitCallOptions): Promise<string> {
+  const timeoutMs = opts?.timeoutMs ?? gitTimeoutMs(args);
   try {
-    const { stdout } = await execFileP("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, timeout: gitTimeout(opts) });
+    const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024, env: opts?.env });
     return stdout;
   } catch (e) {
-    const err = e as { stderr?: string; message?: string; killed?: boolean };
+    if (e instanceof CommandTimeoutError) throw new Error(e.message, { cause: e });
+    const err = e as { stderr?: string; message?: string };
     // A missing cwd makes Node set stderr to "" and put `spawn git ENOENT` on `message`.
     // `??` would keep the empty stderr and hide that (eval recorded `git ls-files failed: `).
     const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
-    const detail = err.killed ? "timed out" : stderr || (err.message ?? String(e)).trim();
+    const detail = stderr || (err.message ?? String(e)).trim();
     throw new Error(`git ${args[0]} failed: ${detail}`, { cause: e });
   }
 }
 
+/**
+ * False when git exits non-zero. A timeout is not a failed command: it is rethrown so a caller
+ * that needed fresh remote state cannot continue on a stale ref.
+ */
 export async function gitOk(cwd: string, args: string[], opts?: GitCallOptions): Promise<boolean> {
   try {
     await git(cwd, args, opts);
     return true;
-  } catch {
+  } catch (e) {
+    if (isCommandTimeout(e)) throw e;
     return false;
   }
 }
@@ -46,10 +73,17 @@ export async function revParse(cwd: string, ref: string, opts?: GitCallOptions):
   return (await git(cwd, ["rev-parse", "--verify", `${ref}^{commit}`], opts)).trim();
 }
 
-/** Remote base ref when an `origin` remote exists, else the local branch. */
+/**
+ * Remote base ref when an `origin` remote exists, else the local branch.
+ * A fetch that times out throws: a cached `origin/<branch>` is not a substitute for a fresh one.
+ */
 export async function baseRef(repoDir: string, branch: string, opts?: GitCallOptions): Promise<string> {
   if (await gitOk(repoDir, ["remote", "get-url", "origin"], opts)) {
-    await gitOk(repoDir, ["fetch", "--quiet", "origin", branch], opts);
+    try {
+      await gitOk(repoDir, ["fetch", "--quiet", "origin", branch], opts);
+    } catch (e) {
+      throw new Error(`${(e as Error).message}; refusing to continue on a stale base`, { cause: e });
+    }
     if (await gitOk(repoDir, ["rev-parse", "--verify", `origin/${branch}`], opts)) return `origin/${branch}`;
   }
   return branch;
@@ -62,9 +96,14 @@ export async function baseRef(repoDir: string, branch: string, opts?: GitCallOpt
 export async function remoteBranchExists(repoDir: string, branch: string): Promise<boolean> {
   if (!(await gitOk(repoDir, ["remote", "get-url", "origin"]))) return false;
   try {
-    await execFileP("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], { cwd: repoDir, timeout: 60_000 });
+    await execFileTimed("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${branch}`], {
+      cwd: repoDir,
+      timeoutMs: gitTimeoutMs(["ls-remote"]),
+    });
     return true;
   } catch (e) {
+    // A timeout or any failure other than "no such ref" (exit 2): the remote cannot be asked.
+    if (isCommandTimeout(e)) return true;
     return (e as { code?: unknown }).code !== 2;
   }
 }

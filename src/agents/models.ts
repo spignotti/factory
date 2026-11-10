@@ -27,23 +27,78 @@ export class InvalidOutputError extends Error {
   }
 }
 
-/** Provider capacity errors are their own class. */
+/**
+ * Quota, usage or billing limit. Not a 429 and not "rate limit": those are capacity (retried).
+ * Checked before auth status so a 403 quota error is not "auth".
+ */
+const LIMIT = /\bquota\b|usage limit|insufficient_quota|spending limit|used all available credits/i;
+
+/** `rate limit … try again in N` — capacity, and the delay is parsed from the same text. */
+const RATE_LIMIT_BACKOFF = /rate.?limit[\s\S]{0,160}?try again in\s+\d/i;
+
+/**
+ * Milliseconds to wait before a same-model retry.
+ * Pi's `formatProviderError` copies status and body into `errorMessage` and drops response headers,
+ * so a header-only `Retry-After` is not available. `AgentError.retryAfterMs` is set only when a caller
+ * already parsed a delay (tests, fakes). Production reads the text form (`try again in N`, `retry-after: N`).
+ */
+export function providerRetryAfterMs(err: unknown, now = Date.now()): number | undefined {
+  const fromField = err instanceof AgentError ? err.retryAfterMs : undefined;
+  if (fromField !== undefined && Number.isFinite(fromField) && fromField > 0) return fromField;
+  const message = err instanceof Error ? err.message : String(err);
+  return parseRetryAfterText(message, now);
+}
+
+function unitMs(n: number, unit: string | undefined): number {
+  const u = (unit ?? "s").toLowerCase();
+  if (u === "ms" || u.startsWith("milli")) return n;
+  if (u === "m" || u.startsWith("min")) return n * 60_000;
+  return n * 1000;
+}
+
+/** Retry-After as a header line (`retry-after: 30`, `retry-after-ms: 1500`, HTTP-date) or prose. */
+export function parseRetryAfterText(message: string, now = Date.now()): number | undefined {
+  const msHeader = /retry-after-ms:\s*(\d+(?:\.\d+)?)/i.exec(message);
+  if (msHeader) return Number(msHeader[1]);
+  const header = /retry-after:\s*([^\n]+)/i.exec(message);
+  if (header) {
+    const raw = header[1]!.trim();
+    const seconds = /^(\d+(?:\.\d+)?)(?:\s*(ms|milliseconds|s|sec|secs|seconds|m|min|minutes))?$/i.exec(raw);
+    if (seconds) return unitMs(Number(seconds[1]), seconds[2]);
+    const at = Date.parse(raw);
+    if (Number.isFinite(at)) {
+      const delta = at - now;
+      return delta > 0 ? delta : undefined;
+    }
+  }
+  const prose = /(?:try again in|retry after)\s+(\d+(?:\.\d+)?)\s*(milliseconds|millisecond|ms|seconds|second|secs|sec|s|minutes|minute|mins|min|m)?\b/i.exec(message);
+  if (prose) return unitMs(Number(prose[1]), prose[2]);
+  return undefined;
+}
+
+/**
+ * Provider capacity errors are their own class. A 429, "at capacity", or "rate limit … try again in N"
+ * is capacity (retried, honoring a delay parsed from the text). Only explicit quota, usage or billing
+ * wording is a limit, even when the status is 429.
+ */
 export function classifyError(err: unknown): ErrorClass {
   if (err instanceof InvalidOutputError) return "invalid_output";
   const message = err instanceof Error ? err.message : String(err);
   const status = err instanceof AgentError ? err.status : undefined;
-  const retryAfter = err instanceof AgentError ? err.retryAfterMs : undefined;
-  if (/at capacity|ttft_admission_refused|overloaded/i.test(message)) return "capacity";
-  if ((status === 429 || status === 503) && (/retry shortly|try again shortly/i.test(message) || retryAfter !== undefined)) {
+  const retryAfter = providerRetryAfterMs(err);
+  if (LIMIT.test(message)) return "limit";
+  if (
+    status === 429 ||
+    /at capacity|ttft_admission_refused|overloaded/i.test(message) ||
+    RATE_LIMIT_BACKOFF.test(message) ||
+    (status === 503 && (/retry shortly|try again shortly/i.test(message) || retryAfter !== undefined))
+  ) {
     return "capacity";
   }
   if (status === undefined && NETWORK.test(message.trim())) return "network";
   if (STREAM.test(message)) return "stream";
   if (status === 401 || status === 403 || /unauthori[sz]ed|invalid api key|authenticat|forbidden|not logged in/i.test(message)) {
     return "auth";
-  }
-  if (status === 429 || /rate.?limit|quota|usage limit|limit reached|insufficient_quota|too many requests/i.test(message)) {
-    return "limit";
   }
   return "other";
 }
@@ -103,9 +158,15 @@ export interface ModelResponse extends AgentResponse {
   model: string;
 }
 
-/** Capacity backoff: base * 2^attempt, capped at max. */
-export function backoffMs(attempt: number, retry: Profile["retry"]): number {
-  return Math.min(retry.base_ms * 2 ** attempt, retry.max_ms);
+/**
+ * Same-model backoff: base * 2^attempt, capped at max.
+ * A provider retry-after is a floor (wait at least that long), itself capped at `max_ms * 2`.
+ */
+export function backoffMs(attempt: number, retry: Profile["retry"], retryAfter?: number): number {
+  const exp = Math.min(retry.base_ms * 2 ** attempt, retry.max_ms);
+  const cap = retry.max_ms * 2;
+  if (retryAfter === undefined || !Number.isFinite(retryAfter) || retryAfter <= 0) return Math.min(exp, cap);
+  return Math.min(Math.max(exp, retryAfter), cap);
 }
 
 /**
@@ -209,7 +270,7 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
           continue;
         }
         if (cls === "stream" && attempt < streamRetries) {
-          const delay = backoffMs(attempt, profile.retry);
+          const delay = backoffMs(attempt, profile.retry, providerRetryAfterMs(err));
           streamRetriesUsed++;
           events.emit({
             step,
@@ -228,7 +289,7 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
           continue;
         }
         if ((cls === "capacity" || cls === "network") && attempt + 1 < profile.retry.attempts) {
-          const delay = backoffMs(attempt, profile.retry);
+          const delay = backoffMs(attempt, profile.retry, providerRetryAfterMs(err));
           events.emit({ step, event: "model_retry", role: req.role, model: entry.model, data: { attempt: attempt + 1, delay_ms: delay } });
           await sleep(delay, req.signal);
           continue;

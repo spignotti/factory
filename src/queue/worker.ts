@@ -549,7 +549,7 @@ function applyUnpark(q: QueueFile, ready: Set<number>, io: Io): void {
 async function baseBlocks(github: GitHub, repo: string, io: Io, redLogged: Set<string>, timeoutMs: number): Promise<boolean> {
   try {
     const cfg = loadRepoConfig(repo);
-    const gitOpts = { timeout: timeoutMs };
+    const gitOpts = { timeoutMs };
     const sha = await revParse(repo, await baseRef(repo, cfg.base_branch, gitOpts), gitOpts);
     const status = await withTimeout(github.baseStatus(repo, sha), timeoutMs, "base CI");
     if (status !== "red") {
@@ -676,7 +676,7 @@ function noteRunId(entry: QueueEntry, tracked: Tracked | undefined): void {
 }
 
 async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
-  const gitOpts = { timeout: ctx.netTimeoutMs };
+  const gitOpts = { timeoutMs: ctx.netTimeoutMs };
   const key = await repoQueueKey(repo, gitOpts);
   if (!loadQueueByKey(ctx.factoryHome, key)) return false;
   const cap = slotCap(repo, ctx.slots);

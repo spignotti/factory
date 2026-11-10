@@ -30,6 +30,9 @@ Unverified (needs a real provider):
 
 - `src/agents/pi-runner.ts` `statusFromMessage`: the HTTP status of a provider error is parsed from
   `errorMessage` text; capacity/limit/auth classification relies on the provider wording.
+  A header-only `Retry-After` is not available: Pi's `formatProviderError` puts status and body into
+  `errorMessage` and drops response headers (checked against the installed SDK, not a live 429).
+  The factory parses the text form (`try again in N`, `retry-after: N`) and retries a 429 as capacity.
 - `thinkingLevel` clamping per model beyond `off|low|medium|high`.
 - `doctor --ping` against the live endpoints (`completeSimple` with `maxTokens: 16` and a session id, which
   OpenCode Go requires). The ping needs the ChatGPT login in `$FACTORY_HOME/pi` first.

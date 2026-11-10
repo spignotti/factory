@@ -11,7 +11,7 @@ export interface RedGreenResult {
   ok: boolean;
   redOnBase: boolean;
   greenOnHead: boolean;
-  /** The proof could not run (no command, no repro, setup failed, or the command timed out); says nothing about the bug. */
+  /** The proof could not run (no command, no repro, setup failed, a non-test exit, or the command timed out); says nothing about the bug. */
   inconclusive: boolean;
   /** The base or HEAD command was killed for the wall-clock cap. Not a failing assertion. */
   timedOut: boolean;
@@ -20,6 +20,26 @@ export interface RedGreenResult {
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+export type ReproExit = "pass" | "fail" | "other";
+
+/**
+ * Exit status only. Output text is not a classifier: a real assertion can say `SyntaxError` or
+ * `No such file or directory` and still be the bug.
+ * 0 = pass. 126/127 (cannot run the command), a signal death, or 128+n = inconclusive.
+ * Any other non-zero exit is a failing test, including 2 and 101.
+ */
+export function classifyReproExit(code: number, signal?: NodeJS.Signals | null): ReproExit {
+  if (signal) return "other";
+  if (code === 0) return "pass";
+  if (code === 126 || code === 127 || code >= 128) return "other";
+  if (code > 0) return "fail";
+  return "other";
+}
+
+function reproExitDetail(code: number, signal: NodeJS.Signals | null | undefined): string {
+  return signal ? `killed by ${signal}` : `exit ${code}`;
 }
 
 /**
@@ -90,12 +110,20 @@ export async function redGreenProof(opts: {
     if (shTimedOut(base)) {
       return inconclusive(`repro timed out on base (inconclusive: the process tree was killed; this is not a failing test):\n${tail(base.output, 20)}`, true);
     }
+    const baseKind = classifyReproExit(base.code, base.signal);
+    if (baseKind === "other") {
+      return inconclusive(`repro on base was not a failing test (${reproExitDetail(base.code, base.signal)}; inconclusive, not a red repro):\n${tail(base.output, 20)}`);
+    }
     const head = await run("head", worktree, cmd);
     if (shTimedOut(head)) {
       return inconclusive(`repro timed out on HEAD (inconclusive: the process tree was killed; this is not a failing test):\n${tail(head.output, 20)}`, true);
     }
-    const redOnBase = base.code !== 0;
-    const greenOnHead = head.code === 0;
+    const headKind = classifyReproExit(head.code, head.signal);
+    if (headKind === "other") {
+      return inconclusive(`repro on HEAD was not a failing test (${reproExitDetail(head.code, head.signal)}; inconclusive, not a red repro):\n${tail(head.output, 20)}`);
+    }
+    const redOnBase = baseKind === "fail";
+    const greenOnHead = headKind === "pass";
     const detail = [
       redOnBase ? "repro fails on base" : `repro passes on base (does not reproduce the bug):\n${tail(base.output, 20)}`,
       greenOnHead ? "repro passes on HEAD" : `repro fails on HEAD:\n${tail(head.output, 20)}`,

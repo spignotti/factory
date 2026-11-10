@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { briefing, canonicalRepoId, memoryKey, flushMemory, loadMemory, memoryPath, observations, repoDirName } from "../../src/memory.js";
+import { briefing, canonicalRepoId, discardDeadLockFile, flushMemory, loadMemory, memoryKey, memoryPath, observations, releaseOwnedLockFile, repoDirName } from "../../src/memory.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 
 const home = () => mkdtempSync(join(tmpdir(), "factory-mem-"));
@@ -95,6 +95,121 @@ describe("findings memory", () => {
     for (let w = 0; w < writers; w++) expect(byKey.get(`own-${w}`)!.count).toBe(5);
     expect(readdirSync(dirname(memoryPath(factoryHome, id)))).toEqual(["findings.json"]);
   }, 60_000);
+
+  it("takes over a lock whose holder pid is dead, including an empty legacy lock", () => {
+    const factoryHome = home();
+    const id = "github.com/a/dead-lock";
+    const path = memoryPath(factoryHome, id);
+    mkdirSync(dirname(path), { recursive: true });
+    const dead = spawnSync("true").pid!;
+    writeFileSync(`${path}.lock`, `${dead}\n`);
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(`${path}.lock`, old, old);
+    const started = Date.now();
+    flushMemory({ factoryHome, repoId: id, runId: "r", now: new Date(), observations: observations([finding()], []) });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(loadMemory(factoryHome, id).entries).toHaveLength(1);
+    expect(existsSync(`${path}.lock`)).toBe(false);
+
+    writeFileSync(`${path}.lock`, "");
+    flushMemory({ factoryHome, repoId: id, runId: "r2", now: new Date(), observations: observations([finding({ claim: "second" })], []) });
+    expect(existsSync(`${path}.lock`)).toBe(false);
+    expect(readdirSync(dirname(path)).filter((n) => /lock|takeover|stale|release/.test(n))).toEqual([]);
+  });
+
+  it("rename-aside drops the observed dead inode and leaves a replacement guard", () => {
+    const dir = home();
+    const guard = join(dir, "findings.json.lock.takeover");
+    writeFileSync(guard, "999999999\n");
+    expect(discardDeadLockFile(guard, () => writeFileSync(guard, `${process.pid}\n`))).toBe(false);
+    expect(readFileSync(guard, "utf8").trim()).toBe(String(process.pid));
+    expect(readdirSync(dir).filter((n) => n.includes("stale"))).toEqual([]);
+
+    const lock = join(dir, "findings.json.lock");
+    writeFileSync(lock, `${process.pid}\n`);
+    releaseOwnedLockFile(lock, () => writeFileSync(lock, "999999999\n"));
+    expect(readFileSync(lock, "utf8").trim()).toBe("999999999");
+    expect(readdirSync(dir).filter((n) => n.includes("release"))).toEqual([]);
+  });
+
+  it("two flushes after a crashed takeover both land and leave no guard", async () => {
+    const factoryHome = home();
+    const id = "github.com/a/takeover-race";
+    const path = memoryPath(factoryHome, id);
+    mkdirSync(dirname(path), { recursive: true });
+    const dead = spawnSync("true").pid!;
+    writeFileSync(`${path}.lock`, `${dead}\n`);
+    writeFileSync(`${path}.lock.takeover`, `${dead}\n`);
+    const helpers = join(import.meta.dirname, "..", "helpers");
+    await Promise.all(
+      [0, 1].map(
+        (w) =>
+          new Promise<void>((done, fail) => {
+            const child = spawn(
+              process.execPath,
+              ["--import", join(helpers, "ts-register.mjs"), join(helpers, "memory-writer.ts"), factoryHome, id, `w${w}`, `shared,own-${w}`],
+              { stdio: ["ignore", "ignore", "pipe"] },
+            );
+            let err = "";
+            child.stderr.on("data", (d) => (err += String(d)));
+            child.on("close", (code) => (code === 0 ? done() : fail(new Error(`writer ${w} exited ${code}: ${err.slice(-500)}`))));
+          }),
+      ),
+    );
+    const byKey = new Map(loadMemory(factoryHome, id).entries.map((e) => [e.key, e]));
+    expect(byKey.get("shared")!.count).toBe(10);
+    expect(byKey.get("own-0")!.count).toBe(5);
+    expect(byKey.get("own-1")!.count).toBe(5);
+    expect(readdirSync(dirname(path)).filter((n) => /lock|takeover|stale|release/.test(n))).toEqual([]);
+  });
+
+  it("does not take over a live holder after 10 s, even when the lock file is old", async () => {
+    const factoryHome = home();
+    const id = "github.com/a/live-lock";
+    const path = memoryPath(factoryHome, id);
+    const ready = join(dirname(path), "ready");
+    mkdirSync(dirname(path), { recursive: true });
+    const helpers = join(import.meta.dirname, "..", "helpers");
+    const holdMs = 12_000;
+    const holder = spawn(process.execPath, ["--import", join(helpers, "ts-register.mjs"), join(helpers, "memory-hold.ts"), factoryHome, id, String(holdMs), ready], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let holderErr = "";
+    holder.stderr.on("data", (d) => (holderErr += String(d)));
+    const started = Date.now();
+    while (!existsSync(ready)) {
+      if (holder.exitCode !== null) throw new Error(`holder exited early: ${holderErr}`);
+      if (Date.now() - started > 5_000) throw new Error(`holder never took the lock: ${holderErr}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const lock = `${path}.lock`;
+    const aged = new Date(Date.now() - 120_000);
+    utimesSync(lock, aged, aged);
+    expect(readFileSync(lock, "utf8").trim()).toBe(String(holder.pid));
+    const waiter = spawn(process.execPath, ["--import", join(helpers, "ts-register.mjs"), join(helpers, "memory-writer.ts"), factoryHome, id, "waiter", "from-waiter"], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let waiterErr = "";
+    waiter.stderr.on("data", (d) => (waiterErr += String(d)));
+    await new Promise((r) => setTimeout(r, 11_000));
+    expect(waiter.exitCode).toBe(null);
+    expect(readFileSync(lock, "utf8").trim()).toBe(String(holder.pid));
+    const textsNow = loadMemory(factoryHome, id).entries.map((entry) => entry.text);
+    expect(textsNow).not.toContain("finding from-waiter");
+    const waitExit = (child: ReturnType<typeof spawn>, label: string, err: () => string) =>
+      new Promise<void>((done, fail) => {
+        const t = setTimeout(() => fail(new Error(`${label} did not finish: ${err()}`)), 8_000);
+        child.on("close", (code) => {
+          clearTimeout(t);
+          if (code === 0) done();
+          else fail(new Error(`${label} exited ${code}: ${err()}`));
+        });
+      });
+    await waitExit(holder, "holder", () => holderErr);
+    await waitExit(waiter, "waiter", () => waiterErr);
+    expect(loadMemory(factoryHome, id).entries.map((entry) => entry.text).sort()).toEqual(["finding from-waiter", "held"]);
+    expect(existsSync(lock)).toBe(false);
+  }, 25_000);
 
   it("a broken file is kept aside, not overwritten", () => {
     const factoryHome = home();
