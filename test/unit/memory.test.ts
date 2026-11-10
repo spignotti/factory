@@ -155,7 +155,8 @@ describe("findings memory", () => {
         const t = setTimeout(() => fail(new Error(`${label} did not finish: ${err()}`)), 8_000);
         child.on("close", (code) => {
           clearTimeout(t);
-          code === 0 ? done() : fail(new Error(`${label} exited ${code}: ${err()}`));
+          if (code === 0) done();
+          else fail(new Error(`${label} exited ${code}: ${err()}`));
         });
       });
     await waitExit(holder, "holder", () => holderErr);

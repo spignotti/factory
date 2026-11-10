@@ -141,14 +141,6 @@ export function execFileTimed(
     let stderr = "";
     let timedOut = false;
     let untrack = () => {};
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (fn: () => void) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      untrack();
-      fn();
-    };
     const child = spawn(file, args, {
       cwd: opts.cwd,
       env: opts.env,
@@ -157,11 +149,18 @@ export function execFileTimed(
       detached: true,
     });
     untrack = child.pid !== undefined ? trackProcessGroup(child.pid) : () => {};
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       timedOut = true;
       killProcessGroup(child.pid);
     }, opts.timeoutMs);
     timer.unref();
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      untrack();
+      fn();
+    };
     const take = (chunk: Buffer, which: "stdout" | "stderr") => {
       const next = (which === "stdout" ? stdout : stderr) + chunk.toString();
       if (Buffer.byteLength(next) > maxBuffer) {

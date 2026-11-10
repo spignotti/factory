@@ -73,8 +73,6 @@ describe("git timeouts", () => {
     const script = join(bin, "git");
     writeFileSync(script, `#!/bin/sh\necho $$ > ${pidFile}\nsleep 30 &\necho $! > ${childFile}\nwait\n`);
     chmodSync(script, 0o755);
-    const prev = process.env.PATH;
-    process.env.PATH = `${bin}:${prev ?? ""}`;
     const alive = (pid: number) => {
       try {
         process.kill(pid, 0);
@@ -83,15 +81,20 @@ describe("git timeouts", () => {
         return (e as NodeJS.ErrnoException).code === "EPERM";
       }
     };
-    try {
-      const started = Date.now();
-      await expect(git(bin, ["fetch"], { timeoutMs: 300 })).rejects.toThrow(/git fetch timed out after 300ms \(process killed\)/);
-      expect(Date.now() - started).toBeLessThan(3_000);
-      expect(alive(Number(readFileSync(pidFile, "utf8")))).toBe(false);
-      expect(alive(Number(readFileSync(childFile, "utf8")))).toBe(false);
-    } finally {
-      process.env.PATH = prev;
+    // Wait for the fake to actually run before a short timeout can fire, so a loaded worker does
+    // not kill a not-started process (which would be a vacuous, passing kill).
+    const run = git(bin, ["fetch"], { timeoutMs: 10_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } });
+    const start = Date.now();
+    while (!existsSync(pidFile)) {
+      if (Date.now() - start > 4_000) throw new Error("fake git never started");
+      run.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
     }
+    const started = Date.now();
+    await expect(run).rejects.toThrow(/git fetch timed out after 10s \(process killed\)/);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(alive(Number(readFileSync(pidFile, "utf8")))).toBe(false);
+    expect(alive(Number(readFileSync(childFile, "utf8")))).toBe(false);
   });
 });
 

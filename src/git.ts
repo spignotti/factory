@@ -33,10 +33,10 @@ export function gitTimeoutMs(args: string[]): number {
 }
 
 /** Git for the factory process itself (its own env). Agents never get this. */
-export async function git(cwd: string, args: string[], opts?: { timeoutMs?: number }): Promise<string> {
+export async function git(cwd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): Promise<string> {
   const timeoutMs = opts?.timeoutMs ?? gitTimeoutMs(args);
   try {
-    const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024, env: opts?.env });
     return stdout;
   } catch (e) {
     if (e instanceof CommandTimeoutError) throw new Error(e.message, { cause: e });
