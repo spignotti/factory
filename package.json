@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Software Factory: deterministic pipeline from task to reviewed PR",
   "type": "module",
