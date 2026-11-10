@@ -103,6 +103,8 @@ interface TickCtx {
   stall: Map<string, StallWatch>;
   terminating: Map<string, Terminating>;
   behindUpdated: Set<string>;
+  /** `update-branch` still running after a tick timeout. One per repo; a later tick does not start another. */
+  behindFlight: Map<string, Promise<unknown>>;
   redLogged: Set<string>;
 }
 
@@ -133,6 +135,14 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
   });
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** True when `p` has not settled. Yields once so an already-rejected call is not treated as in flight. */
+async function stillPending(p: Promise<unknown>): Promise<boolean> {
+  let settled = false;
+  p.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.resolve();
+  return !settled;
 }
 
 /** `ps -o command= -p PID`. Empty when the pid is gone or ps cannot be asked. */
@@ -375,9 +385,17 @@ function signalPid(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-function signalGroup(signal: NodeJS.Signals, tracked: Tracked | undefined, pid: number | undefined): void {
-  if (tracked) tracked.kill(signal);
-  if (pid) signalPid(pid, signal);
+/** Signal the handle we spawned, or a stored pid whose command line still contains the run id. Never a recycled pid. */
+function signalGroup(signal: NodeJS.Signals, tracked: Tracked | undefined, entry: QueueEntry): void {
+  if (tracked) {
+    tracked.kill(signal);
+    return;
+  }
+  if (entry.pid && pidOwnsRun(entry.pid, entry.run_id)) signalPid(entry.pid, signal);
+}
+
+function canSignal(tracked: Tracked | undefined, entry: QueueEntry): boolean {
+  return Boolean(tracked) || pidOwnsRun(entry.pid, entry.run_id);
 }
 
 function runExited(tracked: Tracked | undefined, entry: QueueEntry): boolean {
@@ -422,8 +440,12 @@ function considerStall(entry: QueueEntry, repo: string, ctx: TickCtx, tracked: T
       parkStalled(entry, term.mins, ctx);
       return;
     }
+    if (!canSignal(tracked, entry)) {
+      ctx.terminating.delete(entry.run_id);
+      return;
+    }
     if (!term.sigkill && ctx.nowMs - term.since >= STALL_KILL_GRACE_MS) {
-      signalGroup("SIGKILL", tracked, entry.pid);
+      signalGroup("SIGKILL", tracked, entry);
       term.sigkill = true;
       ctx.io.out(`queue: #${entry.issue} stall: SIGKILL\n`);
     }
@@ -441,8 +463,9 @@ function considerStall(entry: QueueEntry, repo: string, ctx: TickCtx, tracked: T
     return;
   }
   if (ctx.nowMs - prev.since < limit) return;
+  if (!canSignal(tracked, entry)) return;
   if (tracked) tracked.ignoreResult = true;
-  signalGroup("SIGTERM", tracked, entry.pid);
+  signalGroup("SIGTERM", tracked, entry);
   const mins = Math.round((limit / 60_000) * 10) / 10;
   ctx.terminating.set(entry.run_id, { since: ctx.nowMs, sigkill: false, mins });
   ctx.io.out(`queue: #${entry.issue} stall: SIGTERM, waiting for exit\n`);
@@ -565,7 +588,7 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
  * Every behind `factory/*` PR whose run ended `done`, one `update-branch` at a time.
  * A failure is logged and left for a later tick; it does not skip the rest of the list.
  */
-async function updateBehind(github: GitHub, repo: string, factoryHome: string, updated: Set<string>, io: Io, timeoutMs: number): Promise<BehindWatch> {
+async function updateBehind(github: GitHub, repo: string, factoryHome: string, updated: Set<string>, flight: Map<string, Promise<unknown>>, io: Io, timeoutMs: number): Promise<BehindWatch> {
   let prs: OpenFactoryPr[];
   try {
     prs = await withTimeout(github.openFactoryPrFiles(repo), timeoutMs, "open PRs");
@@ -597,15 +620,29 @@ async function updateBehind(github: GitHub, repo: string, factoryHome: string, u
       updated.delete(key);
       continue;
     }
-    if (updated.has(key)) continue;
-    try {
-      await withTimeout(github.updateBranch(repo, key), timeoutMs, `update-branch #${pr.number}`);
-    } catch (e) {
-      io.err(`factory: update-branch #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    if (updated.has(key) || flight.has(repo)) {
       needsUpdate = true;
       continue;
     }
+    const job = github.updateBranch(repo, key);
+    const tracked = job.finally(() => {
+      if (flight.get(repo) === tracked) flight.delete(repo);
+    });
+    void tracked.catch(() => undefined);
+    flight.set(repo, tracked);
+    try {
+      await withTimeout(job, timeoutMs, `update-branch #${pr.number}`);
+    } catch (e) {
+      io.err(`factory: update-branch #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      needsUpdate = true;
+      // Still running: do not start a second update. A settled failure is retried later and does not skip the rest.
+      if (await stillPending(job)) break;
+      flight.delete(repo);
+      continue;
+    }
+    flight.delete(repo);
     updated.add(key);
+    needsUpdate = true;
     io.out(`queue: updated PR #${pr.number} (behind)\n`);
   }
   return { needsUpdate, openDone };
@@ -770,7 +807,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       }, gitOpts);
     }
   }
-  const watch = await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.io, timeoutMs);
+  const watch = await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.io, timeoutMs);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
   const pending = q.entries.some((e) => e.status === "pending");
@@ -805,6 +842,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
   const stall = new Map<string, StallWatch>();
   const terminating = new Map<string, Terminating>();
   const behindUpdated = new Set<string>();
+  const behindFlight = new Map<string, Promise<unknown>>();
   const redLogged = new Set<string>();
   const dir = queueDir(opts.factoryHome);
   mkdirSync(dir, { recursive: true });
@@ -816,33 +854,40 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
       try {
         while (!opts.signal?.aborted) {
           const t = now();
+          // A gap much larger than the tick is a suspend (laptop sleep), not agent silence. Same slack as the run watchdog.
           const jumped = t - lastTick > poll + suspendSlackMs(poll);
           lastTick = t;
           const pastUntil = opts.untilMs !== undefined && t >= opts.untilMs;
           const repos = await reposFor(opts);
           let cont = false;
           for (const repo of repos) {
-            const busy = await tickRepo(
-              {
-                factoryHome: opts.factoryHome,
-                github: opts.github,
-                slots,
-                untilMs: opts.untilMs,
-                pastUntil,
-                nowMs: t,
-                jumped,
-                netTimeoutMs,
-                start: opts.start,
-                io,
-                handles,
-                stall,
-                terminating,
-                behindUpdated,
-                redLogged,
-              },
-              repo,
-            );
-            if (busy) cont = true;
+            try {
+              const busy = await tickRepo(
+                {
+                  factoryHome: opts.factoryHome,
+                  github: opts.github,
+                  slots,
+                  untilMs: opts.untilMs,
+                  pastUntil,
+                  nowMs: t,
+                  jumped,
+                  netTimeoutMs,
+                  start: opts.start,
+                  io,
+                  handles,
+                  stall,
+                  terminating,
+                  behindUpdated,
+                  behindFlight,
+                  redLogged,
+                },
+                repo,
+              );
+              if (busy) cont = true;
+            } catch (e) {
+              io.err(`factory: queue tick failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
+              cont = true;
+            }
           }
           if (!cont) {
             io.out(pastUntil ? "queue: until reached\n" : "queue: idle\n");

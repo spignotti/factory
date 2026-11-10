@@ -35,7 +35,7 @@ import { notifyTest, flushNotifyOutbox, requireNotifyHook, requireNotifyTarget }
 const USAGE = `usage:
   factory --version
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
-              [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait]
+              [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait] [--run-id <id>]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
               [--notify <target>] [--no-notify]
               (refuse to start without a notify hook for the repo unless --no-notify;
@@ -58,7 +58,7 @@ const USAGE = `usage:
   factory queue remove --repo <path> <issue...>
   factory queue run [--repo <path>] [--slots N] [--until HH:MM]
               (one worker: min(slots, concurrency.max_runs) runs per repo, default slots 2;
-               factory run --issue N --no-notify; parks needs_human/needs_input/failed/base_red;
+               factory run --issue N --no-notify --run-id <id>; parks needs_human/needs_input/failed/base_red;
                transient needs_human (state.json transient flag) requeues at most twice;
                updates every behind factory PR (one at a time; a failure is retried, it does not stop the others);
                --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish)
@@ -474,6 +474,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
           "no-notify": { type: "boolean", default: false },
           notify: { type: "string" },
           profile: { type: "string" },
+          "run-id": { type: "string" },
         },
       });
       if (!values.repo || [values.issue, values.plan, values.text].filter(Boolean).length !== 1) {
@@ -517,6 +518,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
             noPr: values["no-pr"],
             wait: values.wait,
             notifyTarget: values.notify,
+            runId: values["run-id"],
           },
           {
             runner,

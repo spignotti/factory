@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ResultSchema, type RunResult } from "../events.js";
+import { newRunId } from "../pipeline/run.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import type { StartedRun } from "./worker.js";
 
@@ -15,20 +16,26 @@ export function factoryCliScript(): string {
   throw new Error(`factory CLI not found at ${nextTo} (run pnpm build)`);
 }
 
+/** Args for the detached `factory run`. The run id is on the command line so `ps -o command=` can match a restarted worker's pid. */
+export function factoryRunArgs(script: string, req: { repo: string; issue: number; runId: string }): string[] {
+  return [script, "run", "--repo", req.repo, "--issue", String(req.issue), "--no-notify", "--run-id", req.runId];
+}
+
 /**
- * Real `queue run` child: `node dist/cli.js run --issue N --no-notify`.
+ * Real `queue run` child: `node dist/cli.js run --issue N --no-notify --run-id <id>`.
  * Detached, stdio ignored, so the worker can exit (restart, Ctrl-C) without closing the child's pipes
  * and the run keeps its lock. The next worker adopts it. Outcome is `result.json`, not stdout.
  */
 export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome: string }): StartedRun {
   const prior = new Set(issueRuns(req.factoryHome, req.repo, req.issue).map((r) => r.run_id));
-  const child = spawn(process.execPath, [factoryCliScript(), "run", "--repo", req.repo, "--issue", String(req.issue), "--no-notify"], {
+  const plannedId = newRunId(Date.now());
+  const child = spawn(process.execPath, factoryRunArgs(factoryCliScript(), { repo: req.repo, issue: req.issue, runId: plannedId }), {
     cwd: req.repo,
     env: { ...process.env, FACTORY_HOME: req.factoryHome },
     stdio: "ignore",
     detached: true,
   });
-  let runId: string | undefined;
+  let runId: string | undefined = plannedId;
   const done = new Promise<RunResult>((resolveResult, reject) => {
     let settled = false;
     const finish = (err?: Error) => {
@@ -48,7 +55,7 @@ export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome:
   return {
     done,
     pid: child.pid ?? 0,
-    runId: () => runId ?? discoverRunId(req.factoryHome, req.repo, req.issue, prior),
+    runId: () => runId,
     kill: (signal = "SIGTERM") => {
       if (!child.pid) return;
       try {
@@ -63,11 +70,6 @@ export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome:
     },
     unref: () => child.unref(),
   };
-}
-
-function discoverRunId(factoryHome: string, repo: string, issue: number, prior: Set<string>): string | undefined {
-  const matches = issueRuns(factoryHome, repo, issue).filter((r) => !r.result && !prior.has(r.run_id));
-  return matches.at(-1)?.run_id;
 }
 
 function readNewResult(factoryHome: string, repo: string, issue: number, prior: Set<string>): RunResult | undefined {

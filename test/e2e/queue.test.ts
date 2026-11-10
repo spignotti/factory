@@ -8,9 +8,11 @@ import { queueAdd, queueList, queueRemove } from "../../src/commands/queue.js";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import type { Io } from "../../src/commands/gates.js";
 import type { RunResult } from "../../src/events.js";
+import { repoLockId } from "../../src/git.js";
 import { FakeGitHub, type Issue } from "../../src/gh.js";
-import { activeHolders, tryPathLock } from "../../src/pipeline/lock.js";
+import { activeHolders, lockRepoKey, tryPathLock } from "../../src/pipeline/lock.js";
 import { runFactory } from "../../src/pipeline/run.js";
+import { factoryRunArgs } from "../../src/queue/spawn.js";
 import { loadQueueByKey, queueDir, repoQueueKey, updateQueue, type QueueEntry } from "../../src/queue/store.js";
 import { runQueue, type StartRun } from "../../src/queue/worker.js";
 import { loadProfile } from "../../src/schemas/profile.js";
@@ -812,6 +814,72 @@ describe("factory queue", () => {
           live.kill("SIGKILL");
         }
       }
+    }
+  });
+
+  it("puts the run id on the factory run command line and uses that id", async () => {
+    const runId = "20261029-210000-abc123";
+    expect(factoryRunArgs("/cli.js", { repo: "/repo", issue: 4, runId })).toEqual([
+      "/cli.js", "run", "--repo", "/repo", "--issue", "4", "--no-notify", "--run-id", runId,
+    ]);
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    github.getIssue = async () => {
+      throw new Error("stop before plan");
+    };
+    const profile = loadProfile(join(FIXTURES, "profile.yaml"));
+    const result = await runFactory({ repo, issue: 1, noPr: true, runId }, { runner: new FakeRunner([]), github, profile, factoryHome, noNotify: true });
+    expect(result.run_id).toBe(runId);
+    expect(result.result).toBe("failed");
+  });
+
+  it("does not SIGTERM a stored pid whose command line is not the run, even after the stall window", async () => {
+    const repo = createFixtureRepo((c) => {
+      const limits = (c.limits ?? {}) as Record<string, unknown>;
+      limits.stall_minutes = 1;
+      c.limits = limits;
+    });
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const runId = "20261029-210001-aaaaaa";
+    const sleeper = spawn("sleep", ["30"], { stdio: "ignore" });
+    const lockKey = lockRepoKey(await repoLockId(repo));
+    mkdirSync(join(factoryHome, "locks"), { recursive: true });
+    writeFileSync(join(factoryHome, "locks", `${lockKey}.lock`), `${process.pid}\n${runId}\n`);
+    await updateQueue(factoryHome, repo, (q) => {
+      q.entries[0]!.status = "running";
+      q.entries[0]!.run_id = runId;
+      q.entries[0]!.pid = sleeper.pid;
+    });
+    let clock = 1_700_000_000_000;
+    let step = false;
+    const ctl = new AbortController();
+    const worker = runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 20,
+      now: () => {
+        if (step) clock += 10_000;
+        return clock;
+      },
+      signal: ctl.signal,
+      start: () => { throw new Error("should not start"); },
+      io: capture().io,
+    });
+    try {
+      await waitFor("adopted", async () => (await entries(factoryHome, repo))[0]?.status === "running");
+      step = true;
+      await new Promise((r) => setTimeout(r, 1_500));
+      expect(sleeper.exitCode).toBeNull();
+      expect((await entries(factoryHome, repo))[0]?.status).toBe("running");
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+      sleeper.kill("SIGKILL");
     }
   });
 
