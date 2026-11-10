@@ -125,6 +125,22 @@ export const AUDIT_TYPES = ["security", "performance", "refactor", "simplify"] a
 export const AuditTypeSchema = z.enum(AUDIT_TYPES);
 export type AuditType = z.infer<typeof AuditTypeSchema>;
 
+/**
+ * Aspects `factory improve` runs. `ci` and `tests` are a later addition: a signal function, one role
+ * prompt, and a value here. `refactor` and `simplify` are one aspect (`structure`).
+ */
+export const IMPROVE_ASPECTS = ["findings", "security", "performance", "structure"] as const;
+export const ImproveAspectSchema = z.enum(IMPROVE_ASPECTS);
+export type ImproveAspect = z.infer<typeof ImproveAspectSchema>;
+
+/** Reasoning level per aspect when `improve.thinking` omits a key. */
+export const DEFAULT_IMPROVE_THINKING = {
+  findings: "medium",
+  security: "high",
+  performance: "high",
+  structure: "medium",
+} as const;
+
 /** Reasoning level per audit type when `audit.thinking` omits a key. */
 export const DEFAULT_AUDIT_THINKING = {
   security: "high",
@@ -163,7 +179,8 @@ function auditFocusText(v: unknown): unknown {
   return lines.join("\n");
 }
 
-const AuditFocusTextSchema = z.preprocess(auditFocusText, z.string().min(1).max(AUDIT_FOCUS_MAX));
+const FocusNoteSchema = z.preprocess(auditFocusText, z.string().min(1).max(AUDIT_FOCUS_MAX));
+const AuditFocusTextSchema = FocusNoteSchema;
 
 const AuditFocusSchema = z
   .object({
@@ -174,6 +191,40 @@ const AuditFocusSchema = z
   })
   .strict()
   .default({});
+
+const ImproveThinkingSchema = z
+  .object({
+    findings: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.findings),
+    security: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.security),
+    performance: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.performance),
+    structure: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.structure),
+  })
+  .strict()
+  .default({ ...DEFAULT_IMPROVE_THINKING });
+
+const ImproveFocusSchema = z
+  .object({
+    findings: FocusNoteSchema.optional(),
+    security: FocusNoteSchema.optional(),
+    performance: FocusNoteSchema.optional(),
+    structure: FocusNoteSchema.optional(),
+  })
+  .strict()
+  .default({});
+
+/** `improve:` in repo.yaml. Absent: `harden:` and `audit:` are a deprecated fallback, not this default. */
+export const ImproveConfigSchema = z
+  .object({
+    aspects: z.array(ImproveAspectSchema).min(1),
+    max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS),
+    thinking: ImproveThinkingSchema,
+    focus: ImproveFocusSchema,
+  })
+  .strict()
+  .superRefine((cfg, ctx) => {
+    if (new Set(cfg.aspects).size !== cfg.aspects.length) ctx.addIssue({ code: "custom", message: "improve.aspects has a duplicate" });
+  });
+export type ImproveConfig = z.infer<typeof ImproveConfigSchema>;
 
 const ToolchainVersionSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._*/+-]{0,39}$/, "toolchain versions use letters, digits and . _ * / + -");
 
@@ -390,7 +441,7 @@ export const RepoConfigSchema = z
         run: z.string().optional(),
       })
       .default({ areas: [] }),
-    // Ranked proposals per harden ticket (`--max` overrides).
+    // Deprecated: `factory harden` reads this only when `improve:` is absent.
     harden: z
       .object({ max_proposals: z.number().int().min(1).max(MAX_PROPOSALS_LIMIT).default(DEFAULT_MAX_PROPOSALS) })
       .default({ max_proposals: DEFAULT_MAX_PROPOSALS }),
@@ -398,6 +449,7 @@ export const RepoConfigSchema = z
      * `factory audit`. Absent (the default): no types are enabled and the command refuses without a model call.
      * `thinking` overrides the role chain's thinking level for that type. `--max` overrides `max_proposals`.
      * `focus.<type>` is an optional note injected only into that type's prompt. No secrets or customer data.
+     * Deprecated: read only when `improve:` is absent (`refactor` and `simplify` map to `structure`).
      */
     audit: z
       .object({
@@ -408,6 +460,12 @@ export const RepoConfigSchema = z
       })
       .strict()
       .default({ types: [], max_proposals: DEFAULT_MAX_PROPOSALS, thinking: { ...DEFAULT_AUDIT_THINKING }, focus: {} }),
+    /**
+     * `factory improve`. Absent: `harden:` and `audit:` are still read, with a deprecation warning.
+     * Without `--aspect`, every listed aspect runs. `thinking` replaces that aspect's chain level.
+     * `focus.<aspect>` is an optional note for that aspect's prompt only. No secrets or customer data.
+     */
+    improve: ImproveConfigSchema.optional(),
     git: z
       .object({ author: z.string().default("factory"), email: z.string().optional() })
       .default({ author: "factory" }),

@@ -1,0 +1,200 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { FakeRunner, type FakeStep } from "../../src/agents/fake-runner.js";
+import { main } from "../../src/cli.js";
+import { auditAlias, hardenAlias, improve, improveCommand } from "../../src/commands/improve.js";
+import { FakeGitHub } from "../../src/gh.js";
+import { canonicalRepoId, loadMemory } from "../../src/memory.js";
+import { listProposals } from "../../src/proposals.js";
+import { loadProfile } from "../../src/schemas/profile.js";
+import { ImproveReportSchema } from "../../src/schemas/proposal.js";
+import { makeRepo } from "../helpers/adopt-repo.js";
+import { entry, PLAN, seedMemory, seedRun } from "../helpers/harden.js";
+import { FIXTURES } from "../helpers/repo.js";
+
+const NOW = new Date("2026-10-29T12:00:00.000Z");
+const CHECKS = "checks:\n  - { name: lint, run: \"true\", tier: fast }\n";
+const IMPROVE = `${CHECKS}improve:
+  aspects: [findings, security, performance, structure]
+  max_proposals: 5
+  thinking: { security: low }
+  focus:
+    security: "Privacy note for this repo only."
+`;
+
+function setup(yaml = IMPROVE) {
+  const repo = makeRepo({ ".factory/repo.yaml": yaml, "README.md": "A sample app.\n", "src/a.ts": "export const n = 1;\n" });
+  const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
+  return { repo, factoryHome, repoId: canonicalRepoId("", repo) };
+}
+
+function deps(ctx: { factoryHome: string }, steps: FakeStep[], gh = new FakeGitHub()) {
+  return { deps: { runner: new FakeRunner(steps), github: gh, profile: loadProfile(join(FIXTURES, "profile.yaml")), factoryHome: ctx.factoryHome, parentEnv: process.env, now: () => NOW.getTime() }, gh };
+}
+
+const item = (goal: string, resolves: string[] = [], checklist: string[] = []) => ({ rationale: `Because ${goal}.`, checklist, plan: PLAN(goal, resolves) });
+const selection = (...items: ReturnType<typeof item>[]) => ({ proposals: items });
+const answer = selection(item("Close the auth gap"));
+
+describe("factory improve", () => {
+  it("runs configured aspects, and --aspect runs only that one", async () => {
+    const ctx = setup();
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const steps: FakeStep[] = [
+      { role: "harden", output: selection(item("Lint rule for a", ["a"])) },
+      { role: "audit_security", output: answer },
+      { role: "audit_performance", output: answer },
+      { role: "audit_refactor", output: answer },
+    ];
+    const all = deps(ctx, steps);
+    const report = await improve({ repo: ctx.repo }, all.deps);
+    expect(report.error).toBeNull();
+    expect(all.deps.runner.calls.map((c) => [c.role, c.thinking])).toEqual([
+      ["harden", "medium"],
+      ["audit_security", "low"],
+      ["audit_performance", "high"],
+      ["audit_refactor", "medium"],
+    ]);
+    expect(all.deps.runner.calls[0]!.system).toContain("unmarked standards");
+    expect(all.deps.runner.calls[1]!.prompt).toContain("Privacy note for this repo only.");
+    expect(all.deps.runner.calls[1]!.prompt).toContain("Up to 5 security proposals");
+    expect(all.deps.runner.calls[2]!.prompt).not.toContain("Privacy note");
+    expect(all.deps.runner.calls[3]!.system).toContain("dead paths");
+    expect(all.deps.runner.calls.every((c) => c.tools === "read_only")).toBe(true);
+    expect(ImproveReportSchema.safeParse(report).success).toBe(true);
+
+    const flagged = deps(ctx, [{ role: "audit_security", output: answer }]);
+    const only = await improve({ repo: ctx.repo, aspects: ["security"], max: 1 }, flagged.deps);
+    expect(only.error).toBeNull();
+    expect(flagged.deps.runner.calls.map((c) => c.role)).toEqual(["audit_security"]);
+    expect(flagged.deps.runner.calls[0]!.prompt).toContain("Up to 1 security proposals");
+  });
+
+  it("opens an issue with the plan block and labels, then updates it instead of duplicating", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const gh = new FakeGitHub();
+    const first = deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh);
+    const created = await improve({ repo: ctx.repo }, first.deps);
+    expect(created.error).toBeNull();
+    expect(created.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings.1", number: 1, action: "created" }]);
+    const issue = gh.issues.get(1)!;
+    expect(issue.title).toBe("Lint rule for a");
+    expect(issue.labels).toEqual(expect.arrayContaining(["factory-proposal", "improve:findings"]));
+    expect(issue.labels).not.toContain("factory-ready");
+    expect(gh.ensuredLabels.map((l) => l.name)).toEqual(expect.arrayContaining(["factory-proposal", "improve:findings"]));
+    const block = /```factory-plan\n([\s\S]*?)```/.exec(issue.body);
+    expect(JSON.parse(block?.[1] ?? "")).toMatchObject({ goal: "Lint rule for a", resolves_findings: ["a"] });
+    expect(issue.body).toContain("Because Lint rule for a.");
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings.1" });
+
+    const second = deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh);
+    const updated = await improve({ repo: ctx.repo }, second.deps);
+    expect(updated.error).toBeNull();
+    expect(updated.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings-2.1", number: 1, action: "updated" }]);
+    expect(gh.issues.size).toBe(1);
+    expect(gh.issues.get(1)!.title).toBe("Stronger lint for a");
+    expect(JSON.parse(/```factory-plan\n([\s\S]*?)```/.exec(gh.issues.get(1)!.body)?.[1] ?? "").goal).toBe("Stronger lint for a");
+    expect(gh.issueEdits).toHaveLength(1);
+  });
+
+  it("drops a proposal whose issue was closed without a merged PR, and resolves one whose factory PR merged", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 }), entry("m", { count: 2 })]);
+    const gh = new FakeGitHub();
+    const opened = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps);
+    expect(opened.results[0]!.issues[0]!.number).toBe(1);
+    gh.issues.get(1)!.state = "closed";
+    const dropped = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps);
+    expect(dropped.lifecycle).toEqual([expect.objectContaining({ id: "2026-10-29-improve-findings.1", status: "dropped", reason: "issue closed without merged PR" })]);
+    expect(gh.issues.get(1)!.state).toBe("closed");
+    expect(gh.issueEdits.every((e) => e.number !== 1)).toBe(true);
+    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === "2026-10-29-improve-findings.1")!.status).toBe("dropped");
+
+    const mergedHome = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const mergedCtx = { repo: ctx.repo, factoryHome: mergedHome, repoId: ctx.repoId };
+    seedMemory(mergedHome, ctx.repoId, [entry("m", { count: 2 })]);
+    const mgh = new FakeGitHub();
+    const ticket = await improve({ repo: ctx.repo }, deps(mergedCtx, [{ role: "harden", output: selection(item("Keep the merged fix", ["m"])) }], mgh).deps);
+    const proposal = ticket.results[0]!.ticket!.proposals[0]!;
+    seedRun(mergedHome, ctx.repo, new Date("2026-10-29T13:00:00.000Z"), { pr: "https://github.com/o/r/pull/9", plan: PLAN("Keep the merged fix", ["m"]), taskRef: proposal.plan_path });
+    mgh.prStates.set("https://github.com/o/r/pull/9", { state: "merged", draft: false });
+    const resolved = await improve({ repo: ctx.repo }, deps(mergedCtx, [], mgh).deps);
+    expect(resolved.lifecycle).toEqual([expect.objectContaining({ id: proposal.id, status: "resolved", reason: "factory PR merged", pr: "https://github.com/o/r/pull/9" })]);
+    expect(resolved.results[0]!.ticket).toBeNull();
+    expect(mgh.issues.size).toBe(1);
+  });
+
+  it("treats harden and audit as aliases, and old config blocks as a fallback with a warning", async () => {
+    const ctx = setup(`${CHECKS}harden:\n  max_proposals: 2\naudit:\n  types: [refactor, simplify]
+  max_proposals: 4\n  thinking: { simplify: high }\n  focus:\n    refactor: "boundaries"\n    simplify: "dead code"\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const err: string[] = [];
+    const io = { out: () => {}, err: (s: string) => err.push(s) };
+    const gh = new FakeGitHub();
+    const code = await hardenAlias(
+      { repo: ctx.repo, compact: false, json: false },
+      deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps,
+      io,
+    );
+    expect(code).toBe(0);
+    expect(err.join("")).toMatch(/harden` is deprecated/);
+    expect(err.join("")).toMatch(/deprecat/);
+    expect(gh.issues.get(1)!.labels).toContain("improve:findings");
+
+    err.length = 0;
+    const auditGh = new FakeGitHub();
+    const auditCode = await auditAlias(
+      { repo: ctx.repo, type: "simplify", json: true },
+      deps(ctx, [{ role: "audit_refactor", output: answer }], auditGh).deps,
+      io,
+    );
+    expect(auditCode).toBe(0);
+    expect(err.join("")).toMatch(/audit` is deprecated/);
+    expect(err.join("")).toMatch(/aspect structure/);
+    expect(auditGh.issues.get(1)!.labels).toEqual(expect.arrayContaining(["factory-proposal", "improve:structure"]));
+
+    const both = deps(ctx, [
+      { role: "harden", output: selection(item("Lint rule for a", ["a"])) },
+      { role: "audit_refactor", output: answer },
+    ]);
+    const out: string[] = [];
+    const warn: string[] = [];
+    const fallback = await improveCommand({ repo: ctx.repo, json: false }, both.deps, { out: (s) => out.push(s), err: (s) => warn.push(s) });
+    expect(fallback).toBe(0);
+    expect(both.deps.runner.calls.map((c) => c.role)).toEqual(["harden", "audit_refactor"]);
+    expect(both.deps.runner.calls[1]!.prompt).toContain("boundaries");
+    expect(both.deps.runner.calls[1]!.prompt).toContain("dead code");
+    expect(both.deps.runner.calls[1]!.prompt).toContain("Up to 4 structure proposals");
+    expect(warn.join("")).toMatch(/harden: and audit: are deprecated/);
+    expect(out.join("")).toMatch(/aspect findings/);
+    expect(out.join("")).toMatch(/aspect structure/);
+  });
+
+  it("does not open an issue on --dry-run, and refuses an aspect that is not configured", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const gh = new FakeGitHub();
+    const report = await improve({ repo: ctx.repo, dryRun: true }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps);
+    expect(report.error).toBeNull();
+    expect(report.dry_run).toBe(true);
+    expect(report.results[0]!.issues).toEqual([]);
+    expect(report.results[0]!.ticket?.proposals).toHaveLength(1);
+    expect(gh.issues.size).toBe(0);
+    expect(gh.ensuredLabels).toEqual([]);
+    expect(listProposals(ctx.factoryHome, ctx.repoId)).toHaveLength(1);
+
+    const runner = new FakeRunner([{ role: "audit_security", output: answer }]);
+    const out: string[] = [];
+    const code = await improveCommand({ repo: ctx.repo, aspects: ["security"], json: false }, { ...deps(ctx, []).deps, runner }, { out: (s) => out.push(s), err: () => {} });
+    expect(code).toBe(1);
+    expect(out.join("")).toMatch(/not enabled/);
+    expect(runner.calls).toHaveLength(0);
+
+    const err: string[] = [];
+    expect(await main(["improve", "--repo", ctx.repo, "--aspect", "ci"], { out: () => {}, err: (s) => err.push(s) })).toBe(2);
+    expect(err.join("")).toMatch(/factory improve/);
+  });
+});

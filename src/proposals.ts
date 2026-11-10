@@ -2,16 +2,17 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { join } from "node:path";
 import { memoryDir } from "./memory.js";
 import { type OpenAuditTicket, type Proposal, type ProposalItem, ProposalSchema } from "./schemas/proposal.js";
-import type { AuditType } from "./schemas/repo.js";
+import type { AuditType, ImproveAspect } from "./schemas/repo.js";
 
 export function proposalsDir(factoryHome: string, repoId: string): string {
   return join(memoryDir(factoryHome, repoId), "proposals");
 }
 
-/** Free id for a new proposal of the day: `<date>[-adopt|-audit-<type>]`, then `-2`, `-3` … */
-export function nextProposalId(dir: string, date: string, kind: Proposal["kind"], auditType?: AuditType): string {
+/** Free id for a new proposal of the day: `<date>[-adopt|-audit-<type>|-improve-<aspect>]`, then `-2`, `-3` … */
+export function nextProposalId(dir: string, date: string, kind: Proposal["kind"], auditType?: AuditType, aspect?: ImproveAspect): string {
   if (kind === "audit" && !auditType) throw new Error("audit proposals need a type");
-  const stem = kind === "adopt" ? `${date}-adopt` : kind === "audit" ? `${date}-audit-${auditType}` : date;
+  if (kind === "improve" && !aspect) throw new Error("improve proposals need an aspect");
+  const stem = kind === "adopt" ? `${date}-adopt` : kind === "audit" ? `${date}-audit-${auditType}` : kind === "improve" ? `${date}-improve-${aspect}` : date;
   if (!existsSync(join(dir, `${stem}.json`))) return stem;
   for (let n = 2; ; n++) if (!existsSync(join(dir, `${stem}-${n}.json`))) return `${stem}-${n}`;
 }

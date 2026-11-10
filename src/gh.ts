@@ -37,6 +37,18 @@ export interface Issue {
   state?: "open" | "closed";
 }
 
+export interface IssueWrite {
+  title: string;
+  body: string;
+  labels?: string[];
+}
+
+export interface LabelSpec {
+  name: string;
+  color: string;
+  description: string;
+}
+
 export interface PrRequest {
   repoDir: string;
   head: string;
@@ -52,6 +64,14 @@ export interface PrRequest {
 export interface GitHub {
   baseStatus(repoDir: string, sha: string): Promise<BaseStatus>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
+  /** Open (or any state) issues, newest page only. `improve` dedups proposal issues by label. */
+  listIssues(repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]>;
+  /** Creates a label if missing (`--force`). */
+  ensureLabel(repoDir: string, spec: LabelSpec): Promise<void>;
+  /** Opens an issue. Labels must already exist. */
+  createIssue(repoDir: string, req: IssueWrite & { labels: string[] }): Promise<Issue>;
+  /** Replaces title and body; adds labels, never removes one. */
+  updateIssue(repoDir: string, n: number, req: IssueWrite): Promise<Issue>;
   /**
    * Factory PR for this issue (`factory/<n>` or `factory/<n>-*`), any state. Null when there is none.
    * Queue `--after` when the dependency is not in the queue. Open wins over merged.
@@ -459,6 +479,17 @@ export function mergeBranchRules(settings: RepoSettings, payload: unknown): Repo
 }
 
 /** `gh` CLI implementation. Not exercised in tests (see docs/VERIFY.md). */
+function issueFromGh(raw: unknown): Issue {
+  const j = raw as { number: number; title: string; body: string; labels: { name: string }[]; state?: string };
+  return {
+    number: j.number,
+    title: j.title,
+    body: j.body ?? "",
+    labels: (j.labels ?? []).map((l) => l.name),
+    state: (j.state ?? "open").toLowerCase() === "closed" ? "closed" : "open",
+  };
+}
+
 export class GhCli implements GitHub {
   async authenticated(repoDir: string): Promise<boolean> {
     try {
@@ -538,14 +569,33 @@ export class GhCli implements GitHub {
 
   async getIssue(repoDir: string, n: number): Promise<Issue> {
     const out = await gh(repoDir, ["issue", "view", String(n), "--json", "number,title,body,labels,state"]);
-    const j = JSON.parse(out) as { number: number; title: string; body: string; labels: { name: string }[]; state?: string };
-    return {
-      number: j.number,
-      title: j.title,
-      body: j.body,
-      labels: j.labels.map((l) => l.name),
-      state: (j.state ?? "open").toLowerCase() === "closed" ? "closed" : "open",
-    };
+    return issueFromGh(JSON.parse(out));
+  }
+
+  async listIssues(repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]> {
+    const args = ["issue", "list", "--state", query.state ?? "open", "--limit", "100", "--json", "number,title,body,labels,state"];
+    if (query.label) args.push("--label", query.label);
+    const raw = JSON.parse((await gh(repoDir, args)) || "[]") as unknown[];
+    return raw.map((j) => issueFromGh(j));
+  }
+
+  async ensureLabel(repoDir: string, spec: LabelSpec): Promise<void> {
+    await gh(repoDir, ["label", "create", spec.name, "--force", "--color", spec.color, "--description", spec.description]);
+  }
+
+  async createIssue(repoDir: string, req: IssueWrite & { labels: string[] }): Promise<Issue> {
+    const args = ["issue", "create", "--title", req.title, "--body", req.body];
+    for (const label of req.labels) args.push("--label", label);
+    const url = (await gh(repoDir, args)).trim();
+    const n = Number(/\/issues\/(\d+)/.exec(url)?.[1]);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`gh issue create returned no issue number: ${url.slice(0, 200)}`);
+    return this.getIssue(repoDir, n);
+  }
+
+  async updateIssue(repoDir: string, n: number, req: IssueWrite): Promise<Issue> {
+    await gh(repoDir, ["issue", "edit", String(n), "--title", req.title, "--body", req.body]);
+    for (const label of req.labels ?? []) await gh(repoDir, ["issue", "edit", String(n), "--add-label", label]);
+    return this.getIssue(repoDir, n);
   }
 
   async findFactoryPr(repoDir: string, issue: number): Promise<FactoryPrRef | null> {
@@ -684,6 +734,41 @@ export class FakeGitHub implements GitHub {
     const issue = this.issues.get(n);
     if (!issue) throw new Error(`issue #${n} not found`);
     return { ...issue, state: issue.state ?? "open" };
+  }
+
+  readonly ensuredLabels: LabelSpec[] = [];
+  readonly issueEdits: { number: number; title: string; body: string }[] = [];
+
+  async listIssues(_repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]> {
+    const state = query.state ?? "open";
+    return [...this.issues.values()]
+      .filter((issue) => {
+        if (query.label && !issue.labels.includes(query.label)) return false;
+        const current = issue.state ?? "open";
+        return state === "all" || current === state;
+      })
+      .map((issue) => ({ ...issue, state: issue.state ?? "open" }));
+  }
+
+  async ensureLabel(_repoDir: string, spec: LabelSpec): Promise<void> {
+    this.ensuredLabels.push(spec);
+  }
+
+  async createIssue(_repoDir: string, req: IssueWrite & { labels: string[] }): Promise<Issue> {
+    const number = Math.max(0, ...this.issues.keys()) + 1;
+    const issue: Issue = { number, title: req.title, body: req.body, labels: [...req.labels], state: "open" };
+    this.issues.set(number, issue);
+    return { ...issue };
+  }
+
+  async updateIssue(_repoDir: string, n: number, req: IssueWrite): Promise<Issue> {
+    const prev = this.issues.get(n);
+    if (!prev) throw new Error(`issue #${n} not found`);
+    prev.title = req.title;
+    prev.body = req.body;
+    if (req.labels) prev.labels = [...new Set([...prev.labels, ...req.labels])];
+    this.issueEdits.push({ number: n, title: req.title, body: req.body });
+    return { ...prev, state: prev.state ?? "open" };
   }
 
   /** Planted factory PR for `--after` when the dependency is not queued. Open `factoryPrs` are also seen. */

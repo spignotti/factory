@@ -57,7 +57,7 @@ function repoRuns(factoryHome: string, repoDir: string): RunRecord[] {
   return listRuns(factoryHome).filter((r) => real(r.state?.repo ?? r.result?.repo ?? "") === me);
 }
 
-async function compact(shot: OneShot, factoryHome: string, repoId: string, repoDir: string, prompts: HardenDeps["prompts"]): Promise<{ merged: number; error: string | null }> {
+export async function compactMemory(shot: OneShot, factoryHome: string, repoId: string, repoDir: string, prompts: HardenDeps["prompts"]): Promise<{ merged: number; error: string | null }> {
   const open = loadMemory(factoryHome, repoId).entries.filter((e) => e.status === "open");
   if (open.length < 2) return { merged: 0, error: null };
   try {
@@ -179,7 +179,7 @@ export async function harden(opts: HardenOptions, deps: HardenDeps): Promise<Har
 
   const shot = new OneShot(deps, join(deps.factoryHome, "harden", repoId.replace(/[^\w.-]+/g, "_")), `harden-${now.toISOString().replace(/[:.]/g, "-")}`, repo);
   try {
-    const compaction = opts.compact ? await compact(shot, deps.factoryHome, repoId, repoDir, deps.prompts) : { merged: 0, error: null };
+    const compaction = opts.compact ? await compactMemory(shot, deps.factoryHome, repoId, repoDir, deps.prompts) : { merged: 0, error: null };
     const mem = loadMemory(deps.factoryHome, repoId);
     let ci: Signals["ci"];
     try {

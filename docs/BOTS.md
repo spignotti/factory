@@ -25,44 +25,38 @@ factory run --repo /path/to/checkout --plan plan.md --wait --notify <target>    
 - `factory run` refuses to start when the repo has no notify hook unless you pass `--no-notify` (see below);
   a `--no-notify` run sends no webhook and writes no outbox entry (its `notify` event says `disabled`).
 
-## Audit
+## Improve
 
-The repo's bot runs `factory audit`. The factory does not schedule it and does not start the proposals.
-One call is one dimension, and only a type listed in `.factory/repo.yaml` `audit.types` runs. With no
-`audit` block the command refuses and does not call a model.
-
-```bash
-factory audit --repo /path/to/checkout --type security
-# also: performance, refactor, simplify
-```
-
-Rhythm, from the bot's own routine: security and performance weekly (alongside `factory harden`), refactor
-and simplify monthly. Each call is one read-only session on the role's model. `audit.thinking` sets the
-reasoning level (high for security and performance, medium for refactor and simplify, unless the repo says
-otherwise).
-
-`audit.focus.<type>` is an optional short note (a string or a list of bullet points) injected only into
-that type's prompt, as data. Other types and the role prompts stay the same; omit it and the prompt is
-unchanged. It is not a checklist and it must not contain secrets or customer data. A privacy pass for the
-security audit:
-
-```yaml
-audit:
-  types: [security]
-  focus:
-    security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
-```
-
-The ticket is `$FACTORY_HOME/memory/<repo>/proposals/<date>-audit-<type>.json`. Each proposal has a plan
-file next to it. The bot starts that plan as its own run after reading the ticket (the factory does not):
+The repo's bot runs `factory improve`. The factory does not schedule it and does not start the proposals.
+Without `--aspect`, every aspect in `.factory/repo.yaml` `improve.aspects` runs. An aspect that is not
+listed is refused and does not call a model. `ci` and `tests` are not aspects yet.
 
 ```bash
-factory run --repo /path/to/checkout --plan <plan_path> --wait
+factory improve --repo /path/to/checkout
+factory improve --repo /path/to/checkout --aspect security
 ```
 
-When that PR merges, the next `factory audit` or `factory harden` marks the proposal `resolved`. A closed
-unmerged PR, or no merged or open PR for 28 days, drops it. `factory status` and `factory stats` list
-proposals that are still open, per repository.
+Rhythm, from the bot's own routine: findings, security and performance weekly; structure monthly. Each
+aspect is one read-only session. `improve.thinking` sets the reasoning level (high for security and
+performance, medium for findings and structure, unless the repo says otherwise). `improve.focus.<aspect>`
+is an optional short note injected only into that aspect's prompt. It is not a checklist and it must not
+contain secrets or customer data.
+
+Each proposal becomes a GitHub issue labelled `factory-proposal` and `improve:<aspect>`, with the plan in
+a `factory-plan` block. An open issue for the same proposal key or the same findings is updated. The bot
+does not start the run from the label `factory-proposal`. Promoting it is a relabel to `factory-ready`;
+`factory queue add` accepts only that label.
+
+```bash
+factory queue add --repo /path/to/checkout <issue>
+```
+
+When that factory PR merges, the next `factory improve` marks the proposal `resolved`. An issue closed
+without a merged PR, a closed unmerged PR, or no merged or open PR for 28 days, drops it.
+
+`factory harden` and `factory audit` are deprecated aliases of `factory improve` with the matching aspect
+(`refactor` and `simplify` are `structure`). A repo that still has `harden:` or `audit:` and no `improve:`
+block is read as that fallback, with a warning.
 
 ## A finished background shell does NOT wake the bot
 
