@@ -78,9 +78,11 @@ function heavyUnder(worktree: string): string[] {
 }
 
 /**
- * Terminal run whose branch is pushed, or that has no PR: the heavy data may go.
- * Resume-status runs (`needs_input` / `needs_human` / `base_red`) and live runs keep worktree and home.
- * A PR whose branch still has unpushed commits is not stripped (the push check fails closed).
+ * Terminal run whose branch is pushed, or that has no PR: `home/` and published caches may go.
+ * Resume-status runs (`needs_input` / `needs_human` / `base_red`), interrupted runs and live runs keep them.
+ * A PR whose push check fails, finds no ref, or sees unpushed commits is not stripped (fails closed).
+ * Dependency folders of a `failed` run are not part of this decision: `gcStripTerminal` leaves them until
+ * the worktree itself goes.
  */
 async function stripEligible(opts: GcOptions, run: RunRecord): Promise<"strip" | "live" | "keep"> {
   const st = run.state;
@@ -98,10 +100,11 @@ function dropDir(path: string, dryRun: boolean): void {
 }
 
 /**
- * Deletes regenerable weight from a terminal run: `home/`, published `evidence/`, service logs, and every
- * `node_modules` / `.venv` / `.nox` under the worktree. Keeps `events.jsonl`, `result.json`, `state.json`,
- * `plan.json`, `pr.md`, review and gate reports. Does not remove the worktree (the worktree stage does that
- * when the PR is merged or closed). No repo lock: these paths are cache, not a git operation.
+ * Deletes regenerable weight from a terminal run: `home/`, published `evidence/`, service logs, and — except
+ * for a `failed` run — every `node_modules` / `.venv` / `.nox` under the worktree. `failed` is resumable and
+ * setup does not run again, so those folders stay until the worktree goes (PR merged/closed, or the no-PR
+ * failed retention). Keeps `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md`, review and gate
+ * reports. Does not remove the worktree. No repo lock: these paths are cache, not a git operation.
  */
 export async function gcStripTerminal(opts: GcOptions, report: GcReport): Promise<void> {
   const runsRoot = join(opts.factoryHome, "runs");
@@ -129,14 +132,20 @@ export async function gcStripTerminal(opts: GcOptions, report: GcReport): Promis
         });
       }
     }
+    const removed: ("evidence/" | "services/")[] = [];
     const evidence = join(run.dir, "evidence");
     if (existsSync(evidence) && evidencePublished(run.dir) && realDirInside(runsRoot, evidence) && !isProtectedFactoryPath(opts.factoryHome, evidence)) {
       dropDir(evidence, opts.dryRun === true);
+      removed.push("evidence/");
     }
     const services = join(run.dir, "services");
     if (existsSync(services) && realDirInside(runsRoot, services) && !isProtectedFactoryPath(opts.factoryHome, services)) {
       dropDir(services, opts.dryRun === true);
+      removed.push("services/");
     }
+    if (removed.length) report.run_dirs_removed.push({ run_id: run.run_id, repo: st.repo, pr: st.pr, removed });
+    // Resume of `failed` does not re-run setup. The worktree stage removes these with the worktree.
+    if (st.result === "failed") continue;
     const wt = st.worktree && existsSync(st.worktree) ? st.worktree : null;
     if (!wt) continue;
     const heavy = heavyUnder(wt).sort();

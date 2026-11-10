@@ -82,21 +82,49 @@ export function dirBytes(path: string): number {
   return n;
 }
 
-/** True when the branch has commits that no remote branch contains. */
+function commitCount(text: string): number | undefined {
+  const raw = text.trim();
+  if (!/^\d+$/.test(raw)) return undefined;
+  return Number(raw);
+}
+
+/**
+ * True when the branch has commits that no remote branch contains.
+ * A missing ref or any git error fails closed (`unpushed: true`): the caller keeps the run.
+ */
 export async function branchHasUnpushedCommits(repo: string, branch: string): Promise<{ unpushed: boolean; reason?: string }> {
-  if (!existsSync(repo)) return { unpushed: false };
-  if (!(await gitOk(repo, ["rev-parse", "-q", "--verify", `refs/heads/${branch}`]))) return { unpushed: false };
-  const notOnRemote = (await git(repo, ["rev-list", "--count", branch, "--not", "--remotes"]).catch(() => "0")).trim();
-  const n = Number(notOnRemote);
-  if (Number.isFinite(n) && n > 0) {
-    return { unpushed: true, reason: `branch ${branch} has ${n} commit(s) not on any remote` };
+  const closed = (reason: string) => ({ unpushed: true, reason });
+  if (!existsSync(repo)) return closed(`repository is not readable; branch ${branch} kept`);
+  if (!(await gitOk(repo, ["rev-parse", "-q", "--verify", `refs/heads/${branch}`]))) {
+    return closed(`branch ${branch} ref is missing; kept`);
   }
+  let notOnRemote: string;
+  try {
+    notOnRemote = await git(repo, ["rev-list", "--count", branch, "--not", "--remotes"]);
+  } catch (e) {
+    return closed(`could not check whether ${branch} is pushed: ${(e as Error).message.slice(0, 200)}`);
+  }
+  const n = commitCount(notOnRemote);
+  if (n === undefined) return closed(`could not count unpushed commits on ${branch}; kept`);
+  if (n > 0) return { unpushed: true, reason: `branch ${branch} has ${n} commit(s) not on any remote` };
+  // No upstream is fine once every commit is already on some remote. A git error reading it is not.
   if (!(await gitOk(repo, ["rev-parse", "-q", "--verify", `${branch}@{upstream}`]))) return { unpushed: false };
-  const upstream = (await git(repo, ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]).catch(() => "")).trim();
+  let upstream: string;
+  try {
+    upstream = (await git(repo, ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`])).trim();
+  } catch (e) {
+    return closed(`could not read upstream of ${branch}: ${(e as Error).message.slice(0, 200)}`);
+  }
   if (upstream && upstream !== branch) {
-    const ahead = (await git(repo, ["rev-list", "--count", `${branch}@{upstream}..${branch}`]).catch(() => "0")).trim();
-    const a = Number(ahead);
-    if (Number.isFinite(a) && a > 0) return { unpushed: true, reason: `branch ${branch} is ${a} commit(s) ahead of ${upstream}` };
+    let ahead: string;
+    try {
+      ahead = await git(repo, ["rev-list", "--count", `${branch}@{upstream}..${branch}`]);
+    } catch (e) {
+      return closed(`could not count commits ahead of upstream for ${branch}: ${(e as Error).message.slice(0, 200)}`);
+    }
+    const a = commitCount(ahead);
+    if (a === undefined) return closed(`could not count commits ahead of upstream for ${branch}; kept`);
+    if (a > 0) return { unpushed: true, reason: `branch ${branch} is ${a} commit(s) ahead of ${upstream}` };
   }
   return { unpushed: false };
 }

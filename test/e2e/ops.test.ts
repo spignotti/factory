@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -19,6 +19,7 @@ import { runScenario } from "../helpers/scenario.js";
 
 const gcExtras = {
   home_removed: [],
+  run_dirs_removed: [],
   worktree_pruned: [],
 } as const;
 
@@ -327,12 +328,17 @@ describe("factory gc: runs without PR, open PRs, automatic gc", () => {
   it("a run without PR keeps its worktree inside the retention; afterwards only the worktree goes, the branch stays", async () => {
     const { r, wt, branch } = await doneRun();
     rewrite(r.runDir, { pr: null, result: "failed", step: "implement" });
+    mkdirSync(join(wt, "node_modules"), { recursive: true });
+    writeFileSync(join(wt, "node_modules", "pkg.js"), "x");
     const early = await gc({ factoryHome: r.factoryHome, github: r.github, evidence: false });
     expect(early.cleaned).toEqual([]);
     expect(early.stripped).toEqual([]);
     expect(early.home_removed.map((h) => h.run_id)).toEqual([r.runId]);
     expect(existsSync(join(r.runDir, "home"))).toBe(false);
     expect(existsSync(wt)).toBe(true);
+    // Resume does not re-run setup. Dependency folders stay until the failed retention removes the worktree.
+    expect(existsSync(join(wt, "node_modules", "pkg.js"))).toBe(true);
+    rmSync(join(wt, "node_modules"), { recursive: true, force: true });
 
     const later = () => Date.now() + 8 * DAY;
     const dry = await gc({ factoryHome: r.factoryHome, github: r.github, now: later, dryRun: true, evidence: false });

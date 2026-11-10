@@ -54,8 +54,9 @@ const USAGE = `usage:
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one)
   factory gc [--dry-run] [--scheduled] [--force] [--retention-days N] [--json]
-              (worktree and branch of merged/closed PRs; terminal runs lose home/, published evidence,
-               service logs and dependency folders; needs_input unanswered for 2 working days
+              (worktree and branch of merged/closed PRs; terminal runs lose home/, published evidence
+               and service logs; done/abandoned also lose dependency folders; failed keeps them until
+               the worktree goes; needs_input unanswered for 2 working days
                (Mon-Fri, Europe/Berlin) is abandoned and the owner notified;
                factory gc --scheduled for the daily LaunchAgent (see docs/GC_RETENTION.md).
                A live gc resumes base_red once base CI is green, within limits.base_red_resume_hours;

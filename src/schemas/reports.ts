@@ -123,6 +123,10 @@ export const GcReportSchema = z.strictObject({
   home_removed: z
     .array(z.strictObject({ run_id: z.string(), repo: z.string(), bytes: z.number().int().min(0), reason: z.string() }))
     .default([]),
+  /** Published `evidence/` and `services/` logs removed from terminal runs (also on dry-run). */
+  run_dirs_removed: z
+    .array(z.strictObject({ run_id: z.string(), repo: z.string(), pr: nullableStr, removed: z.array(z.enum(["evidence/", "services/"])) }))
+    .default([]),
   worktree_pruned: z.array(z.strictObject({ repo: z.string() })).default([]),
   log_path: z.string().optional(),
 });

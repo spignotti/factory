@@ -6,12 +6,12 @@
 
 | Stage | When | Paths |
 | --- | --- | --- |
-| **Strip** | Terminal run (`done`, `failed`, `abandoned`) whose branch is pushed, or that has no PR. Also the automatic gc at the start of `factory run`. | `$FACTORY_HOME/runs/<id>/home`, published `evidence/`, `services/` logs, and every `node_modules`, `.venv`, `.nox` under the worktree |
+| **Strip** | Terminal run (`done`, `failed`, `abandoned`) whose branch is pushed, or that has no PR. Also the automatic gc at the start of `factory run`. | `$FACTORY_HOME/runs/<id>/home`, published `evidence/`, `services/` logs. `done` and `abandoned` also lose every `node_modules`, `.venv`, `.nox` under the worktree. `failed` keeps those folders until the worktree goes |
 | **Worktrees** | Merged/closed PRs; no-PR runs idle ≥ 7 d (failed) or ≥ 14 d (`needs_input` / `needs_human` / `base_red`) | Git worktrees; then `git worktree prune` per repo |
 
 Kept in `runs/<id>/`: `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md`, review and gate reports. The worktree itself goes when the PR is merged or closed (or after the no-PR idle window). Run directories are not archived and are not deleted by age.
 
-Never touched: `keys/`, `secrets/`, `memory/`, `archive/keys`, `archive/memory`, `*.bak`, `profile.yaml`, `notify.yaml*`, `cache/`, or runs that are active. `needs_input` / `needs_human` / `base_red` keep their worktree and `home/` (the worktree of a no-PR resume run still follows the 14-day idle rule). An unpushed branch is not stripped.
+Never touched: `keys/`, `secrets/`, `memory/`, `archive/keys`, `archive/memory`, `*.bak`, `profile.yaml`, `notify.yaml*`, `cache/`, or runs that are active. `needs_input` / `needs_human` / `base_red` keep their worktree and `home/` (the worktree of a no-PR resume run still follows the 14-day idle rule). A `failed` run is resumable: its worktree dependency folders stay until the PR is merged or closed, or until the no-PR failed retention removes the worktree. `home/` may go immediately. An unpushed branch is not stripped. If the push check cannot read the ref or git errors, the run is kept.
 
 Guards:
 
@@ -40,7 +40,7 @@ gc:
 
 CLI flags: `--retention-days`, `--dry-run`, `--force`. Manual runs default to **live** deletes unless you pass `--dry-run`. The LaunchAgent should call `factory gc --scheduled`, which applies `gc.retention.dry_run`. A scheduled dry-run does not resume `base_red` runs.
 
-Each run appends one JSON line to `$FACTORY_HOME/gc.log` (rotated at 5 MiB) with paths, byte counts, and reasons (no secrets).
+Each run appends one JSON line to `$FACTORY_HOME/gc.log` (rotated at 5 MiB) with paths, byte counts, and reasons (no secrets). Published `evidence/` and `services/` removals are in that line (`run_dirs_removed`), including when `dry_run` is true.
 
 ## Scheduling (macOS LaunchAgent)
 

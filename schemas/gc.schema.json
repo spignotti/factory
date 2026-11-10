@@ -209,6 +209,44 @@
         "additionalProperties": false
       }
     },
+    "run_dirs_removed": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "pr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "evidence/",
+                "services/"
+              ]
+            }
+          }
+        },
+        "required": [
+          "run_id",
+          "repo",
+          "pr",
+          "removed"
+        ],
+        "additionalProperties": false
+      }
+    },
     "worktree_pruned": {
       "default": [],
       "type": "array",
@@ -237,6 +275,7 @@
     "evidence",
     "abandoned",
     "home_removed",
+    "run_dirs_removed",
     "worktree_pruned"
   ],
   "additionalProperties": false

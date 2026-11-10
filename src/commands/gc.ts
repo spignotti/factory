@@ -100,6 +100,7 @@ function emptyReport(dryRun: boolean): GcReport {
     evidence: [],
     abandoned: [],
     home_removed: [],
+    run_dirs_removed: [],
     worktree_pruned: [],
   };
 }
@@ -124,10 +125,13 @@ export function resumesBaseRedAfterGc(opts: { dryRun?: boolean; scheduled?: bool
  * - No PR (failed, needs_input, needs_human, interrupted) and idle for `retentionDays` (default 7): removes the
  *   worktree only; the local branch and its commits stay. Such a run can no longer be resumed.
  * - A terminal run whose branch is pushed, or that has no PR: deletes `home/`, published `evidence/`,
- *   service logs, and every `node_modules` / `.venv` / `.nox` under the worktree. The run directory keeps
- *   `events.jsonl`, `result.json`, `state.json`, `plan.json`, `pr.md` and review/gate reports. Resume-status
- *   runs keep the worktree and `home/`. This strip also runs from the automatic gc at `factory run` start.
- * - PR open: the worktree stays (dependency folders are already stripped when the run is terminal and pushed).
+ *   and service logs. `done` and `abandoned` also lose every `node_modules` / `.venv` / `.nox` under the
+ *   worktree. A `failed` run keeps those folders until the worktree goes (merged/closed PR, or the no-PR
+ *   failed retention): resume does not run setup again. The run directory keeps `events.jsonl`,
+ *   `result.json`, `state.json`, `plan.json`, `pr.md` and review/gate reports. Resume-status runs keep the
+ *   worktree and `home/`. This strip also runs from the automatic gc at `factory run` start. The push check
+ *   fails closed (git error or a missing ref keeps the run).
+ * - PR open: the worktree stays (`done` / `abandoned` dependency folders are already stripped when the branch is pushed; `failed` keeps them).
  * A dirty worktree is kept unless `force`. A run that holds a lock slot is left untouched. Worktree removal
  * and local branch deletion take the per-repo git-ops lock (not a run slot), so they proceed while another
  * run of the same repo is active; PR state is looked up before that lock, so a parallel `factory run` is
@@ -153,6 +157,9 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
     if (opts.writeLog ?? true) report.log_path = appendGcLog(opts.factoryHome, { at: now(), scheduled: opts.scheduled ?? false, deploy_self_busy: true, report });
     return report;
   }
+  // Strip before worktree removal. That stage deletes the local branch, and a missing ref keeps the run,
+  // so the push check has to see the ref that still exists.
+  await gcStripTerminal({ ...opts, dryRun }, report);
   const prunedRepos = new Set<string>();
   // One timeout per repo per gc. A lock that stays busy does not cost 60s on every later run.
   const gitOpsBusy = new Set<string>();
@@ -306,7 +313,6 @@ export async function gc(opts: GcOptions): Promise<GcReport> {
     }
     report.cleaned.push(entry);
   }
-  await gcStripTerminal({ ...opts, dryRun }, report);
   await abandonUnanswered({ ...opts, dryRun }, report, nowMs);
   if (opts.evidence ?? true) {
     const repos = [...new Set(listRuns(opts.factoryHome).flatMap((r) => (r.state?.repo && existsSync(r.state.repo) ? [r.state.repo] : [])))];
@@ -334,9 +340,9 @@ export async function autoGc(opts: { factoryHome: string; github: GitHub; timeou
       timeout,
     ]);
     if (!r) opts.log?.("factory: automatic gc timed out; run `factory gc` by hand\n");
-    else if (r.cleaned.length || r.stripped.length || r.abandoned.length || r.home_removed.length) {
+    else if (r.cleaned.length || r.stripped.length || r.abandoned.length || r.home_removed.length || r.run_dirs_removed.length) {
       opts.log?.(
-        `factory: gc cleaned ${r.cleaned.length} worktree(s), stripped dependency folders in ${r.stripped.length}, abandoned ${r.abandoned.length}, removed ${r.home_removed.length} home dir(s) (factory gc --dry-run shows details)\n`,
+        `factory: gc cleaned ${r.cleaned.length} worktree(s), stripped dependency folders in ${r.stripped.length}, abandoned ${r.abandoned.length}, removed ${r.home_removed.length} home dir(s), removed evidence/services in ${r.run_dirs_removed.length} (factory gc --dry-run shows details)\n`,
       );
     }
     return r;
@@ -406,8 +412,9 @@ export async function gcCommand(opts: GcOptions & { json: boolean }, io: Io): Pr
     for (const e of r.evidence) if (e.removed.length) io.out(`${r.dry_run ? "would remove" : "removed"} ${e.removed.length} evidence folder(s) older than ${EVIDENCE_RETENTION_DAYS} days in ${e.repo}\n`);
     for (const a of r.abandoned) io.out(`${r.dry_run ? "would abandon" : "abandoned"} ${a.run_id}: ${a.reason}${a.notified ? " (owner notified)" : ""}\n`);
     for (const h of r.home_removed) io.out(`${r.dry_run ? "would remove" : "removed"} home/ for ${h.run_id} (${h.bytes} bytes)\n`);
+    for (const c of r.run_dirs_removed) io.out(`${r.dry_run ? "would remove" : "removed"} ${c.removed.join(", ")} for ${c.run_id}\n`);
     if (r.log_path) io.out(`gc report appended to ${r.log_path}\n`);
-    if (!r.cleaned.length && !r.skipped.length && !r.stripped.length && !r.abandoned.length && !r.home_removed.length) io.out("nothing to clean\n");
+    if (!r.cleaned.length && !r.skipped.length && !r.stripped.length && !r.abandoned.length && !r.home_removed.length && !r.run_dirs_removed.length) io.out("nothing to clean\n");
   }
   return 0;
 }
