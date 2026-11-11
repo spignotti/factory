@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/spignotti/factory/compare/v0.4.0...v0.5.0) (2026-11-11)
+
+
+### Features
+
+* factory improve (proposals as issues) ([#135](https://github.com/spignotti/factory/issues/135)) ([b307cb9](https://github.com/spignotti/factory/commit/b307cb91996e9e97333a1b91cabd6a832289d522))
+* **improve:** aspects ci and tests ([#138](https://github.com/spignotti/factory/issues/138)) ([40c789b](https://github.com/spignotti/factory/commit/40c789bab6376b3d85c7c0f015f8d9f897fd354d))
+* standards.md, standards reviewer, introduce-a-standard flow ([#136](https://github.com/spignotti/factory/issues/136)) ([78e3400](https://github.com/spignotti/factory/commit/78e3400c9dc0c5768cb99cd1d779cb247074e6f1))
+
+
+### Bug Fixes
+
+* **queue:** wait for an overlapping live run instead of parking for the night ([#139](https://github.com/spignotti/factory/issues/139)) ([de16538](https://github.com/spignotti/factory/commit/de1653815c9e05e3433f8e8f4015c237b7c19951))
+
 ## [0.4.0](https://github.com/spignotti/factory/compare/v0.3.0...v0.4.0) (2026-11-10)
 
 
