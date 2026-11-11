@@ -1,4 +1,5 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { buildAgentEnv, ensureSharedCache } from "../agents/env.js";
 import type { Sleep } from "../agents/fake-runner.js";
@@ -145,7 +146,21 @@ export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "
 
 /** Env for repo commands the factory runs itself (checks, red-green tests, services, the ui, flows): agentEnv plus the repo secrets. */
 export function commandEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "secrets">): Record<string, string> {
-  return { ...agentEnv(ctx), ...(ctx.secrets?.env ?? {}) };
+  const docker = dockerHost();
+  return { ...agentEnv(ctx), ...(docker ? { DOCKER_HOST: docker } : {}), ...(ctx.secrets?.env ?? {}) };
+}
+
+/**
+ * Checks run with an isolated HOME, so the docker CLI loses Docker Desktop's context and looks for
+ * /var/run/docker.sock, which Docker Desktop does not create by default. Hand checks the socket the
+ * factory's own user has: DOCKER_HOST when set, else Docker Desktop's per-user socket, else nothing
+ * (Linux daemons listen on /var/run/docker.sock).
+ */
+export function dockerHost(env: NodeJS.ProcessEnv = process.env, home = homedir(), exists: (path: string) => boolean = existsSync): string | undefined {
+  if (env.DOCKER_HOST) return env.DOCKER_HOST;
+  if (exists("/var/run/docker.sock")) return undefined;
+  const desktop = join(home, ".docker", "run", "docker.sock");
+  return exists(desktop) ? `unix://${desktop}` : undefined;
 }
 
 /**
