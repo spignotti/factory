@@ -186,6 +186,12 @@ export function overlapPrNumbers(reason: string): number[] {
   return [...nums];
 }
 
+/** Run ids in `planned paths overlap active runs: <id> (…)` / `… overlap another factory run: <id> …`. */
+export function overlapRunIds(reason: string): string[] {
+  if (!/overlap (active runs|another factory run)/i.test(reason)) return [];
+  return [...new Set(reason.match(/\b\d{8}-\d{6}-[0-9a-f]{6}\b/g) ?? [])];
+}
+
 /** `repo … is locked by run …`: the slot was still held. Not an open-PR overlap. */
 export function isRepoLockHeld(reason: string): boolean {
   return /\bis locked by\b/i.test(reason);
@@ -204,12 +210,14 @@ function transientStop(factoryHome: string, result: RunResult): boolean {
   return run.state?.transient === true || (run.result as { transient?: boolean } | undefined)?.transient === true;
 }
 
-function park(entry: QueueEntry, reason: string, runId?: string, blocked?: number[]): void {
+function park(entry: QueueEntry, reason: string, runId?: string, blocked?: number[], blockedRuns?: string[]): void {
   entry.status = "parked";
   entry.reason = reason;
   if (runId) entry.run_id = runId;
   if (blocked?.length) entry.blocked_by = blocked;
   else delete entry.blocked_by;
+  if (blockedRuns?.length) entry.blocked_runs = blockedRuns;
+  else delete entry.blocked_runs;
   delete entry.pid;
 }
 
@@ -224,6 +232,7 @@ function releaseToPending(entry: QueueEntry): void {
   delete entry.reason;
   delete entry.run_id;
   delete entry.blocked_by;
+  delete entry.blocked_runs;
   delete entry.pid;
 }
 
@@ -253,6 +262,12 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     const blocked = overlapPrNumbers(result.reason);
     if (blocked.length) {
       park(entry, result.reason || result.result, result.run_id, blocked);
+      return "parked";
+    }
+    // A live run claims these paths: wait for it to finish instead of parking for the night.
+    const runs = overlapRunIds(result.reason);
+    if (runs.length) {
+      park(entry, result.reason, result.run_id, undefined, runs);
       return "parked";
     }
     if (isRepoLockHeld(result.reason)) {
@@ -523,9 +538,14 @@ async function afterGate(entry: QueueEntry, q: QueueFile, github: GitHub, repo: 
   return "wait";
 }
 
-async function unparkReady(q: QueueFile, github: GitHub, repo: string, io: Io, timeoutMs: number): Promise<Set<number>> {
+async function unparkReady(q: QueueFile, github: GitHub, repo: string, io: Io, timeoutMs: number, factoryHome: string): Promise<Set<number>> {
   const ready = new Set<number>();
+  const finished = new Set(listRuns(factoryHome).filter((r) => r.result).map((r) => r.run_id));
   for (const entry of q.entries) {
+    if (entry.status === "parked" && entry.blocked_runs?.length) {
+      if (entry.blocked_runs.every((id) => finished.has(id))) ready.add(entry.issue);
+      continue;
+    }
     if (entry.status !== "parked" || !entry.blocked_by?.length) continue;
     try {
       const states = await Promise.all(entry.blocked_by.map((n) => withTimeout(github.prStatus(repo, String(n)), timeoutMs, `pr status #${n}`)));
@@ -539,9 +559,10 @@ async function unparkReady(q: QueueFile, github: GitHub, repo: string, io: Io, t
 
 function applyUnpark(q: QueueFile, ready: Set<number>, io: Io): void {
   for (const entry of q.entries) {
-    if (!ready.has(entry.issue) || entry.status !== "parked" || !entry.blocked_by?.length) continue;
+    if (!ready.has(entry.issue) || entry.status !== "parked" || !(entry.blocked_by?.length || entry.blocked_runs?.length)) continue;
+    const byRun = (entry.blocked_runs?.length ?? 0) > 0;
     releaseToPending(entry);
-    io.out(`queue: #${entry.issue} pending (blocking PR closed)\n`);
+    io.out(`queue: #${entry.issue} pending (${byRun ? "overlapping run finished" : "blocking PR closed"})\n`);
   }
 }
 
@@ -692,7 +713,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const snap = loadQueueByKey(ctx.factoryHome, key);
   if (!snap) return false;
 
-  const unpark = await unparkReady(snap, ctx.github, repo, ctx.io, timeoutMs);
+  const unpark = await unparkReady(snap, ctx.github, repo, ctx.io, timeoutMs, ctx.factoryHome);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
   const evaluatedAfter = new Set<number>();
@@ -816,7 +837,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   if (!q) return false;
   const pending = q.entries.some((e) => e.status === "pending");
   const running = q.entries.some((e) => e.status === "running");
-  const overlap = q.entries.some((e) => e.status === "parked" && (e.blocked_by?.length ?? 0) > 0);
+  const overlap = q.entries.some((e) => e.status === "parked" && ((e.blocked_by?.length ?? 0) > 0 || (e.blocked_runs?.length ?? 0) > 0));
   const live = [...ctx.handles.values()].some((h) => resolve(h.repo) === resolve(repo) && h.settled === undefined && !h.failed && !h.ignoreResult);
   if (ctx.pastUntil) return running || live;
   const behind = watch.needsUpdate || (ctx.untilMs !== undefined && watch.openDone);
