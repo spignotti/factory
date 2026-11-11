@@ -1,7 +1,7 @@
 # Eval baseline: the default role chains of profiles/default.yaml as of 2026-10-29, pinned so
 # that results stay comparable when the defaults move. Variants for `factory experiment` override
 # roles, retry, env, prompts and flags on top of this (layered: a variant states only its changes).
-description: default role chains as of 2026-10-29, default prompts, standard lane, task plan effort
+description: default role chains as of 2026-10-29, default prompts, task plan effort
 roles:
   plan_high:         [{ model: openai/gpt-6.1-sol, thinking: high }]
   plan_medium:       [{ model: openai/gpt-6.1-sol, thinking: medium }]

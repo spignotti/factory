@@ -1,4 +1,4 @@
-/** Path classes shared by reviewer activation, fast-lane escalation and the risk class. */
+/** Path classes shared by reviewer activation and the risk class. */
 
 /** Dependency manifests and lockfiles, matched by name in any directory. */
 export const DEPENDENCY_FILES = [
@@ -12,7 +12,7 @@ export const DEPENDENCY_GLOBS = DEPENDENCY_FILES.map((f) => `**/${f}`);
 
 /**
  * Generated lockfiles (not manifests): left out of the diff line count, since no one reviews them line
- * by line. They still are dependency files (`DEPENDENCY_GLOBS`): lane escalation, risk and reviewers see them.
+ * by line. They still are dependency files (`DEPENDENCY_GLOBS`): risk and reviewers see them.
  */
 export const LOCK_FILES = [
   "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",

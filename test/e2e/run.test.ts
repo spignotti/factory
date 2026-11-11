@@ -10,7 +10,7 @@ import { continueBaseRed } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
 import type { AgentRequest } from "../../src/agents/runner.js";
-import { type FakeStep, realSleep } from "../../src/agents/fake-runner.js";
+import { realSleep } from "../../src/agents/fake-runner.js";
 import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
 import { addOrigin, commitFile, FIXTURES } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
@@ -26,19 +26,6 @@ function onPath(tool: string): boolean {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 const eventsOf = (r: ScenarioRun, type: string) => r.events.filter((e) => e.event === type);
-
-/** Standard script → fast lane: `plan_normalize` instead of the planner, plan + simplicity in one lean review. */
-function toFastLane(steps: FakeStep[]): FakeStep[] {
-  const out: FakeStep[] = [];
-  for (const step of steps) {
-    if (step.role === "plan_high") out.push({ ...step, role: "plan_normalize" });
-    else if (step.role === "review_simplicity") {
-      const plan = out.findLast((s) => s.role === "review_plan")!;
-      plan.output = { reviews: [plan.output, step.output] };
-    } else out.push({ ...step });
-  }
-  return out;
-}
 
 const HOOK_URL = "https://hooks.example.test/automations/webhook/e2e-secret-id";
 const HOOK_KEY = "crsr_e2e-sender-key-0123456789abcdef";
@@ -527,29 +514,21 @@ ${fixed}` } };
     expect(r.runner.calls.find((c) => c.role === "review_security")?.prompt).toContain("tools/package.json");
   });
 
-  it("fast lane: plan_normalize, one lean review session, PR says fast", async () => {
-    const r = await runScenario({ script: "clean.json", options: { lane: "fast" }, steps: toFastLane });
-    expect(r.result).toMatchObject({ result: "done", lane: "fast", rounds: 1 });
-    expect(r.runner.remaining()).toEqual({});
-    expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_normalize", "implement", "review_plan", "pr_writer"]);
-    const review = r.runner.calls.find((c) => c.role === "review_plan")!;
-    expect(review.prompt).toContain('{"reviews":[<plan review>,<simplicity review>]}');
-    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data).toMatchObject({ mode: "lean", reviewers: ["plan", "simplicity"] });
+  it("plan and simplicity review in separate sessions", async () => {
+    const r = await runScenario({ script: "clean.json" });
+    expect(r.result).toMatchObject({ result: "done", lane: "standard", rounds: 1 });
+    expect(r.runner.calls.filter((c) => c.role === "review_plan")).toHaveLength(1);
+    expect(r.runner.calls.filter((c) => c.role === "review_simplicity")).toHaveLength(1);
+    const plan = r.runner.calls.find((c) => c.role === "review_plan")!;
+    const simplicity = r.runner.calls.find((c) => c.role === "review_simplicity")!;
+    expect(plan.prompt).toContain('"reviewer":"plan"');
+    expect(simplicity.prompt).toContain('"reviewer":"simplicity"');
+    expect(plan.prompt).not.toContain('"reviews"');
+    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
     expect(r.file("review-1-plan.json")).toContain('"reviewer": "plan"');
     expect(r.file("review-1-simplicity.json")).toContain('"reviewer": "simplicity"');
-    expect(r.github.prs[0]?.body).toContain("- lane: fast (lean review, at most one fix round)");
-    expect(eventsOf(r, "lane_escalated")).toEqual([]);
-  });
-
-  it("fast lane: an open bug after the one fix round -> needs_human, no extra round", async () => {
-    const r = await runScenario({ script: "bug-max-rounds.json", options: { lane: "fast" }, steps: (s) => {
-      // Two review rounds and one fix: the script's third round must never be asked for.
-      const seen: Record<string, number> = {};
-      return toFastLane(s).filter((x) => !["review_plan", "implement"].includes(x.role) || (seen[x.role] = (seen[x.role] ?? 0) + 1) <= 2);
-    } });
-    expect(r.result).toMatchObject({ result: "needs_human", lane: "fast", rounds: 2 });
-    expect(r.result.reason).toMatch(/no extra round/);
-    expect(r.runner.remaining()).toEqual({});
+    expect(r.github.prs[0]?.body).toContain("- lane: standard");
+    expect(r.github.prs[0]?.body).not.toContain("lean review");
   });
 
   it("diff_count_tests false: test files stay out of max_diff_lines; the log and result.json report both numbers", async () => {
@@ -589,39 +568,6 @@ ${fixed}` } };
     const final = [...eventsOf(r, "progress")].reverse().find((e) => typeof e.data.counted_lines === "number");
     expect(final?.data).toMatchObject({ counted_lines: r.result.counted_lines, excluded_test_lines: r.result.excluded_test_lines });
     expect(r.file("gates-1.json")).toContain("test lines not counted");
-  });
-
-  it("fast lane escalates after implement when the diff is too big: full review, PR names the reasons, risk stays on the diff", async () => {
-    const r = await runScenario({ script: "clean.json", options: { lane: "fast" }, patch: (c) => void (c.fast_lane = { max_diff_lines: 3 }), steps: (s) => s.map((x) => (x.role === "plan_high" ? { ...x, role: "plan_normalize" } : x)) });
-    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "low" });
-    expect(r.runner.remaining()).toEqual({});
-    const esc = eventsOf(r, "lane_escalated");
-    expect(esc).toHaveLength(1);
-    expect(esc[0]).toMatchObject({ step: "implement", data: { from: "fast", to: "standard" } });
-    expect((esc[0]!.data.reasons as string[])[0]).toMatch(/^diff \d+ lines > fast_lane.max_diff_lines 3$/);
-    expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data).toMatchObject({ mode: "full" });
-    expect(r.github.prs[0]?.body).toMatch(/- lane: fast → standard \(diff \d+ lines/);
-    expect(r.github.prs[0]?.body).not.toContain("fast-lane escalation");
-    expect(JSON.parse(r.file("state.json"))).toMatchObject({ lane: "standard" });
-  });
-
-  it("fast lane: invalid plan_normalize output escalates at intake to the plan step", async () => {
-    const r = await runScenario({ script: "invented-normalize.json", options: { lane: "fast" } });
-    expect(r.result).toMatchObject({ result: "done", lane: "standard" });
-    expect(r.runner.remaining()).toEqual({});
-    expect(eventsOf(r, "lane_escalated")[0]).toMatchObject({ step: "intake" });
-    expect((eventsOf(r, "lane_escalated")[0]!.data.reasons as string[])[0]).toMatch(/^plan_normalize output invalid/);
-  });
-
-  it("fast lane: normalize failure, small diff, no sensitive paths -> risk low; escalation stays in result.json", async () => {
-    const r = await runScenario({ script: "invented-normalize.json", options: { lane: "fast" } });
-    expect(r.result).toMatchObject({ result: "done", lane: "standard", risk: "low" });
-    expect(r.resultFile).toMatchObject({ lane: "standard", risk: "low" });
-    expect(r.runner.calls.map((c) => c.role).slice(0, 3)).toEqual(["plan_normalize", "plan_normalize", "plan_medium"]);
-    const reasons = eventsOf(r, "lane_escalated")[0]!.data.reasons as string[];
-    expect(reasons[0]).toMatch(/^plan_normalize output invalid/);
-    expect(r.github.prs[0]?.body).toContain("plan_normalize output invalid");
-    expect(r.github.prs[0]?.body).not.toContain("fast-lane escalation");
   });
 
   it("fallback: capacity error -> backoff retry on the same model -> fallback", async () => {

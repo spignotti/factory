@@ -73,6 +73,15 @@ describe("factory doctor: model layers", () => {
     expect((JSON.parse(c2.text()) as DoctorReport).checks.find((c) => c.name === "model config")).toMatchObject({ status: "fail" });
   });
 
+  it("warns once when repo.yaml still has fast_lane", async () => {
+    const home = mkdtempSync(join(tmpdir(), "fh-"));
+    const repo = createFixtureRepo((c) => void (c.fast_lane = { max_diff_lines: 40 }));
+    const c = capture();
+    expect(await doctorCommand({ factoryHome: home, repo, json: true, probe, view, github: new FakeGitHub() }, c.io)).toBe(0);
+    const warns = (JSON.parse(c.text()) as DoctorReport).checks.filter((x) => x.name === "fast_lane");
+    expect(warns).toEqual([{ name: "fast_lane", status: "warn", detail: "fast_lane: is ignored; the fast lane was removed" }]);
+  });
+
   it("reports the sandbox: required but unavailable fails, preferred degraded warns", async () => {
     const strict = mkdtempSync(join(tmpdir(), "fh-"));
     writeFileSync(join(strict, "profile.yaml"), "sandbox: required\n");

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { diffExclusion, diffStat, diffTotals, formatDiffTotals, linesCountingTests, looksBinary, parseNumstatZ, repoDiffStat } from "../../src/git.js";
 import { diffSize } from "../../src/gates/builtin.js";
-import { fastLaneEscalation } from "../../src/pipeline/lane.js";
 import { DEPENDENCY_GLOBS, LOCK_FILES } from "../../src/paths.js";
 import { matchesAny } from "../../src/schemas/plan.js";
 import { RepoConfigSchema } from "../../src/schemas/repo.js";
@@ -89,16 +88,6 @@ describe("diff line count: exclusions", () => {
     expect(diffTotals(await repoDiffStat(dir, base, cfg))).toMatchObject({ counted: 7, excluded: 5 });
   });
 
-  it("fast lane: a big lockfile does not escalate by lines, but still as a dependency change", async () => {
-    const dir = repo();
-    const baseSha = gitIn(dir, "rev-parse", "HEAD").trim();
-    write(dir, "package-lock.json", text(400));
-    write(dir, "src/a.ts", text(20));
-    const reasons = await fastLaneEscalation({ worktree: dir, baseSha, repo: RepoConfigSchema.parse({}) });
-    expect(reasons.some((r) => r.includes("fast_lane.max_diff_lines"))).toBe(false);
-    expect(reasons).toContain("dependencies: package-lock.json");
-  });
-
   it("schema: diff_exclude defaults to empty and rejects catch-all globs", () => {
     expect(RepoConfigSchema.parse({}).limits.diff_exclude).toEqual([]);
     for (const g of ["**", "**/*", "*", "./**"]) expect(RepoConfigSchema.safeParse({ limits: { diff_exclude: [g] } }).success).toBe(false);
@@ -178,14 +167,12 @@ describe("limits.diff_count_tests", () => {
     expect(diffSize(stat, 4, { countTests: false }).detail).toBe("4 lines (+0 test lines not counted)");
   });
 
-  it("fast lane and the line total used for risk still count tests when the option is false", async () => {
+  it("the line total used for risk still counts tests when the option is false", async () => {
     const dir = repo();
     const baseSha = gitIn(dir, "rev-parse", "HEAD").trim();
     write(dir, "src/a.ts", text(10));
     write(dir, "test/a.test.ts", text(400));
-    const cfg = RepoConfigSchema.parse({ limits: { diff_count_tests: false }, tests: { globs }, fast_lane: { max_diff_lines: 50 } });
-    const reasons = await fastLaneEscalation({ worktree: dir, baseSha, repo: cfg });
-    expect(reasons).toContain("diff 410 lines > fast_lane.max_diff_lines 50");
+    const cfg = RepoConfigSchema.parse({ limits: { diff_count_tests: false }, tests: { globs } });
     const totals = diffTotals(await repoDiffStat(dir, baseSha, cfg, { countTests: false }));
     expect(linesCountingTests(totals)).toBe(410);
     expect(totals.counted).toBe(10);

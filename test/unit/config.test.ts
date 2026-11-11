@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigError, describeProfile, type Layer, loadLayers, parseLayer, resolveProfile, withRepoModels } from "../../src/config.js";
-import { parseRepoConfig } from "../../src/schemas/repo.js";
+import { parseRepoConfig, repoConfigHasFastLane } from "../../src/schemas/repo.js";
 import { billingOf, profileRoleOf } from "../../src/schemas/profile.js";
 
 const home = (profile?: string) => {
@@ -15,6 +15,17 @@ const home = (profile?: string) => {
 const SILAS = `
 providers: { allow: [opencode-go, openai], deny: [opencode] }
 `;
+
+describe("repo.yaml fast_lane", () => {
+  it("still parses and is ignored", () => {
+    const text = "base_branch: main\nfast_lane:\n  max_diff_lines: 40\n";
+    expect(repoConfigHasFastLane(text)).toBe(true);
+    const cfg = parseRepoConfig(text);
+    expect(cfg.base_branch).toBe("main");
+    expect(cfg).not.toHaveProperty("fast_lane");
+    expect(repoConfigHasFastLane("base_branch: main\n")).toBe(false);
+  });
+});
 
 describe("layered model config", () => {
   it("built-in defaults alone resolve, every role from the built-in layer", () => {

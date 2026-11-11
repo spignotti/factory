@@ -93,7 +93,7 @@ The canonical task YAML is the one shipped in `evals/tasks/`; a scratch copy is 
 
 A variant profile (`profiles/<name>.yaml` or any file, schemas/eval-profile.schema.json) may set
 `roles`, `retry`, `env` (a model layer), `prompts` (role prompt name → file replacing
-`roles/<name>.md`) and `flags` (`lane`, `plan_effort`). In an experiment the variant is layered on the
+`roles/<name>.md`) and `flags` (`plan_effort`). In an experiment the variant is layered on the
 base: models built-in < user < base < variant; prompts and flags merged key by key. `baseline`
 pins the default role chains of 2026-10-29.
 

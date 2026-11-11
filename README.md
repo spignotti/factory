@@ -106,7 +106,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 | Command | Purpose |
 | --- | --- |
-| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--lane fast`, `--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
+| `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
@@ -216,10 +216,9 @@ services:                            # one instance per run; see Services
 env_command: ""                      # prefix for every check command (prefer secrets: below for secrets)
 secrets: { provider: env_file, names: [DATABASE_URL] }   # checks, services, ui only, never agents; see Secrets
 tests: { globs: ["tests/**"], run: "uv run pytest {files}", timeout_s: 600, coverage: "uv run coverage json -o coverage.json" }   # coverage is optional; improve tests reads the report
-sensitive_paths: ["src/auth/**"]     # security reviewer, fast-lane escalation, at least medium risk
+sensitive_paths: ["src/auth/**"]     # security reviewer, at least medium risk
 human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]   # changed only as declared protected_changes
 review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
-fast_lane: { max_diff_lines: 150 }
 merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review | human_review
@@ -249,17 +248,17 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
 # commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
 # factory resume <run-id>"), the worktree keeps the work and resume re-runs the gates over it.
-# Diff line limits (limits.max_diff_lines, fast_lane.max_diff_lines, merge.low_max_diff_lines) count
+# Diff line limits (limits.max_diff_lines, merge.low_max_diff_lines) count
 # added + removed lines since base (renames detected: a moved file counts only its changed lines; a
 # move into or out of an excluded path counts as delete + add), without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
 # not manifests), binary files and limits.diff_exclude (generated paths; test files under tests.globs
 # always count, catch-all globs are rejected). The gate names what it left out:
 # "943 lines (+533 excluded: package-lock.json; 4 binary files)". Lockfiles still are dependency
-# changes for lane escalation and risk. Adding a diff_exclude entry is a loosening (config_guard).
+# changes for risk. Adding a diff_exclude entry is a loosening (config_guard).
 # limits.diff_count_tests [true]: set false when test coverage would otherwise force a higher
 # max_diff_lines. Files the test gates already classify as tests (`tests.globs`) are then left out of
 # limits.max_diff_lines only. Production code, docs and fixtures outside those globs still count.
-# fast_lane.max_diff_lines and merge.low_max_diff_lines still count test files, and diff_exclude is
+# merge.low_max_diff_lines still counts test files, and diff_exclude is
 # unchanged (it still cannot drop a test file). The gate detail, the run log and result.json
 # (counted_lines, excluded_test_lines) report both numbers. Turning it off is a loosening (config_guard).
 ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: ["src/app/**"], pages: ["/"], devices: ["Desktop Chrome"] }
@@ -772,10 +771,6 @@ factory experiment --base baseline --variant my-variant.yaml --repeat 2   # JSON
 
 Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real model time; see
 [`evals/README.md`](evals/README.md) for the task format, metrics and the decision rule.
-
-## Fast lane
-
-`factory run … --lane fast` is for small, single-package changes: the task is translated by `plan_normalize` (no planner), gates run as usual, `plan` and `simplicity` review in one session and there is at most one fix round. The run moves to the standard lane when `plan_normalize` stays schema-invalid (it then falls back to the planner), when the task needs more than one package, or after implement when the diff exceeds `fast_lane.max_diff_lines` (default 150) or touches dependencies, `sensitive_paths`, `human_only_paths` or migrations. Escalations are logged, listed in the PR and recorded as `lane: standard` in `result.json`. They are not a risk reason: risk is paths, diff size (`merge.low_max_diff_lines`) and protected files only.
 
 ## Reviewers
 

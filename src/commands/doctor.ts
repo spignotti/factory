@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statfsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ancestorContextFiles, PI_CONTEXT_NAMES } from "../agents/context-files.js";
 import { endpointViolation, isZenEndpoint, piProviderView, type ProviderView, ZEN_PROVIDER } from "../agents/provider-guard.js";
@@ -8,11 +8,10 @@ import { describeToolchains, resolveToolchains } from "../toolchains.js";
 import { GhCli, type GitHub } from "../gh.js";
 import { baseRef, remotesWithCredentials, revParse, withBaseWorktree } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
-import { loadRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
+import { loadRepoConfig, REPO_CONFIG_PATH, repoConfigHasFastLane, type RepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
 import { createSandbox, gitCommonDir, type Sandbox, type SandboxMode, type SandboxProbe, SandboxUnavailable } from "../sandbox/sandbox.js";
-import { mkdtempSync, rmSync, statfsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { buildAgentEnv, ensureSharedCache, prepareAgentHome } from "../agents/env.js";
 import { sh, tail } from "../exec.js";
@@ -555,6 +554,9 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
           : { name: "git remotes", status: "ok", detail: "no credentials in remote URLs" },
       );
       const repo = loadRepoConfig(repoDir);
+      if (repoConfigHasFastLane(readFileSync(join(repoDir, REPO_CONFIG_PATH), "utf8"))) {
+        checks.push({ name: "fast_lane", status: "warn", detail: "fast_lane: is ignored; the fast lane was removed" });
+      }
       checks.push(concurrencyCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
       checks.push(...standardsDoctorNotes(repoDir, repo.checks.map((c) => c.name)));

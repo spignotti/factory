@@ -193,6 +193,7 @@ export const ResultSchema = z.object({
   repo: z.string(),
   task: z.string(),
   type: z.enum(["feature", "bug", "chore"]).nullable(),
+  /** Always `standard`. `fast` remains so older result.json files still parse. */
   lane: z.enum(["standard", "fast"]),
   result: z.enum(RESULTS),
   risk: z.enum(["low", "medium", "high"]).nullable(),

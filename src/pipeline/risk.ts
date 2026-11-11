@@ -61,7 +61,7 @@ export function riskReasonLine(risk: RiskAssessment): string {
   return line.length > 300 ? `${line.slice(0, 297)}...` : line;
 }
 
-/** Risk classification, in code. Lane escalation is not a reason: only paths, diff size and protected files. */
+/** Risk classification, in code: paths, diff size and protected files. */
 export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig }): RiskAssessment {
   const { changed, diffLines, repo } = input;
   const hits = (globs: string[]) => changed.filter((f) => matchesAny(f, globs));

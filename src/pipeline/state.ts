@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunResultKind } from "../events.js";
 import type { Handoff } from "../schemas/handoff.js";
-import { type Lane, type RunContext, type Task, writeJson } from "./context.js";
+import { type RunContext, type Task, writeJson } from "./context.js";
 import type { PackageStatus } from "./dag.js";
 import type { TrackedFinding } from "./merge.js";
 
@@ -40,8 +40,9 @@ export interface RunState {
   gate_count: number;
   pr: string | null;
   pr_draft: boolean | null;
-  /** Effective lane; absent in states written before M2a (= standard). */
-  lane?: Lane;
+  /** Always `standard`. Older states may say `fast` (the removed fast lane). */
+  lane?: "standard" | "fast";
+  /** Fast-lane escalation reasons. No longer written. */
   lane_escalation?: string[];
   /**
    * The run stopped (`needs_human`) on a transient provider error (timeout, dropped stream, stream abort, capacity) after
@@ -66,7 +67,7 @@ export interface RunState {
   updated_at: string;
 }
 
-export function newState(v: { runId: string; repo: string; task: Task; noPr: boolean; lane?: Lane; wait?: boolean; notifyTarget?: string }): RunState {
+export function newState(v: { runId: string; repo: string; task: Task; noPr: boolean; wait?: boolean; notifyTarget?: string }): RunState {
   return {
     version: 1,
     run_id: v.runId,
@@ -89,8 +90,7 @@ export function newState(v: { runId: string; repo: string; task: Task; noPr: boo
     gate_count: 0,
     pr: null,
     pr_draft: null,
-    lane: v.lane ?? "standard",
-    lane_escalation: [],
+    lane: "standard",
     updated_at: new Date().toISOString(),
   };
 }

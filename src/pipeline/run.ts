@@ -17,14 +17,12 @@ import { finalize, syncBase } from "../steps/finalize.js";
 import { ensurePrDraft } from "../steps/pr-draft.js";
 import { baseCheckOutcome, type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
-import { obtainFastPlan, obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
-import { planStep } from "../steps/plan.js";
-import { fastLaneEscalation } from "./lane.js";
+import { obtainPlan, type PlanEffort, type PlanOutcome, readTask, resolvePlanEffort, type TaskInput } from "../steps/intake.js";
 import { EnvMissing } from "../services.js";
 import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "../secrets.js";
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
-import { agentEnv, checkDeadline, commandEnv, jailFor, type Lane, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLockWithRetry, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
@@ -36,7 +34,6 @@ import { listRuns, runStartedAt } from "../runs.js";
 
 export interface RunOptions extends TaskInput {
   repo: string;
-  lane?: "standard" | "fast";
   planEffort?: PlanEffort;
   noPr?: boolean;
   /** Repo locked by another run: wait in a queue instead of returning `locked`. */
@@ -75,13 +72,6 @@ async function openMemory(f: RunFrame, deps: RunDeps, repoDir: string): Promise<
     f.events.emit({ step: "intake", event: "progress", data: { memory_error: (e as Error).message } });
     return "";
   }
-}
-
-/** Fast lane → standard lane: logged, reported in result.json and the PR. */
-function escalate(f: RunFrame, events: EventLog, step: string, reasons: string[]): void {
-  f.lane = "standard";
-  if (f.state) f.state.lane = "standard";
-  events.emit({ step, event: "lane_escalated", data: { from: "fast", to: "standard", reasons } });
 }
 
 /** Flaky checks of every gate run of this run dir. */
@@ -261,7 +251,6 @@ class RunFrame {
     readonly runId: string,
     readonly runDir: string,
     readonly repoDir: string,
-    public lane: Lane,
     readonly events: EventLog,
     readonly startedAt: number,
     readonly now: Clock,
@@ -329,7 +318,7 @@ class RunFrame {
       repo: this.repoDir,
       task: this.taskRef,
       type: out.type,
-      lane: this.lane,
+      lane: "standard",
       result: out.result,
       risk: out.risk,
       risk_reasons: out.risk_reasons ?? [],
@@ -442,9 +431,8 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });
   const repoDir = resolve(opts.repo);
-  const lane = opts.lane ?? "standard";
   const ref = opts.issue !== undefined ? `#${opts.issue}` : (opts.planFile ?? opts.textFile ?? "");
-  const f = new RunFrame(runId, runDir, repoDir, lane, events, startedAt, now, ref);
+  const f = new RunFrame(runId, runDir, repoDir, events, startedAt, now, ref);
   f.deps = deps;
 
   return f.execute(async () => {
@@ -453,7 +441,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const task: Task = await readTask(opts, repoDir, deps.github);
     f.taskRef = task.ref;
     // Persist the starter's target before the lock, so a locked run still records who to wake.
-    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, lane, wait: opts.wait ?? false, notifyTarget: opts.notifyTarget }));
+    const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, wait: opts.wait ?? false, notifyTarget: opts.notifyTarget }));
     f.save();
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
@@ -475,20 +463,10 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const memoryBriefing = await openMemory(f, deps, repoDir);
     const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
 
-    const escalation: string[] = [];
     const planned: PlanOutcome = await withBaseWorktree(repoDir, baseSha, join(runDir, "plan-base"), async (planDir) => {
       const pctx = { ...base, repoDir: planDir };
-      if (lane !== "fast") return obtainPlan(pctx, resolvePlanEffort(opts.planEffort, task.labels));
-      const fast = await obtainFastPlan(pctx);
-      let p: PlanOutcome;
-      if (fast.kind === "escalate") {
-        escalation.push(fast.reason);
-        p = await planStep(pctx, "medium");
-      } else p = fast;
-      if (p.kind === "plan" && p.plan.packages.length > 1) escalation.push(`${p.plan.packages.length} packages (fast lane takes 1)`);
-      return p;
+      return obtainPlan(pctx, resolvePlanEffort(opts.planEffort, task.labels));
     });
-    if (escalation.length) escalate(f, events, "intake", escalation);
     if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
     if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
     const plan = planned.plan;
@@ -512,7 +490,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       const why = status === "pending" ? `still pending after ${repo.limits.base_ci_wait_minutes} min` : "red";
       return f.set({ result: "base_red", reason: `CI on ${repo.base_branch} (${baseSha.slice(0, 8)}) is ${why}, not green` });
     }
-    await beginWork(f, base, plan, baseSha, status, escalation, { noPr: opts.noPr ?? false, startedAt });
+    await beginWork(f, base, plan, baseSha, status, { noPr: opts.noPr ?? false, startedAt });
   });
 }
 
@@ -535,7 +513,6 @@ async function beginWork(
   plan: Plan,
   baseSha: string,
   ciStatus: BaseStatus,
-  escalation: string[],
   opts: { noPr: boolean; startedAt: number },
 ): Promise<void> {
   const { deps, events, repo, deadline, repoDir, runDir, runId, task } = base;
@@ -562,7 +539,7 @@ async function beginWork(
   f.set({ branch, worktree });
   Object.assign(st, { branch, worktree, base_sha: baseSha, step: "implement", base_ci: undefined });
   f.save();
-  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lane: f.lane, laneEscalation: [...escalation], lockSlot: f.lockSlot, maxRuns: f.maxRuns, wait: f.state?.wait ?? false };
+  const ctx: RunContext = { ...base, worktree, branch, baseSha, plan, handoffs: [], gateCount: 0, deadline, lockSlot: f.lockSlot, maxRuns: f.maxRuns, wait: f.state?.wait ?? false };
   bindLockWait(f, ctx);
   const services = (ctx.services = runServices(ctx));
   f.cleanups.push(() => services.stopAll());
@@ -635,7 +612,7 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
 
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
-  const f = new RunFrame(runId, runDir, st.repo, st.lane ?? "standard", events, startedAt, now, st.task.ref);
+  const f = new RunFrame(runId, runDir, st.repo, events, startedAt, now, st.task.ref);
   const lock = await takeRepoLock(deps, st.repo, runId, events, false, checkout.concurrency.max_runs);
   if (!lock.release) {
     events.emit({ step: "resume", event: "progress", data: { base_red_resume: "locked" } });
@@ -680,7 +657,7 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
     const base = { deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, deadline, briefing: memoryBriefing, secrets };
-    await beginWork(f, base, plan, st.base_sha!, ci, st.lane_escalation ?? [], { noPr: st.no_pr, startedAt });
+    await beginWork(f, base, plan, st.base_sha!, ci, { noPr: st.no_pr, startedAt });
   });
 }
 
@@ -708,8 +685,8 @@ export async function sweepBaseRed(deps: RunDeps, log?: (s: string) => void): Pr
 async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
   const st = f.state!;
   const sync = () => {
-    st.lane = ctx.lane;
-    st.lane_escalation = ctx.laneEscalation;
+    st.lane = "standard";
+    delete st.lane_escalation;
     st.handoffs = ctx.handoffs;
     st.gate_count = ctx.gateCount;
     st.base_sha = ctx.baseSha;
@@ -742,14 +719,6 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
       loop = { result: "needs_human", reason: `packages not done: ${failed.join("; ")}`, rounds: st.rounds, findings: [], gates };
     } else {
       st.step = "review";
-      if (ctx.lane === "fast") {
-        const reasons = await fastLaneEscalation(ctx);
-        if (reasons.length) {
-          escalate(f, ctx.events, "implement", reasons);
-          ctx.lane = "standard";
-          ctx.laneEscalation.push(...reasons);
-        }
-      }
       sync();
     }
   }
@@ -851,7 +820,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
   if (deps.sandbox) events.emit({ step: "intake", event: "sandbox", data: { ...deps.sandbox } });
-  const f = new RunFrame(runId, runDir, st.repo, st.lane ?? "standard", events, startedAt, now, st.task.ref);
+  const f = new RunFrame(runId, runDir, st.repo, events, startedAt, now, st.task.ref);
   f.deps = deps;
   f.set({ branch: st.branch, worktree: st.worktree, pr: st.pr, rounds: st.rounds });
 
@@ -862,7 +831,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     f.state = st;
     const draftError = await keepDraft(f);
     const locked: RunResult = {
-      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: st.lane ?? "standard", result: draftError ? "needs_human" : "locked", risk: null, merge_policy: null,
+      run_id: runId, repo: st.repo, task: st.task.ref, type: null, lane: "standard", result: draftError ? "needs_human" : "locked", risk: null, merge_policy: null,
       pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason: draftError ? `${lock.reason}; ${draftError}` : lock.reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
     };
     await notifyFinished(locked, deps, events);
@@ -886,7 +855,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       const queryFailed = f.out.result === "needs_human";
       const reason = draftError ? `${f.out.reason}; ${draftError}` : f.out.reason;
       const locked: RunResult = {
-        run_id: runId, repo: st.repo, task: st.task.ref, type: plan.type, lane: st.lane ?? "standard", result: queryFailed || draftError ? "needs_human" : "locked", risk: null, merge_policy: null,
+        run_id: runId, repo: st.repo, task: st.task.ref, type: plan.type, lane: "standard", result: queryFailed || draftError ? "needs_human" : "locked", risk: null, merge_policy: null,
         pr: st.pr, rounds: st.rounds, minutes: 0, cost_usd: 0, reason, branch: st.branch, worktree: st.worktree, run_dir: runDir,
       };
       await notifyFinished(locked, deps, events);
@@ -915,7 +884,6 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     const memoryBriefing = await openMemory(f, deps, st.repo);
     const ctx: RunContext = {
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
-      lane: st.lane ?? "standard", laneEscalation: st.lane_escalation ?? [],
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline, secrets,
       lockSlot: f.lockSlot,
       maxRuns: f.maxRuns,

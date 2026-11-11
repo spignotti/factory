@@ -678,13 +678,6 @@
     "flags": {
       "type": "object",
       "properties": {
-        "lane": {
-          "type": "string",
-          "enum": [
-            "standard",
-            "fast"
-          ]
-        },
         "plan_effort": {
           "type": "string",
           "enum": [

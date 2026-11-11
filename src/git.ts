@@ -274,7 +274,7 @@ export function diffTotals(stat: Map<string, DiffEntry>): DiffTotals {
 }
 
 /**
- * Lines for `fast_lane.max_diff_lines` and `merge.low_max_diff_lines`.
+ * Lines for `merge.low_max_diff_lines`.
  * Test files count here even when the max_diff_lines gate left them out.
  */
 export function linesCountingTests(t: DiffTotals): number {
@@ -300,7 +300,7 @@ export function formatDiffTotals(t: DiffTotals, opts?: { countTests?: boolean })
 /**
  * Diff stat with the repo's exclusions (`limits.diff_exclude`).
  * `opts.countTests` defaults to true. Pass `repo.limits.diff_count_tests` for the max_diff_lines
- * gate; fast-lane and merge risk pass it too and add `excludedTestLines` back (`linesCountingTests`).
+ * gate; merge risk passes it too and adds `excludedTestLines` back (`linesCountingTests`).
  */
 export async function repoDiffStat(
   cwd: string,
