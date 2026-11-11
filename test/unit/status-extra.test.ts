@@ -4,9 +4,35 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { FakeGitHub } from "../../src/gh.js";
+import { RepoConfigSchema } from "../../src/schemas/repo.js";
 import { EventLog } from "../../src/events.js";
 
 describe("status extended sections", () => {
+  it("lists stale draft factory PRs with a hint to close or resume", async () => {
+    expect(RepoConfigSchema.parse({}).limits.stale_draft_days).toBe(3);
+    const home = join(tmpdir(), `status-stale-${Date.now()}`);
+    const runDir = join(home, "runs", "20261030-150000-abc123");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "state.json"), JSON.stringify({
+      version: 1, run_id: "20261030-150000-abc123", repo: "/tmp/r", task: { ref: "issue #1", labels: [] },
+      no_pr: false, step: "finished", result: "needs_human", reason: "stale", branch: "factory/1",
+      worktree: "/wt", base_sha: "sha", packages: {}, failures: {}, handoffs: [], rounds: 0, findings: [],
+      gate_count: 0, pr: null, pr_draft: true, lane: "standard", lane_escalation: [], updated_at: new Date().toISOString(),
+    }));
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    const gh = new FakeGitHub();
+    gh.factoryPrs.push(
+      { number: 12, branch: "factory/12", files: ["src/a.ts"], draft: true, headChangedAt: new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString() },
+      { number: 13, branch: "factory/13", files: ["src/b.ts"], draft: true, headChangedAt: new Date(now - 60 * 60 * 1000).toISOString() },
+      { number: 14, branch: "factory/14", files: ["src/c.ts"], draft: false, headChangedAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString() },
+    );
+    const s = await statusReport({ factoryHome: home, github: gh, now: () => now });
+    expect(s.stale_drafts).toEqual([{ repo: "/tmp/r", pr: 12, branch: "factory/12", days_unchanged: 5 }]);
+    expect(renderStatus(s)).toContain("#12 factory/12 — head unchanged for 5 days; close the PR or resume the run (/tmp/r)");
+    expect(renderStatus(s)).not.toContain("#13");
+    expect(renderStatus(s)).not.toContain("#14");
+  });
+
   it("reports orphaned runs from dead lock holders", async () => {
     const home = join(tmpdir(), `status-orphan-${Date.now()}`);
     const runId = "20261030-150000-abc123";

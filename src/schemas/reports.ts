@@ -55,6 +55,18 @@ export const StatusReportSchema = z.strictObject({
       merge_policy: nullableStr, risk: nullableStr, result: nullableStr, error: z.string().optional(),
     }),
   ),
+  /**
+   * Open factory PRs that are drafts and whose head has not changed for `limits.stale_draft_days`.
+   * They do not block the queue. Close the PR or resume the run.
+   */
+  stale_drafts: z.array(
+    z.strictObject({
+      repo: z.string(),
+      pr: z.number().int(),
+      branch: z.string(),
+      days_unchanged: z.number(),
+    }),
+  ),
   /** Open audit proposals, one row per proposal, across every repo in `$FACTORY_HOME`. */
   audit_tickets: z.array(OpenAuditTicketSchema),
   /**

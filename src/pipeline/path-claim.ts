@@ -5,7 +5,7 @@ import { Interrupted } from "../interrupt.js";
 import { checkDeadline, type RunContext, WallTimeExceeded } from "./context.js";
 import { decidePathClaim, lockRepoKey } from "./lock.js";
 import { pathsOverlap, touchesExclusive } from "./overlap.js";
-import type { RepoConfig } from "../schemas/repo.js";
+import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
 
 /** Parallel runs or exclusive-path globs need a live claim over the files that will ship. */
 export function needsConcurrencyPathClaim(repo: Pick<RepoConfig, "concurrency">): boolean {
@@ -17,13 +17,43 @@ export interface FactoryPrHit {
   files: string[];
 }
 
-/** Open `factory/*` PRs (other than this run's branch) whose files overlap `paths`. */
-export function factoryPrOverlaps(prs: OpenFactoryPr[], paths: string[], ownBranch?: string): FactoryPrHit[] {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Draft whose head has not changed for `days`. Unknown age still blocks. `days <= 0` disables the rule. */
+export function isStaleDraft(pr: Pick<OpenFactoryPr, "draft" | "headChangedAt">, days: number, now: number): boolean {
+  if (pr.draft !== true || days <= 0 || !pr.headChangedAt) return false;
+  const t = Date.parse(pr.headChangedAt);
+  if (!Number.isFinite(t)) return false;
+  return now - t >= days * DAY_MS;
+}
+
+export function staleDraftDaysAt(repoDir: string): number {
+  try {
+    return loadRepoConfig(repoDir).limits.stale_draft_days;
+  } catch {
+    return 3;
+  }
+}
+
+export function daysUnchanged(headChangedAt: string, now: number): number {
+  return Math.floor((now - Date.parse(headChangedAt)) / DAY_MS);
+}
+
+/** Open `factory/*` PRs (other than this run's branch) whose files overlap `paths`. Stale drafts are ignored. */
+export function factoryPrOverlaps(
+  prs: OpenFactoryPr[],
+  paths: string[],
+  ownBranch?: string,
+  opts?: { staleDraftDays?: number; now?: number },
+): FactoryPrHit[] {
   if (!paths.length) return [];
+  const days = opts?.staleDraftDays ?? 3;
+  const now = opts?.now ?? Date.now();
   const hits: FactoryPrHit[] = [];
   for (const pr of prs) {
     if (!pr.branch.startsWith("factory/")) continue;
     if (ownBranch && pr.branch === ownBranch) continue;
+    if (isStaleDraft(pr, days, now)) continue;
     const files = [...new Set(pr.files.filter((f) => paths.some((p) => pathsOverlap(p, f))))];
     if (files.length) hits.push({ number: pr.number, files });
   }
@@ -35,9 +65,9 @@ export function factoryPrOverlapReason(when: "planned" | "changed", hits: Factor
   return `${when} paths overlap open factory PR ${listed}`;
 }
 
-export async function openFactoryPrOverlap(github: GitHub, repoDir: string, paths: string[], ownBranch?: string): Promise<FactoryPrHit[]> {
+export async function openFactoryPrOverlap(github: GitHub, repoDir: string, paths: string[], ownBranch?: string, now = Date.now()): Promise<FactoryPrHit[]> {
   if (!paths.length) return [];
-  return factoryPrOverlaps(await github.openFactoryPrFiles(repoDir), paths, ownBranch);
+  return factoryPrOverlaps(await github.openFactoryPrFiles(repoDir), paths, ownBranch, { staleDraftDays: staleDraftDaysAt(repoDir), now });
 }
 
 export type ChangedPathBlock = { ok: false; reason: string; kind: "run" | "pr" | "github" };

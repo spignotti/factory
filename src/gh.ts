@@ -199,6 +199,10 @@ export interface OpenFactoryPr {
   /** Head branch (`factory/…`). */
   branch: string;
   files: string[];
+  /** Absent when the list payload had no `isDraft` (older callers). */
+  draft?: boolean;
+  /** ISO time of the latest head commit, else `updatedAt`. Absent when neither was listed. */
+  headChangedAt?: string;
 }
 
 function filePaths(files: unknown): string[] {
@@ -228,12 +232,37 @@ export class IncompletePrListError extends Error {
 }
 
 export function openFactoryPrListArgs(limit = OPEN_FACTORY_PR_LIMIT): string[] {
-  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", "number,headRefName,isCrossRepository,files"];
+  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", "number,headRefName,isCrossRepository,isDraft,updatedAt,commits,files"];
+}
+
+function isoDate(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? new Date(t).toISOString() : undefined;
+}
+
+/** Latest head commit time. `commits` may be a list or `{ nodes: [...] }`. */
+function latestCommitAt(commits: unknown): string | undefined {
+  const rows = Array.isArray(commits) ? commits : commits && typeof commits === "object" && Array.isArray((commits as { nodes?: unknown }).nodes) ? (commits as { nodes: unknown[] }).nodes : [];
+  let best = 0;
+  let iso: string | undefined;
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const raw = (row as { committedDate?: unknown; committed_date?: unknown }).committedDate ?? (row as { committed_date?: unknown }).committed_date;
+    const at = isoDate(raw);
+    if (!at) continue;
+    const t = Date.parse(at);
+    if (t >= best) {
+      best = t;
+      iso = at;
+    }
+  }
+  return iso;
 }
 
 /**
- * `gh pr list --json number,headRefName,isCrossRepository,files`.
- * Keeps same-repo `factory/*` heads. `files` may be a flat list or `{ nodes: [...] }`.
+ * `gh pr list --json number,headRefName,isCrossRepository,isDraft,updatedAt,commits,files`.
+ * Keeps same-repo `factory/*` heads. `files` and `commits` may be a flat list or `{ nodes: [...] }`.
  * A payload that is not an array, or that fills `limit`, is incomplete: callers must block, not treat it as every open PR.
  */
 export function readOpenFactoryPrs(payload: unknown, limit = OPEN_FACTORY_PR_LIMIT): OpenFactoryPr[] {
@@ -247,11 +276,18 @@ export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
   const out: OpenFactoryPr[] = [];
   for (const row of payload) {
     if (!row || typeof row !== "object") continue;
-    const pr = row as { number?: unknown; headRefName?: unknown; isCrossRepository?: unknown; files?: unknown };
+    const pr = row as { number?: unknown; headRefName?: unknown; isCrossRepository?: unknown; files?: unknown; isDraft?: unknown; updatedAt?: unknown; commits?: unknown };
     if (pr.isCrossRepository === true) continue;
     if (typeof pr.number !== "number" || !Number.isInteger(pr.number) || pr.number <= 0) continue;
     if (typeof pr.headRefName !== "string" || !pr.headRefName.startsWith("factory/")) continue;
-    out.push({ number: pr.number, branch: pr.headRefName, files: filePaths(pr.files) });
+    const headChangedAt = latestCommitAt(pr.commits) ?? isoDate(pr.updatedAt);
+    out.push({
+      number: pr.number,
+      branch: pr.headRefName,
+      files: filePaths(pr.files),
+      ...(pr.isDraft === true ? { draft: true } : pr.isDraft === false ? { draft: false } : {}),
+      ...(headChangedAt ? { headChangedAt } : {}),
+    });
   }
   return out;
 }
@@ -919,7 +955,7 @@ export class FakeGitHub implements GitHub {
   readonly factoryPrs: OpenFactoryPr[] = [];
 
   async openFactoryPrFiles(): Promise<OpenFactoryPr[]> {
-    return this.factoryPrs.map((p) => ({ number: p.number, branch: p.branch, files: [...p.files] }));
+    return this.factoryPrs.map((p) => ({ ...p, files: [...p.files] }));
   }
 
   async createPr(req: PrRequest): Promise<string> {

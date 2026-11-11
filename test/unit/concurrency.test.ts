@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { concurrencyCheck } from "../../src/commands/doctor.js";
 import { acquireRepoLock, acquireRepoLockWithRetry, attemptAcquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
-import { factoryPrOverlapReason, factoryPrOverlaps, needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
+import { factoryPrOverlapReason, factoryPrOverlaps, isStaleDraft, needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
 import { GhCli, IncompletePrListError, OPEN_FACTORY_PR_LIMIT, openFactoryPrListArgs, parseOpenFactoryPrs, readOpenFactoryPrs } from "../../src/gh.js";
 import { claimsConflict, pathsOverlap, touchesExclusive } from "../../src/pipeline/overlap.js";
 import { riskReasonLine, securityRows } from "../../src/pipeline/risk.js";
@@ -214,6 +214,27 @@ describe("risk and host steps", () => {
     expect(hits).toEqual([{ number: 12, files: ["a.py"] }]);
     expect(factoryPrOverlapReason("planned", hits)).toBe("planned paths overlap open factory PR #12 (a.py)");
     expect(factoryPrOverlaps(parsed, ["b.py"])).toEqual([]);
+  });
+
+  it("ignores draft factory PRs whose head has not changed for stale_draft_days", () => {
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    const old = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    const prs = [
+      { number: 1, branch: "factory/1", files: ["a.py"], draft: true, headChangedAt: old },
+      { number: 2, branch: "factory/2", files: ["a.py"], draft: true, headChangedAt: fresh },
+      { number: 3, branch: "factory/3", files: ["a.py"], draft: false, headChangedAt: old },
+      { number: 4, branch: "factory/4", files: ["a.py"], draft: true },
+    ];
+    expect(factoryPrOverlaps(prs, ["a.py"], undefined, { staleDraftDays: 3, now }).map((h) => h.number)).toEqual([2, 3, 4]);
+    expect(factoryPrOverlaps(prs, ["a.py"], undefined, { staleDraftDays: 0, now }).map((h) => h.number)).toEqual([1, 2, 3, 4]);
+    expect(isStaleDraft(prs[0]!, 3, now)).toBe(true);
+    const parsed = parseOpenFactoryPrs([
+      { number: 9, headRefName: "factory/9", isDraft: true, commits: [{ committedDate: old }], files: [{ path: "a.py" }] },
+    ]);
+    expect(parsed[0]).toMatchObject({ draft: true, headChangedAt: old });
+    expect(openFactoryPrListArgs().join(" ")).toContain("isDraft");
+    expect(openFactoryPrListArgs().join(" ")).toContain("commits");
   });
 
   it("an open PR list that fills the page is not a clearance", () => {

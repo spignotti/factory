@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { CI_STUB_PATH, CI_TEMPLATE, ciStubCheck, ciStubMode, otherPrWorkflows, renderCiStub, renderCiStubFor, sha256 } from "../../src/ci.js";
+import { CI_STUB_PATH, CI_TEMPLATE, ciStubCheck, ciStubMode, otherPrWorkflows, renderCiStub, renderCiStubFor, resolveFactoryRef, sha256, tagPinComment } from "../../src/ci.js";
 import { DRAFT_HOLD_JOB, FACTORY_WORKFLOW } from "../../src/pipeline/ci-status.js";
 import { defaultRef, main } from "../../src/cli.js";
 import { settingsHints } from "../../src/commands/adopt.js";
@@ -263,21 +263,66 @@ describe("CI stub", () => {
     expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main", "minimal")[0]).toMatch(/Remove the required status check "factory \/ done"/);
   });
 
-  it("factory ci-stub --ref prints the rendered stub", async () => {
+  it("factory ci-stub --ref resolves a tag to its commit SHA and keeps the tag as a comment", async () => {
+    const sha = "c".repeat(40);
+    const resolveRef = (ref: string) => ({ pin: sha, tag: ref });
     let out = "";
-    expect(await main(["ci-stub", "--ref", "v0.3.0"], { out: (s) => void (out += s), err: () => {} })).toBe(0);
-    expect(out).toBe(readFileSync(CI_TEMPLATE, "utf8").replaceAll("@FACTORY_REF@", "v0.3.0"));
+    expect(await main(["ci-stub", "--ref", "v0.3.0"], { out: (s) => void (out += s), err: () => {} }, { resolveRef })).toBe(0);
+    expect(out).toBe(renderCiStubFor(sha, "full", "v0.3.0"));
+    expect(out).toContain(`github:spignotti/factory#${sha}`);
+    expect(out).toContain(tagPinComment("v0.3.0", sha));
+    expect(out).not.toContain("factory#v0.3.0");
     const localOnly = createFixtureRepo((c) => {
       for (const check of c.checks as { local_only?: boolean }[]) check.local_only = true;
     });
     let minimal = "";
-    expect(await main(["ci-stub", "--ref", "v0.3.0", "--repo", localOnly], { out: (s) => void (minimal += s), err: () => {} })).toBe(0);
-    expect(minimal).toBe(renderCiStubFor("v0.3.0", "minimal"));
-    let pinned = "";
-    expect(await main(["ci-stub"], { out: (s) => void (pinned += s), err: () => {} })).toBe(0);
+    expect(await main(["ci-stub", "--ref", "v0.3.0", "--repo", localOnly], { out: (s) => void (minimal += s), err: () => {} }, { resolveRef })).toBe(0);
+    expect(minimal).toBe(renderCiStubFor(sha, "minimal", "v0.3.0"));
+    const bare = "d".repeat(40);
+    let already = "";
+    expect(await main(["ci-stub", "--ref", bare], { out: (s) => void (already += s), err: () => {} })).toBe(0);
+    expect(already).toBe(readFileSync(CI_TEMPLATE, "utf8").replaceAll("@FACTORY_REF@", bare));
     const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
-    expect(pinned).toBe(renderCiStub(`v${version}`)); // default pin: this factory's release tag
     expect(defaultRef()).toBe(`v${version}`); // follows package.json, so a release PR needs no test edit
+  });
+
+  it("resolves a tag via git peel, then gh, then an unpeeled tag", () => {
+    const sha = "a".repeat(40);
+    const calls: string[] = [];
+    const lookup = {
+      exec(command: "git" | "gh", args: string[]) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "git" && args.some((a) => a.endsWith("^{}"))) return `${sha}\trefs/tags/v0.4.0^{}\n`;
+        throw new Error("unused");
+      },
+    };
+    expect(resolveFactoryRef("v0.4.0", lookup)).toEqual({ pin: sha, tag: "v0.4.0" });
+    expect(calls).toEqual([`git ls-remote https://github.com/spignotti/factory.git refs/tags/v0.4.0^{}`]);
+    expect(resolveFactoryRef(sha, { exec: () => { throw new Error("no"); } })).toEqual({ pin: sha });
+    const gh = {
+      exec(command: "git" | "gh") {
+        if (command === "git") return "";
+        return `${sha.toUpperCase()}\n`;
+      },
+    };
+    expect(resolveFactoryRef("v0.4.0", gh)).toEqual({ pin: sha, tag: "v0.4.0" });
+    expect(() => resolveFactoryRef("v9.9.9", { exec: () => { throw new Error("offline"); } })).toThrow(/could not resolve factory ref v9.9.9/);
+    expect(() => resolveFactoryRef("../x", { exec: () => "" })).toThrow(/invalid factory ref/);
+  });
+
+  it("doctor accepts a tag pin and a SHA pin (with or without the tag comment)", () => {
+    const repo = createFixtureRepo();
+    const sha = "b".repeat(40);
+    write(repo, CI_STUB_PATH, renderCiStub("v0.2.0"));
+    expect(ciStubCheck(repo).status).toBe("ok");
+    write(repo, CI_STUB_PATH, renderCiStub(sha));
+    expect(ciStubCheck(repo)).toMatchObject({ status: "ok", detail: expect.stringContaining(sha) });
+    write(repo, CI_STUB_PATH, renderCiStubFor(sha, "full", "v0.4.0"));
+    expect(ciStubCheck(repo).status).toBe("ok");
+    write(repo, CI_STUB_PATH, renderCiStubFor(sha, "minimal", "v0.4.0"));
+    expect(ciStubCheck(repo, undefined, undefined, "minimal").status).toBe("ok");
+    write(repo, CI_STUB_PATH, renderCiStub("v0.2.0").replace("name: factory\n", `name: factory\n${tagPinComment("v0.2.0", sha)}\n`));
+    expect(ciStubCheck(repo)).toMatchObject({ status: "fail", detail: expect.stringMatching(/tag comment records/) });
   });
 });
 
