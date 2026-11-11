@@ -18,6 +18,7 @@ import { statsCommand } from "./commands/stats.js";
 import { queueCommand } from "./commands/queue.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
+import { standardsMigrateCommand } from "./commands/standards.js";
 import { auditAlias, hardenAlias, improveCommand } from "./commands/improve.js";
 import { AUDIT_TYPES, type AuditType, IMPROVE_ASPECTS, type ImproveAspect, MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
 import { GhCli } from "./gh.js";
@@ -44,6 +45,8 @@ const USAGE = `usage:
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
   factory abandon <run-id> [--json]
               (marks the run abandoned, releases a stale lock, removes its worktree; result and logs stay)
+  factory standards migrate --repo <path> [--json]
+              (writes .factory/standards.md from checklist.md and review-rules.md, severity first and ## Rules last; does not delete the old files)
   factory doctor [--repo <path>] [--profile <file>] [--ping] [--services] [--json]
               (setup checks, Zen guard, ChatGPT login; effective model per role and its layer;
                CI stub hash; --ping sends one tiny request per configured model;
@@ -380,6 +383,22 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const { values } = parseArgs({ args: rest, options: { ref: { type: "string" }, repo: { type: "string" } } });
       io.out(renderCiStubFor(values.ref ?? defaultRef(), ciStubModeAt(resolve(values.repo ?? "."))));
       return 0;
+    }
+    if (command === "standards") {
+      const [sub, ...subRest] = rest;
+      if (sub !== "migrate") {
+        io.err(USAGE);
+        return 2;
+      }
+      const { values } = parseArgs({
+        args: subRest,
+        options: { repo: { type: "string" }, json: { type: "boolean", default: false } },
+      });
+      if (!values.repo) {
+        io.err(USAGE);
+        return 2;
+      }
+      return standardsMigrateCommand({ repo: values.repo, json: values.json }, io);
     }
     if (command === "doctor") {
       const { values } = parseArgs({

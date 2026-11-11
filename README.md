@@ -193,8 +193,7 @@ Runs live in `~/.factory/runs/<run-id>/` (override with `FACTORY_HOME`). The tar
 
 ```
 .factory/repo.yaml         # checks, services, policies (required)
-.factory/review-rules.md   # repo-specific review rules
-.factory/checklist.md      # optional checklist reviewer items
+.factory/standards.md      # repo rules under ## Rules; optional ## Severity section (see Standards)
 .factory/verify/<area>.md  # verification guides per app area (not human-only: they evolve with the app)
 .github/workflows/factory.yml   # CI stub, generated, never edited by hand
 AGENTS.md                  # repo facts for every agent (purpose, commands, test strategy, do-not rules)
@@ -764,14 +763,22 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Reviewers
 
-`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `checklist` joins when `review.checklist` is on (default) and `.factory/checklist.md` has unmarked items:
+`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `standards` joins when `review.checklist` is on (default) and `.factory/standards.md` has unmarked rules (see Standards). Review rules are the `## Severity` section of that file, or `standards/review-rules.md` when the section is absent. Both are read from the base commit.
+
+## Standards
+
+Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations; add `<!-- check: name -->` once that name is a `repo.yaml` check or a pull_request job in `.github/workflows/`. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
 
 ```markdown
+## Severity
+
+- `bug`: correctness, security or breakage defect, or an unmet acceptance criterion.
+
+## Rules
+
 - Every API route checks the session
 - Migrations are reversible <!-- check: migrations -->
 ```
-
-One list item per rule. Mark an item with `<!-- check: <check name> -->` once a deterministic check enforces it; marked items are no longer reviewed by an LLM. The checklist is read from the base commit.
 
 ## Findings memory
 

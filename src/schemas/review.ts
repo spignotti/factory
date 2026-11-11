@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-export const ReviewerSchema = z.enum(["plan", "simplicity", "security", "checklist", "evaluator"]);
+/**
+ * `checklist` is the old name of the standards reviewer. It stays in the input enum so the
+ * published JSON schema still lists the alias; parsing maps it to `standards`.
+ */
+export const ReviewerSchema = z
+  .enum(["plan", "simplicity", "security", "standards", "checklist", "evaluator"])
+  .transform((v) => (v === "checklist" ? "standards" : v));
 export type Reviewer = z.infer<typeof ReviewerSchema>;
 
 export const SeveritySchema = z.enum(["bug", "suggestion", "nit"]);

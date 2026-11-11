@@ -269,6 +269,33 @@ describe("factory doctor: Zen guard rules", () => {
   });
 });
 
+describe("factory doctor: standards", () => {
+  it("warns about the old files, then fails on a dangling marker", async () => {
+    const repo = createFixtureRepo();
+    writeFileSync(join(repo, ".factory", "checklist.md"), "- keep tests <!-- check: nope -->\n- syntax is clean <!-- check: syntax -->\n");
+    mkdirSync(join(repo, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(repo, ".github", "workflows", "lint.yml"), "on: [pull_request]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n");
+    const c = capture();
+    expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c.io)).toBe(1);
+    const notes = (JSON.parse(c.text()) as DoctorReport).checks.filter((x) => x.name === "standards");
+    expect(notes.map((x) => x.status)).toEqual(["warn", "fail"]);
+    expect(notes[0]!.detail).toMatch(/factory standards migrate/);
+    expect(notes[1]!.detail).toContain('"nope"');
+    expect(notes[1]!.detail).not.toContain("syntax");
+
+    writeFileSync(join(repo, ".factory", "standards.md"), "- lint job <!-- check: lint -->\n- missing <!-- check: missing -->\n\n## Severity\n\n- bug: x <!-- check: ignored -->\n");
+    const c2 = capture();
+    expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c2.io)).toBe(1);
+    const migrated = (JSON.parse(c2.text()) as DoctorReport).checks.filter((x) => x.name === "standards");
+    expect(migrated.map((x) => x.status)).toEqual(["warn", "fail"]);
+    expect(migrated[0]!.detail).toMatch(/checklist\.md is ignored\. Delete it/);
+    expect(migrated[0]!.detail).not.toMatch(/factory standards migrate/);
+    expect(migrated[1]!.detail).toContain('"missing"');
+    expect(migrated[1]!.detail).not.toContain("ignored");
+    expect(migrated[1]!.detail).not.toContain("lint");
+  });
+});
+
 describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", () => {
   it("a repo without repo.yaml: the model table still shows, the repo check names the missing file", async () => {
     const repo = mkdtempSync(join(tmpdir(), "norepo-"));

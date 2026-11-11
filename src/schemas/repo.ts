@@ -337,6 +337,7 @@ export const RepoConfigSchema = z
     review: z
       .object({
         max_rounds: z.number().int().min(1).default(2),
+        /** Unmarked `.factory/standards.md` rules get the standards reviewer. Turning it off is a loosening. */
         checklist: z.boolean().default(true),
         skip_paths: z.array(z.string()).default([]),
         max_nits: z.number().int().min(0).default(5),

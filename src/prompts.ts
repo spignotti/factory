@@ -12,9 +12,23 @@ export function asset(path: string): string {
   return text;
 }
 
+/** `review-checklist` is the old prompt name of `review-standards` (eval overrides may use either). */
+const PROMPT_ALIASES: Record<string, string> = {
+  "review-standards": "review-checklist",
+  "review-checklist": "review-standards",
+};
+
 /** A role prompt (`roles/<name>.md`), or its replacement from an eval profile (`RunDeps.prompts`). */
 export function rolePrompt(name: string, overrides?: Partial<Record<string, string>>): string {
-  return (overrides?.[name] ?? asset(`roles/${name}.md`)).trim();
+  const alias = PROMPT_ALIASES[name];
+  const text = overrides?.[name] ?? (alias ? overrides?.[alias] : undefined);
+  if (text !== undefined) return text.trim();
+  try {
+    return asset(`roles/${name}.md`).trim();
+  } catch {
+    if (!alias) throw new Error(`missing role prompt ${name}`);
+    return asset(`roles/${alias}.md`).trim();
+  }
 }
 
 /** Untrusted text (task, PR, diff) is passed as delimited data, never as instructions. */
