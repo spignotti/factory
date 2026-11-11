@@ -54,8 +54,8 @@ describe("factory resume", () => {
     expect(git(wt, "log", "--format=%s|%an", "main..HEAD")).toContain("fix: human changes before resume|factory-bot");
     expect(git(wt, "status", "--porcelain")).toBe("");
     expect(r2.github.prs).toHaveLength(1);
-    expect(r2.github.prs[0]!.draft).toBe(true);
-    expect(r2.github.readied).toEqual([r2.result.pr]);
+    expect(r2.github.prs[0]!.draft).toBe(false);
+    expect(r2.github.readied).toEqual([]);
     expect(r2.events.some((e) => e.step === "resume" && e.data.human_changes_committed)).toBe(true);
     expect(readState(r.runDir)).toMatchObject({ step: "finished", result: "done", packages: { P1: "done" } });
     // events.jsonl is appended to, not replaced
