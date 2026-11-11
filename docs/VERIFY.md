@@ -70,6 +70,10 @@ Unverified (needs a real provider):
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).
 - `getIssue` also reads `state` (`OPEN` / `CLOSED`) for `queue add`. UNVERIFIED against a live `gh`.
+- `ciRunsInWindow` pages `GET /repos/{owner}/{repo}/actions/runs?per_page=100&page=N&created=>=YYYY-MM-DD`
+  and maps each run to the verified `gh run list --json` shape, plus `headBranch` (`head_branch`). Then
+  `gh run view --json jobs` per id. A short page ends the window; 30 full pages is truncated. UNVERIFIED
+  against a live `gh`. Tests fold recorded pages and do not spawn `gh`. The 200-run `gh run list` audit is unchanged.
 - `listOpenIssues` pages `gh api repos/{owner}/{repo}/issues?state=open&per_page=100` (issues and pull
   requests; pull requests are dropped). A short page ends the list. Fifty full pages is incomplete: improve
   does not create an issue. UNVERIFIED against a live `gh`. Tests drive `paginateOpenIssues` without `gh`.

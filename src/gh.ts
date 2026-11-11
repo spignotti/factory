@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { CI_PAGE_SIZE, ciRunListArgs, ciRunViewArgs, paginateRunList, parseRunView } from "./ci-history.js";
 import { CommandTimeoutError, execFileTimed } from "./exec.js";
 import { GIT_LOCAL_TIMEOUT_MS, git } from "./git.js";
 import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
@@ -122,6 +123,11 @@ export interface GitHub {
   repoSettings(repoDir: string, branch: string): Promise<RepoSettings>;
   /** `harden` CI audit: workflow runs created since `since` (ISO date), newest first, with their jobs; at most `limit`. */
   ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]>;
+  /**
+   * improve `ci` / `tests`: every workflow run in the window, newest first, paged past the 200-run cap.
+   * `truncated` when the page cap was hit.
+   */
+  ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }>;
   /** `harden`: newest release tag of the factory itself (`owner/repo`), null when there is none. */
   latestTag(repoDir: string, ownerRepo: string): Promise<string | null>;
 }
@@ -140,6 +146,8 @@ export interface CiRun {
   event: string;
   conclusion: string | null;
   created_at: string;
+  /** Branch or tag. Absent when the list did not include `headBranch`. */
+  head_branch?: string | null;
   jobs: CiJob[];
 }
 
@@ -731,16 +739,22 @@ export class GhCli implements GitHub {
     ) as { databaseId: number; headSha: string; workflowName: string; event: string; conclusion: string | null; createdAt: string }[];
     const out: CiRun[] = [];
     for (const r of list) {
-      const view = JSON.parse(await gh(repoDir, ["run", "view", String(r.databaseId), "--json", "jobs"])) as {
-        jobs: { name: string; conclusion: string | null; startedAt: string | null; completedAt: string | null }[];
-      };
-      const jobs = view.jobs.map((j) => {
-        const ms = j.startedAt && j.completedAt ? Date.parse(j.completedAt) - Date.parse(j.startedAt) : NaN;
-        return { name: j.name, conclusion: j.conclusion || null, seconds: Number.isFinite(ms) && ms >= 0 ? Math.round(ms / 1000) : null };
-      });
+      const jobs = parseRunView(JSON.parse(await gh(repoDir, ciRunViewArgs(r.databaseId))));
       out.push({ id: r.databaseId, sha: r.headSha, workflow: r.workflowName, event: r.event, conclusion: r.conclusion || null, created_at: r.createdAt, jobs });
     }
     return out;
+  }
+
+  async ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }> {
+    // UNVERIFIED: Actions runs paging. `gh run list` has no page flag and stops at its own limit.
+    const { rows, truncated } = await paginateRunList(async (page, perPage) => JSON.parse(await gh(repoDir, ciRunListArgs(since.slice(0, 10), page, perPage))));
+    const runs: CiRun[] = [];
+    for (const row of rows) {
+      if (row.created_at < since) continue;
+      const jobs = parseRunView(JSON.parse(await gh(repoDir, ciRunViewArgs(row.id))));
+      runs.push({ id: row.id, sha: row.sha, workflow: row.workflow, event: row.event, conclusion: row.conclusion, created_at: row.created_at, head_branch: row.head_branch, jobs });
+    }
+    return { runs, truncated };
   }
 
   async latestTag(repoDir: string, ownerRepo: string): Promise<string | null> {
@@ -943,11 +957,18 @@ export class FakeGitHub implements GitHub {
   /** CI history and the factory's newest tag as `harden` sees them. */
   runs: CiRun[] = [];
   factoryTag: string | null = null;
+  /** Set when a test wants the window reported as cut off by the page cap. */
+  ciTruncated = false;
   readonly ciQueries: { since: string; limit: number }[] = [];
 
   async ciRuns(_repoDir: string, since: string, limit: number): Promise<CiRun[]> {
     this.ciQueries.push({ since, limit });
     return this.runs.filter((r) => r.created_at >= since).slice(0, limit);
+  }
+
+  async ciRunsInWindow(_repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }> {
+    this.ciQueries.push({ since, limit: CI_PAGE_SIZE });
+    return { runs: this.runs.filter((r) => r.created_at >= since), truncated: this.ciTruncated };
   }
 
   async latestTag(): Promise<string | null> {

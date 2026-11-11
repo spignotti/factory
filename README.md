@@ -114,7 +114,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), queues, PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
-| `factory improve --repo <p> [--aspect <a>]` | findings, security, performance, structure → GitHub issues |
+| `factory improve --repo <p> [--aspect <a>]` | findings, security, performance, structure, ci, tests → GitHub issues |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>] [--repo <path>]` | print the CI workflow (minimal when no check runs in CI) |
 | `factory notify test <owner/name> [--target <name>]` | send a test ping to the repo hook or a named target (see [docs/BOTS.md](docs/BOTS.md)) |
@@ -215,7 +215,7 @@ services:                            # one instance per run; see Services
   - { name: stack, host: true, start: "…", stop: "…", ports: [5432], env_from: { command: "…", map: { DB_URL: DB_URL } } }
 env_command: ""                      # prefix for every check command (prefer secrets: below for secrets)
 secrets: { provider: env_file, names: [DATABASE_URL] }   # checks, services, ui only, never agents; see Secrets
-tests: { globs: ["tests/**"], run: "uv run pytest {files}", timeout_s: 600 }   # run enables the red-green proof; timeout_s caps it
+tests: { globs: ["tests/**"], run: "uv run pytest {files}", timeout_s: 600, coverage: "uv run coverage json -o coverage.json" }   # coverage is optional; improve tests reads the report
 sensitive_paths: ["src/auth/**"]     # security reviewer, fast-lane escalation, at least medium risk
 human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]   # changed only as declared protected_changes
 review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
@@ -268,9 +268,9 @@ verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]
   run: "uv run pytest {files}"       # runs recorded flows [tests.run]
 improve:                            # absent: harden: and audit: are still read, with a deprecation warning
-  aspects: [findings, security, performance, structure]   # --aspect runs a subset; ci and tests are not aspects yet
+  aspects: [findings, security, performance, structure, ci, tests]   # --aspect runs a subset
   max_proposals: 5                 # 1..10 per aspect; --max overrides
-  thinking: { findings: medium, security: high, performance: high, structure: medium }
+  thinking: { findings: medium, security: high, performance: high, structure: medium, ci: high, tests: medium }
   focus:                           # optional; one note per aspect, injected only into that aspect's prompt
     security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 git: { author: factory, email: "…" }
@@ -680,15 +680,15 @@ base branch; the user's checkout is not touched):
 ## Improve
 
 `factory improve --repo <path> [--aspect <a>...] [--max N] [--dry-run]` is the periodic loop: findings,
-security, performance and structure, one config block, GitHub issues as the output. It does not schedule
-itself and it does not start runs. Without `--aspect`, every aspect in `improve.aspects` runs. An aspect
-that is not configured is refused (exit 1, no model call).
+security, performance, structure, ci and tests, one config block, GitHub issues as the output. It does not
+schedule itself and it does not start runs. Without `--aspect`, every aspect in `improve.aspects` runs. An
+aspect that is not configured is refused (exit 1, no model call).
 
 ```yaml
 improve:
-  aspects: [findings, security, performance, structure]
+  aspects: [findings, security, performance, structure, ci, tests]
   max_proposals: 5
-  thinking: { findings: medium, security: high, performance: high, structure: medium }
+  thinking: { findings: medium, security: high, performance: high, structure: medium, ci: high, tests: medium }
   focus:
     security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 ```
@@ -703,10 +703,18 @@ Aspects:
   PRs. Near-duplicate open findings are compacted first (`plan_medium`). A metrics line is appended.
   No signals and no open proposal to refresh: no model call.
 - **security**, **performance**, **structure** — one read-only session each. Structure is refactor and
-  simplify together. Performance also sees the 30-day CI audit. The model sees open findings, the latest
-  metrics line, and findings already on an open proposal of that aspect (so a later run can update it).
+  simplify together. Performance also sees the 30-day CI audit (at most 200 runs). The model sees open
+  findings, the latest metrics line, and findings already on an open proposal of that aspect.
+- **ci** — workflow runs over 30 days, paged (a busy month is more than 200). Per job: runs, minutes/week,
+  p50/p90, failure rate, never failed. Flags slow jobs without path filters, report-only steps, an empty
+  factory stub, duplicate commands, push-to-main runs. High minutes alone calls the model. Workflow edits
+  only as declared `protected_changes`.
+- **tests** — slow tests when the repo's runner can report them (pytest `--durations`, vitest/jest JSON),
+  flaky checks from memory, test jobs that never fail, and uncovered critical paths when `tests.coverage`
+  (a command that writes a coverage report) is set. Proposals speed up or split slow tests, remove redundant
+  ones, add tests for uncovered critical code, and add or raise a coverage threshold. Never lower one.
 
-`ci` and `tests` are not aspects yet. Adding one is a signal function plus `roles/improve-<aspect>.md`.
+`tests.coverage` is optional. No signals and no open proposal to refresh: no model call, for ci and tests too.
 
 Each valid proposal (same plan validation as before, one retry; overlapping or invalid ones are dropped and
 listed) is written under `$FACTORY_HOME/memory/<repo>/proposals/<date>-improve-<aspect>.json` and opened as
@@ -743,8 +751,8 @@ factory improve --repo <path> --aspect security --dry-run
 no `improve:` block is read as that fallback, with a deprecation warning (`audit` types `refactor` and
 `simplify` map to `structure`).
 
-A practical rhythm, run by the repo's bot (see [docs/BOTS.md](docs/BOTS.md#improve)): findings, security
-and performance weekly; structure monthly. Only configured aspects.
+A practical rhythm, run by the repo's bot (see [docs/BOTS.md](docs/BOTS.md#improve)): findings, security,
+performance and ci weekly; structure and tests monthly. Only configured aspects.
 
 ## Evals and experiments
 

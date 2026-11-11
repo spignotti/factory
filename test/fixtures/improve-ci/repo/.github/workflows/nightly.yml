@@ -1,0 +1,9 @@
+name: Nightly
+on:
+  push:
+    branches: [main]
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ship

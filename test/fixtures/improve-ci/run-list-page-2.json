@@ -1,0 +1,65 @@
+[
+  {
+    "databaseId": 204,
+    "headSha": "sha204",
+    "workflowName": "Lint and test",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 205,
+    "headSha": "sha205",
+    "workflowName": "Lint and test",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 301,
+    "headSha": "sha301",
+    "workflowName": "Report",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 302,
+    "headSha": "sha302",
+    "workflowName": "Report",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 401,
+    "headSha": "sha401",
+    "workflowName": "Nightly",
+    "event": "push",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "main"
+  },
+  {
+    "databaseId": 501,
+    "headSha": "sha501",
+    "workflowName": "Filtered",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 999,
+    "headSha": "sha999",
+    "workflowName": "Lint and test",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-09-01T00:00:00Z",
+    "headBranch": "feature"
+  }
+]

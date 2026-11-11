@@ -126,10 +126,10 @@ export const AuditTypeSchema = z.enum(AUDIT_TYPES);
 export type AuditType = z.infer<typeof AuditTypeSchema>;
 
 /**
- * Aspects `factory improve` runs. `ci` and `tests` are a later addition: a signal function, one role
- * prompt, and a value here. `refactor` and `simplify` are one aspect (`structure`).
+ * Aspects `factory improve` runs. `refactor` and `simplify` are one aspect (`structure`).
+ * `ci` and `tests` are signal functions plus `roles/improve-<aspect>.md` (same proposal flow).
  */
-export const IMPROVE_ASPECTS = ["findings", "security", "performance", "structure"] as const;
+export const IMPROVE_ASPECTS = ["findings", "security", "performance", "structure", "ci", "tests"] as const;
 export const ImproveAspectSchema = z.enum(IMPROVE_ASPECTS);
 export type ImproveAspect = z.infer<typeof ImproveAspectSchema>;
 
@@ -139,6 +139,8 @@ export const DEFAULT_IMPROVE_THINKING = {
   security: "high",
   performance: "high",
   structure: "medium",
+  ci: "high",
+  tests: "medium",
 } as const;
 
 /** Reasoning level per audit type when `audit.thinking` omits a key. */
@@ -198,6 +200,8 @@ const ImproveThinkingSchema = z
     security: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.security),
     performance: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.performance),
     structure: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.structure),
+    ci: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.ci),
+    tests: z.enum(THINKING_LEVELS).default(DEFAULT_IMPROVE_THINKING.tests),
   })
   .strict()
   .default({ ...DEFAULT_IMPROVE_THINKING });
@@ -208,6 +212,8 @@ const ImproveFocusSchema = z
     security: FocusNoteSchema.optional(),
     performance: FocusNoteSchema.optional(),
     structure: FocusNoteSchema.optional(),
+    ci: FocusNoteSchema.optional(),
+    tests: FocusNoteSchema.optional(),
   })
   .strict()
   .default({});
@@ -330,6 +336,11 @@ export const RepoConfigSchema = z
          * `limits.gate_timeout_minutes`. A timeout on base is inconclusive, not a red repro.
          */
         timeout_s: z.number().positive().optional(),
+        /**
+         * Command that writes a coverage report (`coverage json`, vitest/jest `--coverage`, lcov).
+         * Optional. `factory improve --aspect tests` reads it for uncovered critical paths.
+         */
+        coverage: z.string().trim().min(1).optional(),
       })
       .default({ globs: [] }),
     sensitive_paths: z.array(z.string()).default([]),

@@ -18,7 +18,9 @@
           "findings",
           "security",
           "performance",
-          "structure"
+          "structure",
+          "ci",
+          "tests"
         ]
       }
     },
@@ -97,7 +99,9 @@
               "findings",
               "security",
               "performance",
-              "structure"
+              "structure",
+              "ci",
+              "tests"
             ]
           },
           "signals": {
@@ -176,7 +180,9 @@
                             "findings",
                             "security",
                             "performance",
-                            "structure"
+                            "structure",
+                            "ci",
+                            "tests"
                           ]
                         },
                         "key": {

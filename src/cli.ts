@@ -92,7 +92,7 @@ const USAGE = `usage:
   factory adopt --repo <path> [--ref <tag>] [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
               (drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md (template if missing); removes the legacy
                coding setup (--keep spares paths); baseline plan as proposal; one PR; settings only as hints)
-  factory improve --repo <path> [--aspect findings|security|performance|structure]... [--max <1-10>] [--dry-run] [--profile <file>] [--json]
+  factory improve --repo <path> [--aspect findings|security|performance|structure|ci|tests]... [--max <1-10>] [--dry-run] [--profile <file>] [--json]
               (aspects from repo.yaml improve.aspects, or --aspect; each valid proposal becomes a GitHub issue
                labelled factory-proposal and improve:<aspect>, plan in a factory-plan block; an open issue with the
                same proposal marker is updated even after a relabel; --dry-run writes proposal files only, no gh)
