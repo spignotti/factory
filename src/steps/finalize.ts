@@ -394,10 +394,11 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   throwIfInterrupted(ctx.deps);
   let pr: string | null = input.existingPr?.url ?? null;
   let draft: boolean | null = input.existingPr?.draft ?? null;
-  // A pull request stays a draft until local gates have passed and the final push has landed.
-  // The push itself is a draft event, so the stub does not start select/check for it.
+  // A pull request is a draft while the run is not done. A done run marks it ready BEFORE the final
+  // push (and creates a new PR as ready): a push to a draft starts a draft-hold run on the head that
+  // GitHub may register only after markReady, and its deliberate failure would read as red CI.
   const willPush = !input.noPr && hasCommits && !blockPush;
-  if (!input.noPr && input.existingPr && (result !== "done" || willPush)) {
+  if (!input.noPr && input.existingPr && result !== "done") {
     try {
       const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, input.existingPr);
       draft = held.draft;
@@ -405,7 +406,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+      return { result: "needs_human", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
     }
   }
   if (githubClaimError) {
@@ -417,6 +418,13 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
     try {
       const head = await revParse(ctx.worktree, "HEAD");
+      let readyAt: string | undefined;
+      if (result === "done" && input.existingPr && draft !== false) {
+        readyAt = new Date().toISOString();
+        await ctx.deps.github.markReady(ctx.worktree, input.existingPr.url);
+        draft = false;
+        ctx.events.emit({ step: "finalize", event: "progress", data: { pr_ready: input.existingPr.url } });
+      }
       await pushIdempotent(ctx, head);
       // An open PR on this branch (an earlier attempt's create that looked failed, or one opened by hand)
       // is adopted, never duplicated. Known PRs were converted to draft before this push.
@@ -424,10 +432,12 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       let created = false;
       if (!target) {
         try {
-          pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: true, labels: guarded.length ? [PROTECTED_LABEL] : [] });
-          draft = true;
+          const asDraft = result !== "done";
+          pr = await ctx.deps.github.createPr({ repoDir: ctx.worktree, head: ctx.branch, base: ctx.repo.base_branch, title, body, draft: asDraft, labels: guarded.length ? [PROTECTED_LABEL] : [] });
+          draft = asDraft;
           created = true;
-          target = { url: pr, draft: true };
+          target = { url: pr, draft: asDraft };
+          if (!asDraft) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_ready: pr } });
         } catch (e) {
           target = await adoptablePr(ctx, head);
           if (!target) throw e;
@@ -444,8 +454,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         await ctx.deps.github.updatePr(ctx.worktree, target.url, { title, body });
         if (guarded.length) await ctx.deps.github.addLabel(ctx.worktree, target.url, PROTECTED_LABEL);
       }
-      // Ready is after the push, and only when the local result is done. Then CI is polled.
-      let readyAt: string | undefined;
+      // A done run is ready by now unless an adopted PR was still a draft: mark that one ready here. Then CI is polled.
       if (target && result === "done") {
         if (target.draft) {
           readyAt = new Date().toISOString();

@@ -202,8 +202,9 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.runner.remaining()).toEqual({});
 
     const pr = r.github.prs[0]!;
-    expect(pr.draft).toBe(true);
-    expect(r.github.readied).toEqual([pr.url]);
+    // A done run opens the PR ready: no draft-hold run on the head that could read as red CI.
+    expect(pr.draft).toBe(false);
+    expect(r.github.readied).toEqual([]);
     expect(pr.base).toBe("main");
     expect(pr.head).toMatch(/^factory\/task-add-a-multiply-function/);
     expect(r.github.pushes).toEqual([pr.head]);
@@ -284,7 +285,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
       patch: (c) => void ((c.limits as Record<string, unknown>).pr_ci_wait_minutes = 0),
     });
     expect(r.result.result).toBe("done");
-    expect(order).toEqual(["status", "push", "create:true", "ready", "status"]);
+    expect(order).toEqual(["status", "push", "create:false", "status"]);
     expect(r.github.drafted).toEqual([]);
     expect(r.events.some((e) => e.data.pr_ready)).toBe(true);
   });
@@ -393,8 +394,8 @@ ${fixed}` } };
     expect(round2.sessionKey).toBe(r.runner.calls.find((c) => c.role === "review_plan")?.sessionKey);
     const merged = JSON.parse(r.file("merged-2.json"));
     expect(merged.findings[0]).toMatchObject({ id: "R1-plan-1", status: "accepted_wontfix" });
-    expect(r.github.prs[0]?.draft).toBe(true);
-    expect(r.github.readied).toEqual([r.github.prs[0]!.url]);
+    expect(r.github.prs[0]?.draft).toBe(false);
+    expect(r.github.readied).toEqual([]);
   });
 
   it("stalemate: rejected wontfix -> needs_human, draft PR, human_review", async () => {
@@ -756,7 +757,7 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.drafted).toEqual([]);
-    expect(r.github.readied).toEqual([r.result.pr]);
+    expect(r.github.readied).toEqual([]);
     expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
   });
 
@@ -788,7 +789,7 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
     expect(r.result.reason).toMatch(/CI on the PR head \([0-9a-f]{8}\) is red/);
     expect(r.github.autoMerged).toEqual([]);
-    expect(r.github.readied).toEqual([r.result.pr]);
+    expect(r.github.readied).toEqual([]);
     expect(r.github.drafted).toEqual([r.result.pr]);
     expect(r.github.prStates.get(r.result.pr!)?.draft).toBe(true);
     expect(JSON.parse(r.file("state.json"))).toMatchObject({ pr_draft: true });
@@ -993,8 +994,8 @@ describe("base moved before finalize", () => {
     const baseMoved = r.events.filter((e) => e.event === "progress" && e.data.base_moved).length;
     expect(baseMoved).toBe(1);
     expect(() => r.file("gates-3.json")).not.toThrow(); // implement, finalize, after merge
-    expect(r.github.prs[0]!.draft).toBe(true);
-    expect(r.github.readied).toEqual([r.github.prs[0]!.url]);
+    expect(r.github.prs[0]!.draft).toBe(false);
+    expect(r.github.readied).toEqual([]);
   });
 
   it("conflict: merge aborted, needs_human naming the files, draft PR, worktree clean", async () => {
