@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.1](https://github.com/spignotti/factory/compare/v0.5.0...v0.5.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **cli:** improve --aspect takes several values ([#146](https://github.com/spignotti/factory/issues/146)) ([f2ff195](https://github.com/spignotti/factory/commit/f2ff195961dfd3340ccfde4966bfec30fc3ad883))
+* **finalize:** judge PR CI only by runs created after markReady ([#145](https://github.com/spignotti/factory/issues/145)) ([4a26ed1](https://github.com/spignotti/factory/commit/4a26ed1b5dd802141793c69d22aa602956e989ed))
+* **gh:** base CI counts only GitHub Actions check runs ([#144](https://github.com/spignotti/factory/issues/144)) ([29318b3](https://github.com/spignotti/factory/commit/29318b3ed018707717fb9fad3dcd5bb0ee36fa96))
+* **gh:** drop commits from the open-PR list query (GraphQL node limit) ([#143](https://github.com/spignotti/factory/issues/143)) ([cf45714](https://github.com/spignotti/factory/commit/cf45714f0a9a7100ed6aeb530a8998ba09ee8207))
+* setup findings (ci-stub SHA, Context7 retry-after, --help, stale drafts) ([#141](https://github.com/spignotti/factory/issues/141)) ([3cd6ebf](https://github.com/spignotti/factory/commit/3cd6ebf6fc4af0071b04d93c230b16704686daff))
+
 ## [0.5.0](https://github.com/spignotti/factory/compare/v0.4.0...v0.5.0) (2026-11-11)
 
 
