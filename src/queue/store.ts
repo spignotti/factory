@@ -24,6 +24,8 @@ export interface QueueEntry {
   requeues?: number;
   /** Open factory PR numbers that overlap this run. Pending again once each is merged or closed. */
   blocked_by?: number[];
+  /** Live factory runs whose claimed paths overlap this one. Pending again once each has finished. */
+  blocked_runs?: string[];
   pid?: number;
   added_at: string;
 }
@@ -45,6 +47,7 @@ const EntrySchema = z.object({
   reason: z.string().optional(),
   requeues: z.number().int().min(0).optional(),
   blocked_by: z.array(z.number().int().positive()).optional(),
+  blocked_runs: z.array(z.string()).optional(),
   pid: z.number().int().optional(),
   added_at: z.string(),
 });
