@@ -22,6 +22,38 @@ export function actionsCheckRuns(raw: RawCheckRun[]): RawCheckRun[] {
   return raw.filter((r) => !r.app || r.app === "github-actions");
 }
 
+/** How long a run from before markReady counts as pending while its workflow may still start again. */
+export const READY_GRACE_MS = 3 * 60_000;
+
+/**
+ * PR CI after markReady. A repo workflow may fail on purpose while the PR is a draft; that run stays on
+ * the head SHA. A run created before `since` is dropped when the same workflow has a run created at or
+ * after it; while none has appeared yet and the grace period is running, it counts as pending; after
+ * that its own result stands (a workflow that does not run on ready_for_review keeps its verdict).
+ * `since` is compared at whole seconds minus one (Actions timestamps have second precision, clocks skew).
+ */
+export function checkRunsSince(runs: CheckRunView[], since?: string, now = Date.now()): CheckRunView[] {
+  if (!since) return runs;
+  const t = Date.parse(since);
+  if (!Number.isFinite(t)) return runs;
+  const cut = Math.floor(t / 1000) * 1000 - 1000;
+  const at = (r: CheckRunView) => Date.parse(r.created_at ?? r.started_at ?? "");
+  const key = (r: CheckRunView) => r.workflow ?? r.name;
+  const fresh = new Set(runs.filter((r) => Number.isFinite(at(r)) && at(r) >= cut).map(key));
+  const out: CheckRunView[] = [];
+  for (const r of runs) {
+    const a = at(r);
+    if (!Number.isFinite(a) || a >= cut) {
+      out.push(r);
+      continue;
+    }
+    if (fresh.has(key(r))) continue;
+    if (now - t < READY_GRACE_MS) out.push({ ...r, status: "queued", conclusion: null });
+    else out.push(r);
+  }
+  return out;
+}
+
 async function hasRemote(repoDir: string): Promise<boolean> {
   const stdout = await git(repoDir, ["remote"]);
   return stdout.trim() !== "";
@@ -87,7 +119,8 @@ export interface PrRequest {
 
 /** Everything the factory does on GitHub. Only the factory process calls it. */
 export interface GitHub {
-  baseStatus(repoDir: string, sha: string): Promise<BaseStatus>;
+  /** `since`: ignore check runs created before this time (PR CI after markReady: the draft-hold run is not the verdict). */
+  baseStatus(repoDir: string, sha: string, opts?: { since?: string }): Promise<BaseStatus>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
   /** Open (or any state) issues, newest page only (`--limit 100`). Not a full set. */
   listIssues(repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]>;
@@ -692,7 +725,7 @@ export class GhCli implements GitHub {
     return out;
   }
 
-  async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
+  async baseStatus(repoDir: string, sha: string, opts?: { since?: string }): Promise<BaseStatus> {
     // A repo without remotes has no GitHub checks (local probe runs).
     if (!(await hasRemote(repoDir))) return "none";
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id, app: .app.slug}]"]);
@@ -713,7 +746,7 @@ export class GhCli implements GitHub {
         workflow: meta?.name ?? null,
       });
     }
-    return aggregateCheckRuns(runs);
+    return aggregateCheckRuns(checkRunsSince(runs, opts?.since));
   }
 
   async getIssue(repoDir: string, n: number): Promise<Issue> {

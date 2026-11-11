@@ -389,3 +389,23 @@ describe("base CI check runs", () => {
     expect(actionsCheckRuns(rows).map((r) => r.name)).toEqual(["Dependabot", "legacy"]);
   });
 });
+
+describe("PR CI after markReady", () => {
+  const ready = "2026-11-11T12:41:07.400Z";
+  const readyMs = Date.parse(ready);
+  const draftFail = { name: "validate", workflow: "ci", status: "completed", conclusion: "failure", created_at: "2026-11-11T12:41:05Z" };
+  it("drops a pre-ready run once the same workflow ran again", async () => {
+    const { checkRunsSince } = await import("../../src/gh.js");
+    const again = { name: "validate", workflow: "ci", status: "in_progress", conclusion: null, created_at: "2026-11-11T12:41:07Z" };
+    expect(checkRunsSince([draftFail, again], ready, readyMs + 30_000)).toEqual([again]);
+  });
+  it("counts a pre-ready failure as pending during the grace period, then as its own result", async () => {
+    const { checkRunsSince, READY_GRACE_MS } = await import("../../src/gh.js");
+    expect(checkRunsSince([draftFail], ready, readyMs + 30_000)[0]).toMatchObject({ status: "queued", conclusion: null });
+    expect(checkRunsSince([draftFail], ready, readyMs + READY_GRACE_MS + 1)[0]).toMatchObject({ conclusion: "failure" });
+  });
+  it("keeps everything without a ready time", async () => {
+    const { checkRunsSince } = await import("../../src/gh.js");
+    expect(checkRunsSince([draftFail], undefined)).toEqual([draftFail]);
+  });
+});

@@ -8,6 +8,8 @@ export interface CiPoll {
   sha: string;
   /** 0 = one sample, no wait. Pending is returned as pending (not a failure). */
   waitMinutes: number;
+  /** Passed to baseStatus: ignore check runs created before this time. */
+  since?: string;
   pollMs: number;
   sleep?: Sleep;
   signal?: AbortSignal;
@@ -30,7 +32,7 @@ export interface CiPoll {
 export async function pollCommitCi(opts: CiPoll): Promise<{ status: BaseStatus; waitedMs: number }> {
   const waiting = opts.waitWhile ?? ["pending"];
   const started = Date.now();
-  let status = await opts.github.baseStatus(opts.repoDir, opts.sha);
+  let status = await opts.github.baseStatus(opts.repoDir, opts.sha, opts.since ? { since: opts.since } : undefined);
   if (!waiting.includes(status) || opts.waitMinutes <= 0) return { status, waitedMs: 0 };
   const sleep = opts.sleep ?? realSleep;
   const polls = Math.ceil((opts.waitMinutes * 60_000) / opts.pollMs);
@@ -38,7 +40,7 @@ export async function pollCommitCi(opts: CiPoll): Promise<{ status: BaseStatus; 
   for (let i = 0; i < polls && waiting.includes(status); i++) {
     await sleep(opts.pollMs, opts.signal);
     throwIfInterrupted(opts);
-    status = await opts.github.baseStatus(opts.repoDir, opts.sha);
+    status = await opts.github.baseStatus(opts.repoDir, opts.sha, opts.since ? { since: opts.since } : undefined);
   }
   const waitedMs = Date.now() - started;
   opts.onUpdate?.({ status, phase: "settled", waitedMs });
