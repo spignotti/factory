@@ -22,18 +22,36 @@ export function actionsCheckRuns(raw: RawCheckRun[]): RawCheckRun[] {
   return raw.filter((r) => !r.app || r.app === "github-actions");
 }
 
+/** How long a run from before markReady counts as pending while its workflow may still start again. */
+export const READY_GRACE_MS = 3 * 60_000;
+
 /**
- * Check runs created at or after `since`. A repo workflow may fail on purpose while the PR is a draft;
- * that run predates markReady and must not count as the PR's verdict. Runs without a time are kept.
+ * PR CI after markReady. A repo workflow may fail on purpose while the PR is a draft; that run stays on
+ * the head SHA. A run created before `since` is dropped when the same workflow has a run created at or
+ * after it; while none has appeared yet and the grace period is running, it counts as pending; after
+ * that its own result stands (a workflow that does not run on ready_for_review keeps its verdict).
+ * `since` is compared at whole seconds minus one (Actions timestamps have second precision, clocks skew).
  */
-export function checkRunsSince(runs: CheckRunView[], since?: string): CheckRunView[] {
+export function checkRunsSince(runs: CheckRunView[], since?: string, now = Date.now()): CheckRunView[] {
   if (!since) return runs;
   const t = Date.parse(since);
   if (!Number.isFinite(t)) return runs;
-  return runs.filter((r) => {
-    const at = Date.parse(r.created_at ?? r.started_at ?? "");
-    return !Number.isFinite(at) || at >= t;
-  });
+  const cut = Math.floor(t / 1000) * 1000 - 1000;
+  const at = (r: CheckRunView) => Date.parse(r.created_at ?? r.started_at ?? "");
+  const key = (r: CheckRunView) => r.workflow ?? r.name;
+  const fresh = new Set(runs.filter((r) => Number.isFinite(at(r)) && at(r) >= cut).map(key));
+  const out: CheckRunView[] = [];
+  for (const r of runs) {
+    const a = at(r);
+    if (!Number.isFinite(a) || a >= cut) {
+      out.push(r);
+      continue;
+    }
+    if (fresh.has(key(r))) continue;
+    if (now - t < READY_GRACE_MS) out.push({ ...r, status: "queued", conclusion: null });
+    else out.push(r);
+  }
+  return out;
 }
 
 async function hasRemote(repoDir: string): Promise<boolean> {
