@@ -45,7 +45,7 @@ contain secrets or customer data.
 Each proposal becomes a GitHub issue labelled `factory-proposal` and `improve:<aspect>`, with the plan in
 a `factory-plan` block and a hidden `<!-- factory-proposal: <key> -->` marker. The key is the aspect plus
 the sorted finding keys, or a hash of the sorted file paths when the plan resolves none. An open issue with
-that marker is updated, including after a relabel to `factory-ready`. If the open-issue list may be
+that marker is updated in place (same proposal id), including after a relabel to `factory-ready`. If the open-issue list may be
 incomplete, no new issue is created. The bot does not start the run from the label `factory-proposal`.
 Promoting it is a relabel to `factory-ready`; `factory queue add` accepts only that label. `--dry-run` does
 not call `gh`.
@@ -54,7 +54,7 @@ not call `gh`.
 factory queue add --repo /path/to/checkout <issue>
 ```
 
-When that factory PR merges, the next `factory improve` marks the proposal `resolved`. An issue closed
+When that factory PR merges, the next `factory improve` marks the proposal `resolved`, including when the run started before the ticket or a later improve rewrote the issue while the PR was open. An issue closed
 without a merged PR, a closed unmerged PR, or no merged or open PR for 28 days, drops it.
 
 `factory harden` and `factory audit` are deprecated aliases of `factory improve` with the matching aspect

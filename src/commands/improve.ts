@@ -11,9 +11,9 @@ import { ASPECTS, collectAspect } from "../improve/aspects.js";
 import { dedupeProposals, issueWrite, matchingIssue, parseProposalIssue, proposalLabels } from "../improve/issues.js";
 import { canonicalRepoId, markFindingsProposed, updateMemory } from "../memory.js";
 import { asData, rolePrompt } from "../prompts.js";
-import { listProposals, nextProposalId, proposalsDir, saveProposal, writeProposal } from "../proposals.js";
+import { listProposals, nextProposalId, proposalsDir, saveProposal, updateProposalItem, writeProposal } from "../proposals.js";
 import { listRuns, type RunRecord } from "../runs.js";
-import { type ImproveAspectResult, type ImproveIssue, type ImproveReport, ImproveReportSchema, type ProposalItem } from "../schemas/proposal.js";
+import { type ImproveAspectResult, type ImproveIssue, type ImproveReport, ImproveReportSchema, type Proposal, type ProposalItem } from "../schemas/proposal.js";
 import { THINKING_LEVELS, type Profile, type ProfileRole } from "../schemas/profile.js";
 import {
   type AuditType,
@@ -175,7 +175,7 @@ function refreshKeys(factoryHome: string, repoId: string, aspect: ImproveAspect,
   return [...keys];
 }
 
-/** An older open proposal that this one replaces is dropped so only one open proposal owns the issue and the findings. */
+/** A leftover open record with the same issue, key or findings is dropped. The record an open issue already has is updated in place and is not passed here as a new id. */
 function replaceOpenMatches(factoryHome: string, repoId: string, published: ProposalItem, now: Date): void {
   for (const ticket of listProposals(factoryHome, repoId)) {
     let dirty = false;
@@ -199,44 +199,132 @@ function replaceOpenMatches(factoryHome: string, repoId: string, published: Prop
   }
 }
 
-async function publish(
+/** Open proposal this issue already belongs to. The issue number wins; a key match must not point at a different issue. */
+function findOpenProposal(factoryHome: string, repoId: string, aspect: ImproveAspect, key: string, issue: number): { ticketId: string; item: ProposalItem } | undefined {
+  const open = listProposals(factoryHome, repoId).flatMap((ticket) =>
+    ticket.proposals.filter((p) => p.status === "open" && p.aspect === aspect).map((item) => ({ ticketId: ticket.id, item })),
+  );
+  return open.find((e) => e.item.issue === issue) ?? open.find((e) => e.item.key === key && (e.item.issue == null || e.item.issue === issue));
+}
+
+interface PublishSlot {
+  selected: Selected;
+  key: string;
+  match: Issue | undefined;
+  /** Set when an open issue already has a proposal record. That record is updated; no new id is written. */
+  existing?: { ticketId: string; item: ProposalItem };
+}
+
+function classify(factoryHome: string, repoId: string, aspect: ImproveAspect, kept: Selected[], open: Issue[], dryRun: boolean): PublishSlot[] {
+  return kept.map((selected) => {
+    const key = issueWrite(aspect, selected.rationale, selected.plan).key;
+    if (dryRun) return { selected, key, match: undefined };
+    const match = matchingIssue(open, key);
+    const existing = match ? findOpenProposal(factoryHome, repoId, aspect, key, match.number) : undefined;
+    return { selected, key, match, ...(existing ? { existing } : {}) };
+  });
+}
+
+function proposalDraft(aspect: ImproveAspect, slot: PublishSlot) {
+  return {
+    status: "open" as const,
+    aspect,
+    key: slot.key,
+    issue: null,
+    rationale: slot.selected.rationale,
+    plan: slot.selected.plan,
+    references: { findings: slot.selected.plan.resolves_findings ?? [], checklist: slot.selected.checklist },
+    resolution: null,
+  };
+}
+
+function latestById(tickets: Proposal[]): Proposal[] {
+  const byId = new Map<string, Proposal>();
+  for (const t of tickets) byId.set(t.id, t);
+  return [...byId.values()];
+}
+
+interface Published {
+  issues: ImproveIssue[];
+  error: string | null;
+  owned: ProposalItem[];
+  fresh: Proposal | null;
+  updated: Proposal[];
+}
+
+/** Creates issues for new proposals. An open issue with the same marker updates that issue and its proposal record, keeping the id. */
+async function publishSlots(
   github: GitHub,
   repoDir: string,
+  factoryHome: string,
+  repoId: string,
   aspect: ImproveAspect,
-  items: ProposalItem[],
+  slots: PublishSlot[],
+  fresh: Proposal | null,
   open: Issue[],
   issuesComplete: boolean,
-): Promise<{ items: ProposalItem[]; issues: ImproveIssue[]; error: string | null }> {
+  signals: Proposal["signals"],
+  metrics: Proposal["metrics"],
+): Promise<Published> {
   const labels = proposalLabels(aspect);
   try {
     for (const label of labels) await github.ensureLabel(repoDir, label);
   } catch (e) {
-    return { items, issues: [], error: `label create failed: ${(e as Error).message.slice(0, 200)}` };
+    return { issues: [], owned: [], fresh, updated: [], error: `label create failed: ${(e as Error).message.slice(0, 200)}` };
   }
   const issues: ImproveIssue[] = [];
-  const next = [...items];
-  for (let i = 0; i < next.length; i++) {
-    const item = next[i]!;
-    const write = issueWrite(aspect, item.rationale, item.plan);
-    const match = matchingIssue(open, write.key);
-    if (!match && !issuesComplete) {
-      return { items: next, issues, error: `open issue list may be incomplete; not creating an issue for ${item.plan.goal}` };
+  const owned: ProposalItem[] = [];
+  const updated: Proposal[] = [];
+  let ticket = fresh;
+  let freshIndex = 0;
+  for (const slot of slots) {
+    const write = issueWrite(aspect, slot.selected.rationale, slot.selected.plan);
+    if (!slot.match && !issuesComplete) {
+      if (ticket) saveProposal(factoryHome, ticket);
+      return { issues, owned, fresh: ticket, updated, error: `open issue list may be incomplete; not creating an issue for ${slot.selected.plan.goal}` };
     }
     try {
-      const issue = match
-        ? await github.updateIssue(repoDir, match.number, write)
-        : await github.createIssue(repoDir, write);
-      next[i] = { ...item, key: write.key, issue: issue.number };
-      issues.push({ proposal_id: item.id, number: issue.number, action: match ? "updated" : "created" });
+      const issue = slot.match ? await github.updateIssue(repoDir, slot.match.number, write) : await github.createIssue(repoDir, write);
       const stored = { ...issue, labels: write.labels, state: "open" as const };
       const at = open.findIndex((x) => x.number === issue.number);
       if (at >= 0) open[at] = stored;
       else open.push(stored);
+      const existing = slot.existing;
+      if (existing) {
+        const savedTicket = updateProposalItem(
+          factoryHome,
+          repoId,
+          existing.ticketId,
+          {
+            ...existing.item,
+            rationale: slot.selected.rationale,
+            plan: slot.selected.plan,
+            key: slot.key,
+            issue: issue.number,
+            references: { findings: slot.selected.plan.resolves_findings ?? [], checklist: slot.selected.checklist },
+          },
+          { signals, metrics },
+        );
+        updated.push(savedTicket);
+        const saved = savedTicket.proposals.find((p) => p.id === existing.item.id)!;
+        issues.push({ proposal_id: saved.id, number: issue.number, action: "updated" });
+        owned.push(saved);
+      } else if (ticket) {
+        const current = ticket.proposals[freshIndex];
+        if (!current) throw new Error("fresh proposal missing");
+        ticket = { ...ticket, proposals: ticket.proposals.map((p, i) => (i === freshIndex ? { ...p, key: write.key, issue: issue.number } : p)) };
+        freshIndex++;
+        const saved = ticket.proposals[freshIndex - 1]!;
+        issues.push({ proposal_id: saved.id, number: issue.number, action: slot.match ? "updated" : "created" });
+        owned.push(saved);
+      }
     } catch (e) {
-      return { items: next, issues, error: `issue ${match ? "update" : "create"} failed: ${(e as Error).message.slice(0, 200)}` };
+      if (ticket) saveProposal(factoryHome, ticket);
+      return { issues, owned, fresh: ticket, updated, error: `issue ${slot.match ? "update" : "create"} failed: ${(e as Error).message.slice(0, 200)}` };
     }
   }
-  return { items: next, issues, error: null };
+  if (ticket) saveProposal(factoryHome, ticket);
+  return { issues, owned, fresh: ticket, updated, error: null };
 }
 
 async function select(
@@ -334,40 +422,39 @@ export async function improve(opts: ImproveOptions, deps: ImproveDeps): Promise<
       }
       const unique = dedupeProposals(aspect, chosen.accepted);
       const rejected = [...chosen.rejected, ...unique.dropped];
-      const id = nextProposalId(proposalsDir(deps.factoryHome, repoId), now.toISOString().slice(0, 10), "improve", undefined, aspect);
-      let ticket = writeProposal(deps.factoryHome, {
-        version: 1,
-        kind: "improve",
-        id,
-        repo: repoId,
-        created_at: now.toISOString(),
-        proposals: unique.kept.map((c) => ({
-          status: "open" as const,
-          aspect,
-          key: issueWrite(aspect, c.rationale, c.plan).key,
-          issue: null,
-          rationale: c.rationale,
-          plan: c.plan,
-          references: { findings: c.plan.resolves_findings ?? [], checklist: c.checklist },
-          resolution: null,
-        })),
-        signals: input.signals,
-        metrics: input.metrics,
-      });
+      const slots = classify(deps.factoryHome, repoId, aspect, unique.kept, openIssues, dryRun);
+      const freshSlots = slots.filter((s) => !s.existing);
+      let ticket: Proposal | null = freshSlots.length
+        ? writeProposal(deps.factoryHome, {
+            version: 1,
+            kind: "improve",
+            id: nextProposalId(proposalsDir(deps.factoryHome, repoId), now.toISOString().slice(0, 10), "improve", undefined, aspect),
+            repo: repoId,
+            created_at: now.toISOString(),
+            proposals: freshSlots.map((s) => proposalDraft(aspect, s)),
+            signals: input.signals,
+            metrics: input.metrics,
+          })
+        : null;
       let issues: ImproveIssue[] = [];
       let error: string | null = null;
+      let owned: ProposalItem[] = [];
+      let updated: Proposal[] = [];
       if (!dryRun) {
-        const published = await publish(deps.github, repoDir, aspect, ticket.proposals, openIssues, issuesComplete);
-        ticket = { ...ticket, proposals: published.items };
-        saveProposal(deps.factoryHome, ticket);
+        const published = await publishSlots(deps.github, repoDir, deps.factoryHome, repoId, aspect, slots, ticket, openIssues, issuesComplete, input.signals, input.metrics);
         issues = published.issues;
         error = published.error;
+        owned = published.owned;
+        updated = latestById(published.updated);
+        ticket = published.fresh;
       }
+      const reported = ticket ?? (updated.length === 1 ? updated[0]! : null);
       if (!error) {
-        if (!dryRun) for (const p of ticket.proposals) if (p.issue) replaceOpenMatches(deps.factoryHome, repoId, p, now);
-        markFindingsProposed(deps.factoryHome, repoId, new Map(ticket.proposals.flatMap((p) => p.references.findings.map((k) => [k, p.id] as const))));
+        const linked = dryRun ? (ticket?.proposals ?? []) : owned;
+        if (!dryRun) for (const p of linked) if (p.issue) replaceOpenMatches(deps.factoryHome, repoId, p, now);
+        markFindingsProposed(deps.factoryHome, repoId, new Map(linked.flatMap((p) => p.references.findings.map((k) => [k, p.id] as const))));
       }
-      results.push({ aspect, signals: input.signals, ticket, path: join(proposalsDir(deps.factoryHome, repoId), `${ticket.id}.json`), rejected, issues, error });
+      results.push({ aspect, signals: input.signals, ticket: reported, path: reported ? join(proposalsDir(deps.factoryHome, repoId), `${reported.id}.json`) : null, rejected, issues, error });
     } finally {
       shot.close();
     }
@@ -391,6 +478,15 @@ export async function improveCommand(opts: ImproveOptions & { json: boolean }, d
           const issue = result.issues.find((i) => i.proposal_id === p.id);
           io.out(`  ${p.rank}. ${p.plan.goal}${issue ? ` (#${issue.number} ${issue.action})` : ""}\n`);
         }
+        for (const issue of result.issues) {
+          if (result.ticket.proposals.some((p) => p.id === issue.proposal_id)) continue;
+          io.out(`  ${issue.proposal_id} (#${issue.number} ${issue.action})\n`);
+        }
+        for (const x of result.rejected) io.out(`  rejected: ${x}\n`);
+        if (result.error) io.out(`  ${result.error}\n`);
+      } else if (result.issues.length) {
+        io.out(`aspect ${result.aspect}: ${result.issues.length} existing proposal(s) updated\n`);
+        for (const issue of result.issues) io.out(`  ${issue.proposal_id} (#${issue.number} ${issue.action})\n`);
         for (const x of result.rejected) io.out(`  rejected: ${x}\n`);
         if (result.error) io.out(`  ${result.error}\n`);
       } else io.out(result.error ? `aspect ${result.aspect}: no proposal: ${result.error}\n` : `aspect ${result.aspect}: no proposal: no signals\n`);

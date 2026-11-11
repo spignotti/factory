@@ -9,9 +9,11 @@ import { AuditTypeSchema, ImproveAspectSchema } from "./repo.js";
  * `<id>.<rank>.plan.json` (input for `factory run --plan`). `improve` also opens a GitHub issue per proposal.
  *
  * Lifecycle per proposal: `open` when written; the memory entries it references go `open → proposed`
- * (`ref` = the proposal id). A later `harden`, `audit` or `improve` resolves it: a merged factory PR makes it
- * and its entries `resolved`; an improve issue closed without that PR, a closed unmerged PR, or no merged/open
- * PR within `STALE_DAYS`, drops it and puts its entries back to `open`.
+ * (`ref` = the proposal id). A later improve that finds an open issue with the same marker updates this
+ * record in place (id, plan path and run linkage stay). A merged factory PR makes it and its entries
+ * `resolved`, including a PR that closes the proposal's issue no matter when the run started. An improve
+ * issue closed without that PR, a closed unmerged PR, or no merged/open PR within `STALE_DAYS`, drops it
+ * and puts its entries back to `open`.
  *
  * Audit tickets use the stem `<YYYY-MM-DD>-audit-<type>` and set `type`. Improve tickets use
  * `<YYYY-MM-DD>-improve-<aspect>` and set `aspect`.

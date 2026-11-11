@@ -26,11 +26,14 @@ function runPlan(run: RunRecord): { goal?: string; resolves_findings?: string[] 
 /**
  * Runs that worked on a proposal: started after its ticket and run from its plan file, or carrying its goal,
  * or resolving one of its findings (keys are disjoint across the proposals of a ticket).
+ * A run on the proposal's issue counts even when it started earlier. A later improve keeps that issue,
+ * and the merged PR still closes it.
  */
 export function runsFor(p: ProposalItem, createdAt: string, runs: RunRecord[]): RunRecord[] {
   const created = Date.parse(createdAt);
   const refs = new Set(p.references.findings);
   return runs.filter((r) => {
+    if (p.issue && (r.state?.task?.issue === p.issue || r.result?.task === `#${p.issue}`)) return true;
     if (r.started_at.getTime() < created) return false;
     if (r.state?.task?.ref && resolve(r.state.task.ref) === resolve(p.plan_path)) return true;
     const plan = runPlan(r);
@@ -41,7 +44,8 @@ export function runsFor(p: ProposalItem, createdAt: string, runs: RunRecord[]): 
 
 /**
  * Lifecycle of earlier proposals, each on its own: a merged factory PR resolves the proposal and its
- * entries; an improve issue closed without that PR, a PR closed unmerged, or no merged/open PR within
+ * entries. That includes a PR which closes the proposal's issue, whatever the run's start time.
+ * An improve issue closed without that PR, a PR closed unmerged, or no merged/open PR within
  * `STALE_DAYS`, drops it and reopens its `proposed` entries (only those it still owns: `ref` = its id).
  * A `gh` error while reading the issue is unknown: the proposal stays as it is, and is not dropped.
  */

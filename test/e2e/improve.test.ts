@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -95,11 +95,17 @@ describe("factory improve", () => {
     const second = deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh);
     const updated = await improve({ repo: ctx.repo }, second.deps);
     expect(updated.error).toBeNull();
-    expect(updated.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings-2.1", number: 1, action: "updated" }]);
+    expect(updated.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings.1", number: 1, action: "updated" }]);
     expect(gh.issues.size).toBe(1);
     expect(gh.issues.get(1)!.title).toBe("Stronger lint for a");
     expect(JSON.parse(/```factory-plan\n([\s\S]*?)```/.exec(gh.issues.get(1)!.body)?.[1] ?? "").goal).toBe("Stronger lint for a");
     expect(gh.issueEdits).toHaveLength(1);
+    expect(listProposals(ctx.factoryHome, ctx.repoId)).toHaveLength(1);
+    const kept = listProposals(ctx.factoryHome, ctx.repoId)[0]!.proposals[0]!;
+    expect(kept).toMatchObject({ id: "2026-10-29-improve-findings.1", status: "open", issue: 1 });
+    expect(kept.plan.goal).toBe("Stronger lint for a");
+    expect(JSON.parse(readFileSync(kept.plan_path, "utf8")).goal).toBe("Stronger lint for a");
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings.1" });
   });
 
   it("drops a proposal whose issue was closed without a merged PR, and resolves one whose factory PR merged", async () => {
@@ -211,11 +217,12 @@ describe("factory improve", () => {
 
     const updated = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh).deps);
     expect(updated.error).toBeNull();
-    expect(updated.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings-2.1", number: 1, action: "updated" }]);
+    expect(updated.results[0]!.issues).toEqual([{ proposal_id: "2026-10-29-improve-findings.1", number: 1, action: "updated" }]);
     expect(gh.issues.size).toBe(1);
     expect(gh.issues.get(1)!.labels).toEqual(expect.arrayContaining(["factory-ready", "factory-proposal"]));
-    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings-2.1" });
-    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === "2026-10-29-improve-findings.1")!.status).toBe("dropped");
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: "2026-10-29-improve-findings.1" });
+    expect(listProposals(ctx.factoryHome, ctx.repoId)).toHaveLength(1);
+    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === "2026-10-29-improve-findings.1")!.status).toBe("open");
 
     const fresh = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
     seedMemory(fresh.factoryHome, fresh.repoId, [entry("a", { count: 2 })]);
@@ -352,6 +359,50 @@ describe("factory improve", () => {
     expect(out2.join("")).toContain("issue update failed: API rate limit exceeded");
     expect(gh2.issues.get(1)!.title).toBe("Lint rule for a");
     expect(gh2.issueEdits).toHaveLength(0);
+  });
+
+  it("keeps the proposal across a second improve so a merged PR for its issue resolves it", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [findings]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    const gh = new FakeGitHub();
+    const opened = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Lint rule for a", ["a"])) }], gh).deps);
+    expect(opened.error).toBeNull();
+    const proposal = opened.results[0]!.ticket!.proposals[0]!;
+    expect(opened.results[0]!.issues).toEqual([{ proposal_id: proposal.id, number: 1, action: "created" }]);
+
+    // Run on the issue, started before the ticket. Its plan no longer matches the proposal text.
+    // A merged PR that closes the issue must still resolve it, and the second improve must not replace the id.
+    seedRun(ctx.factoryHome, ctx.repo, new Date("2026-10-29T11:00:00.000Z"), {
+      pr: "https://github.com/o/r/pull/4",
+      plan: PLAN("rewritten by the run", []),
+      taskRef: "#1",
+      issue: 1,
+    });
+    gh.prStates.set("https://github.com/o/r/pull/4", { state: "open", draft: false });
+
+    const second = await improve({ repo: ctx.repo }, deps(ctx, [{ role: "harden", output: selection(item("Stronger lint for a", ["a"])) }], gh).deps);
+    expect(second.error).toBeNull();
+    expect(second.lifecycle).toEqual([]);
+    expect(second.results[0]!.issues).toEqual([{ proposal_id: proposal.id, number: 1, action: "updated" }]);
+    expect(listProposals(ctx.factoryHome, ctx.repoId)).toHaveLength(1);
+    const kept = listProposals(ctx.factoryHome, ctx.repoId)[0]!.proposals[0]!;
+    expect(kept.id).toBe(proposal.id);
+    expect(kept.plan_path).toBe(proposal.plan_path);
+    expect(kept.status).toBe("open");
+    expect(kept.issue).toBe(1);
+    expect(kept.plan.goal).toBe("Stronger lint for a");
+    expect(gh.issues.size).toBe(1);
+    expect(gh.issues.get(1)!.title).toBe("Stronger lint for a");
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed", ref: proposal.id });
+
+    gh.prStates.set("https://github.com/o/r/pull/4", { state: "merged", draft: false });
+    gh.issues.get(1)!.state = "closed";
+    const resolved = await improve({ repo: ctx.repo }, deps(ctx, [], gh).deps);
+    expect(resolved.lifecycle).toEqual([expect.objectContaining({ id: proposal.id, status: "resolved", reason: "factory PR merged", pr: "https://github.com/o/r/pull/4" })]);
+    expect(resolved.lifecycle.some((c) => c.status === "dropped")).toBe(false);
+    expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === proposal.id)!.status).toBe("resolved");
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "resolved", ref: "https://github.com/o/r/pull/4" });
+    expect(resolved.results[0]!.ticket).toBeNull();
   });
 });
 

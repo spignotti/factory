@@ -715,16 +715,18 @@ a GitHub issue (`gh` must be authenticated): the goal as title, a short rational
 `factory-plan` block (intake uses that block as the plan), labels `factory-proposal` (created if missing) and
 `improve:<aspect>`. The body ends with a hidden marker `<!-- factory-proposal: <key> -->`. The key is the
 aspect plus the sorted finding keys the plan resolves, or, when it resolves none, the aspect plus a sha256
-of the sorted file paths it changes. An open issue with that marker is updated, whatever its labels (a
-relabel to `factory-ready` is still the same proposal). Open issues are listed with no label filter, page by
+of the sorted file paths it changes. An open issue with that marker is updated in place, whatever its labels (a
+relabel to `factory-ready` is still the same proposal): the issue text and the existing proposal record,
+keeping its id and plan file. It is not dropped and recreated. Open issues are listed with no label filter, page by
 page; if that list may be incomplete, no new issue is created and the run reports it. Two proposals with the
 same key in one run: the first is kept, the second is dropped and listed. `--dry-run` writes the proposal
 files only and does not call `gh`, including lifecycle. A `gh` error while reading an issue's state leaves
 that proposal as it is.
 
-Lifecycle, on the next `factory improve`: a merged factory PR (matched by plan file, goal or
-`resolves_findings`) resolves the proposal and its findings; an issue closed without that PR, a PR closed
-unmerged, or no merged or open PR within 28 days, drops it and reopens its findings. A proposal may change
+Lifecycle, on the next `factory improve`: a merged factory PR resolves the proposal and its findings.
+The PR is matched by plan file, goal or `resolves_findings`, or because the run closes the proposal's issue.
+That issue match counts even when the run started before the ticket. An issue closed without that PR, a PR
+closed unmerged, or no merged or open PR within 28 days, drops it and reopens its findings. A proposal may change
 `.factory/` or CI files only as declared `protected_changes` (see [Protected config](#protected-config)).
 
 Promoting a proposal is a relabel, not a factory command: `factory-proposal` → `factory-ready`. `factory
