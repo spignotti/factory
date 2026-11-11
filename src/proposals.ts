@@ -2,16 +2,17 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { join } from "node:path";
 import { memoryDir } from "./memory.js";
 import { type OpenAuditTicket, type Proposal, type ProposalItem, ProposalSchema } from "./schemas/proposal.js";
-import type { AuditType } from "./schemas/repo.js";
+import type { AuditType, ImproveAspect } from "./schemas/repo.js";
 
 export function proposalsDir(factoryHome: string, repoId: string): string {
   return join(memoryDir(factoryHome, repoId), "proposals");
 }
 
-/** Free id for a new proposal of the day: `<date>[-adopt|-audit-<type>]`, then `-2`, `-3` … */
-export function nextProposalId(dir: string, date: string, kind: Proposal["kind"], auditType?: AuditType): string {
+/** Free id for a new proposal of the day: `<date>[-adopt|-audit-<type>|-improve-<aspect>]`, then `-2`, `-3` … */
+export function nextProposalId(dir: string, date: string, kind: Proposal["kind"], auditType?: AuditType, aspect?: ImproveAspect): string {
   if (kind === "audit" && !auditType) throw new Error("audit proposals need a type");
-  const stem = kind === "adopt" ? `${date}-adopt` : kind === "audit" ? `${date}-audit-${auditType}` : date;
+  if (kind === "improve" && !aspect) throw new Error("improve proposals need an aspect");
+  const stem = kind === "adopt" ? `${date}-adopt` : kind === "audit" ? `${date}-audit-${auditType}` : kind === "improve" ? `${date}-improve-${aspect}` : date;
   if (!existsSync(join(dir, `${stem}.json`))) return stem;
   for (let n = 2; ; n++) if (!existsSync(join(dir, `${stem}-${n}.json`))) return `${stem}-${n}`;
 }
@@ -37,6 +38,29 @@ export function writeProposal(factoryHome: string, t: ProposalDraft): Proposal {
 
 export function saveProposal(factoryHome: string, p: Proposal): void {
   writeAtomic(join(proposalsDir(factoryHome, p.repo), `${p.id}.json`), JSON.stringify(ProposalSchema.parse(p), null, 2) + "\n");
+}
+
+/**
+ * Rewrites one proposal inside its ticket and refreshes that proposal's plan file.
+ * Id, rank and plan_path stay, so a run that already points at them still does.
+ */
+export function updateProposalItem(
+  factoryHome: string,
+  repoId: string,
+  ticketId: string,
+  item: ProposalItem,
+  over: { signals?: Proposal["signals"]; metrics?: Proposal["metrics"] } = {},
+): Proposal {
+  const ticket = readTickets(proposalsDir(factoryHome, repoId)).find((t) => t.id === ticketId);
+  if (!ticket) throw new Error(`proposal ticket ${ticketId} not found`);
+  const stored = ticket.proposals.find((p) => p.id === item.id);
+  if (!stored) throw new Error(`proposal ${item.id} is not in ${ticketId}`);
+  const next = { ...item, rank: stored.rank, id: stored.id, plan_path: stored.plan_path };
+  const full = ProposalSchema.parse({ ...ticket, ...over, proposals: ticket.proposals.map((p) => (p.id === stored.id ? next : p)) });
+  const saved = full.proposals.find((p) => p.id === stored.id)!;
+  writeAtomic(saved.plan_path, JSON.stringify(saved.plan, null, 2) + "\n");
+  writeAtomic(join(proposalsDir(factoryHome, full.repo), `${full.id}.json`), JSON.stringify(full, null, 2) + "\n");
+  return full;
 }
 
 function readTickets(dir: string): Proposal[] {

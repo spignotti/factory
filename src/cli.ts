@@ -18,10 +18,9 @@ import { statsCommand } from "./commands/stats.js";
 import { queueCommand } from "./commands/queue.js";
 import { statusCommand } from "./commands/status.js";
 import { adoptCommand } from "./commands/adopt.js";
-import { auditCommand } from "./commands/audit.js";
-import { hardenCommand } from "./commands/harden.js";
 import { standardsMigrateCommand } from "./commands/standards.js";
-import { AUDIT_TYPES, type AuditType, MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
+import { auditAlias, hardenAlias, improveCommand } from "./commands/improve.js";
+import { AUDIT_TYPES, type AuditType, IMPROVE_ASPECTS, type ImproveAspect, MAX_PROPOSALS_LIMIT } from "./schemas/repo.js";
 import { GhCli } from "./gh.js";
 import { installSignalHandlers, Interrupted } from "./interrupt.js";
 import { isBaseRedWaiting, resumeFactory, runFactory, sweepBaseRed } from "./pipeline/run.js";
@@ -93,15 +92,14 @@ const USAGE = `usage:
   factory adopt --repo <path> [--ref <tag>] [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
               (drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md (template if missing); removes the legacy
                coding setup (--keep spares paths); baseline plan as proposal; one PR; settings only as hints)
+  factory improve --repo <path> [--aspect findings|security|performance|structure]... [--max <1-10>] [--dry-run] [--profile <file>] [--json]
+              (aspects from repo.yaml improve.aspects, or --aspect; each valid proposal becomes a GitHub issue
+               labelled factory-proposal and improve:<aspect>, plan in a factory-plan block; an open issue with the
+               same proposal marker is updated even after a relabel; --dry-run writes proposal files only, no gh)
   factory harden --repo <path> [--no-compact] [--max <1-10>] [--profile <file>] [--json]
-              (resolves earlier proposals, compacts memory, signals and metrics (metrics.jsonl), one ticket
-               $FACTORY_HOME/memory/<repo>/proposals/<date>.json with up to --max (repo.yaml harden.max_proposals,
-               default 5) ranked proposals, each its own run/PR; exit 1 when selection failed)
+              (deprecated alias of factory improve --aspect findings)
   factory audit --repo <path> --type security|performance|refactor|simplify [--max <1-10>] [--profile <file>] [--json]
-              (one read-only session; ticket proposals/<date>-audit-<type>.json with up to --max
-               (repo.yaml audit.max_proposals, default 5) ranked plans when --type is listed in audit.types;
-               otherwise exit 1 and no model call; audit.focus.<type> is an optional note added only to
-               that type's prompt; each plan is its own run/PR)
+              (deprecated alias of factory improve --aspect <type>; refactor and simplify map to structure)
   factory notify test <owner/name> [--target <name>]
               (one test POST to the repo's webhook, or to a named target, from $FACTORY_HOME/notify.yaml;
                doctor lists configured repos and target names, never URLs)
@@ -287,6 +285,47 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         await runner.close();
       }
     }
+    if (command === "improve") {
+      const { values } = parseArgs({
+        args: rest,
+        options: {
+          repo: { type: "string" },
+          aspect: { type: "string", multiple: true },
+          max: { type: "string" },
+          "dry-run": { type: "boolean", default: false },
+          profile: { type: "string" },
+          json: { type: "boolean", default: false },
+        },
+      });
+      const max = values.max === undefined ? undefined : Number(values.max);
+      const aspects = values.aspect ?? [];
+      const aspectOk = aspects.every((a) => (IMPROVE_ASPECTS as readonly string[]).includes(a));
+      if (!values.repo || !aspectOk || (max !== undefined && !(Number.isInteger(max) && max >= 1 && max <= MAX_PROPOSALS_LIMIT))) {
+        io.err(USAGE);
+        return 2;
+      }
+      const factoryHome = factoryHomeOf();
+      const profile = resolveProfile(loadLayers({ factoryHome, profile: values.profile }));
+      const runner = new PiRunner(join(factoryHome, "pi"));
+      const controller = new AbortController();
+      const uninstall = installSignalHandlers(controller, { log: io.err });
+      try {
+        return await improveCommand(
+          {
+            repo: values.repo,
+            json: values.json,
+            dryRun: values["dry-run"],
+            ...(aspects.length ? { aspects: aspects as ImproveAspect[] } : {}),
+            ...(max ? { max } : {}),
+          },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
+          io,
+        );
+      } finally {
+        uninstall();
+        await runner.close();
+      }
+    }
     if (command === "harden") {
       const { values } = parseArgs({
         args: rest,
@@ -303,7 +342,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });
       try {
-        return await hardenCommand(
+        return await hardenAlias(
           { repo: values.repo, compact: !values["no-compact"], json: values.json, ...(max ? { max } : {}) },
           { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
           io,
@@ -330,7 +369,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       const controller = new AbortController();
       const uninstall = installSignalHandlers(controller, { log: io.err });
       try {
-        return await auditCommand(
+        return await auditAlias(
           { repo: values.repo, type: values.type as AuditType, json: values.json, ...(max ? { max } : {}) },
           { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal },
           io,

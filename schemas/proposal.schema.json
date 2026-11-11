@@ -1,6 +1,6 @@
 {
   "$id": "https://github.com/spignotti/factory/schemas/proposal.schema.json",
-  "title": "harden/adopt/audit proposal ($FACTORY_HOME/memory/<repo>/proposals/<id>.json)",
+  "title": "harden/adopt/audit/improve proposal ($FACTORY_HOME/memory/<repo>/proposals/<id>.json)",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "properties": {
@@ -13,7 +13,8 @@
       "enum": [
         "harden",
         "adopt",
-        "audit"
+        "audit",
+        "improve"
       ]
     },
     "id": {
@@ -59,6 +60,31 @@
               "performance",
               "refactor",
               "simplify"
+            ]
+          },
+          "aspect": {
+            "type": "string",
+            "enum": [
+              "findings",
+              "security",
+              "performance",
+              "structure"
+            ]
+          },
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "issue": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "plan": {

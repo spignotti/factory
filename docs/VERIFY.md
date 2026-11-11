@@ -70,6 +70,9 @@ Unverified (needs a real provider):
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).
 - `getIssue` also reads `state` (`OPEN` / `CLOSED`) for `queue add`. UNVERIFIED against a live `gh`.
+- `listOpenIssues` pages `gh api repos/{owner}/{repo}/issues?state=open&per_page=100` (issues and pull
+  requests; pull requests are dropped). A short page ends the list. Fifty full pages is incomplete: improve
+  does not create an issue. UNVERIFIED against a live `gh`. Tests drive `paginateOpenIssues` without `gh`.
 - `findFactoryPr` lists with `gh pr list --state all --search head:factory/<issue> --json number,state,headRefName`
   and keeps only a head that is exactly `factory/<issue>` or `factory/<issue>-*`. UNVERIFIED against a live `gh`.
 - `updateBranch` runs `gh pr update-branch <pr>` (merge from the base, no `--rebase`, no force-push)

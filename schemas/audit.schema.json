@@ -74,7 +74,8 @@
               "enum": [
                 "harden",
                 "adopt",
-                "audit"
+                "audit",
+                "improve"
               ]
             },
             "id": {
@@ -120,6 +121,31 @@
                       "performance",
                       "refactor",
                       "simplify"
+                    ]
+                  },
+                  "aspect": {
+                    "type": "string",
+                    "enum": [
+                      "findings",
+                      "security",
+                      "performance",
+                      "structure"
+                    ]
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "issue": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "plan": {

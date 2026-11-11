@@ -26,11 +26,14 @@ function runPlan(run: RunRecord): { goal?: string; resolves_findings?: string[] 
 /**
  * Runs that worked on a proposal: started after its ticket and run from its plan file, or carrying its goal,
  * or resolving one of its findings (keys are disjoint across the proposals of a ticket).
+ * A run on the proposal's issue counts even when it started earlier. A later improve keeps that issue,
+ * and the merged PR still closes it.
  */
 export function runsFor(p: ProposalItem, createdAt: string, runs: RunRecord[]): RunRecord[] {
   const created = Date.parse(createdAt);
   const refs = new Set(p.references.findings);
   return runs.filter((r) => {
+    if (p.issue && (r.state?.task?.issue === p.issue || r.result?.task === `#${p.issue}`)) return true;
     if (r.started_at.getTime() < created) return false;
     if (r.state?.task?.ref && resolve(r.state.task.ref) === resolve(p.plan_path)) return true;
     const plan = runPlan(r);
@@ -41,8 +44,10 @@ export function runsFor(p: ProposalItem, createdAt: string, runs: RunRecord[]): 
 
 /**
  * Lifecycle of earlier proposals, each on its own: a merged factory PR resolves the proposal and its
- * entries; a PR closed unmerged, or no merged/open PR within `STALE_DAYS`, drops it and reopens its
- * `proposed` entries (only those it still owns: `ref` = its id).
+ * entries. That includes a PR which closes the proposal's issue, whatever the run's start time.
+ * An improve issue closed without that PR, a PR closed unmerged, or no merged/open PR within
+ * `STALE_DAYS`, drops it and reopens its `proposed` entries (only those it still owns: `ref` = its id).
+ * A `gh` error while reading the issue is unknown: the proposal stays as it is, and is not dropped.
  */
 export async function resolveProposals(opts: { factoryHome: string; repoId: string; repoDir: string; runs: RunRecord[]; github: GitHub; now: Date }): Promise<LifecycleChange[]> {
   const changes: LifecycleChange[] = [];
@@ -92,6 +97,17 @@ async function decide(
   const merged = prs.find((x) => x.state === "merged");
   const ageDays = (opts.now.getTime() - Date.parse(createdAt)) / 86_400_000;
   if (merged) return { id: p.id, status: "resolved", reason: "factory PR merged", pr: merged.pr, run_id: merged.run_id };
+  if (p.issue) {
+    // A failed read is unknown, not closed. Do not drop, and do not fall through to the stale drop.
+    const issue = await opts.github.getIssue(opts.repoDir, p.issue).then(
+      (found) => found,
+      () => undefined,
+    );
+    if (issue === undefined) return undefined;
+    if (issue.state === "closed") {
+      return { id: p.id, status: "dropped", reason: "issue closed without merged PR", pr: prs.at(-1)?.pr ?? null, run_id: prs.at(-1)?.run_id ?? null };
+    }
+  }
   if (prs.length && prs.every((x) => x.state === "closed")) return { id: p.id, status: "dropped", reason: "factory PR closed without merge", pr: prs.at(-1)!.pr, run_id: prs.at(-1)!.run_id };
   if (!prs.some((x) => x.state === "open" || x.state === "unknown") && ageDays > STALE_DAYS) {
     return { id: p.id, status: "dropped", reason: `no merged factory PR within ${STALE_DAYS} days`, pr: null, run_id: null };

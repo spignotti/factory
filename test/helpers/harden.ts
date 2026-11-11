@@ -15,16 +15,19 @@ export function seedMemory(home: string, repoId: string, entries: MemoryEntry[])
 }
 
 /** A finished run directory as `listRuns` reads it (UTC run id from `at`). */
-export function seedRun(home: string, repo: string, at: Date, opts: { pr?: string | null; plan?: Record<string, unknown>; result?: string; rounds?: number; taskRef?: string }): string {
+export function seedRun(home: string, repo: string, at: Date, opts: { pr?: string | null; plan?: Record<string, unknown>; result?: string; rounds?: number; taskRef?: string; issue?: number }): string {
   const stamp = at.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
   const runId = `${stamp}-${Math.random().toString(16).slice(2, 8)}`;
   const dir = join(home, "runs", runId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, run_id: runId, repo, ...(opts.taskRef ? { task: { ref: opts.taskRef, title: "t", text: "", labels: [] } } : {}) }));
+  const task = opts.taskRef || opts.issue !== undefined
+    ? { ref: opts.taskRef ?? `#${opts.issue}`, title: "t", text: "", labels: [] as string[], ...(opts.issue !== undefined ? { issue: opts.issue } : {}) }
+    : undefined;
+  writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, run_id: runId, repo, ...(task ? { task } : {}) }));
   writeFileSync(
     join(dir, "result.json"),
     JSON.stringify({
-      run_id: runId, repo, task: "t", type: "chore", lane: "standard", result: opts.result ?? "done", risk: "low", merge_policy: "human_review",
+      run_id: runId, repo, task: opts.issue !== undefined ? `#${opts.issue}` : "t", type: "chore", lane: "standard", result: opts.result ?? "done", risk: "low", merge_policy: "human_review",
       pr: opts.pr ?? null, rounds: opts.rounds ?? 1, minutes: 5, cost_usd: 0.1, reason: "", branch: null, worktree: null, run_dir: dir,
     }),
   );
