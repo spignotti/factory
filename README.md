@@ -12,7 +12,7 @@ source of truth; this README is the reference for concepts, configuration and co
    verified in code.
 3. **Checks in CI, judgment in review.** Lint, types, tests, scanners and recorded flows are checks; LLM
    review covers plan fidelity, simplicity, impact and security reasoning.
-4. **Ratchet toward determinism.** Recurring findings and checklist items become checks (`factory harden`). Security, performance and structure are judged on demand (`factory audit`).
+4. **Ratchet toward determinism.** `factory improve` turns recurring findings into checks and judges security, performance and structure. Each proposal is a GitHub issue; relabel it `factory-ready` to queue a run.
 5. **Tests prove criteria.** Every test proves an acceptance criterion the plan names.
 6. **Minimal prompts.** `roles/*.md` are short, role-specific and the factory's only global agent
    instructions; repo facts live in the repo's `AGENTS.md`.
@@ -114,8 +114,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), queues, PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
-| `factory harden --repo <p>` | signals → ranked proposals |
-| `factory audit --repo <p> --type <t>` | one read-only audit → ranked proposals |
+| `factory improve --repo <p> [--aspect <a>]` | findings, security, performance, structure → GitHub issues |
 | `factory eval` / `experiment` | compare profiles on curated tasks |
 | `factory ci-stub [--ref <tag>] [--repo <path>]` | print the CI workflow (minimal when no check runs in CI) |
 | `factory notify test <owner/name> [--target <name>]` | send a test ping to the repo hook or a named target (see [docs/BOTS.md](docs/BOTS.md)) |
@@ -269,12 +268,11 @@ ui: { start: "…--port {port:app}", url: "http://localhost:{port:app}", paths: 
 verify:
   areas: [{ name: tours, paths: ["src/app/tours/**"], guide: ".factory/verify/tours.md", flows: ["tests/e2e/test_tours.py"], pages: ["/tours"] }]
   run: "uv run pytest {files}"       # runs recorded flows [tests.run]
-harden: { max_proposals: 5 }
-audit:                              # absent: no types enabled, `factory audit` refuses without a model call
-  types: [security, performance, refactor, simplify]
-  max_proposals: 5                 # 1..10; --max overrides
-  thinking: { security: high, performance: high, refactor: medium, simplify: medium }
-  focus:                           # optional; one note per type, injected only into that type's prompt
+improve:                            # absent: harden: and audit: are still read, with a deprecation warning
+  aspects: [findings, security, performance, structure]   # --aspect runs a subset; ci and tests are not aspects yet
+  max_proposals: 5                 # 1..10 per aspect; --max overrides
+  thinking: { findings: medium, security: high, performance: high, structure: medium }
+  focus:                           # optional; one note per aspect, injected only into that aspect's prompt
     security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 git: { author: factory, email: "…" }
 agent_env: []                        # extra env var names for agent tools and checks
@@ -670,7 +668,7 @@ base branch; the user's checkout is not touched):
   Duplicate rules across AGENTS.md and CLAUDE.md and a CLAUDE.md that differs from AGENTS.md are warnings.
   Deploy, release and scheduled workflows stay. `--keep <glob|path|dir>` (repeatable) spares paths. The PR
   description lists every removed, proposed, kept and moved item and every warning.
-- **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Harden); run it after the merge
+- **Baseline plan** (`plan_medium`): saved as ticket `<date>-adopt` with one proposal (see Improve); run it after the merge
   with `factory run --plan <plan_path>`. An invalid plan is noted in the PR, not fatal (`--no-plan` skips).
 - **Settings** are never changed: branch protection (required check `done`, omitted when no check runs in CI) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
@@ -680,67 +678,74 @@ base branch; the user's checkout is not touched):
   repo bot sets up its webhook routine and writes its own `notify.yaml` entry, then runs
   `factory notify test <owner/name>` (checklist in [docs/BOTS.md](docs/BOTS.md#onboarding-checklist-new-repo--new-bot)).
 
-## Harden
+## Improve
 
-`factory harden --repo <path>` (weekly or by hand) turns recurring problems into deterministic checks, one
-proposal at a time. State lives outside the repo in `$FACTORY_HOME/memory/<repo>/`:
+`factory improve --repo <path> [--aspect <a>...] [--max N] [--dry-run]` is the periodic loop: findings,
+security, performance and structure, one config block, GitHub issues as the output. It does not schedule
+itself and it does not start runs. Without `--aspect`, every aspect in `improve.aspects` runs. An aspect
+that is not configured is refused (exit 1, no model call).
 
-1. **Lifecycle** (per proposal): an open proposal whose factory run (matched by its plan file, plan goal or
-   `resolves_findings`) merged is `resolved` (its findings too); all its PRs closed, or no merged/open PR after
-   28 days, is `dropped` and its findings are reopened.
-2. **Compaction** (`plan_medium`, no tools): near-duplicate open findings are merged; counts, runs and dates
-   are merged in code (`--no-compact` skips).
-3. **Signals** (code): findings seen twice or checkable, flaky checks, unchecked checklist items, a 30-day
-   CI audit via `gh` (failure/flaky rates, median/p90 durations, minutes per week, checks that never fail,
-   slow checks without `paths`, CI stub behind the latest factory tag), run stats, stale verify guides,
-   reverted factory PRs, pages the evaluator verified repeatedly without a recorded flow.
-4. **Metrics**: one line per call in `metrics.jsonl` (determinism ratio, open findings, CI minutes, flaky,
-   done and revert rate, median rounds).
-5. **Ticket** (`harden` role, read-only tools): ONE file `proposals/<date>.json` with up to 5 ranked proposals
-   (`repo.yaml` `harden.max_proposals`, `--max`), each validated as a plan (one retry; overlapping or invalid
-   ones are dropped and listed), with its own `<date>.<rank>.plan.json`; their findings become `proposed`.
-   No signals, no LLM call. A proposal may change `.factory/` or CI files only as declared
-   `protected_changes` (see [Protected config](#protected-config)). Each proposal is its own run and PR:
-   `factory run --plan <dir>/<date>.<rank>.plan.json`.
-
-## Audit
-
-`factory audit --repo <path> --type security|performance|refactor|simplify` judges the repository against its
-purpose in one dimension and writes a ranked list of proposals. It does not schedule itself and it does not
-start the runs. A type runs only when it is listed in `audit.types`. With no `audit` block every type is
-refused (exit 1, no model call).
-
-The session is read-only (the same tools as harden's ticket step). Roles `audit_security`,
-`audit_performance`, `audit_refactor` and `audit_simplify` default to the strongest plan chain (`plan_high`'s
-model) and are overridden by the profile layers like every other role, including `models:` in repo.yaml.
-`audit.thinking` sets the reasoning level for that call (default high for security and performance, medium
-for refactor and simplify) and replaces the thinking level on the chain. One call, one type.
-
-The model sees open findings from memory, the latest `metrics.jsonl` line, and — for `performance` only —
-harden's CI audit. There is no fixed checklist. `audit.focus.<type>` is an optional short note for that
-dimension only (a string, or a list of bullet points, at most 2000 characters once joined). It is added to
-that type's prompt as data and to no other prompt; the role prompt stays the same. The note says what to
-weigh, it does not add a checklist. A security audit can be pointed at privacy and GDPR — personal data in
-logs, fixtures, exports and retention — without changing performance, refactor or simplify. Leave `focus`
-out and the prompt is unchanged. Do not put secrets or customer data in it.
-
-Output reuses the proposal pipeline: ticket
-`proposals/<date>-audit-<type>.json`, plan files `<date>-audit-<type>.<rank>.plan.json`, the same plan
-validation (one retry; overlapping or invalid proposals are dropped and listed), and the same lifecycle
-(a later `factory audit` or `factory harden` marks a proposal `resolved` when its factory PR merges, or
-`dropped` when the PR is closed or the ticket goes stale). A proposal may change `.factory/` or CI files
-only as declared `protected_changes`. Findings it names become `proposed`.
-
-```bash
-factory audit --repo <path> --type security
-factory run --repo <path> --plan <plan_path>
+```yaml
+improve:
+  aspects: [findings, security, performance, structure]
+  max_proposals: 5
+  thinking: { findings: medium, security: high, performance: high, structure: medium }
+  focus:
+    security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 ```
 
-`--json` matches `schemas/audit.schema.json`. `factory status` and `factory stats` list open audit tickets
-per repository (`stats --repo` limits the list to that repo).
+`thinking` replaces that aspect's model-chain level. `focus.<aspect>` is an optional note (a string or a
+list of bullet points, at most 2000 characters) injected only into that aspect's prompt, as data. It is not
+a checklist. Do not put secrets or customer data in it.
 
-A practical rhythm, run by the repo's bot (see [docs/BOTS.md](docs/BOTS.md#audit)): security and performance
-weekly, alongside harden; refactor and simplify monthly. Only enabled types.
+Aspects:
+
+- **findings** — recurring or checkable findings, flaky checks, unmarked checklist items, reverted factory
+  PRs. Near-duplicate open findings are compacted first (`plan_medium`). A metrics line is appended.
+  No signals and no open proposal to refresh: no model call.
+- **security**, **performance**, **structure** — one read-only session each. Structure is refactor and
+  simplify together. Performance also sees the 30-day CI audit. The model sees open findings, the latest
+  metrics line, and findings already on an open proposal of that aspect (so a later run can update it).
+
+`ci` and `tests` are not aspects yet. Adding one is a signal function plus `roles/improve-<aspect>.md`.
+
+Each valid proposal (same plan validation as before, one retry; overlapping or invalid ones are dropped and
+listed) is written under `$FACTORY_HOME/memory/<repo>/proposals/<date>-improve-<aspect>.json` and opened as
+a GitHub issue (`gh` must be authenticated): the goal as title, a short rationale, the plan in a
+`factory-plan` block (intake uses that block as the plan), labels `factory-proposal` (created if missing) and
+`improve:<aspect>`. The body ends with a hidden marker `<!-- factory-proposal: <key> -->`. The key is the
+aspect plus the sorted finding keys the plan resolves, or, when it resolves none, the aspect plus a sha256
+of the sorted file paths it changes. An open issue with that marker is updated in place, whatever its labels (a
+relabel to `factory-ready` is still the same proposal): the issue text and the existing proposal record,
+keeping its id and plan file. It is not dropped and recreated. Open issues are listed with no label filter, page by
+page; if that list may be incomplete, no new issue is created and the run reports it. Two proposals with the
+same key in one run: the first is kept, the second is dropped and listed. `--dry-run` writes the proposal
+files only and does not call `gh`, including lifecycle. A `gh` error while reading an issue's state leaves
+that proposal as it is.
+
+Lifecycle, on the next `factory improve`: a merged factory PR resolves the proposal and its findings.
+The PR is matched by plan file, goal or `resolves_findings`, or because the run closes the proposal's issue.
+That issue match counts even when the run started before the ticket. An issue closed without that PR, a PR
+closed unmerged, or no merged or open PR within 28 days, drops it and reopens its findings. A proposal may change
+`.factory/` or CI files only as declared `protected_changes` (see [Protected config](#protected-config)).
+
+Promoting a proposal is a relabel, not a factory command: `factory-proposal` → `factory-ready`. `factory
+queue add` still accepts an issue only when it is `factory-ready`.
+
+```bash
+factory improve --repo <path>
+factory improve --repo <path> --aspect security --dry-run
+```
+
+`--json` matches `schemas/improve.schema.json`.
+
+`factory harden` and `factory audit --type <t>` are deprecated aliases (`refactor` and `simplify` both call
+`--aspect structure`). They print a note and run improve. A repo that still has `harden:` or `audit:` and
+no `improve:` block is read as that fallback, with a deprecation warning (`audit` types `refactor` and
+`simplify` map to `structure`).
+
+A practical rhythm, run by the repo's bot (see [docs/BOTS.md](docs/BOTS.md#improve)): findings, security
+and performance weekly; structure monthly. Only configured aspects.
 
 ## Evals and experiments
 
@@ -770,7 +775,7 @@ One list item per rule. Mark an item with `<!-- check: <check name> -->` once a 
 
 ## Findings memory
 
-Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory harden` (M3) turns them into checks. Delete the file to forget.
+Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory improve --aspect findings` turns them into checks. Delete the file to forget.
 
 ## Doctor and the Zen guard
 
