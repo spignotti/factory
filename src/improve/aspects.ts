@@ -120,7 +120,7 @@ async function collectCi(ctx: AspectContext): Promise<AspectInput> {
   } catch (e) {
     throw new Error(`ci runs: ${clip(e)}`, { cause: e });
   }
-  const signal = ciSignals({ runs: window.runs, truncated: window.truncated, workflows: readCiWorkflows(ctx.repoDir), baseBranch: ctx.repo.base_branch });
+  const signal = ciSignals({ runs: window.runs, truncated: window.truncated, workflows: readCiWorkflows(ctx.repoDir), baseBranch: ctx.repo.base_branch, now: ctx.now });
   return {
     signals: signal as unknown as Record<string, unknown>,
     keys: new Set(ctx.refresh),

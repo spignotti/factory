@@ -705,14 +705,17 @@ Aspects:
 - **security**, **performance**, **structure** — one read-only session each. Structure is refactor and
   simplify together. Performance also sees the 30-day CI audit (at most 200 runs). The model sees open
   findings, the latest metrics line, and findings already on an open proposal of that aspect.
-- **ci** — workflow runs over 30 days, paged (a busy month is more than 200). Per job: runs, minutes/week,
-  p50/p90, failure rate, never failed. Flags slow jobs without path filters, report-only steps, an empty
-  factory stub, duplicate commands, push-to-main runs. High minutes alone calls the model. Workflow edits
-  only as declared `protected_changes`.
-- **tests** — slow tests when the repo's runner can report them (pytest `--durations`, vitest/jest JSON),
-  flaky checks from memory, test jobs that never fail, and uncovered critical paths when `tests.coverage`
+- **ci** — workflow runs over 30 days, paged (100 per page, at most 1000). A truncated window's per-week
+  figures use the days actually covered. Per job: runs, minutes/week, p50/p90, failure rate, never failed.
+  Flags slow jobs without path filters, report-only steps (full job minutes only when every step is
+  report-only), an empty factory stub, duplicate commands, push-to-main runs. High minutes alone calls the
+  model. Workflow edits only as declared `protected_changes`. Do not remove a required check job.
+- **tests** — slow tests when the repo's runner can report them (pytest `--durations`, vitest/jest JSON).
+  Duration and coverage commands run in a temporary base worktree (removed afterwards), not in the checkout.
+  Flaky checks from memory, test jobs that never fail, and uncovered critical paths when `tests.coverage`
   (a command that writes a coverage report) is set. Proposals speed up or split slow tests, remove redundant
-  ones, add tests for uncovered critical code, and add or raise a coverage threshold. Never lower one.
+  ones, add tests for uncovered critical code, and add or raise a coverage threshold. Lowering one fails
+  `config_guard` even when the plan lists the file.
 
 `tests.coverage` is optional. No signals and no open proposal to refresh: no model call, for ci and tests too.
 

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { CI_PAGE_SIZE, ciRunListArgs, ciRunViewArgs, paginateRunList, parseRunView } from "./ci-history.js";
+import { CI_MAX_PAGES, CI_PAGE_SIZE, ciRunListArgs, ciRunViewArgs, ciWorkflowListArgs, paginateRunList, parseRunView, parseWorkflowNames, resolveRunWorkflow } from "./ci-history.js";
 import { CommandTimeoutError, execFileTimed } from "./exec.js";
 import { GIT_LOCAL_TIMEOUT_MS, git } from "./git.js";
 import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
@@ -124,8 +124,9 @@ export interface GitHub {
   /** `harden` CI audit: workflow runs created since `since` (ISO date), newest first, with their jobs; at most `limit`. */
   ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]>;
   /**
-   * improve `ci` / `tests`: every workflow run in the window, newest first, paged past the 200-run cap.
-   * `truncated` when the page cap was hit.
+   * improve `ci` / `tests`: every workflow run in the window, newest first.
+   * At most 1000 runs (10 pages). `truncated` when the page cap or an HTTP 422 stopped the list.
+   * Workflow identity is the file path, named from the workflows API, never the run name.
    */
   ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }>;
   /** `harden`: newest release tag of the factory itself (`owner/repo`), null when there is none. */
@@ -137,6 +138,8 @@ export interface CiJob {
   /** success | failure | cancelled | skipped | … ; null while running. */
   conclusion: string | null;
   seconds: number | null;
+  /** Present when `gh run view` included steps. */
+  steps?: { name: string; conclusion: string | null; seconds: number | null }[];
 }
 
 export interface CiRun {
@@ -148,6 +151,8 @@ export interface CiRun {
   created_at: string;
   /** Branch or tag. Absent when the list did not include `headBranch`. */
   head_branch?: string | null;
+  /** Workflow file path when the runs API provided it. */
+  path?: string | null;
   jobs: CiJob[];
 }
 
@@ -552,6 +557,25 @@ export async function paginateOpenIssues(
   return { issues, complete: false };
 }
 
+/**
+ * Workflow file path → workflow name (`GET /actions/workflows`).
+ * A failed page stops the lookup; the runs still identify by path. Never the run name.
+ */
+async function workflowNames(repoDir: string): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  for (let page = 1; page <= CI_MAX_PAGES; page++) {
+    let batch: { name: string; path: string }[];
+    try {
+      batch = parseWorkflowNames(JSON.parse(await gh(repoDir, ciWorkflowListArgs(page))));
+    } catch {
+      break;
+    }
+    for (const row of batch) map.set(row.path, row.name);
+    if (batch.length < CI_PAGE_SIZE) break;
+  }
+  return map;
+}
+
 export class GhCli implements GitHub {
   async authenticated(repoDir: string): Promise<boolean> {
     try {
@@ -747,12 +771,25 @@ export class GhCli implements GitHub {
 
   async ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }> {
     // UNVERIFIED: Actions runs paging. `gh run list` has no page flag and stops at its own limit.
+    // A page past 1000 runs is HTTP 422; paginateRunList keeps the pages already read.
     const { rows, truncated } = await paginateRunList(async (page, perPage) => JSON.parse(await gh(repoDir, ciRunListArgs(since.slice(0, 10), page, perPage))));
+    const names = await workflowNames(repoDir);
     const runs: CiRun[] = [];
     for (const row of rows) {
       if (row.created_at < since) continue;
       const jobs = parseRunView(JSON.parse(await gh(repoDir, ciRunViewArgs(row.id))));
-      runs.push({ id: row.id, sha: row.sha, workflow: row.workflow, event: row.event, conclusion: row.conclusion, created_at: row.created_at, head_branch: row.head_branch, jobs });
+      const identity = resolveRunWorkflow(row, names);
+      runs.push({
+        id: row.id,
+        sha: row.sha,
+        workflow: identity.workflow,
+        path: identity.path,
+        event: row.event,
+        conclusion: row.conclusion,
+        created_at: row.created_at,
+        head_branch: row.head_branch,
+        jobs,
+      });
     }
     return { runs, truncated };
   }

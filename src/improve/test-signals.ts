@@ -1,7 +1,9 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileTimed } from "../exec.js";
 import type { CiRun } from "../gh.js";
+import { baseRef, revParse, withBaseWorktree } from "../git.js";
 import type { MemoryFile } from "../memory.js";
 import { matchesAny } from "../schemas/plan.js";
 import type { RepoConfig } from "../schemas/repo.js";
@@ -9,6 +11,8 @@ import { NEVER_FAILED_MIN_RUNS } from "../harden/signals.js";
 
 /** A test at least this slow is a duration signal. Shorter timings stay out of the prompt. */
 export const SLOW_TEST_SECONDS = 2;
+/** Local duration and coverage commands never run longer than this, even when the check timeout is higher. */
+export const LOCAL_SIGNAL_TIMEOUT_MS = 5 * 60_000;
 const SLOWEST_CAP = 15;
 const UNCOVERED_CAP = 40;
 const TEST_JOB = /(^|[^a-z])(tests?|pytest|vitest|jest|specs?|e2e|unit)([^a-z]|$)/i;
@@ -33,13 +37,27 @@ export interface TestSignal {
   coverage: { uncovered: UncoveredPath[]; error: string | null } | null;
 }
 
+/** Vitest's default script is watch mode. `--run` (or the `vitest run` subcommand) forces a single run. */
+export function forceVitestRun(command: string): string {
+  if (/\bvitest\s+run\b/.test(command) || /(^|\s)--run(\s|=|$)/.test(command)) return command;
+  return command.replace(/\bvitest\b/, "vitest --run");
+}
+
 export function durationCommand(command: string): { command: string; kind: "pytest" | "vitest" | "jest" } | null {
   const base = command.replace(/\{files\}/g, "").replace(/\s+/g, " ").trim();
   if (!base) return null;
   if (/\bpytest\b/.test(base)) return { kind: "pytest", command: /--durations(=|\s)/.test(base) ? base : `${base} --durations=25` };
-  if (/\bvitest\b/.test(base)) return { kind: "vitest", command: /--reporter(=|\s)/.test(base) ? base : `${base} --reporter=json` };
+  if (/\bvitest\b/.test(base)) {
+    const withRun = forceVitestRun(base);
+    return { kind: "vitest", command: /--reporter(=|\s)/.test(withRun) ? withRun : `${withRun} --reporter=json` };
+  }
   if (/\bjest\b/.test(base)) return { kind: "jest", command: /\s--json\b/.test(base) ? base : `${base} --json` };
   return null;
+}
+
+/** `min(5 min, limits.command_timeout_minutes)`. Each local command gets its own cap. */
+export function localSignalTimeoutMs(commandTimeoutMinutes: number): number {
+  return Math.min(LOCAL_SIGNAL_TIMEOUT_MS, commandTimeoutMinutes * 60_000);
 }
 
 /** The repo's runner, when the command names pytest, vitest or jest. Otherwise null (no duration signal). */
@@ -55,8 +73,11 @@ export function runnerInvocation(repoDir: string, repo: RepoConfig): { command: 
   const parsed = durationCommand(script);
   if (!parsed || parsed.kind === "pytest") return parsed;
   const pm = existsSync(join(repoDir, "pnpm-lock.yaml")) ? "pnpm" : existsSync(join(repoDir, "yarn.lock")) ? "yarn" : "npm";
-  const extra = parsed.kind === "vitest" ? "--reporter=json" : "--json";
-  return { kind: parsed.kind, command: `${pm} test -- ${extra}` };
+  const flags =
+    parsed.kind === "vitest"
+      ? [forceVitestRun(script) === script ? "" : "--run", /--reporter(=|\s)/.test(script) ? "" : "--reporter=json"].filter(Boolean)
+      : [/\s--json\b/.test(script) ? "" : "--json"].filter(Boolean);
+  return { kind: parsed.kind, command: flags.length ? `${pm} test -- ${flags.join(" ")}` : `${pm} test` };
 }
 
 export function parsePytestDurations(text: string): SlowTest[] {
@@ -210,10 +231,36 @@ export interface TestSignalInput {
   runs: CiRun[];
   dryRun?: boolean;
   exec?: (command: string, cwd: string, timeoutMs: number) => Promise<{ stdout: string; stderr: string }>;
+  /** Where local commands run. Default: a temporary base worktree, removed afterwards. Never the checkout. */
+  isolate?: (repoDir: string, repo: RepoConfig, fn: (cwd: string) => Promise<void>) => Promise<void>;
+}
+
+function signalEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, CI: "1" };
 }
 
 async function defaultExec(command: string, cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
-  return execFileTimed("sh", ["-c", command], { cwd, timeoutMs, maxBuffer: 8 * 1024 * 1024 });
+  return execFileTimed("sh", ["-c", command], { cwd, timeoutMs, maxBuffer: 8 * 1024 * 1024, env: signalEnv() });
+}
+
+/** Detached worktree of the base commit, same idea as the plan-base worktree. Removed afterwards. */
+async function withSignalWorktree(repoDir: string, repo: RepoConfig, fn: (cwd: string) => Promise<void>): Promise<void> {
+  const tmp = mkdtempSync(join(tmpdir(), "factory-improve-"));
+  try {
+    const sha = await revParse(repoDir, await baseRef(repoDir, repo.base_branch));
+    await withBaseWorktree(repoDir, sha, join(tmp, "wt"), fn);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function outputOf(e: unknown): { stdout: string; stderr: string } | null {
+  if (!e || typeof e !== "object") return null;
+  const rec = e as { stdout?: unknown; stderr?: unknown };
+  const stdout = typeof rec.stdout === "string" ? rec.stdout : "";
+  const stderr = typeof rec.stderr === "string" ? rec.stderr : "";
+  if (!stdout && !stderr) return null;
+  return { stdout, stderr };
 }
 
 function flakyOf(mem: MemoryFile): TestSignal["flaky"] {
@@ -265,38 +312,50 @@ export async function collectTestSignals(input: TestSignalInput): Promise<TestSi
   const never_failed = neverFailedTests(input.runs);
   let slowest: SlowTest[] = [];
   let duration_error: string | null = null;
-  const invocation = runnerInvocation(input.repoDir, input.repo);
-  if (invocation && !input.dryRun) {
-    try {
-      const timeoutMs = input.repo.limits.command_timeout_minutes * 60_000;
-      const exec = input.exec ?? defaultExec;
-      const out = await exec(invocation.command, input.repoDir, timeoutMs);
-      const text = `${out.stdout}\n${out.stderr}`;
-      slowest = invocation.kind === "pytest" ? parsePytestDurations(text) : parseReporterDurations(text);
-    } catch (e) {
-      duration_error = clip(e);
-    }
-  }
-  const command = input.repo.tests.coverage;
   let coverage: TestSignal["coverage"] = null;
-  if (command) {
-    if (input.dryRun) {
-      coverage = { uncovered: [], error: "dry-run: command not run" };
-    } else {
+  const invocation = runnerInvocation(input.repoDir, input.repo);
+  const command = input.repo.tests.coverage;
+  if (input.dryRun) {
+    if (command) coverage = { uncovered: [], error: "dry-run: command not run" };
+    return { slowest, duration_error, flaky, never_failed, coverage };
+  }
+  if (!invocation && !command) return { slowest, duration_error, flaky, never_failed, coverage };
+
+  const exec = input.exec ?? defaultExec;
+  const timeoutMs = localSignalTimeoutMs(input.repo.limits.command_timeout_minutes);
+  const isolate = input.isolate ?? withSignalWorktree;
+  await isolate(input.repoDir, input.repo, async (cwd) => {
+    if (invocation) {
+      try {
+        const out = await exec(invocation.command, cwd, timeoutMs);
+        const text = `${out.stdout}\n${out.stderr}`;
+        slowest = invocation.kind === "pytest" ? parsePytestDurations(text) : parseReporterDurations(text);
+      } catch (e) {
+        const partial = outputOf(e);
+        const text = partial ? `${partial.stdout}\n${partial.stderr}` : "";
+        if (text.trim()) slowest = invocation.kind === "pytest" ? parsePytestDurations(text) : parseReporterDurations(text);
+        else duration_error = clip(e);
+      }
+    }
+    if (command) {
       const started = Date.now();
       let error: string | null = null;
       let stdout = "";
+      let failedClip: string | null = null;
       try {
-        const exec = input.exec ?? defaultExec;
-        const out = await exec(command, input.repoDir, input.repo.limits.command_timeout_minutes * 60_000);
+        const out = await exec(command, cwd, timeoutMs);
         stdout = out.stdout;
       } catch (e) {
-        error = clip(e);
+        failedClip = clip(e);
+        const partial = outputOf(e);
+        if (partial) stdout = partial.stdout;
+        else error = failedClip;
       }
-      const reports = [...readReports(input.repoDir, started), ...parseCoverageReport(stdout, "stdout")];
+      const reports = [...readReports(cwd, started), ...parseCoverageReport(stdout, "stdout")];
+      if (failedClip && reports.length === 0 && error === null) error = failedClip;
       coverage = { uncovered: uncoveredCritical(input.repoDir, reports, input.repo.sensitive_paths), error };
     }
-  }
+  });
   return { slowest, duration_error, flaky, never_failed, coverage };
 }
 

@@ -87,7 +87,8 @@ describe("improve ci and tests", () => {
     const report = await improve({ repo, aspects: ["tests"] }, d);
     expect(report.error).toBeNull();
     expect(d.runner.calls.map((c) => c.role)).toEqual(["harden"]);
-    expect(d.runner.calls[0]!.system).toContain("Never lower");
+    expect(d.runner.calls[0]!.system).toContain("config_guard fails a lowered");
+    expect(d.runner.calls[0]!.system).toContain("Do not remove a required check job");
     expect(d.runner.calls[0]!.prompt).toContain("flaky:unit");
     expect(d.runner.calls[0]!.prompt).toContain('"name": "unit"');
     expect(report.results[0]!.issues[0]).toMatchObject({ number: 1, action: "created" });

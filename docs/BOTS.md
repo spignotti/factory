@@ -31,7 +31,8 @@ The repo's bot runs `factory improve`. The factory does not schedule it and does
 Without `--aspect`, every aspect in `.factory/repo.yaml` `improve.aspects` runs. An aspect that is not
 listed is refused and does not call a model. `ci` (paged workflow history, minutes, path filters, report-only
 steps, empty stub) and `tests` (slow, flaky, never-failed, coverage when `tests.coverage` is set) use the
-same issue flow. Workflow edits are declared `protected_changes`. A coverage threshold is only added or raised.
+same issue flow. Workflow edits are declared `protected_changes`. A coverage threshold is only added or raised;
+`config_guard` rejects a lower one even when the plan lists the file. A proposal must not remove a required check job.
 
 ```bash
 factory improve --repo /path/to/checkout

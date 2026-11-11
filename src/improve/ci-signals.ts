@@ -21,12 +21,19 @@ function quantile(values: number[], q: number): number | null {
   return s[Math.min(s.length - 1, Math.max(0, Math.ceil(q * s.length) - 1))]!;
 }
 
+export interface CiWorkflowStep {
+  name: string;
+  reasons: string[];
+  /** First line of `run`, so a run view step `Run <cmd>` can be matched. */
+  run: string | null;
+  uses: string | null;
+}
+
 export interface CiWorkflowJob {
   id: string;
   name: string;
   runs: string[];
-  /** `continue-on-error` or `exit-code: 0`: the step still occupies a runner. */
-  report_only: string[];
+  steps: CiWorkflowStep[];
 }
 
 export interface CiWorkflow {
@@ -49,15 +56,32 @@ export interface JobStat {
   never_failed: boolean;
 }
 
+export interface ReportOnlyStep {
+  name: string;
+  reasons: string[];
+  /** Step duration in seconds when a run view had it. Null when the view omitted steps. */
+  seconds: number | null;
+}
+
+export interface ReportOnlyJob {
+  file: string;
+  job: string;
+  /** Full job minutes/week only when every step of the job is report-only. Otherwise null. */
+  minutes_per_week: number | null;
+  steps: ReportOnlyStep[];
+}
+
 export interface CiSignal {
   window_days: number;
   runs: number;
   truncated: boolean;
+  /** Set when the list was cut off: per-week figures use the days actually covered, not the full window. */
+  truncation: string | null;
   minutes_per_week: number;
   jobs: JobStat[];
   never_failed: { workflow: string; name: string; runs: number }[];
   slow_without_paths: { workflow: string; file: string | null; name: string; p50_s: number }[];
-  report_only: { file: string; job: string; reasons: string[]; minutes_per_week: number }[];
+  report_only: ReportOnlyJob[];
   empty_stub: { select_p50_s: number; select_runs: number; check_skipped: number; check_ran: number } | null;
   duplicates: { command: string; workflows: string[] }[];
   push_to_main: { workflow: string; file: string | null; runs: number; minutes_per_week: number }[];
@@ -75,6 +99,7 @@ export function assembleRuns(rows: RunListRow[], views: Record<string, unknown>,
       conclusion: row.conclusion,
       created_at: row.created_at,
       head_branch: row.head_branch,
+      path: row.path,
       jobs: parseRunView(views[String(row.id)]),
     }));
 }
@@ -127,15 +152,11 @@ export function readCiWorkflows(repoDir: string): CiWorkflow[] {
       if (!raw || typeof raw !== "object") return [];
       const job = raw as Record<string, unknown>;
       const steps = (Array.isArray(job.steps) ? job.steps : []) as Record<string, unknown>[];
-      const reasons = [
-        ...(job["continue-on-error"] === true || job["continue-on-error"] === "true" ? ["continue-on-error"] : []),
-        ...steps.flatMap((s) => (s && typeof s === "object" ? reportOnly(s) : [])),
-      ];
       return [{
         id,
         name: typeof job.name === "string" ? job.name : id,
         runs: steps.map((s) => s?.run).filter((r): r is string => typeof r === "string"),
-        report_only: [...new Set(reasons)],
+        steps: steps.flatMap((s, i) => (s && typeof s === "object" ? [workflowStep(s, i)] : [])),
       }];
     });
     out.push({
@@ -152,8 +173,30 @@ function isStub(workflow: string, file: string | null): boolean {
   return workflow === "factory" || file === CI_STUB_PATH;
 }
 
-function workflowFor(workflows: CiWorkflow[], name: string): CiWorkflow | undefined {
-  return workflows.find((w) => w.name === name) ?? workflows.find((w) => w.file.endsWith(`/${name}.yml`) || w.file.endsWith(`/${name}.yaml`));
+function workflowStep(step: Record<string, unknown>, index: number): CiWorkflowStep {
+  const run = typeof step.run === "string" ? step.run : null;
+  const uses = typeof step.uses === "string" ? step.uses : null;
+  const named = typeof step.name === "string" && step.name.trim() ? step.name.trim() : null;
+  const name = named ?? (run ? run.split("\n")[0]!.trim().slice(0, 80) : null) ?? uses ?? `step ${index + 1}`;
+  return { name, reasons: reportOnly(step), run, uses };
+}
+
+function workflowFor(workflows: CiWorkflow[], run: { workflow: string; path?: string | null }): CiWorkflow | undefined {
+  if (run.path) {
+    const path = run.path.replace(/^\.\//, "");
+    const byPath = workflows.find((w) => w.file === path);
+    if (byPath) return byPath;
+  }
+  return workflows.find((w) => w.name === run.workflow) ?? workflows.find((w) => w.file === run.workflow || w.file.endsWith(`/${run.workflow}.yml`) || w.file.endsWith(`/${run.workflow}.yaml`));
+}
+
+function runLabel(run: CiRun, workflows: CiWorkflow[]): string {
+  return workflowFor(workflows, run)?.name ?? run.workflow;
+}
+
+/** Path when known, so a `run-name` cannot split one workflow into many. */
+function runKey(run: CiRun, workflows: CiWorkflow[]): string {
+  return run.path ?? workflowFor(workflows, run)?.file ?? run.workflow;
 }
 
 function jobBase(name: string): string {
@@ -174,24 +217,61 @@ function perWeek(seconds: number, windowDays: number): number {
   return round(seconds / 60 / (windowDays / 7), 1);
 }
 
+/** Days the per-week figures divide by. The requested window, unless the list was cut off. */
+function coveredDays(runs: { created_at: string }[], truncated: boolean, requestedDays: number, now?: Date): { days: number; note: string | null } {
+  if (!truncated) return { days: requestedDays, note: null };
+  const stamps = runs.map((r) => Date.parse(r.created_at)).filter((n) => Number.isFinite(n));
+  if (!stamps.length) {
+    return { days: requestedDays, note: `truncated: no runs were read; per-week figures are not a full ${requestedDays}-day window` };
+  }
+  const oldest = Math.min(...stamps);
+  const end = now?.getTime() ?? Math.max(...stamps);
+  const days = Math.max(0.1, round(Math.max(0, end - oldest) / 86_400_000, 1));
+  return {
+    days,
+    note: `truncated: per-week figures use ${days} days actually covered, not the full ${requestedDays}-day window`,
+  };
+}
+
+function stepSeconds(wf: CiWorkflow, job: CiWorkflowJob, step: CiWorkflowStep, runs: CiRun[]): number | null {
+  const hint = step.run ? `Run ${step.run.split("\n")[0]!.trim()}` : null;
+  const uses = step.uses?.split("@")[0] ?? null;
+  const secs: number[] = [];
+  for (const run of runs) {
+    const matched = workflowFor([wf], run)?.file === wf.file || run.workflow === wf.name || run.path === wf.file;
+    if (!matched) continue;
+    for (const viewed of run.jobs) {
+      if (viewed.name !== job.name && viewed.name !== job.id && jobBase(viewed.name) !== job.id && jobBase(viewed.name) !== job.name) continue;
+      for (const seen of viewed.steps ?? []) {
+        const hit = seen.name === step.name || (hint !== null && seen.name === hint) || (step.uses !== null && seen.name === step.uses) || (uses !== null && seen.name === uses);
+        if (hit && seen.seconds != null) secs.push(seen.seconds);
+      }
+    }
+  }
+  return quantile(secs, 0.5);
+}
+
 /**
  * Per workflow/job cost and the flags the ci aspect proposes from. High minutes, never-failed,
  * missing path filters, report-only steps, an empty stub, duplicate commands and push-to-main
  * runs are each enough to call the model.
  */
-export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows: CiWorkflow[]; baseBranch: string; windowDays?: number }): CiSignal {
-  const windowDays = input.windowDays ?? WINDOW_DAYS;
+export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows: CiWorkflow[]; baseBranch: string; windowDays?: number; now?: Date }): CiSignal {
+  const requestedDays = input.windowDays ?? WINDOW_DAYS;
+  const covered = coveredDays(input.runs, input.truncated, requestedDays, input.now);
+  const windowDays = covered.days;
   const byJob = new Map<string, Accum>();
   let seconds = 0;
-  const pushSeconds = new Map<string, { runs: number; seconds: number }>();
+  const pushSeconds = new Map<string, { label: string; runs: number; seconds: number }>();
   for (const run of input.runs) {
+    const label = runLabel(run, input.workflows);
     let runSeconds = 0;
     for (const job of run.jobs) {
       const secs = job.seconds ?? 0;
       seconds += secs;
       runSeconds += secs;
-      const key = `${run.workflow}\u0000${job.name}`;
-      const acc = byJob.get(key) ?? { workflow: run.workflow, name: job.name, runs: 0, skipped: 0, failures: 0, seconds: 0, secs: [] };
+      const key = `${runKey(run, input.workflows)}\u0000${job.name}`;
+      const acc = byJob.get(key) ?? { workflow: label, name: job.name, runs: 0, skipped: 0, failures: 0, seconds: 0, secs: [] };
       acc.seconds += secs;
       if (!job.conclusion || job.conclusion === "skipped") {
         acc.skipped += 1;
@@ -203,10 +283,11 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows:
       byJob.set(key, acc);
     }
     if (run.event === "push" && run.head_branch === input.baseBranch) {
-      const p = pushSeconds.get(run.workflow) ?? { runs: 0, seconds: 0 };
+      const key = runKey(run, input.workflows);
+      const p = pushSeconds.get(key) ?? { label, runs: 0, seconds: 0 };
       p.runs += 1;
       p.seconds += runSeconds;
-      pushSeconds.set(run.workflow, p);
+      pushSeconds.set(key, p);
     }
   }
   const jobs: JobStat[] = [...byJob.values()]
@@ -225,16 +306,24 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows:
 
   const slow_without_paths = jobs.flatMap((job) => {
     if ((job.p50_s ?? 0) <= SLOW_CHECK_SECONDS) return [];
-    const wf = workflowFor(input.workflows, job.workflow);
+    const wf = workflowFor(input.workflows, { workflow: job.workflow });
     if (isStub(job.workflow, wf?.file ?? null) || wf?.path_filtered) return [];
     return [{ workflow: job.workflow, file: wf?.file ?? null, name: job.name, p50_s: job.p50_s! }];
   });
 
   const report_only = input.workflows.flatMap((wf) =>
-    wf.jobs.filter((job) => job.report_only.length).flatMap((job) => {
+    wf.jobs.flatMap((job) => {
+      const flagged = job.steps.filter((s) => s.reasons.length > 0);
+      if (!flagged.length) return [];
       const stat = jobs.find((j) => j.workflow === wf.name && (j.name === job.name || j.name === job.id || jobBase(j.name) === job.id || jobBase(j.name) === job.name));
       if (!stat || stat.runs === 0) return [];
-      return [{ file: wf.file, job: job.id, reasons: job.report_only, minutes_per_week: stat.minutes_per_week }];
+      const allReportOnly = job.steps.length > 0 && job.steps.every((s) => s.reasons.length > 0);
+      return [{
+        file: wf.file,
+        job: job.id,
+        minutes_per_week: allReportOnly ? stat.minutes_per_week : null,
+        steps: flagged.map((step) => ({ name: step.name, reasons: step.reasons, seconds: stepSeconds(wf, job, step, input.runs) })),
+      }];
     }),
   );
 
@@ -265,10 +354,10 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows:
     .map(([command, files]) => ({ command, workflows: [...files].sort() }))
     .sort((a, b) => a.command.localeCompare(b.command));
 
-  const push_to_main = [...pushSeconds.entries()]
-    .map(([workflow, p]) => ({
-      workflow,
-      file: workflowFor(input.workflows, workflow)?.file ?? null,
+  const push_to_main = [...pushSeconds.values()]
+    .map((p) => ({
+      workflow: p.label,
+      file: workflowFor(input.workflows, { workflow: p.label })?.file ?? null,
       runs: p.runs,
       minutes_per_week: perWeek(p.seconds, windowDays),
     }))
@@ -278,6 +367,7 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows:
     window_days: windowDays,
     runs: input.runs.length,
     truncated: input.truncated,
+    truncation: covered.note,
     minutes_per_week: perWeek(seconds, windowDays),
     jobs,
     never_failed: jobs.filter((j) => j.never_failed).map((j) => ({ workflow: j.workflow, name: j.name, runs: j.runs })),

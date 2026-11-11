@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { addedSuppressions, configChange, configGuard, configGuardInputs } from "../../src/gates/config-guard.js";
+import { addedSuppressions, configChange, configGuard, configGuardInputs, coverageRatchet } from "../../src/gates/config-guard.js";
 import { standardsRemovals } from "../../src/standards.js";
 import type { Plan } from "../../src/schemas/plan.js";
 import { gitIn } from "../helpers/repo.js";
@@ -206,6 +206,61 @@ describe("config guard: scope", () => {
     });
     expect(keptAside.ok).toBe(false);
     expect(keptAside.detail).toContain("check marker removed: unit");
+  });
+
+  it("fails a lowered coverage threshold even when the plan lists the file", () => {
+    const vt = "export default { coverage: { thresholds: { lines: 80, branches: 70 } } };\n";
+    expect(coverageRatchet("vitest.config.ts", vt, vt.replace("80", "90"))).toBeUndefined();
+    expect(coverageRatchet("vitest.config.ts", vt, vt.replace("80", "40"))).toMatch(/vitest.lines 80 -> 40/);
+    expect(coverageRatchet("pyproject.toml", "[tool.coverage.report]\nfail_under = 80\n", "[tool.coverage.report]\nfail_under = 50\n")).toMatch(/fail_under 80 -> 50/);
+    expect(coverageRatchet("pytest.ini", "[pytest]\naddopts = --cov-fail-under=80\n", "[pytest]\naddopts = --cov-fail-under=40\n")).toMatch(/cov-fail-under 80 -> 40/);
+    expect(coverageRatchet("setup.cfg", "[coverage:report]\nfail_under = 80\n", "[coverage:report]\nfail_under = 80\n")).toBeUndefined();
+    const nyc = '{"nyc":{"check-coverage":true,"lines":80}}';
+    expect(coverageRatchet("package.json", nyc, nyc.replace("80", "40"))).toMatch(/nyc.lines 80 -> 40/);
+    expect(coverageRatchet("package.json", nyc, nyc.replace("true", "false"))).toMatch(/check-coverage turned off/);
+    expect(coverageRatchet("package.json", nyc, nyc.replace("80", "90"))).toBeUndefined();
+    expect(coverageRatchet("package.json", '{"jest":{"coverageThreshold":{"global":{"lines":80}}}}', '{"jest":{"coverageThreshold":{"global":{"lines":40}}}}')).toMatch(/jest.lines 80 -> 40/);
+    expect(coverageRatchet("jest.config.js", "module.exports = { coverageThreshold: { global: { lines: 80 } } };\n", "module.exports = { coverageThreshold: { global: { lines: 40 } } };\n")).toMatch(/jest.lines 80 -> 40/);
+    const c8 = '{"scripts":{"test":"c8 --check-coverage --lines 80 vitest"}}';
+    expect(coverageRatchet("package.json", c8, c8.replace("80", "40"))).toMatch(/c8.lines 80 -> 40/);
+    expect(coverageRatchet(".coveragerc", "[report]\nfail_under = 80\n", "[report]\nfail_under = 10\n")).toMatch(/fail_under/);
+    expect(coverageRatchet("src/app.ts", "fail_under = 80", "fail_under = 10")).toBeUndefined();
+
+    const lowered = coverageRatchet("vitest.config.ts", vt, vt.replace("80", "40"))!;
+    const blocked = configGuard({
+      plan: plan(["vitest.config.ts"], "lower coverage"),
+      packages: ["P1"],
+      configChanges: [{ file: "vitest.config.ts", why: "coverage thresholds changed" }],
+      suppressions: [],
+      thresholdLoosening: [lowered],
+    });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.detail).toContain("coverage threshold lowered");
+    const raised = configGuard({
+      plan: plan(["vitest.config.ts"], "raise coverage"),
+      packages: ["P1"],
+      configChanges: [{ file: "vitest.config.ts", why: "coverage thresholds changed" }],
+      suppressions: [],
+      thresholdLoosening: [],
+    });
+    expect(raised.ok).toBe(true);
+  });
+
+  it("collects a lowered threshold from the worktree even when the file is in the plan", async () => {
+    const dir = makeRepo({ "vitest.config.ts": "export default { coverage: { thresholds: { lines: 80 } } };\n" });
+    const base = gitIn(dir, "rev-parse", "HEAD").trim();
+    writeFileSync(join(dir, "vitest.config.ts"), "export default { coverage: { thresholds: { lines: 40 } } };\n");
+    gitIn(dir, "add", "-A");
+    const inputs = await configGuardInputs(dir, base, ["vitest.config.ts"]);
+    expect(inputs.thresholdLoosening?.[0]).toMatch(/lowered/);
+    const guard = configGuard({ plan: plan(["vitest.config.ts"]), packages: ["P1"], ...inputs });
+    expect(guard.ok).toBe(false);
+
+    writeFileSync(join(dir, "vitest.config.ts"), "export default { coverage: { thresholds: { lines: 90 } } };\n");
+    gitIn(dir, "add", "-A");
+    const raised = await configGuardInputs(dir, base, ["vitest.config.ts"]);
+    expect(raised.thresholdLoosening).toEqual([]);
+    expect(configGuard({ plan: plan(["vitest.config.ts"]), packages: ["P1"], ...raised }).ok).toBe(true);
   });
 
   it("collects both from a worktree against the base (new files included once staged)", async () => {
