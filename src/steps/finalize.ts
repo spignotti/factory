@@ -425,7 +425,17 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         draft = false;
         ctx.events.emit({ step: "finalize", event: "progress", data: { pr_ready: input.existingPr.url } });
       }
-      await pushIdempotent(ctx, head);
+      try {
+        await pushIdempotent(ctx, head);
+      } catch (e) {
+        // Marked ready but the final commit did not land: back to draft, so CI does not judge the old head.
+        if (readyAt && input.existingPr) {
+          const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: input.existingPr.url, draft: false }).catch(() => ({ draft: false, changed: false }));
+          draft = held.draft;
+          if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
+        }
+        throw e;
+      }
       // An open PR on this branch (an earlier attempt's create that looked failed, or one opened by hand)
       // is adopted, never duplicated. Known PRs were converted to draft before this push.
       let target = input.existingPr ? { url: input.existingPr.url, draft: draft !== false } : await adoptablePr(ctx, head);
