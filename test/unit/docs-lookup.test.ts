@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Context7Client, context7Probe, docsTools, type FetchLike, MAX_DOC_CHARS } from "../../src/docs/context7.js";
+import { Context7Client, context7Probe, docsTools, docsUnavailableUntil, parseRetryAfter, type FetchLike, MAX_DOC_CHARS } from "../../src/docs/context7.js";
 import { docsLookupCheck } from "../../src/commands/doctor.js";
 import { buildAgentEnv } from "../../src/agents/env.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
@@ -73,9 +73,34 @@ describe("Context7 client (docs_lookup)", () => {
     expect(f.seen[1]!.url.searchParams.get("libraryId")).toBe("/new/lib");
   });
 
+  it("parses Retry-After as seconds, implausible milliseconds, or an HTTP date", () => {
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    expect(parseRetryAfter("30", now)?.retryAt).toBe(now + 30_000);
+    // 1733683s is about 20 days; that header value is milliseconds.
+    expect(parseRetryAfter("1733683", now)?.retryAt).toBe(now + 1_733_683);
+    expect(docsUnavailableUntil(now + 1_733_683)).toBe("docs lookup unavailable until 2026-04-08T00:28:53.683Z");
+    expect(parseRetryAfter("Wed, 21 Oct 2015 07:28:00 GMT", now)?.retryAt).toBe(Date.parse("Wed, 21 Oct 2015 07:28:00 GMT"));
+    expect(parseRetryAfter("not-a-date", now)).toBeUndefined();
+  });
+
   it("maps errors to results the model can continue from", async () => {
-    const limited = new Context7Client({ fetch: fakeFetch(() => [429, "{}", { "retry-after": "30" }]).fetch });
-    expect(await limited.lookup({ library: "zod", topic: "x" })).toMatchObject({ status: "rate_limited", tokens: 0 });
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    let calls = 0;
+    const limited = new Context7Client({
+      now: () => now,
+      fetch: fakeFetch(() => {
+        calls++;
+        return [429, "{}", { "retry-after": "1733683" }];
+      }).fetch,
+    });
+    const first = await limited.lookup({ library: "zod", topic: "x" });
+    expect(first).toEqual({ status: "rate_limited", text: "docs lookup unavailable until 2026-04-08T00:28:53.683Z", tokens: 0 });
+    const second = await limited.lookup({ library: "other", topic: "y" });
+    expect(second.text).toBe(first.text);
+    expect(calls).toBe(1);
+    const probe = await context7Probe(limited, now);
+    expect(probe.detail).toBe("rate limit reached; docs lookup unavailable until 2026-04-08T00:28:53.683Z");
+    expect(probe.detail).not.toContain("1733683s");
     const none = new Context7Client({ fetch: fakeFetch(() => [200, JSON.stringify({ results: [] })]).fetch });
     expect((await none.lookup({ library: "nope", topic: "x" })).status).toBe("not_found");
     const down = new Context7Client({ fetch: async () => { throw new Error("ENOTFOUND context7.com"); } });
@@ -90,6 +115,10 @@ describe("Context7 client (docs_lookup)", () => {
     expect(tools.specs.map((s) => s.name)).toEqual(["docs_lookup"]);
     expect((await tools.call("docs_lookup", { library: "zod", topic: "safeParse" })).isError).toBeUndefined();
     expect((await tools.call("docs_lookup", { library: "", topic: "x" })).isError).toBe(true);
+    const limited = docsTools(new Context7Client({ fetch: fakeFetch(() => [429, "{}", { "retry-after": "30" }]).fetch }), () => {});
+    const blocked = await limited.call("docs_lookup", { library: "zod", topic: "safeParse" });
+    expect(blocked.isError).toBeUndefined();
+    expect(blocked.text).toMatch(/^docs lookup unavailable until /);
     expect(calls).toEqual([{ library: "zod", library_id: "/colinhacks/zod", topic: "safeParse", tokens: 10, status: "ok" }]);
   });
 

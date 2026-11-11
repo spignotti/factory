@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,6 +29,11 @@ export const CI_MINIMAL_TEMPLATE = new URL("../templates/ci/factory-minimal.yml"
 const REF_MARK = "@FACTORY_REF@";
 const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const PINNED = /github:spignotti\/factory#([^\s"']+)/g;
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+/** A tag resolved to a commit, kept next to the SHA pin. Not part of the hash `doctor` compares. */
+const TAG_PIN_LINE = /^# pinned from tag ([A-Za-z0-9][A-Za-z0-9._/-]{0,99}) \(([0-9a-f]{40})\)\n/m;
+const FACTORY_GIT = "https://github.com/spignotti/factory.git";
+const FACTORY_API = "repos/spignotti/factory";
 
 /** `full`: select/check/done. `minimal`: draft marker and `done`, no factory install. */
 export type CiStubMode = "full" | "minimal";
@@ -61,9 +67,87 @@ export function renderCiStub(ref: string, template = readFileSync(CI_TEMPLATE, "
   return template.replaceAll(REF_MARK, ref);
 }
 
-/** The stub `factory ci-stub` prints for this ref and mode. */
-export function renderCiStubFor(ref: string, mode: CiStubMode): string {
-  return renderCiStub(ref, ciStubTemplate(mode));
+/** Human note for a SHA pin that was resolved from a tag. `doctor` strips it before hashing. */
+export function tagPinComment(tag: string, sha: string): string {
+  return `# pinned from tag ${tag} (${sha})`;
+}
+
+export function readTagPinComment(text: string): { tag: string; sha: string } | undefined {
+  const m = TAG_PIN_LINE.exec(text);
+  return m ? { tag: m[1]!, sha: m[2]! } : undefined;
+}
+
+export function stripTagPinComment(text: string): string {
+  return text.replace(TAG_PIN_LINE, "");
+}
+
+/** Insert the tag comment after the first line so stripping it restores `renderCiStub`. */
+export function withTagPinComment(rendered: string, tag: string, sha: string): string {
+  const line = `${tagPinComment(tag, sha)}\n`;
+  const nl = rendered.indexOf("\n");
+  return nl < 0 ? `${rendered}\n${line}` : `${rendered.slice(0, nl + 1)}${line}${rendered.slice(nl + 1)}`;
+}
+
+/** The stub `factory ci-stub` prints for this ref and mode. `tag` records the tag a SHA pin came from. */
+export function renderCiStubFor(ref: string, mode: CiStubMode, tag?: string): string {
+  const body = renderCiStub(ref, ciStubTemplate(mode));
+  return tag ? withTagPinComment(body, tag, ref) : body;
+}
+
+export interface RefLookup {
+  exec(command: "git" | "gh", args: string[]): string;
+}
+
+function defaultRefLookup(): RefLookup {
+  return {
+    exec(command, args) {
+      return execFileSync(command, args, { encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"] });
+    },
+  };
+}
+
+function shaFromLsRemote(text: string): string | undefined {
+  return /^([0-9a-f]{40})\b/im.exec(text)?.[1]?.toLowerCase();
+}
+
+type LookupResult = { ok: true; out: string } | { ok: false; error: string };
+
+function lookupRef(lookup: RefLookup, command: "git" | "gh", args: string[]): LookupResult {
+  try {
+    return { ok: true, out: lookup.exec(command, args).trim() };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg.split("\n")[0]?.slice(0, 200) || "failed" };
+  }
+}
+
+/**
+ * A full commit SHA is already a pin. A tag is resolved to the commit it points at
+ * (git ls-remote peel, then `gh api`, then a lightweight tag whose peel succeeded with nothing to peel)
+ * and kept as a comment. A failed peel is not proof of a lightweight tag: the unpeeled SHA may be a tag object.
+ */
+export function resolveFactoryRef(ref: string, lookup: RefLookup = defaultRefLookup()): { pin: string; tag?: string } {
+  if (!REF.test(ref) || ref.includes("..")) throw new Error(`invalid factory ref: ${ref}`);
+  if (FULL_SHA.test(ref)) return { pin: ref.toLowerCase() };
+  const peel = lookupRef(lookup, "git", ["ls-remote", FACTORY_GIT, `refs/tags/${ref}^{}`]);
+  if (peel.ok) {
+    const peeled = shaFromLsRemote(peel.out);
+    if (peeled) return { pin: peeled, tag: ref };
+  }
+  const viaGh = lookupRef(lookup, "gh", ["api", `${FACTORY_API}/commits/${ref}`, "--jq", ".sha"]);
+  if (viaGh.ok && FULL_SHA.test(viaGh.out.toLowerCase())) return { pin: viaGh.out.toLowerCase(), tag: ref };
+  // Empty successful peel: the ref is a lightweight tag and already points at a commit.
+  if (peel.ok && peel.out === "") {
+    const direct = lookupRef(lookup, "git", ["ls-remote", FACTORY_GIT, `refs/tags/${ref}`]);
+    if (direct.ok) {
+      const sha = shaFromLsRemote(direct.out);
+      if (sha) return { pin: sha, tag: ref };
+    }
+    throw new Error(`could not resolve factory ref ${ref} to a commit SHA (git ls-remote and gh api failed)`);
+  }
+  const why = peel.ok ? "peel did not return a commit SHA" : `peeling the tag failed (${peel.error})`;
+  const ghWhy = viaGh.ok ? "no commit SHA" : viaGh.error;
+  throw new Error(`could not resolve factory ref ${ref} to a commit SHA: ${why}; gh api failed (${ghWhy}); refusing to pin an unpeeled tag object`);
 }
 
 export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -84,18 +168,22 @@ export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE
   // Not adopted yet (by hand until `adopt`, M5): a warning, not a failure.
   if (!existsSync(path)) return { status: "warn", detail: `${CI_STUB_PATH} is missing; write it with \`factory ci-stub --ref <tag> > ${CI_STUB_PATH}\`` };
   const actual = readFileSync(path, "utf8");
-  const refs = pinnedRefs(actual);
+  // A SHA pin may carry a tag comment. The hash is the template for whatever ref the npx line pins.
+  const noted = readTagPinComment(actual);
+  const stripped = stripTagPinComment(actual);
+  const refs = pinnedRefs(stripped);
   if (refs.length !== 1) {
     return { status: "fail", detail: refs.length ? `pins several factory refs (${refs.join(", ")})` : "pins no github:spignotti/factory#<ref>" };
   }
   const ref = refs[0]!;
+  if (noted && noted.sha !== ref) return { status: "fail", detail: `tag comment records ${noted.sha} but the stub pins ${ref}` };
   let expected: string;
   try {
     expected = renderCiStub(ref, mode === "minimal" ? ciStubTemplate("minimal") : template);
   } catch (e) {
     return { status: "fail", detail: (e as Error).message };
   }
-  const a = sha256(actual);
+  const a = sha256(stripped);
   const x = sha256(expected);
   return a === x
     ? { status: "ok", detail: `equals the template for ${ref} (sha256 ${x.slice(0, 12)})` }

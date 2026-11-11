@@ -410,6 +410,9 @@ export const RepoConfigSchema = z
         // Progress warning when one agent call's tokens_in reaches this. Does not fail the call.
         // 0 disables. A multi-million-token step is a common partner of a stream abort.
         step_token_warn: z.number().int().min(0).default(1_000_000),
+        // Open factory drafts do not block another run once the newer of the head commit time and
+        // PR updatedAt is this many days old, unless a live run still holds that branch. 0 disables.
+        stale_draft_days: z.number().int().min(0).max(365).default(3),
       })
       .default({
         max_diff_lines: 1500,
@@ -425,6 +428,7 @@ export const RepoConfigSchema = z
         diff_count_tests: true,
         stream_retries: 2,
         step_token_warn: 1_000_000,
+        stale_draft_days: 3,
       }),
     services: z.array(ServiceSchema).default([]),
     ui: z

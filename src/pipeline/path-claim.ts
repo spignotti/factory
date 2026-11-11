@@ -1,11 +1,13 @@
+import { resolve } from "node:path";
 import { IncompletePrListError, type GitHub, type OpenFactoryPr } from "../gh.js";
 import { repoLockId } from "../git.js";
 import { realSleep } from "../agents/fake-runner.js";
 import { Interrupted } from "../interrupt.js";
+import { listRuns } from "../runs.js";
 import { checkDeadline, type RunContext, WallTimeExceeded } from "./context.js";
-import { decidePathClaim, lockRepoKey } from "./lock.js";
+import { activeHolders, decidePathClaim, lockRepoKey } from "./lock.js";
 import { pathsOverlap, touchesExclusive } from "./overlap.js";
-import type { RepoConfig } from "../schemas/repo.js";
+import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
 
 /** Parallel runs or exclusive-path globs need a live claim over the files that will ship. */
 export function needsConcurrencyPathClaim(repo: Pick<RepoConfig, "concurrency">): boolean {
@@ -17,13 +19,75 @@ export interface FactoryPrHit {
   files: string[];
 }
 
-/** Open `factory/*` PRs (other than this run's branch) whose files overlap `paths`. */
-export function factoryPrOverlaps(prs: OpenFactoryPr[], paths: string[], ownBranch?: string): FactoryPrHit[] {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Draft whose newest activity (`headChangedAt`: head commit or `updatedAt`) is at least `days` old.
+ * Unknown age still blocks. `days <= 0` disables the rule. A branch in `heldBranches` is never stale:
+ * a live run still holds it.
+ */
+export function isStaleDraft(
+  pr: Pick<OpenFactoryPr, "draft" | "headChangedAt" | "branch">,
+  days: number,
+  now: number,
+  heldBranches?: ReadonlySet<string>,
+): boolean {
+  if (pr.draft !== true || days <= 0 || !pr.headChangedAt) return false;
+  if (pr.branch && heldBranches?.has(pr.branch)) return false;
+  const t = Date.parse(pr.headChangedAt);
+  if (!Number.isFinite(t)) return false;
+  return now - t >= days * DAY_MS;
+}
+
+/**
+ * Branches a live lock still holds, keyed by resolved repo path.
+ * Liveness is the lock pid (`activeHolders`), the same check as slot takeover. The branch is the
+ * holder's run `state.branch`, so a resumed draft stays occupied even when its path claim is narrower than the PR.
+ */
+export function branchesHeldByLiveRuns(factoryHome: string): Map<string, Set<string>> {
+  const live = new Set(activeHolders(factoryHome).map((h) => h.runId).filter((id): id is string => !!id));
+  const byRepo = new Map<string, Set<string>>();
+  if (!live.size) return byRepo;
+  for (const run of listRuns(factoryHome)) {
+    if (!live.has(run.run_id)) continue;
+    const branch = run.state?.branch;
+    const repo = run.state?.repo;
+    if (!branch || !repo) continue;
+    const key = resolve(repo);
+    const held = byRepo.get(key) ?? new Set<string>();
+    held.add(branch);
+    byRepo.set(key, held);
+  }
+  return byRepo;
+}
+
+export function staleDraftDaysAt(repoDir: string): number {
+  try {
+    return loadRepoConfig(repoDir).limits.stale_draft_days;
+  } catch {
+    return 3;
+  }
+}
+
+export function daysUnchanged(headChangedAt: string, now: number): number {
+  return Math.floor((now - Date.parse(headChangedAt)) / DAY_MS);
+}
+
+/** Open `factory/*` PRs (other than this run's branch) whose files overlap `paths`. Stale drafts are ignored. */
+export function factoryPrOverlaps(
+  prs: OpenFactoryPr[],
+  paths: string[],
+  ownBranch?: string,
+  opts?: { staleDraftDays?: number; now?: number; heldBranches?: ReadonlySet<string> },
+): FactoryPrHit[] {
   if (!paths.length) return [];
+  const days = opts?.staleDraftDays ?? 3;
+  const now = opts?.now ?? Date.now();
   const hits: FactoryPrHit[] = [];
   for (const pr of prs) {
     if (!pr.branch.startsWith("factory/")) continue;
     if (ownBranch && pr.branch === ownBranch) continue;
+    if (isStaleDraft(pr, days, now, opts?.heldBranches)) continue;
     const files = [...new Set(pr.files.filter((f) => paths.some((p) => pathsOverlap(p, f))))];
     if (files.length) hits.push({ number: pr.number, files });
   }
@@ -35,9 +99,17 @@ export function factoryPrOverlapReason(when: "planned" | "changed", hits: Factor
   return `${when} paths overlap open factory PR ${listed}`;
 }
 
-export async function openFactoryPrOverlap(github: GitHub, repoDir: string, paths: string[], ownBranch?: string): Promise<FactoryPrHit[]> {
+export async function openFactoryPrOverlap(
+  github: GitHub,
+  repoDir: string,
+  paths: string[],
+  ownBranch: string | undefined,
+  factoryHome: string,
+  now = Date.now(),
+): Promise<FactoryPrHit[]> {
   if (!paths.length) return [];
-  return factoryPrOverlaps(await github.openFactoryPrFiles(repoDir), paths, ownBranch);
+  const heldBranches = branchesHeldByLiveRuns(factoryHome).get(resolve(repoDir));
+  return factoryPrOverlaps(await github.openFactoryPrFiles(repoDir), paths, ownBranch, { staleDraftDays: staleDraftDaysAt(repoDir), now, ...(heldBranches ? { heldBranches } : {}) });
 }
 
 export type ChangedPathBlock = { ok: false; reason: string; kind: "run" | "pr" | "github" };
@@ -104,7 +176,7 @@ export async function ensureChangedPathClaim(ctx: ClaimCtx, changed: string[], w
     }
     let hits: FactoryPrHit[];
     try {
-      hits = await openFactoryPrOverlap(ctx.deps.github, ctx.repoDir, paths, ctx.branch);
+      hits = await openFactoryPrOverlap(ctx.deps.github, ctx.repoDir, paths, ctx.branch, ctx.deps.factoryHome);
     } catch (e) {
       rethrowClaimSignal(e, ctx.deps.signal);
       if (e instanceof IncompletePrListError) {

@@ -41,10 +41,39 @@ export class Context7Error extends Error {
     message: string,
     readonly status: number,
     readonly kind: LookupStatus,
+    readonly retryAt?: number,
   ) {
     super(message);
     this.name = "Context7Error";
   }
+}
+
+/**
+ * A Retry-After above this many seconds is not a rate-limit window (Context7 has sent multi-day
+ * numbers that were milliseconds). Smaller numbers stay seconds, per the HTTP spec.
+ */
+const RETRY_AFTER_SECONDS_MAX = 24 * 60 * 60;
+
+/**
+ * `Retry-After` as delta-seconds, as milliseconds when that reading is implausibly long, or as an HTTP date.
+ * `retryAt` is the absolute reset time (ms since epoch).
+ */
+export function parseRetryAfter(raw: string | undefined, now = Date.now()): { retryAt: number } | undefined {
+  if (!raw?.trim()) return undefined;
+  const text = raw.trim();
+  if (/^\d+(?:\.\d+)?$/.test(text)) {
+    const n = Number(text);
+    if (!(n > 0)) return undefined;
+    const delayMs = n > RETRY_AFTER_SECONDS_MAX ? n : n * 1000;
+    return { retryAt: now + delayMs };
+  }
+  const at = Date.parse(text);
+  if (!Number.isFinite(at)) return undefined;
+  return { retryAt: at };
+}
+
+export function docsUnavailableUntil(retryAt: number): string {
+  return `docs lookup unavailable until ${new Date(retryAt).toISOString()}`;
 }
 
 const estimateTokens = (text: string) => Math.ceil(text.length / 4);
@@ -52,9 +81,15 @@ const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 export class Context7Client {
   private readonly cache = new Map<string, LookupResult>();
   private readonly fetchImpl: FetchLike;
+  /** Absolute time (ms) until which further lookups skip the network. */
+  private limitedUntil: number | undefined;
 
-  constructor(private readonly opts: { apiKey?: string; fetch?: FetchLike; timeoutMs?: number } = {}) {
+  constructor(private readonly opts: { apiKey?: string; fetch?: FetchLike; timeoutMs?: number; now?: () => number } = {}) {
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
+  }
+
+  private now(): number {
+    return this.opts.now?.() ?? Date.now();
   }
 
   static fromEnv(env: NodeJS.ProcessEnv, fetchImpl?: FetchLike): Context7Client {
@@ -83,7 +118,11 @@ export class Context7Client {
   }
 
   private fail(status: number, body: string, retryAfter?: string): never {
-    if (status === 429) throw new Context7Error(`Context7 rate limit reached${retryAfter ? ` (retry after ${retryAfter}s)` : ""}`, status, "rate_limited");
+    if (status === 429) {
+      const parsed = parseRetryAfter(retryAfter, this.now());
+      const message = parsed ? docsUnavailableUntil(parsed.retryAt) : "docs lookup unavailable (rate limited)";
+      throw new Context7Error(message, status, "rate_limited", parsed?.retryAt);
+    }
     if (status === 401 || status === 403) throw new Context7Error(`Context7 refused the request (${status}); check ${CONTEXT7_KEY_ENV}`, status, "auth");
     if (status === 404) throw new Context7Error("Context7 has no documentation for this", status, "not_found");
     let message = "";
@@ -137,6 +176,9 @@ export class Context7Client {
     const key = JSON.stringify([input.library, input.topic, input.version ?? ""]);
     const hit = this.cache.get(key);
     if (hit) return { ...hit, cached: true };
+    if (this.limitedUntil !== undefined && this.now() < this.limitedUntil) {
+      return { status: "rate_limited", text: docsUnavailableUntil(this.limitedUntil), tokens: 0 };
+    }
     let result: LookupResult;
     try {
       let id = input.library.trim();
@@ -153,6 +195,10 @@ export class Context7Client {
       if (text.length > MAX_DOC_CHARS) text = `${text.slice(0, MAX_DOC_CHARS)}\n… (truncated; ask a narrower topic)`;
       result = { status: "ok", text: header + text, library_id: id, tokens: estimateTokens(text) };
     } catch (e) {
+      if (e instanceof Context7Error && e.kind === "rate_limited") {
+        if (e.retryAt !== undefined) this.limitedUntil = e.retryAt;
+        return { status: "rate_limited", text: e.message, tokens: 0 };
+      }
       const kind = e instanceof Context7Error ? e.kind : "error";
       const msg = e instanceof Error ? e.message : String(e);
       return { status: kind, text: `docs_lookup failed: ${msg.slice(0, 300)}. Continue without it.`, tokens: 0 };
@@ -198,19 +244,24 @@ export function docsTools(client: Context7Client, onCall: (call: DocsCall) => vo
       if (!library.trim() || !topic.trim()) return { text: "docs_lookup needs library and topic", isError: true };
       const r = await client.lookup({ library, topic, version });
       onCall({ library, ...(r.library_id ? { library_id: r.library_id } : {}), topic: topic.slice(0, 200), tokens: r.tokens, status: r.status, ...(r.cached ? { cached: true } : {}) });
-      return { text: r.text, ...(r.status === "ok" ? {} : { isError: true }) };
+      // A rate limit is a short result, not a tool error, so the run continues without docs.
+      return { text: r.text, ...(r.status === "ok" || r.status === "rate_limited" ? {} : { isError: true }) };
     },
   };
 }
 
 /** `doctor`: reachability of Context7 and, when configured, whether the key is accepted. */
-export async function context7Probe(client: Context7Client): Promise<{ status: "ok" | "warn" | "fail"; detail: string }> {
+export async function context7Probe(client: Context7Client, now = Date.now()): Promise<{ status: "ok" | "warn" | "fail"; detail: string }> {
   try {
     const r = await client.get("/api/v2/libs/search", { libraryName: "react", query: "hooks" });
     const left = r.remaining !== undefined ? `; ${r.remaining} requests left in the window` : "";
     if (r.status === 200) return { status: "ok", detail: client.hasKey ? `reachable, ${CONTEXT7_KEY_ENV} accepted${left}` : `reachable without API key (anonymous rate limit${left}); set ${CONTEXT7_KEY_ENV} for higher limits` };
     if (r.status === 401 || r.status === 403) return { status: client.hasKey ? "fail" : "warn", detail: client.hasKey ? `${CONTEXT7_KEY_ENV} rejected (${r.status})` : `Context7 requires an API key here (${r.status}); set ${CONTEXT7_KEY_ENV}` };
-    if (r.status === 429) return { status: "warn", detail: `rate limit reached${r.retryAfter ? ` (retry after ${r.retryAfter}s)` : ""}; agents get an error until it resets` };
+    if (r.status === 429) {
+      const parsed = parseRetryAfter(r.retryAfter, now);
+      const until = parsed ? ` until ${new Date(parsed.retryAt).toISOString()}` : "";
+      return { status: "warn", detail: `rate limit reached; docs lookup unavailable${until}` };
+    }
     return { status: "warn", detail: `unexpected HTTP ${r.status}; docs_lookup returns errors to agents` };
   } catch (e) {
     return { status: "warn", detail: `unreachable (${(e as Error).message.slice(0, 120)}); docs_lookup returns errors to agents` };

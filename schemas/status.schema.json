@@ -451,6 +451,35 @@
         "additionalProperties": false
       }
     },
+    "stale_drafts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "branch": {
+            "type": "string"
+          },
+          "days_unchanged": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "repo",
+          "pr",
+          "branch",
+          "days_unchanged"
+        ],
+        "additionalProperties": false
+      }
+    },
     "audit_tickets": {
       "type": "array",
       "items": {
@@ -835,6 +864,7 @@
     "orphaned",
     "stalled",
     "prs",
+    "stale_drafts",
     "audit_tickets",
     "queues",
     "since"

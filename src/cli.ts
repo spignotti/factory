@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { join, resolve } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
-import { ciStubModeAt, defaultRef, renderCiStubFor } from "./ci.js";
+import { ciStubModeAt, defaultRef, renderCiStubFor, resolveFactoryRef } from "./ci.js";
 
 export { defaultRef };
 import { doctorCommand } from "./commands/doctor.js";
@@ -66,6 +66,7 @@ const USAGE = `usage:
                --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish)
   factory status [--since <duration>] [--json]
               (running, waiting for a human, interrupted runs; queues; open factory PRs;
+               stale draft factory PRs, with a hint to close or resume them;
                --since 12h adds finished runs from result.json: merged, human_review, blocked, failed, base_red, needs_input)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one;
@@ -106,10 +107,43 @@ const USAGE = `usage:
   factory notify flush [--json]
               (retry pending notifications from $FACTORY_HOME/outbox/; also runs at the start of every run and resume)
   factory ci-stub [--ref <tag>] [--repo <path>]
-              (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; a repo whose
-               checks are all local_only, or there are none, gets the minimal stub, no npx; a manual
-               check keeps the full stub so workflow_dispatch can run it; doctor checks its hash)
+              (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; a tag is
+               resolved to its commit SHA and kept as a comment; a repo whose checks are all local_only,
+               or there are none, gets the minimal stub, no npx; a manual check keeps the full stub so
+               workflow_dispatch can run it; doctor accepts a tag pin and a SHA pin)
 `;
+
+const COMMAND_LINE = /^ {2}factory /;
+
+/** Usage block for one command, taken from `USAGE`. No command prints the whole text. */
+export function usageFor(argv: string[]): string {
+  const tokens = argv.filter((a) => a !== "--help" && a !== "-h" && !a.startsWith("-"));
+  const command = tokens[0];
+  const sub = tokens[1];
+  if (!command) return USAGE;
+  const lines = USAGE.split("\n");
+  const blocks: string[][] = [];
+  let cur: string[] | null = null;
+  for (const line of lines) {
+    if (COMMAND_LINE.test(line)) {
+      if (cur) blocks.push(cur);
+      cur = [line];
+    } else if (cur && /^ {3,}\S/.test(line)) cur.push(line);
+    else if (cur) {
+      blocks.push(cur);
+      cur = null;
+    }
+  }
+  if (cur) blocks.push(cur);
+  const specific = sub ? blocks.filter((b) => b[0]!.startsWith(`  factory ${command} ${sub}`)) : [];
+  const matched = specific.length ? specific : blocks.filter((b) => b[0] === `  factory ${command}` || b[0]!.startsWith(`  factory ${command} `));
+  if (!matched.length) return USAGE;
+  return `${matched.map((b) => b.join("\n")).join("\n")}\n`;
+}
+
+function wantsHelp(argv: string[]): boolean {
+  return argv.some((a) => a === "--help" || a === "-h");
+}
 
 function exitCode(result: string, signal: AbortSignal): number {
   const reason: unknown = signal.reason;
@@ -169,9 +203,18 @@ function versionString(): string {
   }
 }
 
-export async function main(argv: string[], io: Io = defaultIo): Promise<number> {
+export interface CliDeps {
+  /** Test hook: resolve `ci-stub --ref` without calling git or gh. */
+  resolveRef?: (ref: string) => { pin: string; tag?: string };
+}
+
+export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {}): Promise<number> {
   const [command, ...rest] = argv;
   try {
+    if (wantsHelp(argv)) {
+      io.err(usageFor(argv));
+      return 0;
+    }
     if (command === "--version" || command === "version") {
       io.out(`factory ${versionString()}\n`);
       return 0;
@@ -381,7 +424,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     }
     if (command === "ci-stub") {
       const { values } = parseArgs({ args: rest, options: { ref: { type: "string" }, repo: { type: "string" } } });
-      io.out(renderCiStubFor(values.ref ?? defaultRef(), ciStubModeAt(resolve(values.repo ?? "."))));
+      const requested = values.ref ?? defaultRef();
+      const resolved = (deps.resolveRef ?? resolveFactoryRef)(requested);
+      io.out(renderCiStubFor(resolved.pin, ciStubModeAt(resolve(values.repo ?? ".")), resolved.tag));
       return 0;
     }
     if (command === "standards") {
