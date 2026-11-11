@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { concurrencyCheck } from "../../src/commands/doctor.js";
 import { acquireRepoLock, acquireRepoLockWithRetry, attemptAcquireRepoLock, decidePathClaim, legacyLockPath, lockRepoKey, releaseRunLock, repoLockPath } from "../../src/pipeline/lock.js";
-import { factoryPrOverlapReason, factoryPrOverlaps, isStaleDraft, needsConcurrencyPathClaim } from "../../src/pipeline/path-claim.js";
-import { GhCli, IncompletePrListError, OPEN_FACTORY_PR_LIMIT, openFactoryPrListArgs, parseOpenFactoryPrs, readOpenFactoryPrs } from "../../src/gh.js";
+import { branchesHeldByLiveRuns, factoryPrOverlapReason, factoryPrOverlaps, isStaleDraft, needsConcurrencyPathClaim, openFactoryPrOverlap } from "../../src/pipeline/path-claim.js";
+import { FakeGitHub, GhCli, IncompletePrListError, OPEN_FACTORY_PR_LIMIT, openFactoryPrListArgs, parseOpenFactoryPrs, readOpenFactoryPrs } from "../../src/gh.js";
 import { claimsConflict, pathsOverlap, touchesExclusive } from "../../src/pipeline/overlap.js";
 import { riskReasonLine, securityRows } from "../../src/pipeline/risk.js";
 import { validatePlan } from "../../src/schemas/plan.js";
@@ -235,6 +235,55 @@ describe("risk and host steps", () => {
     expect(parsed[0]).toMatchObject({ draft: true, headChangedAt: old });
     expect(openFactoryPrListArgs().join(" ")).toContain("isDraft");
     expect(openFactoryPrListArgs().join(" ")).toContain("commits");
+    expect(openFactoryPrListArgs().join(" ")).toContain("updatedAt");
+  });
+
+  it("treats a draft as fresh when updatedAt is newer than the head commit", () => {
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    const old = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(now - 60 * 60 * 1000).toISOString();
+    const pushed = parseOpenFactoryPrs([
+      { number: 1, headRefName: "factory/1", isDraft: true, commits: [{ committedDate: old }], updatedAt: fresh, files: [{ path: "a.py" }] },
+    ]);
+    expect(pushed[0]?.headChangedAt).toBe(fresh);
+    expect(isStaleDraft(pushed[0]!, 3, now)).toBe(false);
+    expect(factoryPrOverlaps(pushed, ["a.py"], undefined, { staleDraftDays: 3, now }).map((h) => h.number)).toEqual([1]);
+    const quiet = parseOpenFactoryPrs([
+      { number: 2, headRefName: "factory/2", isDraft: true, commits: [{ committedDate: fresh }], updatedAt: old, files: [{ path: "a.py" }] },
+    ]);
+    expect(quiet[0]?.headChangedAt).toBe(fresh);
+    const onlyUpdated = parseOpenFactoryPrs([
+      { number: 3, headRefName: "factory/3", isDraft: true, updatedAt: old, files: [{ path: "a.py" }] },
+    ]);
+    expect(onlyUpdated[0]?.headChangedAt).toBe(old);
+    expect(isStaleDraft(onlyUpdated[0]!, 3, now)).toBe(true);
+  });
+
+  it("does not treat a draft as stale while a live run holds its branch", async () => {
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    const old = new Date(now - 4 * 24 * 60 * 60 * 1000).toISOString();
+    const repo = "/tmp/factory-held";
+    const homeDir = home();
+    const runId = "20261030-150000-abc123";
+    const pr = { number: 1, branch: "factory/1", files: ["b.ts"], draft: true, headChangedAt: old };
+    expect(factoryPrOverlaps([pr], ["b.ts"], undefined, { staleDraftDays: 3, now, heldBranches: new Set(["factory/1"]) })).toEqual([{ number: 1, files: ["b.ts"] }]);
+    expect(isStaleDraft(pr, 3, now, new Set(["factory/1"]))).toBe(false);
+    mkdirSync(join(homeDir, "runs", runId), { recursive: true });
+    mkdirSync(join(homeDir, "locks"), { recursive: true });
+    writeFileSync(join(homeDir, "runs", runId, "state.json"), JSON.stringify({ branch: "factory/1", repo }));
+    writeFileSync(join(homeDir, "locks", "held.lock"), `${process.pid}\n${runId}`);
+    expect(branchesHeldByLiveRuns(homeDir).get(repo)).toEqual(new Set(["factory/1"]));
+    const gh = new FakeGitHub();
+    gh.factoryPrs.push(pr);
+    expect((await openFactoryPrOverlap(gh, repo, ["b.ts"], undefined, homeDir, now)).map((h) => h.number)).toEqual([1]);
+    writeFileSync(join(homeDir, "locks", "held.lock"), `999999999\n${runId}`);
+    expect(branchesHeldByLiveRuns(homeDir).has(repo)).toBe(false);
+    expect(await openFactoryPrOverlap(gh, repo, ["b.ts"], undefined, homeDir, now)).toEqual([]);
+    writeFileSync(join(homeDir, "locks", "held.lock"), `${process.pid}\n${runId}`);
+    writeFileSync(join(homeDir, "runs", runId, "state.json"), JSON.stringify({ branch: "factory/9", repo }));
+    expect(await openFactoryPrOverlap(gh, repo, ["b.ts"], undefined, homeDir, now)).toEqual([]);
+    writeFileSync(join(homeDir, "runs", runId, "state.json"), JSON.stringify({ branch: "factory/1", repo: "/tmp/other" }));
+    expect(await openFactoryPrOverlap(gh, repo, ["b.ts"], undefined, homeDir, now)).toEqual([]);
   });
 
   it("an open PR list that fills the page is not a clearance", () => {

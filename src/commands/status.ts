@@ -1,8 +1,8 @@
 import { statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { GitHub, PrStatus } from "../gh.js";
 import { activeHolders } from "../pipeline/lock.js";
-import { daysUnchanged, isStaleDraft, staleDraftDaysAt } from "../pipeline/path-claim.js";
+import { branchesHeldByLiveRuns, daysUnchanged, isStaleDraft, staleDraftDaysAt } from "../pipeline/path-claim.js";
 import { openAuditTickets } from "../proposals.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { listRuns, type RunRecord } from "../runs.js";
@@ -237,6 +237,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     report.since = await sinceFinished(runs, { since: opts.since, now, skip, loadPr });
   }
   const repos = new Set<string>([...runs.map(repoOf), ...report.queues.map((q) => q.repo)].filter((r) => r.length > 0));
+  const heldByRepo = branchesHeldByLiveRuns(opts.factoryHome);
   for (const repo of [...repos].sort()) {
     let open;
     try {
@@ -245,8 +246,9 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
       continue;
     }
     const days = staleDraftDaysAt(repo);
+    const held = heldByRepo.get(resolve(repo));
     for (const pr of open) {
-      if (!isStaleDraft(pr, days, now) || !pr.headChangedAt) continue;
+      if (!isStaleDraft(pr, days, now, held) || !pr.headChangedAt) continue;
       report.stale_drafts.push({ repo, pr: pr.number, branch: pr.branch, days_unchanged: daysUnchanged(pr.headChangedAt, now) });
     }
   }
@@ -281,7 +283,7 @@ export function renderStatus(s: StatusReport): string {
   section("orphaned", s.orphaned.map((r) => `${r.run_id} ${r.task} — lock holder gone in ${r.step}; factory resume ${r.run_id} or factory status`));
   section("interrupted", s.interrupted.map((r) => `${r.run_id} ${r.task} — stopped in ${r.step}; factory resume ${r.run_id}`));
   section("open PRs", s.prs.map((p) => `${p.pr} ${p.task} — ${p.state}${p.draft ? ", draft" : ""}, merge policy ${p.merge_policy ?? "?"}, risk ${p.risk ?? "?"}`));
-  section("stale drafts", s.stale_drafts.map((p) => `#${p.pr} ${p.branch} — head unchanged for ${p.days_unchanged} days; close the PR or resume the run (${p.repo})`));
+  section("stale drafts", s.stale_drafts.map((p) => `#${p.pr} ${p.branch} — unchanged for ${p.days_unchanged} days; close the PR or resume the run (${p.repo})`));
   section("open audit tickets", s.audit_tickets.map((t) => `${t.repo} [${t.type}] ${t.id} — ${t.goal} (${t.plan_path})`));
   if (s.since) {
     const fin = s.since;

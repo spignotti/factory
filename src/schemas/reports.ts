@@ -56,8 +56,9 @@ export const StatusReportSchema = z.strictObject({
     }),
   ),
   /**
-   * Open factory PRs that are drafts and whose head has not changed for `limits.stale_draft_days`.
-   * They do not block the queue. Close the PR or resume the run.
+   * Open factory drafts whose newer of head commit time and `updatedAt` is at least
+   * `limits.stale_draft_days` old, and whose branch no live run holds. They do not block the queue.
+   * Close the PR or resume the run.
    */
   stale_drafts: z.array(
     z.strictObject({

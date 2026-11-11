@@ -180,7 +180,7 @@ async function ensurePathClaim(
     }
     let hits: Awaited<ReturnType<typeof openFactoryPrOverlap>>;
     try {
-      hits = await openFactoryPrOverlap(deps.github, repoDir, paths, ownBranch);
+      hits = await openFactoryPrOverlap(deps.github, repoDir, paths, ownBranch, deps.factoryHome);
     } catch (e) {
       if (e instanceof WallTimeExceeded || e instanceof Interrupted || deps.signal?.aborted) throw e;
       if (e instanceof IncompletePrListError) {

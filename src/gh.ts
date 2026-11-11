@@ -201,7 +201,7 @@ export interface OpenFactoryPr {
   files: string[];
   /** Absent when the list payload had no `isDraft` (older callers). */
   draft?: boolean;
-  /** ISO time of the latest head commit, else `updatedAt`. Absent when neither was listed. */
+  /** Newest of the head commit time and `updatedAt`. Absent when neither was listed. */
   headChangedAt?: string;
 }
 
@@ -260,6 +260,13 @@ function latestCommitAt(commits: unknown): string | undefined {
   return iso;
 }
 
+/** Later of two ISO timestamps. Either side may be absent. */
+function newerIso(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return Date.parse(a) >= Date.parse(b) ? a : b;
+}
+
 /**
  * `gh pr list --json number,headRefName,isCrossRepository,isDraft,updatedAt,commits,files`.
  * Keeps same-repo `factory/*` heads. `files` and `commits` may be a flat list or `{ nodes: [...] }`.
@@ -280,7 +287,7 @@ export function parseOpenFactoryPrs(payload: unknown): OpenFactoryPr[] {
     if (pr.isCrossRepository === true) continue;
     if (typeof pr.number !== "number" || !Number.isInteger(pr.number) || pr.number <= 0) continue;
     if (typeof pr.headRefName !== "string" || !pr.headRefName.startsWith("factory/")) continue;
-    const headChangedAt = latestCommitAt(pr.commits) ?? isoDate(pr.updatedAt);
+    const headChangedAt = newerIso(latestCommitAt(pr.commits), isoDate(pr.updatedAt));
     out.push({
       number: pr.number,
       branch: pr.headRefName,

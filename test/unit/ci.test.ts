@@ -286,7 +286,7 @@ describe("CI stub", () => {
     expect(defaultRef()).toBe(`v${version}`); // follows package.json, so a release PR needs no test edit
   });
 
-  it("resolves a tag via git peel, then gh, then an unpeeled tag", () => {
+  it("resolves a tag via git peel, then gh, then a lightweight tag, and never an unpeeled tag object", () => {
     const sha = "a".repeat(40);
     const calls: string[] = [];
     const lookup = {
@@ -306,6 +306,31 @@ describe("CI stub", () => {
       },
     };
     expect(resolveFactoryRef("v0.4.0", gh)).toEqual({ pin: sha, tag: "v0.4.0" });
+    const lightweight = {
+      exec(command: "git" | "gh", args: string[]) {
+        if (command === "gh") throw new Error("no gh");
+        if (args.some((a) => a.endsWith("^{}"))) return "";
+        return `${sha}\trefs/tags/v0.4.0\n`;
+      },
+    };
+    expect(resolveFactoryRef("v0.4.0", lightweight)).toEqual({ pin: sha, tag: "v0.4.0" });
+    const tagObject = "e".repeat(40);
+    const failedPeel = {
+      exec(command: "git" | "gh", args: string[]) {
+        if (command === "git" && args.some((a) => a.endsWith("^{}"))) throw new Error("timeout");
+        if (command === "gh") throw new Error("no gh");
+        return `${tagObject}\trefs/tags/v0.4.0\n`;
+      },
+    };
+    expect(() => resolveFactoryRef("v0.4.0", failedPeel)).toThrow(/peeling the tag failed \(timeout\).*refusing to pin an unpeeled tag object/);
+    const ghAfterTimeout = {
+      exec(command: "git" | "gh", args: string[]) {
+        if (command === "git" && args.some((a) => a.endsWith("^{}"))) throw new Error("timeout");
+        if (command === "gh") return `${sha}\n`;
+        throw new Error("unpeeled tag must not be consulted");
+      },
+    };
+    expect(resolveFactoryRef("v0.4.0", ghAfterTimeout)).toEqual({ pin: sha, tag: "v0.4.0" });
     expect(() => resolveFactoryRef("v9.9.9", { exec: () => { throw new Error("offline"); } })).toThrow(/could not resolve factory ref v9.9.9/);
     expect(() => resolveFactoryRef("../x", { exec: () => "" })).toThrow(/invalid factory ref/);
   });

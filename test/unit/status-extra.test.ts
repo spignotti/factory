@@ -28,9 +28,33 @@ describe("status extended sections", () => {
     );
     const s = await statusReport({ factoryHome: home, github: gh, now: () => now });
     expect(s.stale_drafts).toEqual([{ repo: "/tmp/r", pr: 12, branch: "factory/12", days_unchanged: 5 }]);
-    expect(renderStatus(s)).toContain("#12 factory/12 — head unchanged for 5 days; close the PR or resume the run (/tmp/r)");
+    expect(renderStatus(s)).toContain("#12 factory/12 — unchanged for 5 days; close the PR or resume the run (/tmp/r)");
     expect(renderStatus(s)).not.toContain("#13");
     expect(renderStatus(s)).not.toContain("#14");
+  });
+
+  it("does not list a stale draft whose branch a live run still holds", async () => {
+    const home = join(tmpdir(), `status-held-${Date.now()}`);
+    const runId = "20261030-150000-abc123";
+    const repo = "/tmp/r";
+    mkdirSync(join(home, "runs", runId), { recursive: true });
+    mkdirSync(join(home, "locks"), { recursive: true });
+    writeFileSync(join(home, "locks", "held.lock"), `${process.pid}\n${runId}`);
+    writeFileSync(join(home, "runs", runId, "state.json"), JSON.stringify({
+      version: 1, run_id: runId, repo, task: { ref: "issue #1", labels: [] },
+      no_pr: false, step: "implement", result: null, reason: "", branch: "factory/12",
+      worktree: "/wt", base_sha: "sha", packages: {}, failures: {}, handoffs: [], rounds: 0, findings: [],
+      gate_count: 0, pr: null, pr_draft: true, lane: "standard", lane_escalation: [], updated_at: new Date().toISOString(),
+    }));
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    const old = new Date(now - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const gh = new FakeGitHub();
+    gh.factoryPrs.push(
+      { number: 12, branch: "factory/12", files: ["src/a.ts"], draft: true, headChangedAt: old },
+      { number: 15, branch: "factory/15", files: ["src/d.ts"], draft: true, headChangedAt: old },
+    );
+    const s = await statusReport({ factoryHome: home, github: gh, now: () => now });
+    expect(s.stale_drafts.map((p) => p.pr)).toEqual([15]);
   });
 
   it("reports orphaned runs from dead lock holders", async () => {

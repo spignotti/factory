@@ -110,29 +110,44 @@ function shaFromLsRemote(text: string): string | undefined {
   return /^([0-9a-f]{40})\b/im.exec(text)?.[1]?.toLowerCase();
 }
 
-function tryLookup(lookup: RefLookup, command: "git" | "gh", args: string[]): string | undefined {
+type LookupResult = { ok: true; out: string } | { ok: false; error: string };
+
+function lookupRef(lookup: RefLookup, command: "git" | "gh", args: string[]): LookupResult {
   try {
-    const out = lookup.exec(command, args).trim();
-    return out || undefined;
-  } catch {
-    return undefined;
+    return { ok: true, out: lookup.exec(command, args).trim() };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg.split("\n")[0]?.slice(0, 200) || "failed" };
   }
 }
 
 /**
  * A full commit SHA is already a pin. A tag is resolved to the commit it points at
- * (git ls-remote peel, then `gh api`, then an unpeeled lightweight tag) and kept as a comment.
+ * (git ls-remote peel, then `gh api`, then a lightweight tag whose peel succeeded with nothing to peel)
+ * and kept as a comment. A failed peel is not proof of a lightweight tag: the unpeeled SHA may be a tag object.
  */
 export function resolveFactoryRef(ref: string, lookup: RefLookup = defaultRefLookup()): { pin: string; tag?: string } {
   if (!REF.test(ref) || ref.includes("..")) throw new Error(`invalid factory ref: ${ref}`);
   if (FULL_SHA.test(ref)) return { pin: ref.toLowerCase() };
-  const peeled = shaFromLsRemote(tryLookup(lookup, "git", ["ls-remote", FACTORY_GIT, `refs/tags/${ref}^{}`]) ?? "");
-  if (peeled) return { pin: peeled, tag: ref };
-  const viaGh = tryLookup(lookup, "gh", ["api", `${FACTORY_API}/commits/${ref}`, "--jq", ".sha"])?.toLowerCase();
-  if (viaGh && FULL_SHA.test(viaGh)) return { pin: viaGh, tag: ref };
-  const direct = shaFromLsRemote(tryLookup(lookup, "git", ["ls-remote", FACTORY_GIT, `refs/tags/${ref}`]) ?? "");
-  if (direct) return { pin: direct, tag: ref };
-  throw new Error(`could not resolve factory ref ${ref} to a commit SHA (git ls-remote and gh api failed)`);
+  const peel = lookupRef(lookup, "git", ["ls-remote", FACTORY_GIT, `refs/tags/${ref}^{}`]);
+  if (peel.ok) {
+    const peeled = shaFromLsRemote(peel.out);
+    if (peeled) return { pin: peeled, tag: ref };
+  }
+  const viaGh = lookupRef(lookup, "gh", ["api", `${FACTORY_API}/commits/${ref}`, "--jq", ".sha"]);
+  if (viaGh.ok && FULL_SHA.test(viaGh.out.toLowerCase())) return { pin: viaGh.out.toLowerCase(), tag: ref };
+  // Empty successful peel: the ref is a lightweight tag and already points at a commit.
+  if (peel.ok && peel.out === "") {
+    const direct = lookupRef(lookup, "git", ["ls-remote", FACTORY_GIT, `refs/tags/${ref}`]);
+    if (direct.ok) {
+      const sha = shaFromLsRemote(direct.out);
+      if (sha) return { pin: sha, tag: ref };
+    }
+    throw new Error(`could not resolve factory ref ${ref} to a commit SHA (git ls-remote and gh api failed)`);
+  }
+  const why = peel.ok ? "peel did not return a commit SHA" : `peeling the tag failed (${peel.error})`;
+  const ghWhy = viaGh.ok ? "no commit SHA" : viaGh.error;
+  throw new Error(`could not resolve factory ref ${ref} to a commit SHA: ${why}; gh api failed (${ghWhy}); refusing to pin an unpeeled tag object`);
 }
 
 export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
