@@ -232,7 +232,7 @@ export class IncompletePrListError extends Error {
 }
 
 export function openFactoryPrListArgs(limit = OPEN_FACTORY_PR_LIMIT): string[] {
-  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", "number,headRefName,isCrossRepository,isDraft,updatedAt,commits,files"];
+  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", "number,headRefName,isCrossRepository,isDraft,updatedAt,files"];
 }
 
 function isoDate(value: unknown): string | undefined {
@@ -268,7 +268,8 @@ function newerIso(a: string | undefined, b: string | undefined): string | undefi
 }
 
 /**
- * `gh pr list --json number,headRefName,isCrossRepository,isDraft,updatedAt,commits,files`.
+ * `gh pr list --json number,headRefName,isCrossRepository,isDraft,updatedAt,files`. No `commits`: with
+ * `files` it exceeds GitHub's GraphQL node limit; `updatedAt` moves on every push. Commits are still read when present.
  * Keeps same-repo `factory/*` heads. `files` and `commits` may be a flat list or `{ nodes: [...] }`.
  * A payload that is not an array, or that fills `limit`, is incomplete: callers must block, not treat it as every open PR.
  */

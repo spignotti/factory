@@ -234,7 +234,8 @@ describe("risk and host steps", () => {
     ]);
     expect(parsed[0]).toMatchObject({ draft: true, headChangedAt: old });
     expect(openFactoryPrListArgs().join(" ")).toContain("isDraft");
-    expect(openFactoryPrListArgs().join(" ")).toContain("commits");
+    // commits together with files exceeds GitHub's GraphQL node limit; updatedAt marks a push.
+    expect(openFactoryPrListArgs().join(" ")).not.toContain("commits");
     expect(openFactoryPrListArgs().join(" ")).toContain("updatedAt");
   });
 
