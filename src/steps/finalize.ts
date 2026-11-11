@@ -445,8 +445,10 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         if (guarded.length) await ctx.deps.github.addLabel(ctx.worktree, target.url, PROTECTED_LABEL);
       }
       // Ready is after the push, and only when the local result is done. Then CI is polled.
+      let readyAt: string | undefined;
       if (target && result === "done") {
         if (target.draft) {
+          readyAt = new Date().toISOString();
           await ctx.deps.github.markReady(ctx.worktree, target.url);
           ctx.events.emit({ step: "finalize", event: "progress", data: { pr_ready: target.url } });
         }
@@ -468,6 +470,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           sleep: ctx.deps.sleep,
           signal: ctx.deps.signal,
           waitWhile: ["pending", "none"],
+          since: readyAt,
           onUpdate: (info) =>
             ctx.events.emit({
               step: "finalize",

@@ -389,3 +389,16 @@ describe("base CI check runs", () => {
     expect(actionsCheckRuns(rows).map((r) => r.name)).toEqual(["Dependabot", "legacy"]);
   });
 });
+
+describe("PR CI after markReady", () => {
+  it("ignores check runs created before the PR was marked ready", async () => {
+    const { checkRunsSince } = await import("../../src/gh.js");
+    const runs = [
+      { name: "validate", status: "completed", conclusion: "failure", created_at: "2026-11-11T12:41:05Z" },
+      { name: "validate", status: "in_progress", conclusion: null, created_at: "2026-11-11T12:41:08Z" },
+      { name: "queued-no-time", status: "queued", conclusion: null },
+    ];
+    expect(checkRunsSince(runs, "2026-11-11T12:41:07Z").map((r) => r.created_at ?? "none")).toEqual(["2026-11-11T12:41:08Z", "none"]);
+    expect(checkRunsSince(runs, undefined)).toHaveLength(3);
+  });
+});

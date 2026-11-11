@@ -22,6 +22,20 @@ export function actionsCheckRuns(raw: RawCheckRun[]): RawCheckRun[] {
   return raw.filter((r) => !r.app || r.app === "github-actions");
 }
 
+/**
+ * Check runs created at or after `since`. A repo workflow may fail on purpose while the PR is a draft;
+ * that run predates markReady and must not count as the PR's verdict. Runs without a time are kept.
+ */
+export function checkRunsSince(runs: CheckRunView[], since?: string): CheckRunView[] {
+  if (!since) return runs;
+  const t = Date.parse(since);
+  if (!Number.isFinite(t)) return runs;
+  return runs.filter((r) => {
+    const at = Date.parse(r.created_at ?? r.started_at ?? "");
+    return !Number.isFinite(at) || at >= t;
+  });
+}
+
 async function hasRemote(repoDir: string): Promise<boolean> {
   const stdout = await git(repoDir, ["remote"]);
   return stdout.trim() !== "";
@@ -87,7 +101,8 @@ export interface PrRequest {
 
 /** Everything the factory does on GitHub. Only the factory process calls it. */
 export interface GitHub {
-  baseStatus(repoDir: string, sha: string): Promise<BaseStatus>;
+  /** `since`: ignore check runs created before this time (PR CI after markReady: the draft-hold run is not the verdict). */
+  baseStatus(repoDir: string, sha: string, opts?: { since?: string }): Promise<BaseStatus>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
   /** Open (or any state) issues, newest page only (`--limit 100`). Not a full set. */
   listIssues(repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]>;
@@ -692,7 +707,7 @@ export class GhCli implements GitHub {
     return out;
   }
 
-  async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
+  async baseStatus(repoDir: string, sha: string, opts?: { since?: string }): Promise<BaseStatus> {
     // A repo without remotes has no GitHub checks (local probe runs).
     if (!(await hasRemote(repoDir))) return "none";
     const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id, app: .app.slug}]"]);
@@ -713,7 +728,7 @@ export class GhCli implements GitHub {
         workflow: meta?.name ?? null,
       });
     }
-    return aggregateCheckRuns(runs);
+    return aggregateCheckRuns(checkRunsSince(runs, opts?.since));
   }
 
   async getIssue(repoDir: string, n: number): Promise<Issue> {
