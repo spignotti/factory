@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import { parseRepoConfig } from "../../src/schemas/repo.js";
 import { costLines } from "../../src/steps/finalize.js";
 import { formatGateResults } from "../../src/steps/gates.js";
 import { handoffShape, parseHandoff } from "../../src/steps/implement.js";
-import { extractPlanBlock, obtainFastPlan, obtainPlan, readTask, resolvePlanEffort } from "../../src/steps/intake.js";
+import { extractPlanBlock, obtainPlan, readTask, resolvePlanEffort } from "../../src/steps/intake.js";
 
 describe("intake helpers", () => {
   it("plan effort: flag, then issue label, then high", () => {
@@ -202,15 +202,16 @@ describe("plan_normalize schema retry", () => {
     ]);
   });
 
-  it("falls back only after the retry is also invalid, and the event lists both failures", async () => {
+  it("falls back to the planner only after the retry is also invalid, and the event lists both failures", async () => {
     const { ctx, runner, seen } = intake([
       { role: "plan_normalize", output: schemaInvalid },
       { role: "plan_normalize", output: schemaInvalid },
+      { role: "plan_medium", output: faithful },
     ]);
-    const fast = await obtainFastPlan(ctx);
-    expect(fast.kind).toBe("escalate");
-    if (fast.kind === "escalate") expect(fast.reason).toMatch(/^plan_normalize output invalid/);
-    expect(runner.calls).toHaveLength(2);
+    execFileSync("git", ["init", "-q"], { cwd: ctx.repoDir });
+    const out = await obtainPlan(ctx, "none");
+    expect(out).toMatchObject({ kind: "plan", source: "plan_medium" });
+    expect(runner.calls.map((c) => c.role)).toEqual(["plan_normalize", "plan_normalize", "plan_medium"]);
     const last = seen.filter((e) => Array.isArray(e.data.attempts)).at(-1);
     expect(last?.data.attempts).toEqual([
       expect.objectContaining({ n: 1, ok: false }),

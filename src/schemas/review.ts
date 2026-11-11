@@ -54,6 +54,3 @@ export const ReviewOutputSchema = z.object({
   findings: z.array(FindingSchema).default([]),
 });
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>;
-
-/** Fast lane `lean` review: plan and simplicity in one session. */
-export const LeanOutputSchema = z.object({ reviews: z.array(ReviewOutputSchema) });

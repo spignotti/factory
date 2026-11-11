@@ -219,9 +219,7 @@ export function renderPrBody(ctx: RunContext, v: {
     gates: v.gates ? formatGateResults(v.gates.checks) : "- not run",
     review: list(input.findings.filter((f) => f.status !== "open").map((f) => `${f.id} ${f.severity}: ${f.status}`)),
     stats: [
-      ctx.laneEscalation.length
-        ? `- lane: fast → standard (${ctx.laneEscalation.join("; ")})`
-        : `- lane: ${ctx.lane}${ctx.lane === "fast" ? " (lean review, at most one fix round)" : ""}`,
+      "- lane: standard",
       `- rounds: ${input.rounds}`,
       `- duration: ${((Date.now() - input.startedAt) / 60_000).toFixed(1)} min`,
       `- tokens: ${ctx.events.totals.tokens_in} in / ${ctx.events.totals.tokens_out} out`,

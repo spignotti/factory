@@ -358,11 +358,11 @@ describe("factory eval (fake runner)", () => {
 
   it("an experiment variant is layered on its base: models, prompts and flags", () => {
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));
-    const base: LoadedEvalProfile = { name: "b", source: "b.yaml", data: { roles: { pr_writer: [{ model: "openai/gpt-6-luna" }] }, flags: { lane: "fast" } }, prompts: { implement: "BASE", plan: "BASE-PLAN" } };
+    const base: LoadedEvalProfile = { name: "b", source: "b.yaml", data: { roles: { pr_writer: [{ model: "openai/gpt-6-luna" }] }, flags: { plan_effort: "none" } }, prompts: { implement: "BASE", plan: "BASE-PLAN" } };
     const v = layerOn({ name: "v", source: "v.yaml", data: { roles: { review_plan: [{ model: "openai/gpt-6-luna" }] }, flags: { plan_effort: "high" } }, prompts: { implement: "VAR" } }, base);
     expect(v.name).toBe("v");
     expect(v.prompts).toEqual({ implement: "VAR", plan: "BASE-PLAN" });
-    expect(v.data.flags).toEqual({ lane: "fast", plan_effort: "high" });
+    expect(v.data.flags).toEqual({ plan_effort: "high" });
     const p = resolveEvalProfile(v, home);
     expect(p.roles.pr_writer[0]!.model).toBe("openai/gpt-6-luna");
     expect(p.roles.review_plan[0]!.model).toBe("openai/gpt-6-luna");

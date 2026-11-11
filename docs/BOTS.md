@@ -259,8 +259,7 @@ green); deeper review only for harder changes. Improvements go straight to a PR 
 
 | Change | Path |
 |---|---|
-| Normal work in a **factory-enrolled** repo | `factory run` (standard lane) |
-| Small, single-package change in a **factory-enrolled** repo | `factory run … --lane fast` (see the README's Fast lane section) |
+| Work in a **factory-enrolled** repo | `factory run` |
 | Work in any **other** repo | Cloud Agent (above) |
 | Emergency or Silas explicitly says so | direct work, below |
 

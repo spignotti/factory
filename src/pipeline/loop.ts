@@ -126,9 +126,7 @@ export async function reviewLoop(
   opts: ReviewLoopOptions = {},
   state: FixState = { gateFailures: 0 },
 ): Promise<LoopOutcome> {
-  // Fast lane: at most one fix round, no extra round for an open bug.
-  const fast = () => ctx.lane === "fast";
-  const maxRounds = () => (fast() ? Math.min(2, ctx.repo.review.max_rounds) : ctx.repo.review.max_rounds);
+  const maxRounds = ctx.repo.review.max_rounds;
   const firstRound = opts.firstRound ?? 1;
   let findings: TrackedFinding[] = [];
   let gates = initialGates;
@@ -146,7 +144,7 @@ export async function reviewLoop(
     writeJson(ctx, `merged-${round}.json`, { ...merged, findings });
     const open = openFindings(findings);
     opts.onRound?.(round, findings);
-    const decision = decideExit({ round: round - firstRound + 1, maxRounds: maxRounds(), stalemate: isStalemate(merged), open, extraRound: !fast() });
+    const decision = decideExit({ round: round - firstRound + 1, maxRounds, stalemate: isStalemate(merged), open });
     ctx.events.emit({
       step: "review",
       event: "round_finished",

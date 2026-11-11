@@ -351,7 +351,7 @@ export async function evalOne(task: EvalTask, profile: LoadedEvalProfile, repeat
     const runner = deps.runner(profile, task, repeat);
     try {
       result = await runFactory(
-        { repo: repoDir, textFile: taskFile, lane: profile.data.flags?.lane ?? "standard", planEffort: profile.data.flags?.plan_effort ?? task.plan_effort, noPr: true },
+        { repo: repoDir, textFile: taskFile, planEffort: profile.data.flags?.plan_effort ?? task.plan_effort, noPr: true },
         {
           runner,
           github: deps.github ?? new FakeGitHub(),

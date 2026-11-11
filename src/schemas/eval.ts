@@ -79,8 +79,6 @@ export const EvalProfileSchema = ProfileLayerSchema.omit({ providers: true, sand
     prompts: z.partialRecord(z.enum(PROMPT_NAMES), z.string().min(1)).optional(),
     flags: z
       .object({
-        /** Overrides the lane of every task (default: standard). */
-        lane: z.enum(["standard", "fast"]).optional(),
         /** Overrides each task's `plan_effort`. */
         plan_effort: z.enum(["none", "medium", "high"]).optional(),
       })

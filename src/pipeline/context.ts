@@ -86,10 +86,6 @@ export interface RunContext {
   deadline: Deadline;
   /** Findings memory briefing: top open recurring findings, or "". */
   briefing: string;
-  /** Effective lane: `fast` until escalated. */
-  lane: Lane;
-  /** Why a fast-lane run moved to the standard lane (empty = not escalated). */
-  laneEscalation: string[];
   /** Services of this run, stopped at run end. */
   services?: Services;
   /** repo.yaml `secrets:` resolved for this run (commands only, never agents); absent = none. */
@@ -105,8 +101,6 @@ export interface RunContext {
   /** Takes a slot again after that wait and updates `lockSlot`. Undefined when none could be taken. */
   reacquireLock?: () => Promise<number | undefined>;
 }
-
-export type Lane = "standard" | "fast";
 
 export class WallTimeExceeded extends Error {
   constructor(minutes: number, detail?: string) {

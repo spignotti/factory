@@ -9,7 +9,7 @@ import type { TrackedFinding } from "../pipeline/merge.js";
 import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny, planReviewNotes } from "../schemas/plan.js";
-import { type Reviewer, type ReviewOutput, ReviewOutputSchema, LeanOutputSchema } from "../schemas/review.js";
+import { type Reviewer, type ReviewOutput, ReviewOutputSchema } from "../schemas/review.js";
 import { CHECKLIST_REL, resolveStandards, REVIEW_RULES_REL, STANDARDS_REL, type ResolvedStandards } from "../standards.js";
 import { skippedSecurityGates, type GateReport, visibleGateDetail } from "./gates.js";
 
@@ -102,28 +102,19 @@ function reviewerExtras(ctx: RunContext, reviewer: Reviewer, plan: ReviewerPlan)
   return "";
 }
 
-/** One reviewer session: a single reviewer (mode `full`) or `plan` + `simplicity` together (mode `lean`). */
+/** One reviewer, one session. */
 interface ReviewSession {
   key: string;
   role: string;
-  reviewers: Reviewer[];
+  reviewer: Reviewer;
 }
 
-function sessionsFor(ctx: RunContext, reviewers: Reviewer[]): ReviewSession[] {
-  const single = (r: Reviewer): ReviewSession => ({ key: r, role: `review_${r}`, reviewers: [r] });
-  if (ctx.lane !== "fast") return reviewers.map(single);
-  const lean: Reviewer[] = ["plan", "simplicity"];
-  return [{ key: "lean", role: "review_plan", reviewers: lean }, ...reviewers.filter((r) => !lean.includes(r)).map(single)];
+function sessionsFor(reviewers: Reviewer[]): ReviewSession[] {
+  return reviewers.map((r) => ({ key: r, role: `review_${r}`, reviewer: r }));
 }
-
-const LEAN_SHAPE = `Reply with a single \`\`\`json block {"reviews":[<plan review>,<simplicity review>]}, each review shaped like:
-{"reviewer":"plan|simplicity","prior":[{"finding_id":"<id of a prior finding you were given>","verdict":"resolved|accept_wontfix|still_open|reject_wontfix"}],
- "findings":[{"severity":"bug|suggestion|nit","file":"","line":0,"claim":"","evidence":"","fix":"","checkable":"lint|test|script|no","check_sketch":""}]}
-Give the verdict on a prior finding in the review of the reviewer that raised it.
-Without prior findings, "prior" is [].`;
 
 const shapeOf = (s: ReviewSession): string =>
-  s.reviewers.length > 1 ? LEAN_SHAPE : `${REVIEW_SHAPE.replace("<name>", s.reviewers[0]!)}\nWithout prior findings, "prior" is [].`;
+  `${REVIEW_SHAPE.replace("<name>", s.reviewer)}\nWithout prior findings, "prior" is [].`;
 
 interface Diffs {
   /** Since base: round 1 and reviewers joining later. */
@@ -147,7 +138,7 @@ function gateResultsJson(gates: GateReport, continued: boolean): string {
 }
 
 async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, plan: ReviewerPlan): Promise<string> {
-  const continued = input.round > 1 && input.lastReviewedSha && s.reviewers.every((r) => reviewedBefore(ctx, r, input.round));
+  const continued = input.round > 1 && input.lastReviewedSha && reviewedBefore(ctx, s.reviewer, input.round);
   if (!continued) {
     return [
       asData("plan", JSON.stringify(ctx.plan, null, 2)),
@@ -156,7 +147,7 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
       asData("handoffs", JSON.stringify(ctx.handoffs, null, 2)),
       asData("gate_results", gateResultsJson(input.gates, false)),
       `Review rules:\n${plan.reviewRules}`,
-      ...s.reviewers.map((r) => reviewerExtras(ctx, r, plan)),
+      reviewerExtras(ctx, s.reviewer, plan),
       ctx.briefing ? `Recurring findings in this repo (check whether this diff repeats them):\n${asData("findings_briefing", ctx.briefing)}` : "",
       // Prior findings of a reviewer joining late: open ones still need its verdict.
       input.round > 1 ? priorBlock(input, s) : "",
@@ -174,25 +165,16 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
 
 function priorBlock(input: ReviewInput, s: ReviewSession): string {
   const prior = input.findings
-    .filter((f) => s.reviewers.includes(f.reviewer) && f.status === "open")
+    .filter((f) => f.reviewer === s.reviewer && f.status === "open")
     .map((f) => ({ id: f.id, reviewer: f.reviewer, severity: f.severity, file: f.file, line: f.line, claim: f.claim, response: f.response ?? null }));
   return prior.length || input.round > 1 ? asData("prior_findings_with_responses", JSON.stringify(prior, null, 2)) : "";
 }
 
 function parseSession(s: ReviewSession, text: string): { ok: true; reviews: ReviewOutput[] } | { ok: false; errors: string[] } {
   const json = extractJson(text);
-  if (s.reviewers.length === 1) {
-    const parsed = ReviewOutputSchema.safeParse(json);
-    if (!parsed.success) return { ok: false, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) };
-    return parsed.data.reviewer === s.reviewers[0] ? { ok: true, reviews: [parsed.data] } : { ok: false, errors: [`reviewer must be ${s.reviewers[0]}`] };
-  }
-  const parsed = LeanOutputSchema.safeParse(json);
+  const parsed = ReviewOutputSchema.safeParse(json);
   if (!parsed.success) return { ok: false, errors: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`) };
-  const got = parsed.data.reviews.map((r) => r.reviewer);
-  if (got.length !== s.reviewers.length || !s.reviewers.every((r) => got.includes(r))) {
-    return { ok: false, errors: [`reviews must be exactly one each for ${s.reviewers.join(", ")}`] };
-  }
-  return { ok: true, reviews: s.reviewers.map((r) => parsed.data.reviews.find((x) => x.reviewer === r)!) };
+  return parsed.data.reviewer === s.reviewer ? { ok: true, reviews: [parsed.data] } : { ok: false, errors: [`reviewer must be ${s.reviewer}`] };
 }
 
 /**
@@ -202,14 +184,14 @@ function parseSession(s: ReviewSession, text: string): { ok: true; reviews: Revi
  */
 function checkPriorIds(out: ReturnType<typeof parseSession>, input: ReviewInput, s: ReviewSession): ReturnType<typeof parseSession> {
   if (!out.ok) return out;
-  const known = new Set(input.findings.filter((f) => s.reviewers.includes(f.reviewer)).map((f) => f.id));
+  const known = new Set(input.findings.filter((f) => f.reviewer === s.reviewer).map((f) => f.id));
   const unknown = out.reviews.flatMap((r) => r.prior.map((p) => p.finding_id)).filter((id) => !known.has(id));
   if (!unknown.length) return out;
   return { ok: false, errors: [`prior verdicts name unknown finding ids: ${unknown.join(", ")} (judge only the prior findings you were given${known.size ? "" : "; there are none, so prior must be []"})`] };
 }
 
 async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, plan: ReviewerPlan): Promise<ReviewOutput[]> {
-  const system = [...s.reviewers.map((r) => rolePrompt(`review-${r}`, ctx.deps.prompts)), rolePrompt("review-common", ctx.deps.prompts)].join("\n\n");
+  const system = [rolePrompt(`review-${s.reviewer}`, ctx.deps.prompts), rolePrompt("review-common", ctx.deps.prompts)].join("\n\n");
   let prompt = await reviewPrompt(ctx, s, input, diffs, plan);
   let errors: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -223,21 +205,21 @@ async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput,
     ctx.events.emit({ step: "review", event: "progress", role: s.role, data: { rejected: errors } });
     prompt = `Your review output was invalid:\n- ${errors.join("\n- ")}\n\n${shapeOf(s)}`;
   }
-  throw new InvalidOutputError(`${s.key === "lean" ? "review (lean)" : s.role} output invalid: ${errors.join("; ")}`);
+  throw new InvalidOutputError(`${s.role} output invalid: ${errors.join("; ")}`);
 }
 
-/** One review round: every active reviewer in parallel sessions (mode `full`; fast lane `lean`). */
+/** One review round: every active reviewer in its own session. */
 export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<ReviewOutput[]> {
   // Stage and diff once: parallel reviewers must not touch the git index concurrently.
   await stageAll(ctx.worktree);
   const plan = await planReviewers(ctx, input.round);
-  const sessions = sessionsFor(ctx, plan.reviewers);
+  const sessions = sessionsFor(plan.reviewers);
   const planChecks = planReviewNotes(ctx.plan, ctx.task.text, ctx.task.labels);
   ctx.events.emit({
     step: "review",
     event: "step_started",
     data: {
-      round: input.round, reviewers: plan.reviewers, mode: ctx.lane === "fast" ? "lean" : "full",
+      round: input.round, reviewers: plan.reviewers,
       security_files: plan.security.length, checklist_items: plan.standards.length, standards_items: plan.standards.length,
       ...(plan.deprecated ? { standards_deprecated: plan.deprecated } : {}),
       ...(planChecks ? { plan_checks: planChecks } : {}),

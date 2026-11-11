@@ -354,7 +354,6 @@ export const RepoConfigSchema = z
         max_nits: z.number().int().min(0).default(5),
       })
       .default({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5 }),
-    fast_lane: z.object({ max_diff_lines: z.number().int().min(1).default(150) }).default({ max_diff_lines: 150 }),
     merge: z
       .object({
         auto_merge_max_risk: z.enum(["none", "low", "medium"]).default("none"),
@@ -401,7 +400,7 @@ export const RepoConfigSchema = z
           .array(z.string().min(1).refine((g) => !CATCH_ALL.has(g.replace(/^\.\//, "")), "diff_exclude must not match every file"))
           .default([]),
         // When false, files matching `tests.globs` (the test-gate classification) are left out of
-        // `max_diff_lines` only. Fast-lane and merge line limits still count them. Default true.
+        // `max_diff_lines` only. The merge line limit still counts them. Default true.
         // Turning it off is a loosening (config_guard).
         diff_count_tests: z.boolean().default(true),
         // Same-model retries after a provider stream abort (the current agent call only; earlier
@@ -597,8 +596,17 @@ function placeholderIssues(cfg: Parameters<typeof placeholderTexts>[0]): string[
 
 export const REPO_CONFIG_PATH = ".factory/repo.yaml";
 
+/** True when the file still has a `fast_lane:` block. It parses and is ignored. */
+export function repoConfigHasFastLane(text: string): boolean {
+  const raw = parse(text);
+  return !!raw && typeof raw === "object" && !Array.isArray(raw) && Object.prototype.hasOwnProperty.call(raw, "fast_lane");
+}
+
 export function parseRepoConfig(text: string): RepoConfig {
-  return RepoConfigSchema.parse(parse(text) ?? {});
+  const cfg = RepoConfigSchema.parse(parse(text) ?? {});
+  // `.loose()` keeps unknown keys; drop the removed block so nothing reads it.
+  delete (cfg as { fast_lane?: unknown }).fast_lane;
+  return cfg;
 }
 
 export function loadRepoConfig(repoDir: string): RepoConfig {

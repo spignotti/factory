@@ -4,7 +4,7 @@ import { MemoryFileSchema } from "../memory.js";
 import { EvalProfileSchema, EvalRecordSchema, EvalTaskSchema, VerdictSchema as ExperimentVerdictSchema } from "./eval.js";
 import { DoctorReportSchema, GcReportSchema, StatsReportSchema, StatusReportSchema } from "./reports.js";
 import { AuditReportSchema, HardenReportSchema, ImproveReportSchema, MetricsSchema, ProposalSchema } from "./proposal.js";
-import { LeanOutputSchema, ReviewOutputSchema } from "./review.js";
+import { ReviewOutputSchema } from "./review.js";
 
 /** One line of `events.jsonl`. `data` depends on the event. */
 export const EventLineSchema = z.object({
@@ -38,7 +38,6 @@ export const JSON_SCHEMAS: Record<string, { schema: z.ZodType; io: "input" | "ou
   "improve.schema.json": { schema: ImproveReportSchema, io: "output", title: "factory improve --json" },
   "metrics.schema.json": { schema: MetricsSchema, io: "output", title: "harden metrics line ($FACTORY_HOME/memory/<repo>/metrics.jsonl)" },
   "review-output.schema.json": { schema: ReviewOutputSchema, io: "input", title: "reviewer output (one reviewer)" },
-  "review-lean.schema.json": { schema: LeanOutputSchema, io: "input", title: "fast lane lean review output" },
   "eval-task.schema.json": { schema: EvalTaskSchema, io: "input", title: "eval task (evals/tasks/<id>.yaml)" },
   "eval-profile.schema.json": { schema: EvalProfileSchema, io: "input", title: "eval profile / experiment variant" },
   "eval-record.schema.json": { schema: EvalRecordSchema, io: "output", title: "eval result line (evals/results/<date>.jsonl)" },

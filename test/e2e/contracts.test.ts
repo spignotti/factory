@@ -10,7 +10,7 @@ import { statusReport } from "../../src/commands/status.js";
 import { ResultSchema } from "../../src/events.js";
 import { EventLineSchema, JSON_SCHEMAS, renderJsonSchema } from "../../src/schemas/json.js";
 import { DoctorReportSchema, GcReportSchema, StatsReportSchema, StatusReportSchema } from "../../src/schemas/reports.js";
-import { LeanOutputSchema, ReviewOutputSchema } from "../../src/schemas/review.js";
+import { ReviewOutputSchema } from "../../src/schemas/review.js";
 import { MemoryFileSchema } from "../../src/memory.js";
 import { addOrigin } from "../helpers/repo.js";
 import { runScenario } from "../helpers/scenario.js";
@@ -20,10 +20,8 @@ const SCHEMA_DIR = join(import.meta.dirname, "..", "..", "schemas");
 describe("JSON contracts", () => {
   it("review-output still lists checklist as an alias of standards", () => {
     const review = JSON.parse(readFileSync(join(SCHEMA_DIR, "review-output.schema.json"), "utf8")) as { properties: { reviewer: { enum: string[] } } };
-    const lean = JSON.parse(readFileSync(join(SCHEMA_DIR, "review-lean.schema.json"), "utf8")) as { properties: { reviews: { items: { properties: { reviewer: { enum: string[] } } } } } };
     expect(review.properties.reviewer.enum).toContain("checklist");
     expect(review.properties.reviewer.enum).toContain("standards");
-    expect(lean.properties.reviews.items.properties.reviewer.enum).toContain("checklist");
     expect(ReviewOutputSchema.parse({ reviewer: "checklist", findings: [] }).reviewer).toBe("standards");
   });
 
@@ -58,8 +56,5 @@ describe("JSON contracts", () => {
     DoctorReportSchema.parse(JSON.parse(out));
   });
 
-  it("the lean review shape in the prompt parses", () => {
-    const sample = { reviews: [{ reviewer: "plan", findings: [{ severity: "bug", claim: "x" }] }, { reviewer: "simplicity" }] };
-    expect(LeanOutputSchema.parse(sample).reviews[1]).toEqual({ reviewer: "simplicity", prior: [], findings: [] });
-  });
 });
+

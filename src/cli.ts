@@ -34,7 +34,7 @@ import { notifyTest, flushNotifyOutbox, requireNotifyHook, requireNotifyTarget }
 
 const USAGE = `usage:
   factory --version
-  factory run --repo <path> (--issue <n> | --plan <file> | --text <file>) [--lane standard|fast]
+  factory run --repo <path> (--issue <n> | --plan <file> | --text <file>)
               [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait] [--run-id <id>]
               (one run per repo at a time: busy repo → result "locked", or queue with --wait)
               [--notify <target>] [--no-notify]
@@ -577,7 +577,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
           issue: { type: "string" },
           plan: { type: "string" },
           text: { type: "string" },
-          lane: { type: "string", default: "standard" },
+          lane: { type: "string" },
           "plan-effort": { type: "string" },
           "no-pr": { type: "boolean", default: false },
           wait: { type: "boolean", default: false },
@@ -593,7 +593,8 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       }
       const effort = values["plan-effort"];
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
-      if (!["standard", "fast"].includes(values.lane)) throw new Error(`invalid --lane ${values.lane}`);
+      if (values.lane === "fast") throw new Error("the fast lane was removed; run without --lane (plan effort is --plan-effort none|medium|high)");
+      if (values.lane !== undefined && values.lane !== "standard") throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = factoryHomeOf();
       if (values.notify !== undefined) {
         const named = await requireNotifyTarget(factoryHome, values.notify);
@@ -623,7 +624,6 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
             issue: values.issue !== undefined ? Number(values.issue) : undefined,
             planFile: values.plan,
             textFile: values.text,
-            lane: values.lane as "standard" | "fast",
             planEffort: effort as "none" | "medium" | "high" | undefined,
             noPr: values["no-pr"],
             wait: values.wait,
