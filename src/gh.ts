@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { CI_MAX_PAGES, CI_PAGE_SIZE, ciRunListArgs, ciRunViewArgs, ciWorkflowListArgs, paginateRunList, parseRunView, parseWorkflowNames, resolveRunWorkflow } from "./ci-history.js";
+import { attachRunViews, CI_MAX_PAGES, CI_PAGE_SIZE, ciRunListArgs, ciRunViewArgs, ciWorkflowListArgs, paginateRunList, parseRunView, parseWorkflowNames } from "./ci-history.js";
 import { CommandTimeoutError, execFileTimed } from "./exec.js";
 import { GIT_LOCAL_TIMEOUT_MS, git } from "./git.js";
 import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
@@ -126,9 +126,10 @@ export interface GitHub {
   /**
    * improve `ci` / `tests`: every workflow run in the window, newest first.
    * At most 1000 runs (10 pages). `truncated` when the page cap or an HTTP 422 stopped the list.
-   * Workflow identity is the file path, named from the workflows API, never the run name.
+   * A failed `gh run view` skips that run (`skipped`) and keeps the rest. Workflow identity is the
+   * file path, named from the workflows API, never the run name.
    */
-  ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }>;
+  ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean; skipped: number }>;
   /** `harden`: newest release tag of the factory itself (`owner/repo`), null when there is none. */
   latestTag(repoDir: string, ownerRepo: string): Promise<string | null>;
 }
@@ -769,29 +770,14 @@ export class GhCli implements GitHub {
     return out;
   }
 
-  async ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }> {
+  async ciRunsInWindow(repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean; skipped: number }> {
     // UNVERIFIED: Actions runs paging. `gh run list` has no page flag and stops at its own limit.
     // A page past 1000 runs is HTTP 422; paginateRunList keeps the pages already read.
+    // A failed `gh run view` skips that run; it must not discard the window.
     const { rows, truncated } = await paginateRunList(async (page, perPage) => JSON.parse(await gh(repoDir, ciRunListArgs(since.slice(0, 10), page, perPage))));
     const names = await workflowNames(repoDir);
-    const runs: CiRun[] = [];
-    for (const row of rows) {
-      if (row.created_at < since) continue;
-      const jobs = parseRunView(JSON.parse(await gh(repoDir, ciRunViewArgs(row.id))));
-      const identity = resolveRunWorkflow(row, names);
-      runs.push({
-        id: row.id,
-        sha: row.sha,
-        workflow: identity.workflow,
-        path: identity.path,
-        event: row.event,
-        conclusion: row.conclusion,
-        created_at: row.created_at,
-        head_branch: row.head_branch,
-        jobs,
-      });
-    }
-    return { runs, truncated };
+    const { runs, skipped } = await attachRunViews(rows, since, names, (id) => gh(repoDir, ciRunViewArgs(id)));
+    return { runs, truncated, skipped };
   }
 
   async latestTag(repoDir: string, ownerRepo: string): Promise<string | null> {
@@ -996,6 +982,10 @@ export class FakeGitHub implements GitHub {
   factoryTag: string | null = null;
   /** Set when a test wants the window reported as cut off by the page cap. */
   ciTruncated = false;
+  /** Runs whose view failed. The list itself still succeeds. */
+  ciSkipped = 0;
+  /** When set, the window fetch fails (list error, not a skipped view). */
+  ciWindowError: string | null = null;
   readonly ciQueries: { since: string; limit: number }[] = [];
 
   async ciRuns(_repoDir: string, since: string, limit: number): Promise<CiRun[]> {
@@ -1003,9 +993,10 @@ export class FakeGitHub implements GitHub {
     return this.runs.filter((r) => r.created_at >= since).slice(0, limit);
   }
 
-  async ciRunsInWindow(_repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean }> {
+  async ciRunsInWindow(_repoDir: string, since: string): Promise<{ runs: CiRun[]; truncated: boolean; skipped: number }> {
     this.ciQueries.push({ since, limit: CI_PAGE_SIZE });
-    return { runs: this.runs.filter((r) => r.created_at >= since), truncated: this.ciTruncated };
+    if (this.ciWindowError) throw new Error(this.ciWindowError);
+    return { runs: this.runs.filter((r) => r.created_at >= since), truncated: this.ciTruncated, skipped: this.ciSkipped };
   }
 
   async latestTag(): Promise<string | null> {

@@ -1,6 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { sharedCacheEnv } from "../agents/env.js";
+import { factoryHomeOf } from "../config.js";
 import { execFileTimed } from "../exec.js";
 import type { CiRun } from "../gh.js";
 import { baseRef, revParse, withBaseWorktree } from "../git.js";
@@ -80,7 +82,7 @@ export function runnerInvocation(repoDir: string, repo: RepoConfig): { command: 
   return { kind: parsed.kind, command: flags.length ? `${pm} test -- ${flags.join(" ")}` : `${pm} test` };
 }
 
-export function parsePytestDurations(text: string): SlowTest[] {
+function pytestTotals(text: string): Map<string, number> {
   const lines = text.split("\n");
   const start = lines.findIndex((l) => /slowest .+durations/i.test(l));
   const body = start >= 0 ? lines.slice(start + 1) : [];
@@ -92,22 +94,22 @@ export function parsePytestDurations(text: string): SlowTest[] {
     const seconds = m[2] === "ms" ? Number(m[1]) / 1000 : Number(m[1]);
     totals.set(m[3]!, (totals.get(m[3]!) ?? 0) + seconds);
   }
-  return ranked(totals);
+  return totals;
 }
 
-export function parseReporterDurations(text: string): SlowTest[] {
+function reporterTotals(text: string): Map<string, number> {
+  const totals = new Map<string, number>();
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return [];
+  if (start < 0 || end <= start) return totals;
   let json: unknown;
   try {
     json = JSON.parse(text.slice(start, end + 1));
   } catch {
-    return [];
+    return totals;
   }
   const results = json && typeof json === "object" ? (json as { testResults?: unknown }).testResults : undefined;
-  if (!Array.isArray(results)) return [];
-  const totals = new Map<string, number>();
+  if (!Array.isArray(results)) return totals;
   for (const file of results) {
     if (!file || typeof file !== "object") continue;
     const assertions = (file as { assertionResults?: unknown }).assertionResults;
@@ -120,7 +122,19 @@ export function parseReporterDurations(text: string): SlowTest[] {
       totals.set(name, Math.max(totals.get(name) ?? 0, row.duration / 1000));
     }
   }
-  return ranked(totals);
+  return totals;
+}
+
+function durationTotals(kind: "pytest" | "vitest" | "jest", text: string): Map<string, number> {
+  return kind === "pytest" ? pytestTotals(text) : reporterTotals(text);
+}
+
+export function parsePytestDurations(text: string): SlowTest[] {
+  return ranked(pytestTotals(text));
+}
+
+export function parseReporterDurations(text: string): SlowTest[] {
+  return ranked(reporterTotals(text));
 }
 
 function ranked(totals: Map<string, number>): SlowTest[] {
@@ -199,11 +213,36 @@ function parseCoverageJson(json: unknown): { path: string; missed: number }[] {
   return out;
 }
 
+function addRoot(out: Set<string>, root: string): void {
+  const norm = root.replaceAll("\\", "/").replace(/\/$/, "");
+  if (!norm) return;
+  out.add(norm);
+  if (norm.startsWith("/private/tmp/")) out.add(norm.slice("/private".length));
+  else if (norm.startsWith("/tmp/")) out.add(`/private${norm}`);
+}
+
+/** Checkout or worktree, plus its real path. macOS reports `/tmp` and `/private/tmp` for the same dir. */
+function rootVariants(root: string): string[] {
+  const out = new Set<string>();
+  addRoot(out, root);
+  addRoot(out, resolve(root));
+  try {
+    addRoot(out, realpathSync(root));
+  } catch {
+    // The worktree is gone, or the path is a fixture. String prefixes still apply.
+  }
+  return [...out];
+}
+
+/** Absolute paths under the measurement worktree become repo-relative before matching or reporting. */
 function relPath(repoDir: string, path: string): string {
   const norm = path.replaceAll("\\", "/");
-  const root = repoDir.replaceAll("\\", "/").replace(/\/$/, "");
-  const cut = norm.startsWith(`${root}/`) ? norm.slice(root.length + 1) : norm.replace(/^\.\//, "");
-  return cut;
+  for (const root of rootVariants(repoDir)) {
+    if (norm === root) return "";
+    if (norm.startsWith(`${root}/`)) return norm.slice(root.length + 1);
+  }
+  if (!isAbsolute(path)) return norm.replace(/^\.\//, "");
+  return norm;
 }
 
 export function uncoveredCritical(repoDir: string, reports: { path: string; missed: number }[], sensitive: string[]): UncoveredPath[] {
@@ -224,23 +263,39 @@ function clip(e: unknown): string {
   return ((e as Error).message || String(e)).split("\n")[0]!.slice(0, 200);
 }
 
+function signalError(e: unknown): string {
+  const partial = outputOf(e);
+  const extra = partial?.stderr.trim().split("\n").filter(Boolean).at(-1);
+  const head = clip(e);
+  // stderr first: the command line in `head` can be the whole 200 characters.
+  if (extra && !head.includes(extra)) return `${extra}: ${head}`.slice(0, 200);
+  return head;
+}
+
 export interface TestSignalInput {
   repoDir: string;
   repo: RepoConfig;
   mem: MemoryFile;
   runs: CiRun[];
   dryRun?: boolean;
-  exec?: (command: string, cwd: string, timeoutMs: number) => Promise<{ stdout: string; stderr: string }>;
+  /** `$FACTORY_HOME` for the shared package cache. Defaults to the process home. */
+  factoryHome?: string;
+  exec?: (command: string, cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv) => Promise<{ stdout: string; stderr: string }>;
   /** Where local commands run. Default: a temporary base worktree, removed afterwards. Never the checkout. */
   isolate?: (repoDir: string, repo: RepoConfig, fn: (cwd: string) => Promise<void>) => Promise<void>;
 }
 
-function signalEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, CI: "1" };
+function prefixed(command: string, envCommand: string): string {
+  return envCommand ? `${envCommand} ${command}` : command;
 }
 
-async function defaultExec(command: string, cwd: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
-  return execFileTimed("sh", ["-c", command], { cwd, timeoutMs, maxBuffer: 8 * 1024 * 1024, env: signalEnv() });
+/** `CI=1` plus the package-cache dirs a run uses (`$FACTORY_HOME/cache`). */
+function signalEnv(factoryHome: string): NodeJS.ProcessEnv {
+  return { ...process.env, CI: "1", ...sharedCacheEnv(factoryHome) };
+}
+
+async function defaultExec(command: string, cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
+  return execFileTimed("sh", ["-c", command], { cwd, timeoutMs, maxBuffer: 8 * 1024 * 1024, env });
 }
 
 /** Detached worktree of the base commit, same idea as the plan-base worktree. Removed afterwards. */
@@ -305,7 +360,8 @@ function readReports(repoDir: string, sinceMs: number): { path: string; missed: 
 
 /**
  * Slow tests (when the repo's runner can report them), flaky checks from memory, test jobs that
- * never failed, and uncovered critical paths when `tests.coverage` is set.
+ * never failed, and uncovered critical paths when `tests.coverage` is set. `repo.setup` runs first
+ * in the measurement worktree; a failed setup is a signal error, not an empty suite.
  */
 export async function collectTestSignals(input: TestSignalInput): Promise<TestSignal> {
   const flaky = flakyOf(input.mem);
@@ -324,17 +380,30 @@ export async function collectTestSignals(input: TestSignalInput): Promise<TestSi
   const exec = input.exec ?? defaultExec;
   const timeoutMs = localSignalTimeoutMs(input.repo.limits.command_timeout_minutes);
   const isolate = input.isolate ?? withSignalWorktree;
+  const env = signalEnv(input.factoryHome ?? factoryHomeOf());
   await isolate(input.repoDir, input.repo, async (cwd) => {
+    const runIn = (command: string, ms: number) => exec(prefixed(command, input.repo.env_command), cwd, ms, env);
+    if (input.repo.setup) {
+      try {
+        await runIn(input.repo.setup, input.repo.limits.command_timeout_minutes * 60_000);
+      } catch (e) {
+        const msg = `setup failed: ${signalError(e)}`.slice(0, 200);
+        if (invocation) duration_error = msg;
+        if (command) coverage = { uncovered: [], error: msg };
+        return;
+      }
+    }
     if (invocation) {
       try {
-        const out = await exec(invocation.command, cwd, timeoutMs);
+        const out = await runIn(invocation.command, timeoutMs);
         const text = `${out.stdout}\n${out.stderr}`;
-        slowest = invocation.kind === "pytest" ? parsePytestDurations(text) : parseReporterDurations(text);
+        slowest = ranked(durationTotals(invocation.kind, text));
       } catch (e) {
         const partial = outputOf(e);
         const text = partial ? `${partial.stdout}\n${partial.stderr}` : "";
-        if (text.trim()) slowest = invocation.kind === "pytest" ? parsePytestDurations(text) : parseReporterDurations(text);
-        else duration_error = clip(e);
+        const totals = durationTotals(invocation.kind, text);
+        if (totals.size > 0) slowest = ranked(totals);
+        else duration_error = signalError(e);
       }
     }
     if (command) {
@@ -343,22 +412,26 @@ export async function collectTestSignals(input: TestSignalInput): Promise<TestSi
       let stdout = "";
       let failedClip: string | null = null;
       try {
-        const out = await exec(command, cwd, timeoutMs);
+        const out = await runIn(command, timeoutMs);
         stdout = out.stdout;
       } catch (e) {
-        failedClip = clip(e);
+        failedClip = signalError(e);
         const partial = outputOf(e);
         if (partial) stdout = partial.stdout;
         else error = failedClip;
       }
       const reports = [...readReports(cwd, started), ...parseCoverageReport(stdout, "stdout")];
       if (failedClip && reports.length === 0 && error === null) error = failedClip;
-      coverage = { uncovered: uncoveredCritical(input.repoDir, reports, input.repo.sensitive_paths), error };
+      coverage = { uncovered: uncoveredCritical(cwd, reports, input.repo.sensitive_paths), error };
     }
   });
   return { slowest, duration_error, flaky, never_failed, coverage };
 }
 
+function countsAsError(error: string | null | undefined): boolean {
+  return !!error && !error.startsWith("dry-run:");
+}
+
 export function testWorth(signal: TestSignal, refresh: number): boolean {
-  return refresh > 0 || signal.slowest.length > 0 || signal.flaky.length > 0 || signal.never_failed.length > 0 || (signal.coverage?.uncovered.length ?? 0) > 0;
+  return refresh > 0 || signal.slowest.length > 0 || countsAsError(signal.duration_error) || signal.flaky.length > 0 || signal.never_failed.length > 0 || (signal.coverage?.uncovered.length ?? 0) > 0 || countsAsError(signal.coverage?.error);
 }

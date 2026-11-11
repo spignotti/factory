@@ -75,6 +75,8 @@ export interface CiSignal {
   window_days: number;
   runs: number;
   truncated: boolean;
+  /** Runs left out because `gh run view` failed. The rest of the window is kept. */
+  skipped: number;
   /** Set when the list was cut off: per-week figures use the days actually covered, not the full window. */
   truncation: string | null;
   minutes_per_week: number;
@@ -256,7 +258,7 @@ function stepSeconds(wf: CiWorkflow, job: CiWorkflowJob, step: CiWorkflowStep, r
  * missing path filters, report-only steps, an empty stub, duplicate commands and push-to-main
  * runs are each enough to call the model.
  */
-export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows: CiWorkflow[]; baseBranch: string; windowDays?: number; now?: Date }): CiSignal {
+export function ciSignals(input: { runs: CiRun[]; truncated: boolean; skipped?: number; workflows: CiWorkflow[]; baseBranch: string; windowDays?: number; now?: Date }): CiSignal {
   const requestedDays = input.windowDays ?? WINDOW_DAYS;
   const covered = coveredDays(input.runs, input.truncated, requestedDays, input.now);
   const windowDays = covered.days;
@@ -367,6 +369,7 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; workflows:
     window_days: windowDays,
     runs: input.runs.length,
     truncated: input.truncated,
+    skipped: input.skipped ?? 0,
     truncation: covered.note,
     minutes_per_week: perWeek(seconds, windowDays),
     jobs,

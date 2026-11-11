@@ -709,9 +709,14 @@ Aspects:
   figures use the days actually covered. Per job: runs, minutes/week, p50/p90, failure rate, never failed.
   Flags slow jobs without path filters, report-only steps (full job minutes only when every step is
   report-only), an empty factory stub, duplicate commands, push-to-main runs. High minutes alone calls the
-  model. Workflow edits only as declared `protected_changes`. Do not remove a required check job.
+  model. A failed `gh run view` skips that run (`skipped`) and keeps the rest; `ci` and `tests` share one
+  window. Workflow edits only as declared `protected_changes`. Removing or renaming a job fails
+  `config_guard` unless that entry names the job.
 - **tests** — slow tests when the repo's runner can report them (pytest `--durations`, vitest/jest JSON).
-  Duration and coverage commands run in a temporary base worktree (removed afterwards), not in the checkout.
+  `repo.setup` runs first in a temporary base worktree (removed afterwards; not the checkout), with
+  `env_command` and the shared package cache, then duration and coverage commands. A failed setup, or a
+  non-zero run that produced nothing parsable, is a signal error (the model may propose fixing the
+  measurement). Coverage paths are repo-relative before they are matched or reported.
   Flaky checks from memory, test jobs that never fail, and uncovered critical paths when `tests.coverage`
   (a command that writes a coverage report) is set. Proposals speed up or split slow tests, remove redundant
   ones, add tests for uncovered critical code, and add or raise a coverage threshold. Lowering one fails

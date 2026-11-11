@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { parse } from "yaml";
 import { diffText, git, mergeBase } from "../git.js";
 import { matchesAny, type Plan, redGreenLoosening } from "../schemas/plan.js";
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
@@ -10,7 +11,8 @@ import type { BuiltinResult } from "./builtin.js";
  * Config guard: the implementer fixes code to satisfy linters, type checkers and test runners; it
  * does not loosen their config or silence them inline. Deterministic: a changed tool config or an
  * added suppression fails the gate unless the plan puts it in scope (the config file in a package's
- * `files`, the suppression marker named in a package or criterion).
+ * `files`, the suppression marker named in a package or criterion). Removing or renaming a workflow
+ * job is a loosening unless that file's protected_changes names the job.
  */
 
 /** Files that are tool config as a whole: any change counts. */
@@ -453,6 +455,77 @@ function standardsRemovalHow(): string {
   return `declare it by listing ${STANDARDS_REL} in a package's files and naming the rule, or the check as a whole word, in the goal, an acceptance criterion, or protected_changes (not in out_of_scope)`;
 }
 
+const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
+
+export interface WorkflowJobRemoval {
+  file: string;
+  /** Job id that was removed, or whose `name:` changed. */
+  id: string;
+  /** Previous `name:`, or the id when unset. */
+  name: string;
+  kind: "removed" | "renamed";
+}
+
+function workflowJobs(text: string | undefined): { id: string; name: string }[] | null {
+  if (text === undefined) return [];
+  let doc: unknown;
+  try {
+    doc = parse(text) ?? {};
+  } catch {
+    return null;
+  }
+  if (!doc || typeof doc !== "object") return [];
+  const jobs = (doc as { jobs?: unknown }).jobs;
+  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return [];
+  return Object.entries(jobs as Record<string, unknown>).flatMap(([id, raw]) => {
+    if (!id) return [];
+    const named = raw && typeof raw === "object" && typeof (raw as { name?: unknown }).name === "string" ? (raw as { name: string }).name.trim() : "";
+    return [{ id, name: named || id }];
+  });
+}
+
+/**
+ * A job id that disappeared, or a `name:` that changed, in a workflow file. Adding a job or editing
+ * its steps is not a loosening. An unparsable after-file cannot prove the jobs remain.
+ */
+export function workflowJobLoosening(file: string, before: string | undefined, after: string | undefined): WorkflowJobRemoval[] {
+  if (!WORKFLOW_FILE.test(file.replaceAll("\\", "/")) || before === undefined || before === after) return [];
+  const oldJobs = workflowJobs(before);
+  if (!oldJobs?.length) return [];
+  const newJobs = workflowJobs(after);
+  if (newJobs === null) return oldJobs.map((job) => ({ file, id: job.id, name: job.name, kind: "removed" as const }));
+  const out: WorkflowJobRemoval[] = [];
+  for (const job of oldJobs) {
+    const now = newJobs.find((j) => j.id === job.id);
+    if (!now) out.push({ file, id: job.id, name: job.name, kind: "removed" });
+    else if (now.name !== job.name) out.push({ file, id: job.id, name: job.name, kind: "renamed" });
+  }
+  return out;
+}
+
+function namesJob(text: string, job: string): boolean {
+  const name = job.trim();
+  if (!name) return false;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_.-])${escaped}(?![A-Za-z0-9_.-])`).test(text);
+}
+
+function jobRemovalDeclared(plan: Plan, packages: string[], removal: WorkflowJobRemoval): boolean {
+  const files = new Set(plan.packages.filter((p) => packages.includes(p.id)).flatMap((p) => p.files));
+  if (!files.has(removal.file)) return false;
+  const text = (plan.protected_changes ?? [])
+    .filter((c) => c.file === removal.file)
+    .map((c) => `${c.change}\n${c.reason}`)
+    .join("\n");
+  return namesJob(text, removal.id) || namesJob(text, removal.name);
+}
+
+function describeJobRemoval(r: WorkflowJobRemoval): string {
+  const label = r.name !== r.id ? `${r.id} (name: ${r.name})` : r.id;
+  const verb = r.kind === "renamed" ? "renamed" : "removed";
+  return `job ${label} ${verb} (loosens a required check; name the job in that file's protected_changes)`;
+}
+
 /** The gate over precomputed inputs (pure, for tests). */
 export function configGuard(input: {
   plan: Plan;
@@ -465,6 +538,8 @@ export function configGuard(input: {
   thresholdLoosening?: string[];
   /** Rule or marker removed from standards.md. Declared only when a package lists the file and the rule text, or the check name as a whole word, is in the goal, acceptance, or protected_changes. */
   standardsRemovals?: StandardsRemoval[];
+  /** Workflow job removed or renamed. Declared only when a package lists the file and protected_changes names the job. */
+  jobLoosening?: WorkflowJobRemoval[];
   /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
   labels?: string[];
 }): BuiltinResult {
@@ -480,6 +555,7 @@ export function configGuard(input: {
     ...(input.standardsRemovals ?? [])
       .filter((r) => !standardsRemovalDeclared(input.plan, r))
       .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; ${standardsRemovalHow()})`),
+    ...(input.jobLoosening ?? []).filter((r) => !jobRemovalDeclared(input.plan, input.packages, r)).map((r) => `${r.file}: ${describeJobRemoval(r)}`),
     ...(exemption.fail ? [exemption.fail] : []),
   ];
   const note = exemption.note ?? "";
@@ -491,10 +567,11 @@ export function configGuard(input: {
 }
 
 /** Collects config changes and added suppressions in a worktree against `base` (stage first). */
-export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "thresholdLoosening" | "standardsRemovals">> {
+export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "thresholdLoosening" | "standardsRemovals" | "jobLoosening">> {
   const mb = await mergeBase(cwd, base);
   const configChanges: { file: string; why: string }[] = [];
   const thresholdLoosening: string[] = [];
+  const jobLoosening: WorkflowJobRemoval[] = [];
   let loosening: string[] = [];
   let standards: StandardsRemoval[] = [];
   for (const file of changed) {
@@ -504,8 +581,9 @@ export async function configGuardInputs(cwd: string, base: string, changed: stri
     if (why) configChanges.push({ file, why });
     const lowered = coverageRatchet(file, before, after);
     if (lowered) thresholdLoosening.push(lowered);
+    jobLoosening.push(...workflowJobLoosening(file, before, after));
     if (file === REPO_CONFIG_PATH) loosening = repoConfigLoosening(before, after);
     if (file === STANDARDS_REL) standards = standardsRemovals(before, after);
   }
-  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, thresholdLoosening, standardsRemovals: standards };
+  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, thresholdLoosening, standardsRemovals: standards, jobLoosening };
 }

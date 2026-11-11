@@ -78,6 +78,27 @@ function windowSince(now: Date): string {
   return new Date(now.getTime() - WINDOW_DAYS * 86_400_000).toISOString();
 }
 
+type CiWindow = { runs: CiRun[]; truncated: boolean; skipped: number };
+
+/** One walk per GitHub client, repo and window. `ci` and `tests` must not each page and view. */
+const ciWindows = new WeakMap<GitHub, Map<string, Promise<CiWindow>>>();
+
+function ciWindow(ctx: AspectContext): Promise<CiWindow> {
+  const since = windowSince(ctx.now);
+  let byKey = ciWindows.get(ctx.github);
+  if (!byKey) {
+    byKey = new Map();
+    ciWindows.set(ctx.github, byKey);
+  }
+  const key = `${ctx.repoDir}\n${since}`;
+  let pending = byKey.get(key);
+  if (!pending) {
+    pending = ctx.github.ciRunsInWindow(ctx.repoDir, since);
+    byKey.set(key, pending);
+  }
+  return pending;
+}
+
 export async function collectAspect(aspect: ImproveAspect, ctx: AspectContext): Promise<AspectInput> {
   const mem = loadMemory(ctx.factoryHome, ctx.repoId);
   const refresh = refreshEntries(mem, ctx.refresh);
@@ -113,14 +134,13 @@ export async function collectAspect(aspect: ImproveAspect, ctx: AspectContext): 
 
 async function collectCi(ctx: AspectContext): Promise<AspectInput> {
   if (ctx.dryRun) return { signals: { error: "dry-run: no gh calls" }, keys: new Set(ctx.refresh), worth: false, metrics: null };
-  const since = windowSince(ctx.now);
-  let window: { runs: CiRun[]; truncated: boolean };
+  let window: CiWindow;
   try {
-    window = await ctx.github.ciRunsInWindow(ctx.repoDir, since);
+    window = await ciWindow(ctx);
   } catch (e) {
     throw new Error(`ci runs: ${clip(e)}`, { cause: e });
   }
-  const signal = ciSignals({ runs: window.runs, truncated: window.truncated, workflows: readCiWorkflows(ctx.repoDir), baseBranch: ctx.repo.base_branch, now: ctx.now });
+  const signal = ciSignals({ runs: window.runs, truncated: window.truncated, skipped: window.skipped, workflows: readCiWorkflows(ctx.repoDir), baseBranch: ctx.repo.base_branch, now: ctx.now });
   return {
     signals: signal as unknown as Record<string, unknown>,
     keys: new Set(ctx.refresh),
@@ -131,19 +151,22 @@ async function collectCi(ctx: AspectContext): Promise<AspectInput> {
 
 async function collectTests(ctx: AspectContext, mem: MemoryFile, refresh: { key: string; text: string; status: string }[]): Promise<AspectInput> {
   let runs: CiRun[] = [];
+  let skipped = 0;
   let ciError: string | null = null;
   if (!ctx.dryRun) {
     try {
-      runs = (await ctx.github.ciRunsInWindow(ctx.repoDir, windowSince(ctx.now))).runs;
+      const window = await ciWindow(ctx);
+      runs = window.runs;
+      skipped = window.skipped;
     } catch (e) {
       ciError = clip(e);
     }
   }
-  const signal = await collectTestSignals({ repoDir: ctx.repoDir, repo: ctx.repo, mem, runs, dryRun: ctx.dryRun });
+  const signal = await collectTestSignals({ repoDir: ctx.repoDir, repo: ctx.repo, mem, runs, dryRun: ctx.dryRun, factoryHome: ctx.factoryHome });
   const worth = testWorth(signal, refresh.length);
   if (ciError && !worth) throw new Error(`ci runs: ${ciError}`);
   return {
-    signals: { ...(signal as unknown as Record<string, unknown>), ...(ciError ? { ci_error: ciError } : {}) },
+    signals: { ...(signal as unknown as Record<string, unknown>), ...(ctx.dryRun ? {} : { skipped }), ...(ciError ? { ci_error: ciError } : {}) },
     keys: new Set([...signal.flaky.map((f) => f.key), ...ctx.refresh]),
     worth,
     metrics: null,

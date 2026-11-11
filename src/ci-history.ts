@@ -223,6 +223,55 @@ export function ciRunViewArgs(id: number): string[] {
   return ["run", "view", String(id), "--json", "jobs"];
 }
 
+export interface AttachedRun {
+  id: number;
+  sha: string;
+  workflow: string;
+  path: string | null;
+  event: string;
+  conclusion: string | null;
+  created_at: string;
+  head_branch: string | null;
+  jobs: ParsedJob[];
+}
+
+/**
+ * One `gh run view` per in-window row. A failed or unparsable view skips that run and counts it;
+ * the rows already read stay. Rows before `sinceIso` are not viewed.
+ */
+export async function attachRunViews(
+  rows: RunListRow[],
+  sinceIso: string,
+  names: ReadonlyMap<string, string>,
+  view: (id: number) => Promise<string>,
+): Promise<{ runs: AttachedRun[]; skipped: number }> {
+  const runs: AttachedRun[] = [];
+  let skipped = 0;
+  for (const row of rows) {
+    if (row.created_at < sinceIso) continue;
+    let jobs: ParsedJob[];
+    try {
+      jobs = parseRunView(JSON.parse(await view(row.id)));
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    const identity = resolveRunWorkflow(row, names);
+    runs.push({
+      id: row.id,
+      sha: row.sha,
+      workflow: identity.workflow,
+      path: identity.path,
+      event: row.event,
+      conclusion: row.conclusion,
+      created_at: row.created_at,
+      head_branch: row.head_branch,
+      jobs,
+    });
+  }
+  return { runs, skipped };
+}
+
 /** One page of workflow names. `.name` is the workflow name; `path` is the file. */
 export function ciWorkflowListArgs(page: number, perPage = CI_PAGE_SIZE): string[] {
   return ["api", "--method", "GET", `repos/{owner}/{repo}/actions/workflows?per_page=${perPage}&page=${page}`, "--jq", ".workflows"];

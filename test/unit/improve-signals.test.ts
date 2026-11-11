@@ -2,9 +2,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CI_MAX_PAGES, ciRunListArgs, foldRunListPages, paginateRunList, parseRunList, parseRunView, resolveRunWorkflow } from "../../src/ci-history.js";
+import { attachRunViews, CI_MAX_PAGES, ciRunListArgs, foldRunListPages, paginateRunList, parseRunList, parseRunView, resolveRunWorkflow, type RunListRow } from "../../src/ci-history.js";
+import { collectAspect } from "../../src/improve/aspects.js";
 import { assembleRuns, ciSignals, ciWorth, HIGH_CI_MINUTES_PER_WEEK, readCiWorkflows } from "../../src/improve/ci-signals.js";
-import { collectTestSignals, durationCommand, localSignalTimeoutMs, parseCoverageReport, parsePytestDurations, parseReporterDurations, runnerInvocation, uncoveredCritical } from "../../src/improve/test-signals.js";
+import { collectTestSignals, durationCommand, localSignalTimeoutMs, parseCoverageReport, parsePytestDurations, parseReporterDurations, runnerInvocation, testWorth, uncoveredCritical } from "../../src/improve/test-signals.js";
+import { FakeGitHub } from "../../src/gh.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 import { entry } from "../helpers/harden.js";
 import { makeRepo } from "../helpers/adopt-repo.js";
@@ -248,6 +250,15 @@ describe("tests signals", () => {
     ]);
     const reports = parseCoverageReport(JSON.stringify({ files: { "src/auth.py": { summary: { missing_lines: 4 } }, "src/ok.py": { summary: { missing_lines: 0 } } } }), "coverage.json");
     expect(uncoveredCritical("/repo", reports, ["src/auth.py"])).toEqual([{ path: "src/auth.py", sensitive: true, missed: 4 }]);
+    expect(uncoveredCritical("/tmp/factory-improve-x/wt", [
+      { path: "/private/tmp/factory-improve-x/wt/src/auth.ts", missed: 2 },
+      { path: "/tmp/factory-improve-x/wt/src/other.ts", missed: 1 },
+      { path: "/other/src/auth.ts", missed: 9 },
+    ], ["src/auth.ts"])).toEqual([
+      { path: "src/auth.ts", sensitive: true, missed: 2 },
+      { path: "/other/src/auth.ts", sensitive: false, missed: 9 },
+      { path: "src/other.ts", sensitive: false, missed: 1 },
+    ]);
   });
 
   it("collects flaky memory, never-failed test jobs and a coverage report", async () => {
@@ -337,5 +348,173 @@ describe("tests signals", () => {
     expect(existsSync(join(dir, "DIRTY"))).toBe(true);
     expect(gitIn(dir, "worktree", "list").trim().split("\n")).toHaveLength(1);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("runs setup in the measurement worktree before coverage, with env_command and the shared cache", async () => {
+    const dir = makeRepo({ "README.md": "hi\n" });
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const cache = join(home, "cache");
+    const setup = `node -e 'const fs=require("fs"); if(!fs.existsSync(".envcmd")) process.exit(5); if(process.env.UV_CACHE_DIR!==${JSON.stringify(cache)}) process.exit(2); if(process.env.npm_config_cache!==${JSON.stringify(cache)}) process.exit(2); if(process.env.CI!=="1") process.exit(3); fs.writeFileSync(".ready","1")'`;
+    const coverage = `node -e 'const fs=require("fs"); if(!fs.existsSync(".ready")) process.exit(4); const abs=require("path").resolve("src/a.py"); fs.writeFileSync("coverage.json", JSON.stringify({files:{[abs]:{summary:{missing_lines:1}}}}))'`;
+    const repo = parseRepoConfig(
+      `setup: ${JSON.stringify(setup)}\nenv_command: "node -e 'require(\\"fs\\").writeFileSync(\\".envcmd\\",\\"1\\")' &&"\ntests: { coverage: ${JSON.stringify(coverage)} }\nsensitive_paths: ["src/a.py"]\n`,
+    );
+    const signal = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      factoryHome: home,
+    });
+    expect(signal.coverage?.error).toBeNull();
+    expect(signal.coverage?.uncovered).toEqual([{ path: "src/a.py", sensitive: true, missed: 1 }]);
+    expect(existsSync(join(dir, ".ready"))).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("reports a failed setup as a signal error and does not run the measurement", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "improve-setup-fail-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
+    const repo = parseRepoConfig('setup: "pnpm install --frozen-lockfile"\nenv_command: "true &&"\ntests: { coverage: "coverage" }\n');
+    const commands: string[] = [];
+    const signal = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async (command, _cwd, timeoutMs) => {
+        commands.push(command);
+        expect(timeoutMs).toBe(10 * 60_000);
+        throw Object.assign(new Error("Command failed: exit 1"), { stderr: "ERR_PNPM_NO_LOCKFILE" });
+      },
+    });
+    expect(commands).toEqual(["true && pnpm install --frozen-lockfile"]);
+    expect(signal.duration_error).toMatch(/setup failed:.*ERR_PNPM_NO_LOCKFILE/);
+    expect(signal.coverage?.error).toBe(signal.duration_error);
+    expect(signal.slowest).toEqual([]);
+    expect(testWorth(signal, 0)).toBe(true);
+  });
+
+  it("sets duration_error when a non-zero exit produced nothing parsable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "improve-duration-err-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
+    const repo = parseRepoConfig("checks: []\n");
+    const unparsed = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => {
+        throw Object.assign(new Error("Command failed: exit 127"), { stdout: "", stderr: "sh: vitest: not found" });
+      },
+    });
+    expect(unparsed.duration_error).toMatch(/not found/);
+    expect(unparsed.slowest).toEqual([]);
+    expect(testWorth(unparsed, 0)).toBe(true);
+
+    const fast = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => {
+        throw Object.assign(new Error("Command failed: exit 1"), {
+          stdout: JSON.stringify({ testResults: [{ assertionResults: [{ fullName: "fast", duration: 10 }] }] }),
+          stderr: "FAIL",
+        });
+      },
+    });
+    expect(fast.duration_error).toBeNull();
+    expect(fast.slowest).toEqual([]);
+    expect(testWorth(fast, 0)).toBe(false);
+    expect(testWorth({ slowest: [], duration_error: null, flaky: [], never_failed: [], coverage: { uncovered: [], error: "dry-run: command not run" } }, 0)).toBe(false);
+  });
+
+  it("sets coverage.error when a non-zero exit wrote nothing parsable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "improve-cov-err-"));
+    const repo = parseRepoConfig('tests: { coverage: "coverage" }\n');
+    const signal = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => {
+        throw Object.assign(new Error("Command failed: exit 1"), { stdout: "not a report", stderr: "coverage failed" });
+      },
+    });
+    expect(signal.coverage?.uncovered).toEqual([]);
+    expect(signal.coverage?.error).toMatch(/coverage failed/);
+    expect(testWorth(signal, 0)).toBe(true);
+  });
+});
+
+describe("ci window shared by ci and tests", () => {
+  const row = (id: number, created = "2026-10-20T00:00:00.000Z"): RunListRow => ({
+    id,
+    sha: `s${id}`,
+    workflow: "CI",
+    path: ".github/workflows/ci.yml",
+    event: "pull_request",
+    conclusion: "success",
+    created_at: created,
+    head_branch: "main",
+  });
+
+  it("skips a failed run view and keeps the rest", async () => {
+    const viewed: number[] = [];
+    const { runs, skipped } = await attachRunViews([row(1), row(2), row(3, "2026-01-01T00:00:00.000Z")], "2026-09-01T00:00:00.000Z", new Map([[".github/workflows/ci.yml", "CI"]]), async (id) => {
+      viewed.push(id);
+      if (id === 2) throw new Error("gh run view failed: exit 1");
+      return JSON.stringify({ jobs: [{ name: "unit", conclusion: "success" }] });
+    });
+    expect(viewed).toEqual([1, 2]);
+    expect(skipped).toBe(1);
+    expect(runs.map((r) => r.id)).toEqual([1]);
+    expect(runs[0]!.jobs).toEqual([{ name: "unit", conclusion: "success", seconds: null, steps: [] }]);
+    const signal = ciSignals({ runs, truncated: false, skipped, workflows: [], baseBranch: "main" });
+    expect(signal.skipped).toBe(1);
+    expect(signal.runs).toBe(1);
+  });
+
+  it("fetches the window once and shares skipped between ci and tests", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aspect-window-"));
+    const home = mkdtempSync(join(tmpdir(), "aspect-home-"));
+    const gh = new FakeGitHub();
+    gh.ciSkipped = 2;
+    gh.runs = [{
+      id: 1,
+      sha: "abc",
+      workflow: "CI",
+      event: "pull_request",
+      conclusion: "success",
+      created_at: "2026-10-20T00:00:00.000Z",
+      jobs: [{ name: "unit", conclusion: "success", seconds: 3 }],
+    }];
+    const ctx = {
+      repoDir: dir,
+      repo: parseRepoConfig("checks: []\n"),
+      factoryHome: home,
+      repoId: "r",
+      now: new Date("2026-10-29T12:00:00.000Z"),
+      github: gh,
+      runs: [],
+      refresh: [],
+    };
+    const ci = await collectAspect("ci", ctx);
+    const tests = await collectAspect("tests", ctx);
+    expect(gh.ciQueries).toHaveLength(1);
+    expect(ci.signals.skipped).toBe(2);
+    expect(tests.signals.skipped).toBe(2);
+
+    const failing = new FakeGitHub();
+    failing.ciWindowError = "gh run view failed";
+    await expect(collectAspect("ci", { ...ctx, github: failing })).rejects.toThrow(/ci runs: gh run view failed/);
+    await expect(collectAspect("tests", { ...ctx, github: failing })).rejects.toThrow(/ci runs: gh run view failed/);
+    expect(failing.ciQueries).toHaveLength(1);
   });
 });
