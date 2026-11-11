@@ -93,7 +93,7 @@ const USAGE = `usage:
   factory adopt --repo <path> [--ref <tag>] [--base <branch>] [--keep <glob>]… [--no-measure] [--no-plan] [--no-pr] [--force] [--json]
               (drafts .factory/repo.yaml, review rules, CI stub, AGENTS.md (template if missing); removes the legacy
                coding setup (--keep spares paths); baseline plan as proposal; one PR; settings only as hints)
-  factory improve --repo <path> [--aspect findings|security|performance|structure|ci|tests]... [--max <1-10>] [--dry-run] [--profile <file>] [--json]
+  factory improve --repo <path> [--aspect <a> [<a>...]] (a: findings|security|performance|structure|ci|tests) [--max <1-10>] [--dry-run] [--profile <file>] [--json]
               (aspects from repo.yaml improve.aspects, or --aspect; each valid proposal becomes a GitHub issue
                labelled factory-proposal and improve:<aspect>, plan in a factory-plan block; an open issue with the
                same proposal marker is updated even after a relabel; --dry-run writes proposal files only, no gh)
@@ -206,6 +206,11 @@ function versionString(): string {
 export interface CliDeps {
   /** Test hook: resolve `ci-stub --ref` without calling git or gh. */
   resolveRef?: (ref: string) => { pin: string; tag?: string };
+}
+
+/** `--aspect ci tests`, repeated `--aspect`, and `ci,tests` all list aspects. */
+export function improveAspectArgs(flags: string[], positionals: string[]): string[] {
+  return [...flags, ...positionals].flatMap((a) => a.split(",")).map((a) => a.trim()).filter(Boolean);
 }
 
 export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {}): Promise<number> {
@@ -329,8 +334,10 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       }
     }
     if (command === "improve") {
-      const { values } = parseArgs({
+      // `--aspect ci tests`, `--aspect ci --aspect tests` and `--aspect ci,tests` all name two aspects.
+      const { values, positionals } = parseArgs({
         args: rest,
+        allowPositionals: true,
         options: {
           repo: { type: "string" },
           aspect: { type: "string", multiple: true },
@@ -341,7 +348,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
         },
       });
       const max = values.max === undefined ? undefined : Number(values.max);
-      const aspects = values.aspect ?? [];
+      const aspects = improveAspectArgs(values.aspect ?? [], positionals);
       const aspectOk = aspects.every((a) => (IMPROVE_ASPECTS as readonly string[]).includes(a));
       if (!values.repo || !aspectOk || (max !== undefined && !(Number.isInteger(max) && max >= 1 && max <= MAX_PROPOSALS_LIMIT))) {
         io.err(USAGE);
