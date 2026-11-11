@@ -146,7 +146,7 @@ describe("config guard: scope", () => {
     expect(undeclared.ok).toBe(false);
     expect(undeclared.detail).toContain(".factory/standards.md: rule removed: no console.log");
     expect(undeclared.detail).toContain(".factory/standards.md: check marker removed: unit");
-    expect(undeclared.detail).toContain("declare it by listing .factory/standards.md in a package's files and naming the check in the plan");
+    expect(undeclared.detail).toContain("declare it by listing .factory/standards.md in a package's files and naming the rule, or the check as a whole word, in the goal, an acceptance criterion, or protected_changes (not in out_of_scope)");
     const namedOnly = configGuard({
       plan: plan(["src/a.py"], "Remove the rule no console.log and drop the unit marker"),
       packages: ["P1"],
@@ -155,7 +155,7 @@ describe("config guard: scope", () => {
       standardsRemovals: [...rule, ...marker],
     });
     expect(namedOnly.ok).toBe(false);
-    expect(namedOnly.detail).not.toContain("rule removed");
+    expect(namedOnly.detail).toContain("rule removed: no console.log");
     expect(namedOnly.detail).toContain("check marker removed: unit");
     const declared = configGuard({
       plan: plan([".factory/standards.md", "src/a.py"], "Remove the rule no console.log and drop the unit marker"),
@@ -165,6 +165,47 @@ describe("config guard: scope", () => {
       standardsRemovals: [...rule, ...marker],
     });
     expect(declared.ok).toBe(true);
+  });
+
+  it("does not treat out_of_scope text or a check-name substring as a standards declaration", () => {
+    const before = "# Standards\n\n- no console.log\n- tests pass <!-- check: unit -->\n";
+    const rule = standardsRemovals(before, before.replace("- no console.log\n", ""));
+    const marker = standardsRemovals(before, before.replace(" <!-- check: unit -->", ""));
+    const hidden = configGuard({
+      plan: { ...plan([".factory/standards.md"], "tidy standards"), out_of_scope: ["do not remove the rule no console.log"] },
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      standardsRemovals: rule,
+    });
+    expect(hidden.ok).toBe(false);
+    expect(hidden.detail).toContain("rule removed: no console.log");
+    const community = configGuard({
+      plan: plan([".factory/standards.md"], "community"),
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      standardsRemovals: marker,
+    });
+    expect(community.ok).toBe(false);
+    expect(community.detail).toContain("check marker removed: unit");
+    const named = configGuard({
+      plan: plan([".factory/standards.md"], "keep the unit marker"),
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      standardsRemovals: marker,
+    });
+    expect(named.ok).toBe(true);
+    const keptAside = configGuard({
+      plan: { ...plan([".factory/standards.md"], "tidy standards"), out_of_scope: ["keep the unit marker"] },
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      standardsRemovals: marker,
+    });
+    expect(keptAside.ok).toBe(false);
+    expect(keptAside.detail).toContain("check marker removed: unit");
   });
 
   it("collects both from a worktree against the base (new files included once staged)", async () => {

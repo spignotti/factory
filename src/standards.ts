@@ -193,15 +193,46 @@ export function describeStandardsRemoval(r: StandardsRemoval): string {
   return r.kind === "rule" ? `rule removed: ${r.text}` : `check marker removed: ${r.check}`;
 }
 
+/** Plan fields the declaration check may see. `context` and `out_of_scope` are accepted and ignored. */
+export interface StandardsDeclarationPlan {
+  goal?: string;
+  context?: string;
+  packages?: readonly { title?: string; description?: string; files?: readonly string[] }[];
+  acceptance?: readonly { text?: string }[];
+  protected_changes?: readonly { change?: string; reason?: string }[];
+  out_of_scope?: readonly string[];
+}
+
+function declarationText(plan: StandardsDeclarationPlan): string {
+  return [
+    plan.goal ?? "",
+    ...(plan.packages ?? []).flatMap((p) => [p.title ?? "", p.description ?? ""]),
+    ...(plan.acceptance ?? []).map((a) => a.text ?? ""),
+    ...(plan.protected_changes ?? []).flatMap((c) => [c.change ?? "", c.reason ?? ""]),
+  ].join("\n");
+}
+
+/** Whole identifier, not `\b`: a hyphen is a `\b` boundary, so `unit` would match inside `unit-test`. */
+function namesCheck(text: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, "i").test(text);
+}
+
 /**
- * A rule is declared by its text anywhere in the plan. A marker is declared only when some
- * package lists `.factory/standards.md` and the plan names that check (the name anywhere in the text).
+ * A removed rule or marker is declared only when a package lists `.factory/standards.md` and the
+ * rule text, or the check name as a whole word, appears in the goal, a package title or description,
+ * an acceptance criterion, or protected_changes. Not in `out_of_scope` or context.
  */
-export function standardsRemovalDeclared(planText: string, r: StandardsRemoval, files: readonly string[] = []): boolean {
-  const blob = planText.toLowerCase();
-  if (r.kind === "rule") return blob.includes(r.text.toLowerCase());
-  const name = (r.check ?? "").toLowerCase();
-  return name !== "" && files.includes(STANDARDS_REL) && blob.includes(name);
+export function standardsRemovalDeclared(plan: StandardsDeclarationPlan, r: StandardsRemoval): boolean {
+  const files = (plan.packages ?? []).flatMap((p) => p.files ?? []);
+  if (!files.includes(STANDARDS_REL)) return false;
+  const text = declarationText(plan);
+  if (r.kind === "rule") {
+    const rule = r.text.trim();
+    return rule !== "" && text.toLowerCase().includes(rule.toLowerCase());
+  }
+  const name = (r.check ?? "").trim();
+  return name !== "" && namesCheck(text, name);
 }
 
 function triggersOf(doc: Record<string, unknown>): string[] {

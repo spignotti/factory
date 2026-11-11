@@ -250,22 +250,8 @@ function planText(plan: Plan, packages: string[]): string {
   return [...ps.flatMap((p) => [p.title, p.description]), ...plan.acceptance.filter((a) => packages.includes(a.package)).map((a) => a.text)].join("\n").toLowerCase();
 }
 
-function standardsRemovalHow(r: StandardsRemoval): string {
-  return r.kind === "marker"
-    ? `declare it by listing ${STANDARDS_REL} in a package's files and naming the check in the plan`
-    : "declare the removal in the plan";
-}
-
-/** Whole plan, not only the packages of this gate: a standards removal is one diff, declared once. */
-function standardsPlanText(plan: Plan): string {
-  return [
-    plan.goal,
-    plan.context,
-    ...plan.packages.flatMap((p) => [p.title, p.description]),
-    ...plan.acceptance.map((a) => a.text),
-    ...(plan.protected_changes ?? []).flatMap((c) => [c.file, c.change, c.reason]),
-    ...(plan.out_of_scope ?? []),
-  ].join("\n");
+function standardsRemovalHow(): string {
+  return `declare it by listing ${STANDARDS_REL} in a package's files and naming the rule, or the check as a whole word, in the goal, an acceptance criterion, or protected_changes (not in out_of_scope)`;
 }
 
 /** The gate over precomputed inputs (pure, for tests). */
@@ -276,14 +262,13 @@ export function configGuard(input: {
   suppressions: { file: string; marker: string; line: string }[];
   /** repo.yaml loosening: fails even when the plan declares the file a protected change. */
   loosening?: string[];
-  /** Rule or marker removed from standards.md. A rule passes when the plan names it; a marker passes when a package lists the file and the plan names the check. */
+  /** Rule or marker removed from standards.md. Declared only when a package lists the file and the rule text, or the check name as a whole word, is in the goal, acceptance, or protected_changes. */
   standardsRemovals?: StandardsRemoval[];
   /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
   labels?: string[];
 }): BuiltinResult {
   const files = input.plan.packages.filter((p) => input.packages.includes(p.id)).flatMap((p) => p.files);
   const text = planText(input.plan, input.packages);
-  const standardsText = standardsPlanText(input.plan);
   const inScope = (f: string) => files.includes(f) || matchesAny(f, files);
   const exemption = redGreenLoosening(input.plan, input.labels ?? []);
   const bad = [
@@ -291,8 +276,8 @@ export function configGuard(input: {
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
     ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
     ...(input.standardsRemovals ?? [])
-      .filter((r) => !standardsRemovalDeclared(standardsText, r, input.plan.packages.flatMap((p) => p.files)))
-      .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; ${standardsRemovalHow(r)})`),
+      .filter((r) => !standardsRemovalDeclared(input.plan, r))
+      .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; ${standardsRemovalHow()})`),
     ...(exemption.fail ? [exemption.fail] : []),
   ];
   const note = exemption.note ?? "";

@@ -112,13 +112,25 @@ describe("standards.md", () => {
     expect(standardsDoctorNotes(dir, [])[0]!.detail).toMatch(/ignored\. Delete them/);
   });
 
-  it("a marker removal needs the file listed and the check named; a rule needs its text", () => {
+  it("a removal is declared only from the goal, acceptance or protected_changes, with the file listed", () => {
     const marker = { kind: "marker" as const, text: "tests pass", check: "unit" };
-    expect(standardsRemovalDeclared("remove the unit marker", marker, ["src/a.py"])).toBe(false);
-    expect(standardsRemovalDeclared("drop check: unit", marker, [])).toBe(false);
-    expect(standardsRemovalDeclared("no mention", marker, [".factory/standards.md"])).toBe(false);
-    expect(standardsRemovalDeclared("remove the unit marker", marker, [".factory/standards.md"])).toBe(true);
-    expect(standardsRemovalDeclared("Remove the rule no console.log", { kind: "rule", text: "no console.log" }, [])).toBe(true);
+    const listed = (text: string, files: string[] = [".factory/standards.md"]) =>
+      standardsRemovalDeclared({ goal: "g", packages: [{ title: "t", description: text, files }], acceptance: [{ text: "works" }] }, marker);
+    expect(listed("remove the unit marker", ["src/a.py"])).toBe(false);
+    expect(listed("drop check: unit", [])).toBe(false);
+    expect(listed("no mention")).toBe(false);
+    expect(listed("remove the unit marker")).toBe(true);
+    expect(listed("keep the unit marker")).toBe(true);
+    expect(listed("community")).toBe(false);
+    expect(listed("unit-tests")).toBe(false);
+    expect(standardsRemovalDeclared({ goal: "g", packages: [{ files: [".factory/standards.md"] }], out_of_scope: ["keep the unit marker", "community"] }, marker)).toBe(false);
+    const rule = { kind: "rule" as const, text: "no console.log" };
+    expect(standardsRemovalDeclared({ goal: "Remove the rule no console.log", packages: [{ files: [] }] }, rule)).toBe(false);
+    expect(standardsRemovalDeclared({ goal: "tidy", packages: [{ files: [".factory/standards.md"] }], out_of_scope: ["do not remove the rule no console.log"] }, rule)).toBe(false);
+    expect(standardsRemovalDeclared({ goal: "g", context: "do not remove the rule no console.log", packages: [{ files: [".factory/standards.md"] }] }, rule)).toBe(false);
+    expect(standardsRemovalDeclared({ goal: "Remove the rule no console.log", packages: [{ files: [".factory/standards.md"] }] }, rule)).toBe(true);
+    expect(standardsRemovalDeclared({ goal: "g", packages: [{ files: [".factory/standards.md"] }], acceptance: [{ text: "no console.log is gone" }] }, rule)).toBe(true);
+    expect(standardsRemovalDeclared({ goal: "g", packages: [{ files: [".factory/standards.md"] }], protected_changes: [{ change: "delete the no console.log rule", reason: "obsolete" }] }, rule)).toBe(true);
 
     const afterSeverity = "# Standards\n\n## Severity\n\n- sev\n\n## Rules\n\n- keep\n- tests pass <!-- check: unit -->\n";
     expect(standardsRemovals(afterSeverity, afterSeverity.replace("- keep\n", ""))).toEqual([{ kind: "rule", text: "keep" }]);
