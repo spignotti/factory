@@ -377,3 +377,15 @@ describe("open factory PR lookup", () => {
     }
   });
 });
+
+describe("base CI check runs", () => {
+  it("counts only GitHub Actions check runs", async () => {
+    const { actionsCheckRuns } = await import("../../src/gh.js");
+    const rows = [
+      { name: "Dependabot", status: "completed", conclusion: "success", app: "github-actions" },
+      { name: ".github/dependabot.yml", status: "queued", conclusion: null, app: "dependabot" },
+      { name: "legacy", status: "completed", conclusion: "success" },
+    ];
+    expect(actionsCheckRuns(rows).map((r) => r.name)).toEqual(["Dependabot", "legacy"]);
+  });
+});

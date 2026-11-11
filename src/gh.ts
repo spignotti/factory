@@ -4,6 +4,24 @@ import { CommandTimeoutError, execFileTimed } from "./exec.js";
 import { GIT_LOCAL_TIMEOUT_MS, git } from "./git.js";
 import { aggregateCheckRuns, type CheckRunView } from "./pipeline/ci-status.js";
 
+export interface RawCheckRun {
+  name?: string;
+  status?: string;
+  conclusion?: string | null;
+  started_at?: string | null;
+  id?: number;
+  suite?: number | null;
+  app?: string | null;
+}
+
+/**
+ * Base CI is GitHub Actions only. Other apps (Dependabot's config validation, external services) can sit
+ * in `queued` for hours and would hold every run as pending. Rows without an app slug are kept.
+ */
+export function actionsCheckRuns(raw: RawCheckRun[]): RawCheckRun[] {
+  return raw.filter((r) => !r.app || r.app === "github-actions");
+}
+
 async function hasRemote(repoDir: string): Promise<boolean> {
   const stdout = await git(repoDir, ["remote"]);
   return stdout.trim() !== "";
@@ -677,8 +695,8 @@ export class GhCli implements GitHub {
   async baseStatus(repoDir: string, sha: string): Promise<BaseStatus> {
     // A repo without remotes has no GitHub checks (local probe runs).
     if (!(await hasRemote(repoDir))) return "none";
-    const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id}]"]);
-    const raw = JSON.parse(out || "[]") as { name?: string; status?: string; conclusion?: string | null; started_at?: string | null; id?: number; suite?: number | null }[];
+    const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs`, "--jq", "[.check_runs[] | {name, status, conclusion, started_at, id, suite: .check_suite.id, app: .app.slug}]"]);
+    const raw = actionsCheckRuns(JSON.parse(out || "[]") as RawCheckRun[]);
     const suites = await workflowSuites(repoDir, sha);
     const runs: CheckRunView[] = [];
     for (const run of raw) {
