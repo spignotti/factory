@@ -1,0 +1,212 @@
+{
+  "101": {
+    "jobs": [
+      {
+        "name": "select",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:01:30Z"
+      },
+      {
+        "name": "check (lint)",
+        "conclusion": "skipped",
+        "startedAt": null,
+        "completedAt": null
+      },
+      {
+        "name": "done",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:04Z"
+      }
+    ]
+  },
+  "102": {
+    "jobs": [
+      {
+        "name": "select",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:01:30Z"
+      },
+      {
+        "name": "check (lint)",
+        "conclusion": "skipped",
+        "startedAt": null,
+        "completedAt": null
+      },
+      {
+        "name": "done",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:04Z"
+      }
+    ]
+  },
+  "103": {
+    "jobs": [
+      {
+        "name": "select",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:01:30Z"
+      },
+      {
+        "name": "check (lint)",
+        "conclusion": "skipped",
+        "startedAt": null,
+        "completedAt": null
+      },
+      {
+        "name": "done",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:04Z"
+      }
+    ]
+  },
+  "104": {
+    "jobs": [
+      {
+        "name": "select",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:01:30Z"
+      },
+      {
+        "name": "check (lint)",
+        "conclusion": "skipped",
+        "startedAt": null,
+        "completedAt": null
+      },
+      {
+        "name": "done",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:04Z"
+      }
+    ]
+  },
+  "105": {
+    "jobs": [
+      {
+        "name": "select",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:01:30Z"
+      },
+      {
+        "name": "check (lint)",
+        "conclusion": "skipped",
+        "startedAt": null,
+        "completedAt": null
+      },
+      {
+        "name": "done",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:04Z"
+      }
+    ]
+  },
+  "201": {
+    "jobs": [
+      {
+        "name": "build",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:03:00Z"
+      }
+    ]
+  },
+  "202": {
+    "jobs": [
+      {
+        "name": "build",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:03:00Z"
+      }
+    ]
+  },
+  "203": {
+    "jobs": [
+      {
+        "name": "build",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:03:00Z"
+      }
+    ]
+  },
+  "204": {
+    "jobs": [
+      {
+        "name": "build",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:03:00Z"
+      }
+    ]
+  },
+  "205": {
+    "jobs": [
+      {
+        "name": "build",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:03:00Z"
+      }
+    ]
+  },
+  "301": {
+    "jobs": [
+      {
+        "name": "audit",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:40Z"
+      }
+    ]
+  },
+  "302": {
+    "jobs": [
+      {
+        "name": "audit",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:40Z"
+      }
+    ]
+  },
+  "401": {
+    "jobs": [
+      {
+        "name": "ship",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:00:30Z"
+      }
+    ]
+  },
+  "501": {
+    "jobs": [
+      {
+        "name": "slow",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T10:03:20Z"
+      }
+    ]
+  },
+  "999": {
+    "jobs": [
+      {
+        "name": "build",
+        "conclusion": "success",
+        "startedAt": "2026-10-20T10:00:00Z",
+        "completedAt": "2026-10-20T12:46:40Z"
+      }
+    ]
+  }
+}

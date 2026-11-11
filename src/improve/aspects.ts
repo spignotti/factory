@@ -1,4 +1,4 @@
-import type { GitHub } from "../gh.js";
+import type { CiRun, GitHub } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { appendMetrics, computeMetrics, latestMetrics } from "../harden/metrics.js";
 import {
@@ -17,17 +17,20 @@ import type { Metrics } from "../schemas/proposal.js";
 import { type ImproveAspect, type RepoConfig } from "../schemas/repo.js";
 import { statsReport } from "../commands/stats.js";
 import { CI_RUN_LIMIT, FACTORY_REPO } from "../commands/harden.js";
+import { ciSignals, ciWorth, readCiWorkflows } from "./ci-signals.js";
+import { collectTestSignals, testWorth } from "./test-signals.js";
 
 /**
- * One entry per aspect. A follow-up (`ci`, `tests`) is a signal function, `roles/improve-<aspect>.md`,
- * a value on `IMPROVE_ASPECTS`, and a line here. `role` is an existing profile role (the model chain);
- * the prompt file is independent, so the addition does not need a new profile role.
+ * One entry per aspect. `role` is an existing profile role (the model chain); the prompt file is
+ * independent, so an aspect does not need a new profile role.
  */
 export const ASPECTS: Record<ImproveAspect, { role: ProfileRole; prompt: string }> = {
   findings: { role: "harden", prompt: "improve-findings" },
   security: { role: "audit_security", prompt: "improve-security" },
   performance: { role: "audit_performance", prompt: "improve-performance" },
   structure: { role: "audit_refactor", prompt: "improve-structure" },
+  ci: { role: "audit_performance", prompt: "improve-ci" },
+  tests: { role: "harden", prompt: "improve-tests" },
 };
 
 export interface AspectInput {
@@ -67,11 +70,41 @@ function refreshEntries(mem: MemoryFile, refresh: string[]) {
   return mem.entries.filter((e) => want.has(e.key)).map((e) => ({ key: e.key, text: e.text, status: e.status }));
 }
 
-/** Signals the aspect's prompt sees. Findings also appends a metrics line (CI minutes stay unset; that aspect is later). */
+function clip(e: unknown): string {
+  return ((e as Error).message || String(e)).split("\n")[0]!.slice(0, 200);
+}
+
+function windowSince(now: Date): string {
+  return new Date(now.getTime() - WINDOW_DAYS * 86_400_000).toISOString();
+}
+
+type CiWindow = { runs: CiRun[]; truncated: boolean; skipped: number };
+
+/** One walk per GitHub client, repo and window. `ci` and `tests` must not each page and view. */
+const ciWindows = new WeakMap<GitHub, Map<string, Promise<CiWindow>>>();
+
+function ciWindow(ctx: AspectContext): Promise<CiWindow> {
+  const since = windowSince(ctx.now);
+  let byKey = ciWindows.get(ctx.github);
+  if (!byKey) {
+    byKey = new Map();
+    ciWindows.set(ctx.github, byKey);
+  }
+  const key = `${ctx.repoDir}\n${since}`;
+  let pending = byKey.get(key);
+  if (!pending) {
+    pending = ctx.github.ciRunsInWindow(ctx.repoDir, since);
+    byKey.set(key, pending);
+  }
+  return pending;
+}
+
 export async function collectAspect(aspect: ImproveAspect, ctx: AspectContext): Promise<AspectInput> {
   const mem = loadMemory(ctx.factoryHome, ctx.repoId);
   const refresh = refreshEntries(mem, ctx.refresh);
   if (aspect === "findings") return collectFindings(ctx, mem, refresh);
+  if (aspect === "ci") return collectCi(ctx);
+  if (aspect === "tests") return collectTests(ctx, mem, refresh);
   const findings = openFindings(mem);
   const metrics = latestMetrics(ctx.factoryHome, ctx.repoId);
   const signals: Record<string, unknown> = { findings, metrics, refresh_findings: refresh };
@@ -96,6 +129,47 @@ export async function collectAspect(aspect: ImproveAspect, ctx: AspectContext): 
     keys: new Set([...findings.map((f) => f.key), ...ctx.refresh]),
     worth: true,
     metrics,
+  };
+}
+
+async function collectCi(ctx: AspectContext): Promise<AspectInput> {
+  if (ctx.dryRun) return { signals: { error: "dry-run: no gh calls" }, keys: new Set(ctx.refresh), worth: false, metrics: null };
+  let window: CiWindow;
+  try {
+    window = await ciWindow(ctx);
+  } catch (e) {
+    throw new Error(`ci runs: ${clip(e)}`, { cause: e });
+  }
+  const signal = ciSignals({ runs: window.runs, truncated: window.truncated, skipped: window.skipped, workflows: readCiWorkflows(ctx.repoDir), baseBranch: ctx.repo.base_branch, now: ctx.now });
+  return {
+    signals: signal as unknown as Record<string, unknown>,
+    keys: new Set(ctx.refresh),
+    worth: ciWorth(signal) || ctx.refresh.length > 0,
+    metrics: null,
+  };
+}
+
+async function collectTests(ctx: AspectContext, mem: MemoryFile, refresh: { key: string; text: string; status: string }[]): Promise<AspectInput> {
+  let runs: CiRun[] = [];
+  let skipped = 0;
+  let ciError: string | null = null;
+  if (!ctx.dryRun) {
+    try {
+      const window = await ciWindow(ctx);
+      runs = window.runs;
+      skipped = window.skipped;
+    } catch (e) {
+      ciError = clip(e);
+    }
+  }
+  const signal = await collectTestSignals({ repoDir: ctx.repoDir, repo: ctx.repo, mem, runs, dryRun: ctx.dryRun, factoryHome: ctx.factoryHome });
+  const worth = testWorth(signal, refresh.length);
+  if (ciError && !worth) throw new Error(`ci runs: ${ciError}`);
+  return {
+    signals: { ...(signal as unknown as Record<string, unknown>), ...(ctx.dryRun ? {} : { skipped }), ...(ciError ? { ci_error: ciError } : {}) },
+    keys: new Set([...signal.flaky.map((f) => f.key), ...ctx.refresh]),
+    worth,
+    metrics: null,
   };
 }
 

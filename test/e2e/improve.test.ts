@@ -203,7 +203,7 @@ describe("factory improve", () => {
     expect(runner.calls).toHaveLength(0);
 
     const err: string[] = [];
-    expect(await main(["improve", "--repo", ctx.repo, "--aspect", "ci"], { out: () => {}, err: (s) => err.push(s) })).toBe(2);
+    expect(await main(["improve", "--repo", ctx.repo, "--aspect", "nope"], { out: () => {}, err: (s) => err.push(s) })).toBe(2);
     expect(err.join("")).toMatch(/factory improve/);
   });
 

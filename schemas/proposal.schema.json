@@ -68,7 +68,9 @@
               "findings",
               "security",
               "performance",
-              "structure"
+              "structure",
+              "ci",
+              "tests"
             ]
           },
           "key": {

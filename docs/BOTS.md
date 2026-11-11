@@ -29,16 +29,20 @@ factory run --repo /path/to/checkout --plan plan.md --wait --notify <target>    
 
 The repo's bot runs `factory improve`. The factory does not schedule it and does not start the proposals.
 Without `--aspect`, every aspect in `.factory/repo.yaml` `improve.aspects` runs. An aspect that is not
-listed is refused and does not call a model. `ci` and `tests` are not aspects yet.
+listed is refused and does not call a model. `ci` (paged workflow history, minutes, path filters, report-only
+steps, empty stub) and `tests` (slow, flaky, never-failed, coverage when `tests.coverage` is set) use the
+same issue flow. Workflow edits are declared `protected_changes`. A coverage threshold is only added or raised;
+`config_guard` rejects a lower one even when the plan lists the file, and a removed or renamed workflow job unless `protected_changes` names that job. A proposal must not remove a required check job.
 
 ```bash
 factory improve --repo /path/to/checkout
 factory improve --repo /path/to/checkout --aspect security
 ```
 
-Rhythm, from the bot's own routine: findings, security and performance weekly; structure monthly. Each
-aspect is one read-only session. `improve.thinking` sets the reasoning level (high for security and
-performance, medium for findings and structure, unless the repo says otherwise). `improve.focus.<aspect>`
+Rhythm, from the bot's own routine: findings, security, performance and ci weekly; structure and tests
+monthly. Each aspect is one read-only session. `improve.thinking` sets the reasoning level (high for
+security, performance and ci, medium for findings, structure and tests, unless the repo says otherwise).
+`improve.focus.<aspect>`
 is an optional short note injected only into that aspect's prompt. It is not a checklist and it must not
 contain secrets or customer data.
 

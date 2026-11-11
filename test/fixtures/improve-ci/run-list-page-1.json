@@ -1,0 +1,74 @@
+[
+  {
+    "databaseId": 101,
+    "headSha": "sha101",
+    "workflowName": "factory",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 102,
+    "headSha": "sha102",
+    "workflowName": "factory",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 103,
+    "headSha": "sha103",
+    "workflowName": "factory",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 104,
+    "headSha": "sha104",
+    "workflowName": "factory",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 105,
+    "headSha": "sha105",
+    "workflowName": "factory",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 201,
+    "headSha": "sha201",
+    "workflowName": "Lint and test",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 202,
+    "headSha": "sha202",
+    "workflowName": "Lint and test",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  },
+  {
+    "databaseId": 203,
+    "headSha": "sha203",
+    "workflowName": "Lint and test",
+    "event": "pull_request",
+    "conclusion": "success",
+    "createdAt": "2026-10-20T10:00:00Z",
+    "headBranch": "feature"
+  }
+]

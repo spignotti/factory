@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { parse } from "yaml";
 import { diffText, git, mergeBase } from "../git.js";
 import { matchesAny, type Plan, redGreenLoosening } from "../schemas/plan.js";
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
@@ -10,7 +11,8 @@ import type { BuiltinResult } from "./builtin.js";
  * Config guard: the implementer fixes code to satisfy linters, type checkers and test runners; it
  * does not loosen their config or silence them inline. Deterministic: a changed tool config or an
  * added suppression fails the gate unless the plan puts it in scope (the config file in a package's
- * `files`, the suppression marker named in a package or criterion).
+ * `files`, the suppression marker named in a package or criterion). Removing or renaming a workflow
+ * job is a loosening unless that file's protected_changes names the job.
  */
 
 /** Files that are tool config as a whole: any change counts. */
@@ -54,6 +56,205 @@ const TS_FLAGS = /"(strict\w*|noImplicit\w+|noUnused\w+|noUnchecked\w+|noFallthr
 /** Coverage thresholds in vitest/jest config or package.json. */
 const COVERAGE = /\b(thresholds?|coverageThreshold|lines|branches|functions|statements|perFile|autoUpdate|fail_under|cov-fail-under)\b["']?\s*[:=]\s*[^,}\n]+/g;
 const TEST_RUNNER_CONFIG = ["**/vitest.config.*", "**/vitest.workspace.*", "**/jest.config.*", "**/package.json", "**/.coveragerc"];
+const COVERAGE_RATCHET_FILES = [
+  ...TEST_RUNNER_CONFIG,
+  "**/pytest.ini",
+  "**/pyproject.toml",
+  "**/setup.cfg",
+  "**/tox.ini",
+  "**/.nycrc",
+  "**/.nycrc.json",
+  "**/nyc.config.*",
+  "**/.c8rc",
+  "**/.c8rc.json",
+  "**/c8.config.*",
+];
+const COVERAGE_METRICS = new Set(["lines", "branches", "functions", "statements"]);
+
+interface ThresholdSet {
+  nums: Map<string, number[]>;
+  bools: Map<string, boolean>;
+}
+
+function emptyThresholds(): ThresholdSet {
+  return { nums: new Map(), bools: new Map() };
+}
+
+function addNum(set: ThresholdSet, key: string, value: number): void {
+  const list = set.nums.get(key) ?? [];
+  list.push(value);
+  set.nums.set(key, list);
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())) return Number(value);
+  return null;
+}
+
+function addThresholdObject(prefix: string, node: unknown, set: ThresholdSet): void {
+  if (!node || typeof node !== "object") return;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    const n = asNumber(value);
+    if (n != null && COVERAGE_METRICS.has(key)) addNum(set, `${prefix}.${key}`, n);
+    else if (value && typeof value === "object") addThresholdObject(prefix, value, set);
+  }
+}
+
+function addNycObject(prefix: string, node: unknown, set: ThresholdSet): void {
+  if (!node || typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+  if (obj["check-coverage"] === true) set.bools.set(`${prefix}.check-coverage`, true);
+  else if (obj["check-coverage"] === false) set.bools.set(`${prefix}.check-coverage`, false);
+  if (obj["check-coverage"] !== true) return;
+  for (const key of COVERAGE_METRICS) {
+    const n = asNumber(obj[key]);
+    if (n != null) addNum(set, `${prefix}.${key}`, n);
+  }
+}
+
+function addCliThresholds(text: string, set: ThresholdSet): void {
+  const tool = /\bc8\b/.test(text) ? "c8" : /\bnyc\b/.test(text) ? "nyc" : null;
+  const check = /(?:^|\s)--check-coverage\b/.test(text) && !/(?:^|\s)--no-check-coverage\b/.test(text);
+  if (tool && check) {
+    set.bools.set(`${tool}.check-coverage`, true);
+    for (const metric of COVERAGE_METRICS) {
+      for (const hit of text.matchAll(new RegExp(`--${metric}(?:=|\\s+)(\\d+(?:\\.\\d+)?)`, "g"))) addNum(set, `${tool}.${metric}`, Number(hit[1]));
+    }
+  } else if (tool && /(?:^|\s)--no-check-coverage\b/.test(text)) {
+    set.bools.set(`${tool}.check-coverage`, false);
+  }
+  for (const hit of text.matchAll(/--cov-fail-under(?:=|\s+)(\d+(?:\.\d+)?)/g)) addNum(set, "cov-fail-under", Number(hit[1]));
+}
+
+function addPytestThresholds(text: string, set: ThresholdSet): void {
+  for (const hit of text.matchAll(/(?:^|\n)\s*fail_under\s*=\s*(\d+(?:\.\d+)?)/g)) addNum(set, "fail_under", Number(hit[1]));
+  addCliThresholds(text, set);
+}
+
+function sliceBalanced(text: string, open: number): string {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = open; i < text.length; i++) {
+    const c = text[i]!;
+    if (quote) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === "`") {
+      quote = c;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return text.slice(open, i + 1);
+    }
+  }
+  return text.slice(open);
+}
+
+function addJsCoverageBlocks(text: string, set: ThresholdSet): void {
+  const re = /\b(coverageThreshold|thresholds)\b/g;
+  let hit: RegExpExecArray | null;
+  while ((hit = re.exec(text))) {
+    const brace = text.indexOf("{", hit.index + hit[0].length);
+    if (brace < 0) continue;
+    const body = sliceBalanced(text, brace);
+    const prefix = hit[1] === "coverageThreshold" ? "jest" : "vitest";
+    for (const metric of body.matchAll(/\b(lines|branches|functions|statements)\b["']?\s*:\s*["']?(\d+(?:\.\d+)?)/g)) {
+      addNum(set, `${prefix}.${metric[1]}`, Number(metric[2]));
+    }
+    re.lastIndex = brace + body.length;
+  }
+  addCliThresholds(text, set);
+}
+
+function addJsonThresholds(name: string, text: string, set: ThresholdSet): void {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    addJsCoverageBlocks(text, set);
+    addPytestThresholds(text, set);
+    return;
+  }
+  if (!json || typeof json !== "object") return;
+  const root = json as Record<string, unknown>;
+  if (name === "package.json") {
+    const jest = root.jest;
+    if (jest && typeof jest === "object") addThresholdObject("jest", (jest as Record<string, unknown>).coverageThreshold, set);
+    addNycObject("nyc", root.nyc, set);
+    addNycObject("c8", root.c8, set);
+    const scripts = root.scripts;
+    if (scripts && typeof scripts === "object") {
+      for (const value of Object.values(scripts as Record<string, unknown>)) {
+        if (typeof value === "string") addCliThresholds(value, set);
+      }
+    }
+    return;
+  }
+  addNycObject(name.includes("c8") ? "c8" : "nyc", root, set);
+}
+
+function addNycText(prefix: string, text: string, set: ThresholdSet): void {
+  if (/["']?check-coverage["']?\s*:\s*true\b/.test(text)) {
+    set.bools.set(`${prefix}.check-coverage`, true);
+    for (const metric of COVERAGE_METRICS) {
+      for (const hit of text.matchAll(new RegExp(`["']?${metric}["']?\\s*[:=]\\s*["']?(\\d+(?:\\.\\d+)?)`, "g"))) {
+        addNum(set, `${prefix}.${metric}`, Number(hit[1]));
+      }
+    }
+  } else if (/["']?check-coverage["']?\s*:\s*false\b/.test(text)) {
+    set.bools.set(`${prefix}.check-coverage`, false);
+  }
+  addCliThresholds(text, set);
+}
+
+function extractThresholds(path: string, text: string): ThresholdSet {
+  const set = emptyThresholds();
+  const name = basename(path);
+  if (name === "package.json" || name === ".nycrc" || name === ".nycrc.json" || name === ".c8rc" || name === ".c8rc.json") addJsonThresholds(name, text, set);
+  else if (/(?:nyc|c8)\.config\./.test(name)) addNycText(name.includes("c8") ? "c8" : "nyc", text, set);
+  else if (matchesAny(path, ["**/vitest.config.*", "**/vitest.workspace.*", "**/jest.config.*"])) addJsCoverageBlocks(text, set);
+  if (name === "pyproject.toml" || name === "setup.cfg" || name === "tox.ini" || name === "pytest.ini" || name === ".coveragerc") addPytestThresholds(text, set);
+  return set;
+}
+
+function gateTurnedOff(tool: string, before: ThresholdSet, after: ThresholdSet): boolean {
+  const key = `${tool}.check-coverage`;
+  return before.bools.get(key) === true && after.bools.get(key) !== true;
+}
+
+/**
+ * A lowered coverage threshold. Absent when nothing enforced was lowered (raising and adding stay allowed).
+ * Compared kinds: vitest/jest coverageThreshold, pytest fail_under / --cov-fail-under, nyc/c8 check-coverage.
+ */
+export function coverageRatchet(path: string, before: string | undefined, after: string | undefined): string | undefined {
+  if (before === undefined || before === after || !matchesAny(path, COVERAGE_RATCHET_FILES)) return undefined;
+  const prior = extractThresholds(path, before);
+  const next = extractThresholds(path, after ?? "");
+  const lowered: string[] = [];
+  for (const [key, was] of prior.bools) {
+    if (was === true && next.bools.get(key) !== true) lowered.push(`${key} turned off`);
+  }
+  for (const [key, values] of prior.nums) {
+    const tool = key.split(".")[0]!;
+    if ((tool === "nyc" || tool === "c8") && gateTurnedOff(tool, prior, next)) continue;
+    const beforeSorted = [...values].sort((a, b) => b - a);
+    const afterSorted = [...(next.nums.get(key) ?? [])].sort((a, b) => b - a);
+    if (afterSorted.length < beforeSorted.length) lowered.push(`${key} removed`);
+    for (let i = 0; i < Math.min(beforeSorted.length, afterSorted.length); i++) {
+      if (afterSorted[i]! < beforeSorted[i]!) lowered.push(`${key} ${beforeSorted[i]} -> ${afterSorted[i]}`);
+    }
+  }
+  if (!lowered.length) return undefined;
+  return `${path}: coverage threshold lowered (${lowered.join("; ")})`;
+}
 
 export interface Suppression {
   marker: string;
@@ -254,6 +455,77 @@ function standardsRemovalHow(): string {
   return `declare it by listing ${STANDARDS_REL} in a package's files and naming the rule, or the check as a whole word, in the goal, an acceptance criterion, or protected_changes (not in out_of_scope)`;
 }
 
+const WORKFLOW_FILE = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
+
+export interface WorkflowJobRemoval {
+  file: string;
+  /** Job id that was removed, or whose `name:` changed. */
+  id: string;
+  /** Previous `name:`, or the id when unset. */
+  name: string;
+  kind: "removed" | "renamed";
+}
+
+function workflowJobs(text: string | undefined): { id: string; name: string }[] | null {
+  if (text === undefined) return [];
+  let doc: unknown;
+  try {
+    doc = parse(text) ?? {};
+  } catch {
+    return null;
+  }
+  if (!doc || typeof doc !== "object") return [];
+  const jobs = (doc as { jobs?: unknown }).jobs;
+  if (!jobs || typeof jobs !== "object" || Array.isArray(jobs)) return [];
+  return Object.entries(jobs as Record<string, unknown>).flatMap(([id, raw]) => {
+    if (!id) return [];
+    const named = raw && typeof raw === "object" && typeof (raw as { name?: unknown }).name === "string" ? (raw as { name: string }).name.trim() : "";
+    return [{ id, name: named || id }];
+  });
+}
+
+/**
+ * A job id that disappeared, or a `name:` that changed, in a workflow file. Adding a job or editing
+ * its steps is not a loosening. An unparsable after-file cannot prove the jobs remain.
+ */
+export function workflowJobLoosening(file: string, before: string | undefined, after: string | undefined): WorkflowJobRemoval[] {
+  if (!WORKFLOW_FILE.test(file.replaceAll("\\", "/")) || before === undefined || before === after) return [];
+  const oldJobs = workflowJobs(before);
+  if (!oldJobs?.length) return [];
+  const newJobs = workflowJobs(after);
+  if (newJobs === null) return oldJobs.map((job) => ({ file, id: job.id, name: job.name, kind: "removed" as const }));
+  const out: WorkflowJobRemoval[] = [];
+  for (const job of oldJobs) {
+    const now = newJobs.find((j) => j.id === job.id);
+    if (!now) out.push({ file, id: job.id, name: job.name, kind: "removed" });
+    else if (now.name !== job.name) out.push({ file, id: job.id, name: job.name, kind: "renamed" });
+  }
+  return out;
+}
+
+function namesJob(text: string, job: string): boolean {
+  const name = job.trim();
+  if (!name) return false;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_.-])${escaped}(?![A-Za-z0-9_.-])`).test(text);
+}
+
+function jobRemovalDeclared(plan: Plan, packages: string[], removal: WorkflowJobRemoval): boolean {
+  const files = new Set(plan.packages.filter((p) => packages.includes(p.id)).flatMap((p) => p.files));
+  if (!files.has(removal.file)) return false;
+  const text = (plan.protected_changes ?? [])
+    .filter((c) => c.file === removal.file)
+    .map((c) => `${c.change}\n${c.reason}`)
+    .join("\n");
+  return namesJob(text, removal.id) || namesJob(text, removal.name);
+}
+
+function describeJobRemoval(r: WorkflowJobRemoval): string {
+  const label = r.name !== r.id ? `${r.id} (name: ${r.name})` : r.id;
+  const verb = r.kind === "renamed" ? "renamed" : "removed";
+  return `job ${label} ${verb} (loosens a required check; name the job in that file's protected_changes)`;
+}
+
 /** The gate over precomputed inputs (pure, for tests). */
 export function configGuard(input: {
   plan: Plan;
@@ -262,8 +534,12 @@ export function configGuard(input: {
   suppressions: { file: string; marker: string; line: string }[];
   /** repo.yaml loosening: fails even when the plan declares the file a protected change. */
   loosening?: string[];
+  /** Lowered coverage threshold: fails even when the plan lists the file. Raising is not listed here. */
+  thresholdLoosening?: string[];
   /** Rule or marker removed from standards.md. Declared only when a package lists the file and the rule text, or the check name as a whole word, is in the goal, acceptance, or protected_changes. */
   standardsRemovals?: StandardsRemoval[];
+  /** Workflow job removed or renamed. Declared only when a package lists the file and protected_changes names the job. */
+  jobLoosening?: WorkflowJobRemoval[];
   /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
   labels?: string[];
 }): BuiltinResult {
@@ -275,9 +551,11 @@ export function configGuard(input: {
     ...input.configChanges.filter((c) => !inScope(c.file)).map((c) => `${c.file}: ${c.why} (not in the plan's files)`),
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
     ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
+    ...(input.thresholdLoosening ?? []),
     ...(input.standardsRemovals ?? [])
       .filter((r) => !standardsRemovalDeclared(input.plan, r))
       .map((r) => `${STANDARDS_REL}: ${describeStandardsRemoval(r)} (loosens a repo standard; ${standardsRemovalHow()})`),
+    ...(input.jobLoosening ?? []).filter((r) => !jobRemovalDeclared(input.plan, input.packages, r)).map((r) => `${r.file}: ${describeJobRemoval(r)}`),
     ...(exemption.fail ? [exemption.fail] : []),
   ];
   const note = exemption.note ?? "";
@@ -289,9 +567,11 @@ export function configGuard(input: {
 }
 
 /** Collects config changes and added suppressions in a worktree against `base` (stage first). */
-export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "standardsRemovals">> {
+export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "thresholdLoosening" | "standardsRemovals" | "jobLoosening">> {
   const mb = await mergeBase(cwd, base);
   const configChanges: { file: string; why: string }[] = [];
+  const thresholdLoosening: string[] = [];
+  const jobLoosening: WorkflowJobRemoval[] = [];
   let loosening: string[] = [];
   let standards: StandardsRemoval[] = [];
   for (const file of changed) {
@@ -299,8 +579,11 @@ export async function configGuardInputs(cwd: string, base: string, changed: stri
     const after = await readFile(join(cwd, file), "utf8").catch(() => undefined);
     const why = configChange(file, before, after);
     if (why) configChanges.push({ file, why });
+    const lowered = coverageRatchet(file, before, after);
+    if (lowered) thresholdLoosening.push(lowered);
+    jobLoosening.push(...workflowJobLoosening(file, before, after));
     if (file === REPO_CONFIG_PATH) loosening = repoConfigLoosening(before, after);
     if (file === STANDARDS_REL) standards = standardsRemovals(before, after);
   }
-  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, standardsRemovals: standards };
+  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, thresholdLoosening, standardsRemovals: standards, jobLoosening };
 }

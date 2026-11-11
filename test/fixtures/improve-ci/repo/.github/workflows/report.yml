@@ -1,0 +1,11 @@
+name: Report
+on: [pull_request]
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+        continue-on-error: true
+      - uses: example/reporter@v1
+        with:
+          exit-code: 0
