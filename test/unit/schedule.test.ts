@@ -14,6 +14,7 @@ import {
   FAIR_WAIT_MS,
   fulfilledIssues,
   mutualBundle,
+  priorityRank,
   rankPending,
   updateNeedsDecision,
 } from "../../src/queue/admit.js";
@@ -24,6 +25,12 @@ import type { RunContext } from "../../src/pipeline/context.js";
 import { createFixtureRepo } from "../helpers/repo.js";
 
 describe("admission and schedule", () => {
+  it("honors canonical priority labels and retains legacy spellings", () => {
+    expect(priorityRank(["prio:high"])).toBe(2);
+    expect(priorityRank(["prio:low"])).toBe(0);
+    expect(priorityRank(["priority:high"])).toBe(2);
+    expect(priorityRank([])).toBe(1);
+  });
   const ready = { title: "Fix the gate", body: "Make it fail first.", labels: ["factory-ready"], state: "open" as const };
 
   it("refuses blocked labels and an empty task, and accepts a ready issue", () => {

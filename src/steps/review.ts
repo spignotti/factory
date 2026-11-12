@@ -54,7 +54,7 @@ export async function planReviewers(ctx: RunContext, round: number): Promise<Rev
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const security = changed.filter((f) => matchesAny(f, ctx.repo.sensitive_paths) || matchesAny(f, DEPENDENCY_GLOBS));
   const standards = await baseStandards(ctx);
-  const visibleStandards = rulesForReview(standards.items, ctx.repo.checks);
+  const visibleStandards = rulesForReview(standards.items);
   const reviewers: Reviewer[] = ["plan", "simplicity"];
   // A reviewer that ran once stays for the rest of the run: its open findings need its verdicts.
   if (security.length || reviewedBefore(ctx, "security", round)) reviewers.push("security");

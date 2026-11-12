@@ -789,7 +789,7 @@ describe("factory queue", () => {
     expect(cap.out()).toContain(`queue: auto-merge ${pr}`);
   });
 
-  it("re-approves the head an update-branch just produced and disables auto-merge", async () => {
+  it("does not update or reapprove a legacy automatic PR without a local checkpoint", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
     const github = new FakeGitHub();
@@ -824,16 +824,15 @@ describe("factory queue", () => {
       },
       io: capture().io,
     });
-    expect(github.updatedBranches).toEqual(["7"]);
-    expect(github.autoMergeDisabled).toEqual([pr]);
-    expect(github.approvedShas).toEqual([newSha]);
+    expect(github.updatedBranches).toEqual([]);
+    expect(github.approvedShas).toEqual([]);
     expect(github.autoMerged).toEqual([]);
-    expect((await github.findOpenPr(repo, branch))?.headSha).toBe(newSha);
-    expect(github.remoteShas.get(branch)).toBe(newSha);
-    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).approved_sha).toBe(newSha);
+    expect((await github.findOpenPr(repo, branch))?.headSha).toBe(oldSha);
+    expect(github.remoteShas.get(branch)).toBe(oldSha);
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).approved_sha).toBe(oldSha);
   });
 
-  it("bot_review re-approves and re-reviews the update-branch head; human_review does not", async () => {
+  it("a poller never changes a bot_review SHA; a human-policy branch update grants no approval", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
     const github = new FakeGitHub();
@@ -870,12 +869,12 @@ describe("factory queue", () => {
     });
     const botHead = github.remoteShas.get("factory/8-goal");
     expect(botHead).toBeTruthy();
-    expect(botHead).not.toBe(bot.sha);
-    expect(github.autoMergeDisabled).toContain(bot.pr);
-    expect(github.approvedShas).toEqual([botHead]);
+    expect(botHead).toBe(bot.sha);
+    expect(github.approvedShas).toEqual([]);
     const botState = JSON.parse(readFileSync(join(bot.dir, "state.json"), "utf8")) as { approved_sha?: string; reviewed_sha?: string };
-    expect(botState.approved_sha).toBe(botHead);
-    expect(botState.reviewed_sha).toBe(botHead);
+    expect(botState.approved_sha).toBe(bot.sha);
+    expect(botState.reviewed_sha).toBe(bot.sha);
+    expect(github.updatedBranches).toEqual(["9"]);
     const humanState = JSON.parse(readFileSync(join(human.dir, "state.json"), "utf8")) as { approved_sha?: string };
     expect(humanState.approved_sha).toBe(human.sha);
     expect(github.approvedShas).not.toContain(github.remoteShas.get("factory/9-goal"));
@@ -924,7 +923,7 @@ describe("factory queue", () => {
     pushed.remoteShas.set(pushedRun.branch, oldSha);
     pushed.updateBranchParents = [oldSha];
     await runQueue({ factoryHome, github: pushed, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
-    expect(pushed.autoMergeDisabled).toContain(pushedRun.pr);
+    expect(pushed.updatedBranches).toEqual([]);
     expect(pushed.approvedShas).toEqual([]);
     expect(JSON.parse(readFileSync(join(pushedRun.dir, "state.json"), "utf8")).approved_sha).toBe(oldSha);
   });

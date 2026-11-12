@@ -7,6 +7,8 @@ import { failureSummary, type GateReport, runGates, withEnvCommand } from "../st
 
 /** Gate-repair budget for one run. Resume continues these numbers; it does not start them over. */
 export const MAX_GATE_ATTEMPTS = 3;
+/** Post-push repair/revalidation attempts, shared by the worker and persisted resume path. */
+export const MAX_CONTINUATIONS = 2;
 
 export type RepairClass = "format" | "code" | "infra" | "base" | "config" | "unknown";
 
@@ -64,7 +66,7 @@ export function blocksProductEdit(cls: RepairClass | undefined): boolean {
   return cls === "unknown" || cls === "config" || cls === "infra" || cls === "base";
 }
 
-const CODE = /\bSyntaxError\b|\bAssertionError\b|\bTypeError\b|\bReferenceError\b|not ok \d|✖|ERR_ASSERT|Assertion failed|\bExpected\b/i;
+const CODE = /\bSyntaxError\b|\bAssertionError\b|\bTypeError\b|\bReferenceError\b|not ok \d|✖|ERR_ASSERT|Assertion failed|\bExpected\b|^FAILED\s+\S+::/im;
 const CONFIG = /command not found|EnvMissing|configuration file not found|config file not found|not recognized as an internal or external command/i;
 const INFRA = /runner has received a shutdown signal|No space left on device|Resource temporarily unavailable|\bETIMEDOUT\b|\bECONNRESET\b|\bEAI_AGAIN\b|TLS handshake|temporary failure in name resolution|\b502 Bad Gateway\b|\b503 Service Unavailable\b/i;
 

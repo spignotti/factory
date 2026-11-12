@@ -20,8 +20,13 @@ const PASS_MARK = "\u2714";
 const FAIL_MARK = "\u2716";
 const SKIP_MARK = "\uFE63";
 
-function shellQuote(s: string): string {
+export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Direct pytest runners must report individual names for `path::name` evidence. No shell rewriting. */
+export function reportingTestCommand(command: string): string {
+  return command.replace(/^((?:uv run(?: --[\w-]+)* |python[\d.]* -m )?pytest)(?=\s|$)/, "$1 -v");
 }
 
 /** `path` or `path::test name`. */
@@ -108,6 +113,11 @@ function pytestCounts(output: string): PytestCounts | undefined {
  * is a file-level failure, not a pass.
  */
 export function parseTestReport(file: string, output: string, code: number): ExecutedTest[] {
+  const pytestLines = pytestResultLines(file, output);
+  if (pytestLines.length) {
+    // Never let named passes hide a collection/process failure of the same invocation.
+    return code === 0 ? pytestLines : [...pytestLines, { file, name: "", result: "fail" }];
+  }
   if (output.includes("TAP version")) {
     const tap = parseTap(file, output);
     if (tap.length) return tap;
@@ -163,7 +173,7 @@ function pytestResultOf(status: string): "pass" | "fail" | "skip" {
 }
 
 /** A cited file counts only when a result line names that path exactly. */
-function pytestResultLines(file: string, output: string): ExecutedTest[] {
+export function pytestResultLines(file: string, output: string): ExecutedTest[] {
   const out: ExecutedTest[] = [];
   for (const raw of output.split("\n")) {
     const line = stripAnsi(raw).trim();
@@ -191,9 +201,10 @@ export function matchTestEvidence(ref: string, executed: readonly ExecutedTest[]
   if (!file || !exists) return { ok: false, reason: `invented reference (file not in the tree): ${ref}` };
   const rows = executed.filter((e) => e.file === file);
   if (rows.length === 0) return { ok: false, reason: `test was not executed: ${ref}` };
+  if (rows.some((e) => e.name === "" && e.result === "fail")) return { ok: false, reason: `test invocation failed: ${ref}` };
   if (name !== undefined) {
     const hit = rows.find((e) => e.name === name);
-    if (!hit) return { ok: false, reason: `invented reference (test not in the run): ${ref}` };
+    if (!hit) return { ok: false, reason: `invented reference (test not in the run; use verbose output for named evidence): ${ref}` };
     if (hit.result === "skip") return { ok: false, reason: `skipped test is not evidence: ${ref}` };
     if (hit.result !== "pass") return { ok: false, reason: `test did not pass: ${ref}` };
     return { ok: true, reason: "" };
@@ -234,22 +245,27 @@ export async function runCitedTests(opts: {
   heartbeatMs?: number;
 }): Promise<ExecutedTest[]> {
   if (!opts.testCommand || opts.files.length === 0) return [];
+  const testCommand = reportingTestCommand(opts.testCommand);
   const run = (command: string, where: string) =>
     watchCheck("evidence", () => sh(command, { cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs, jail: opts.jail }), {
       where,
       onCheck: opts.onCheck,
       heartbeatMs: opts.heartbeatMs,
     });
-  if (opts.testCommand.includes("{files}")) {
+  if (testCommand.includes("{files}")) {
     const out: ExecutedTest[] = [];
     for (const file of opts.files) {
-      const result = await run(opts.testCommand.replaceAll("{files}", shellQuote(file)), file);
+      const result = await run(testCommand.replaceAll("{files}", shellQuote(file)), file);
       out.push(...parseTestReport(file, result.output, result.code));
     }
     return out;
   }
-  const result = await run(opts.testCommand, "suite");
+  const result = await run(testCommand, "suite");
   const out: ExecutedTest[] = [];
-  for (const file of opts.files) out.push(...pytestResultLines(file, result.output));
+  for (const file of opts.files) {
+    const rows = pytestResultLines(file, result.output);
+    out.push(...rows);
+    if (rows.length && result.code !== 0) out.push({ file, name: "", result: "fail" });
+  }
   return out;
 }

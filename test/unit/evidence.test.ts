@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { matchTestEvidence, parseTestReport, runCitedTests } from "../../src/gates/evidence.js";
+import { matchTestEvidence, parseTestReport, reportingTestCommand, runCitedTests } from "../../src/gates/evidence.js";
 import { testPresence, type EvidenceInputs } from "../../src/gates/builtin.js";
 import { rolePrompt } from "../../src/prompts.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
@@ -12,6 +12,18 @@ import { sh } from "../../src/exec.js";
 const env = { PATH: process.env.PATH ?? "" };
 
 describe("executed test evidence", () => {
+  it("requests named output from direct pytest runners without altering wrappers or scripts", () => {
+    expect(reportingTestCommand("uv run --locked pytest {files}")).toBe("uv run --locked pytest -v {files}");
+    expect(reportingTestCommand("python3 -m pytest {files}")).toBe("python3 -m pytest -v {files}");
+    expect(reportingTestCommand("bash scripts/test-pytest.sh {files}")).toBe("bash scripts/test-pytest.sh {files}");
+  });
+  it("keeps pytest names and skips with a file-selecting command", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pytest-report-"));
+    const rows = await runCitedTests({ cwd: dir, files: ["test/a.py"], env,
+      testCommand: "printf 'test/a.py::works PASSED\\ntest/a.py::later SKIPPED\\n=== 1 passed, 1 skipped in 0.01s ===\\n'; : {files}" });
+    expect(matchTestEvidence("test/a.py::works", rows, true).ok).toBe(true);
+    expect(matchTestEvidence("test/a.py::later", rows, true).reason).toMatch(/skipped/);
+  });
   it("parses a real node run: a passing test counts and a skipped test does not", async () => {
     const dir = mkdtempSync(join(tmpdir(), "factory-evidence-"));
     mkdirSync(join(dir, "test"));

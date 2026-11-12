@@ -39,29 +39,30 @@ export function effectCheckNames(plan: { acceptance?: readonly { text: string }[
   return [...names];
 }
 
-export function effectStatus(plan: { acceptance?: readonly { text: string }[] }, checks: readonly { name: string; status: string }[] | null): EffectStatus {
+export function effectStatus(plan: { acceptance?: readonly { text: string }[] }, checks: readonly { name: string; status: string; effect_proven?: boolean }[] | null): EffectStatus {
   const names = effectCheckNames(plan);
   if (names.length === 0 || checks === null) return "unclear";
   const byName = new Map(checks.map((check) => [check.name, check.status]));
   if (names.some((name) => !byName.has(name))) return "unclear";
   if (names.some((name) => byName.get(name) !== "pass")) return "negative";
-  return "confirmed";
+  // Only an executed negative control can confirm efficacy. A green named command alone cannot.
+  return names.every((name) => name === "red_green" && checks.some((c) => c.name === name && c.effect_proven === true)) ? "confirmed" : "unclear";
 }
 
-function latestGateChecks(dir: string): { name: string; status: string }[] | null {
+function latestGateChecks(dir: string): { name: string; status: string; effect_proven?: boolean }[] | null {
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
     return null;
   }
-  let best: { n: number; checks: { name: string; status: string }[] } | null = null;
+  let best: { n: number; checks: { name: string; status: string; effect_proven?: boolean }[] } | null = null;
   for (const name of names) {
     const match = /^gates-(\d+)\.json$/.exec(name);
     if (!match) continue;
-    let report: { n?: number; checks?: { name: string; status: string }[] };
+    let report: { n?: number; checks?: { name: string; status: string; effect_proven?: boolean }[] };
     try {
-      report = JSON.parse(readFileSync(join(dir, name), "utf8")) as { n?: number; checks?: { name: string; status: string }[] };
+      report = JSON.parse(readFileSync(join(dir, name), "utf8")) as typeof report;
     } catch {
       continue;
     }
@@ -113,8 +114,8 @@ export async function resolveProposals(opts: { factoryHome: string; repoId: stri
     let dirty = false;
     const proposals: ProposalItem[] = [];
     for (const p of ticket.proposals) {
-      const change = p.status === "open" ? await decide(p, ticket.created_at, opts) : undefined;
-      if (!change) {
+      const change = p.status === "open" || (p.status === "resolved" && p.resolution?.effect !== "confirmed") ? await decide(p, ticket.created_at, opts) : undefined;
+      if (!change || (p.status === "resolved" && (change.status !== "resolved" || (p.resolution?.effect === change.effect && p.resolution?.pr === change.pr)))) {
         proposals.push(p);
         continue;
       }
@@ -123,9 +124,16 @@ export async function resolveProposals(opts: { factoryHome: string; repoId: stri
       updateMemory(opts.factoryHome, opts.repoId, (mem) => {
         for (const e of mem.entries) {
           if (!refs.has(e.key) || e.status !== "proposed" || e.ref !== p.id) continue;
-          if (change.status === "resolved") {
+          if (change.status === "resolved" && change.effect === "confirmed") {
             e.status = "resolved";
             e.ref = change.pr;
+          } else if (change.status === "resolved" && change.effect === "negative") {
+            e.status = "open";
+            e.ref = change.pr;
+          } else if (change.status === "resolved") {
+            // Implemented but unverified: retain ownership. Do not suppress it as fixed or
+            // generate a second proposal solely to manage the missing efficacy proof.
+            e.status = "proposed";
           } else {
             e.status = "open";
             e.ref = null;

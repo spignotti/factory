@@ -217,6 +217,8 @@ export async function redGreenProof(opts: {
   heartbeatMs?: number;
   /** Run artifact. Conclusive base probes are reused from here; inconclusive ones are not written. */
   cacheFile?: string;
+  /** Same-tree evidence command already passed this single-file HEAD probe in this gate phase. */
+  headPassed?: boolean;
 }): Promise<RedGreenResult> {
   const { worktree, baseSha, files, testCommand, env } = opts;
   const support = opts.supportFiles ?? [];
@@ -258,7 +260,7 @@ export async function redGreenProof(opts: {
     reused: boolean,
     baseRun?: { output: string; code: number; signal?: NodeJS.Signals | null },
   ): Promise<RedGreenResult> => {
-    const head = await run("head", worktree, cmd);
+    const head = opts.headPassed ? { code: 0, signal: null, output: "HEAD evidence reused", durationMs: 0 } : await run("head", worktree, cmd);
     const prefix = reused ? "base probe reused\n" : "";
     if (shTimedOut(head)) {
       return inconclusive(

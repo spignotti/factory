@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { sh, tail } from "../exec.js";
 import { changedFiles, diffCountFields, diffTotals, git, repoDiffStat, stageAll } from "../git.js";
@@ -13,7 +14,7 @@ import {
   scopeReport,
   testPresence,
 } from "../gates/builtin.js";
-import { citedTestFiles, runCitedTests } from "../gates/evidence.js";
+import { citedTestFiles, parseTestReport, pytestResultLines, runCitedTests, shellQuote, splitEvidenceRef, type ExecutedTest } from "../gates/evidence.js";
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { runBaselineGates } from "../baseline/gates.js";
 import { baseProbeFiles, redGreenProof } from "../gates/redgreen.js";
@@ -38,6 +39,8 @@ export interface CheckResult {
   timed_out?: boolean;
   /** Set when a product red-then-green is allowed by this check's `flake_allow` reason. */
   flake_allowed?: boolean;
+  /** An actual red-on-base, green-on-head proof, never an exemption or a green command alone. */
+  effect_proven?: boolean;
 }
 
 /** A fail, a timeout, or a product flake that no repo rule allows. */
@@ -96,6 +99,7 @@ export async function runChecks(
     /** Progress and heartbeat while a check command is running. */
     onCheck?: (e: CheckPulse) => void;
     heartbeatMs?: number;
+    onResult?: (check: Check, result: Awaited<ReturnType<typeof sh>>, status: CheckResult["status"]) => void;
   },
 ): Promise<CheckResult[]> {
   const timeoutMs = (check: Check) => gateCheckTimeoutMs({ check, gateTimeoutMinutes: opts.gateTimeoutMinutes, deadline: opts.deadline });
@@ -161,6 +165,8 @@ export async function runChecks(
       output_tail = output_tail ? `owner: ${check.owner}\n${output_tail}` : `owner: ${check.owner}`;
     }
     const timed_out = status === "timeout";
+    // A retried failure never supplies evidence from a different attempt.
+    if (status === "pass" && r.code === 0) opts.onResult?.(check, r, status);
     results.push({
       name: check.name,
       kind: "check",
@@ -178,7 +184,7 @@ const fromBuiltin = (b: BuiltinResult): CheckResult => ({
   name: b.name,
   kind: "builtin",
   status: b.timedOut ? "timeout" : b.ok ? "pass" : "fail",
-  duration_ms: 0,
+  duration_ms: b.duration_ms ?? 0,
   output_tail: b.detail,
   ...(b.timedOut ? { timed_out: true } : {}),
 });
@@ -241,6 +247,16 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       data: { check: e.check, phase: "running", ...(e.where ? { where: e.where } : {}) },
     });
   const selected = dedupeChecks(selectChecks(repo.checks, tier, changed));
+  const tree = (await git(worktree, ["ls-files"])).split("\n").filter(Boolean);
+  const cited = citedTestFiles(handoffs).filter((f) => tree.includes(f));
+  const namedFiles = new Set(handoffs.flatMap((h) => h.evidence.filter((e) => e.kind === "test").map((e) => splitEvidenceRef(e.ref))).filter((r) => r.name !== undefined).map((r) => r.file));
+  const command = repo.tests.run ? withEnvCommand(repo.tests.run, repo.env_command) : undefined;
+  const fingerprint = async () => createHash("sha256").update(JSON.stringify({
+    tree: await git(worktree, ["write-tree"]), base: ctx.baseSha, command, env, cited,
+  })).digest("hex");
+  const before = await fingerprint();
+  const reusable = !repo.env_command && repo.services.length === 0;
+  let executed: ExecutedTest[] = [];
   const checks = await runChecks(selected.checks, {
     cwd: worktree,
     env,
@@ -250,6 +266,19 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     jail: jailFor(ctx, worktree),
     services: ctx.services,
     onCheck,
+    onResult: (check, result) => {
+      if (!command || check.services?.length) return;
+      const ranCommand = withEnvCommand(check.run, repo.env_command);
+      if (!command.includes("{files}") && ranCommand === command) {
+        executed.push(...cited.flatMap((file) => pytestResultLines(file, result.output)));
+      } else {
+        for (const file of cited) {
+          if (ranCommand === command.replaceAll("{files}", shellQuote(file)) || ranCommand === command.replaceAll("{files}", file)) {
+            executed.push(...parseTestReport(file, result.output, result.code));
+          }
+        }
+      }
+    },
   });
   for (const dup of selected.sameCommand) {
     const src = checks.find((c) => c.name === dup.sameAs);
@@ -270,12 +299,17 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const stat = await repoDiffStat(worktree, ctx.baseSha, repo, { countTests });
   const diffReport = diffCountFields(diffTotals(stat), countTests);
   if (diffReport) ctx.events.diffCount = diffReport;
-  const tree = (await git(worktree, ["ls-files"])).split("\n").filter(Boolean);
-  const cited = citedTestFiles(handoffs).filter((f) => tree.includes(f));
-  const executed = await runCitedTests({
+  await stageAll(worktree);
+  const key = await fingerprint();
+  if (before !== key) executed = [];
+  if (reusable && ctx.testEvidence?.key === key) executed.push(...ctx.testEvidence.executed.filter((row) => !executed.some((e) => e.file === row.file)));
+  const missing = cited.filter((file) => !executed.some((row) => row.file === file && (!namedFiles.has(file) || row.name !== "")));
+  executed = executed.filter((row) => !missing.includes(row.file));
+  const evidenceStarted = Date.now();
+  executed.push(...await runCitedTests({
     cwd: worktree,
-    files: cited,
-    testCommand: repo.tests.run,
+    files: missing,
+    testCommand: command,
     env,
     timeoutMs: gateCheckTimeoutMs({
       check: repo.tests.timeout_s !== undefined ? { timeout_s: repo.tests.timeout_s } : undefined,
@@ -284,7 +318,11 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     }),
     jail: jailFor(ctx, worktree),
     onCheck,
-  });
+  }));
+  const evidenceDuration = Date.now() - evidenceStarted;
+  await stageAll(worktree);
+  if (reusable && key === await fingerprint() && executed.every((e) => e.result === "pass")) ctx.testEvidence = { key, executed };
+  else delete ctx.testEvidence;
   const evidence: EvidenceInputs = {
     files: tree,
     executed,
@@ -296,7 +334,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     protectedPaths(plan, changed, repo.human_only_paths),
     diffSize(stat, repo.limits.max_diff_lines, { countTests }),
     testPresence(plan, packages, handoffs, evidence),
-    evidenceCheck(handoffs, evidence),
+    { ...evidenceCheck(handoffs, evidence), duration_ms: evidenceDuration },
     guideUpdate(plan, packages, changed, repo),
     configGuard({ plan, packages, labels: ctx.task.labels, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
     ...omitRepeatedNames(
@@ -317,7 +355,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   ];
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];
-  if (plan.type === "bug" && first && packages.includes(first.id)) {
+  if ((plan.type === "bug" || plan.red_green === "required") && first && packages.includes(first.id)) {
     const decision = redGreenDecision(plan, ctx.task.labels);
     if (decision.kind === "exempt") {
       builtins.push({ name: "red_green", ok: true, detail: redGreenExemptDetail(decision.reason) });
@@ -330,7 +368,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         baseSha: ctx.baseSha,
         files: probe.tests,
         supportFiles: probe.support,
-        testCommand: repo.tests.run,
+        testCommand: command,
         setup: repo.setup,
         env,
         gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
@@ -339,13 +377,16 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         jail: (cwd) => jailFor(ctx, cwd),
         onCheck,
         cacheFile: join(ctx.runDir, "red-green-base.json"),
+        headPassed: reusable && probe.tests.length === 1 && executed.some((e) => e.file === probe.tests[0] && e.result === "pass") && executed.filter((e) => e.file === probe.tests[0]).every((e) => e.result === "pass"),
       });
       checkDeadline(ctx);
       reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
-      builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail, timedOut: proof.timedOut });
+      builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail, timedOut: proof.timedOut, duration_ms: proof.duration_ms });
     }
   }
   const all = [...checks, ...builtins.map(fromBuiltin)];
+  const redGreen = all.find((c) => c.name === "red_green");
+  if (redGreen && reproRedOnBase === true && redGreen.status === "pass") redGreen.effect_proven = true;
   const report: GateReport = {
     n: ++ctx.gateCount,
     tier,

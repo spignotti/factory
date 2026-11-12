@@ -246,9 +246,9 @@ describe("F07 close", () => {
     expect(report.brief.artifacts.join("\n")).toContain("prompt deadbeef");
     expect(report.automation).toEqual([
       expect.objectContaining({
-        full: ["Sources are formatted"],
-        partial: ["Secrets stay out of logs"],
-        review_scope: ["Secrets stay out of logs", "A person reads the product diff"],
+        full: [],
+        partial: ["Sources are formatted"],
+        review_scope: ["Sources are formatted", "Secrets stay out of logs", "A person reads the product diff"],
       }),
     ]);
     const text = renderStatus(report);
@@ -261,7 +261,7 @@ describe("F07 close", () => {
     expect(text).toContain(prs.closed);
     expect(text).toContain("needs Silas:");
     expect(text).toContain("which file?");
-    expect(text).toContain("full 1, partial 1, review scope 2");
+    expect(text).toContain("full 0, partial 1, review scope 3");
     expect(text).not.toContain("determinism_ratio");
     expect(text).toContain(`${join(home, "runs", confirmed, "result.json")}`);
 
@@ -300,9 +300,9 @@ describe("F07 close", () => {
       checks,
     );
     expect(coverage).toEqual({
-      full: ["Sources are formatted"],
-      partial: ["Secrets stay out of logs"],
-      review_scope: ["Secrets stay out of logs", "A person reads the product diff"],
+      full: [],
+      partial: ["Sources are formatted"],
+      review_scope: ["Sources are formatted", "Secrets stay out of logs", "A person reads the product diff"],
     });
     expect(coverage).not.toHaveProperty("determinism_ratio");
   });

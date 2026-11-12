@@ -7,9 +7,10 @@ import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
-import { readState, saveState } from "../pipeline/state.js";
+import { saveState } from "../pipeline/state.js";
 import { deliveryForDone } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
+import { MAX_CONTINUATIONS } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
@@ -873,73 +874,47 @@ function selfMergeRuns(runs: RunRecord[], pr: OpenFactoryPr): RunRecord[] {
   return runs.filter((r) => selfMergePolicy(r.result?.merge_policy) && runEndedDone([r], pr));
 }
 
-/** Persist the SHA this update-branch produced. A missing or unchanged head is not approved. */
-function writeApprovedHead(run: RunRecord, sha: string, policy: string | null | undefined): void {
-  const state = readState(run.dir);
-  state.approved_sha = sha;
-  if (policy === "bot_review") state.reviewed_sha = sha;
-  saveState({ runDir: run.dir, events: new EventLog(run.dir, run.run_id) }, state);
-}
-
-/**
- * Drop a pin to the pre-update head, then approve only the merge commit this update-branch call just produced.
- * No previous head, a failed disable, or a commit that is not that merge: do not approve whatever is there now.
- */
-async function reapproveUpdatedHead(
-  github: GitHub,
-  repo: string,
-  pr: OpenFactoryPr,
-  runs: RunRecord[],
-  beforeSha: string | null | undefined,
-  timeoutMs: number,
-  io: Io,
-  onFailure?: () => void,
-): Promise<void> {
-  const owners = selfMergeRuns(runs, pr);
-  if (!owners.length) return;
-  const prRef = owners.map((r) => r.result?.pr ?? r.state?.pr).find((url) => url) ?? String(pr.number);
-  try {
-    await withTimeout(github.disableAutoMerge(repo, prRef), timeoutMs, `disable auto-merge #${pr.number}`);
-  } catch (e) {
-    onFailure?.();
-    io.err(`factory: disable auto-merge #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-    return;
-  }
-  // null: the open PR had no head. undefined: the read failed. Neither is a known previous commit.
-  if (!beforeSha) return;
-  let afterSha: string | null;
-  try {
-    afterSha = (await withTimeout(github.findOpenPr(repo, pr.branch), timeoutMs, `open pr #${pr.number}`))?.headSha ?? null;
-  } catch (e) {
-    onFailure?.();
-    io.err(`factory: open pr #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-    return;
-  }
-  // Same SHA as before this call, or none: not the commit update-branch just produced.
-  if (!afterSha || afterSha === beforeSha) return;
-  let parents: string[] | null;
-  try {
-    parents = await withTimeout(github.commitParents(repo, afterSha), timeoutMs, `commit #${pr.number}`);
-  } catch (e) {
-    onFailure?.();
-    io.err(`factory: commit #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-    return;
-  }
-  // update-branch merges the base into the PR: first parent is the previous head, and there is a second.
-  if (!parents || parents[0] !== beforeSha || parents.length < 2) return;
-  try {
-    await withTimeout(github.approveHead(repo, afterSha), timeoutMs, `approve #${pr.number}`);
-  } catch (e) {
-    onFailure?.();
-    io.err(`factory: approve #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-    return;
-  }
-  for (const run of owners) {
+/** Revalidate through the existing pipeline. A poller never manufactures a review SHA. */
+async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> {
+  const q = loadQueueByKey(ctx.factoryHome, await repoQueueKey(repo));
+  if (!q) return;
+  for (const run of listRuns(ctx.factoryHome).filter((r) => sameRepo(r, repo))) {
+    const st = run.state;
+    if (!st?.pr || !st.branch || !st.worktree || !run.result || st.gc_at) continue;
+    if (!st.continuation && (run.result.result !== "done" || !selfMergePolicy(run.result.merge_policy))) continue;
+    const entry = q.entries.find((e) => e.run_id === run.run_id);
+    if (!entry || entry.status === "running" || entry.status === "pending" || !entry.issue_rev) continue;
+    if (pauseRequested(ctx.factoryHome, { runId: run.run_id })) continue;
+    if (!existsSync(st.worktree) || !existsSync(join(run.dir, "plan.json"))) continue;
     try {
-      writeApprovedHead(run, afterSha, run.result?.merge_policy);
+      const status = await withTimeout(ctx.github.prStatus(repo, st.pr), ctx.netTimeoutMs, "continuation PR");
+      if (status.state !== "open") continue;
+      const head = await withTimeout(ctx.github.findOpenPr(repo, st.branch), ctx.netTimeoutMs, "continuation head");
+      if (!head?.headSha || head.url !== st.pr) continue;
+      const kind = st.continuation?.kind ?? (head.headSha !== st.approved_sha ? "head" : status.behind ? "base" : status.ci === "red" ? "ci" : undefined);
+      if (!kind) continue;
+      await withTimeout(ctx.github.disableAutoMerge(repo, st.pr), ctx.netTimeoutMs, "disable stale approval");
+      if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
+        await updateQueue(ctx.factoryHome, repo, (queue) => {
+          const own = queue.entries.find((e) => e.run_id === run.run_id);
+          if (own) park(own, `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS}); factory resume ${run.run_id}`);
+        });
+        continue;
+      }
+      const issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), ctx.netTimeoutMs, "continuation issue");
+      if (admissionBlock(issue) || entry.issue_rev !== issueRevision(issue.title, issue.body)) continue;
+      st.continuation = { kind, sha: head.headSha };
+      if (st.step === "finished") st.step = "review";
+      delete st.approved_sha;
+      saveState({ runDir: run.dir, events: new EventLog(run.dir, run.run_id) }, st);
+      await updateQueue(ctx.factoryHome, repo, (queue) => {
+        const own = queue.entries.find((e) => e.run_id === run.run_id);
+        if (own && own.status !== "running") releaseToPending(own, true);
+      });
+      ctx.io.out(`queue: #${entry.issue} resumes ${run.run_id} (${kind}; same PR)\n`);
     } catch (e) {
-      onFailure?.();
-      io.err(`factory: persist approved sha #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      ctx.netFailed = true;
+      ctx.io.err(`factory: continuation ${run.run_id}: ${(e as Error).message.slice(0, 200)}\n`);
     }
   }
 }
@@ -995,6 +970,8 @@ async function updateBehind(
       updated.delete(key);
       continue;
     }
+    // Automatic runs merge locally under their normal slot, then run gates and a delta review.
+    if (selfMergeRuns(runs, pr).length) continue;
     // A semantic conflict is a question for a person. Retrying update-branch would spin.
     if (conflicted.has(`${repo}#${pr.number}`)) continue;
     // A PR still behind 10 minutes after its last update fell behind again (another PR merged): update it again.
@@ -1002,18 +979,6 @@ async function updateBehind(
     if ((last !== undefined && Date.now() - last < BEHIND_RETRY_MS) || flight.has(repo)) {
       needsUpdate = true;
       continue;
-    }
-    const approvable = selfMergeRuns(runs, pr);
-    // Head before this call. Missing or unreadable: a later SHA is not treated as the one this update produced.
-    let beforeSha: string | null | undefined = null;
-    if (approvable.length) {
-      try {
-        beforeSha = (await withTimeout(github.findOpenPr(repo, pr.branch), timeoutMs, `open pr #${pr.number}`))?.headSha ?? null;
-      } catch (e) {
-        beforeSha = undefined;
-        onFailure?.();
-        io.err(`factory: open pr #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-      }
     }
     const job = github.updateBranch(repo, key);
     const tracked = job.finally(() => {
@@ -1043,7 +1008,6 @@ async function updateBehind(
     updated.set(key, Date.now());
     needsUpdate = true;
     io.out(`queue: updated PR #${pr.number} (behind)\n`);
-    if (approvable.length) await reapproveUpdatedHead(github, repo, pr, runs, beforeSha, timeoutMs, io, onFailure);
   }
   return { needsUpdate, openDone };
 }
@@ -1123,6 +1087,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     localBookkeeping(q, repo, ctx);
     if (!ctx.holdStarts) await discoverReady(q, ctx, repo);
   }, gitOpts);
+  if (!ctx.holdStarts) await scheduleContinuations(ctx, repo);
   const snap = loadQueueByKey(ctx.factoryHome, key);
   if (!snap) return false;
 
@@ -1261,7 +1226,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       }
       if (state === "error") continue;
       const hit = openPrs?.find((p) => factoryIssueOfBranch(p.branch) === entry.issue);
-      if (hit) {
+      if (hit && !canResume(ctx.factoryHome, entry, issueByNumber.get(entry.issue)!)) {
         park(entry, `open factory PR #${hit.number}`);
         ctx.io.out(`queue: #${entry.issue} parked: open factory PR #${hit.number}\n`);
         continue;

@@ -20,7 +20,7 @@ import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evalua
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
-import { mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
@@ -88,6 +88,7 @@ export interface FinalizeOutput {
   ciWait?: "pending" | "none";
   /** SHA the review evidence covers after a delta review. */
   reviewedSha?: string;
+  continuation?: { kind: "ci"; sha: string };
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -448,6 +449,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
+  let continuation: FinalizeOutput["continuation"];
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
@@ -547,6 +549,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         ctx.deadline.extend?.(ci.waitedMs);
         headGreen = ci.status === "green";
         if (ci.status === "red") {
+          if (selfMergePolicy(policy)) continuation = { kind: "ci", sha: head };
           result = "needs_human";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
           const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr, draft: false });
@@ -615,6 +618,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ...(approvedSha && result === "done" ? { approvedSha } : {}),
     ...(ciWait && result === "done" ? { ciWait } : {}),
     ...(reviewedSha ? { reviewedSha } : {}),
+    ...(continuation ? { continuation } : {}),
     ...skippedField(gates),
   };
 }

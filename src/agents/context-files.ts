@@ -46,10 +46,19 @@ export function isolatedContextFiles(cwd: string): { files: ContextFile[]; warni
 /** Context files Pi would load from `dir` and its ancestors (stopping at the filesystem root). */
 export function ancestorContextFiles(dir: string, opts: { includeSelf?: boolean } = {}): string[] {
   const found: string[] = [];
+  const seen = new Set<string>();
   let d = resolve(dir);
   if (!opts.includeSelf) d = dirname(d);
   for (;;) {
-    for (const n of PI_CONTEXT_NAMES) if (isFile(join(d, n))) found.push(join(d, n));
+    for (const n of PI_CONTEXT_NAMES) {
+      const path = join(d, n);
+      if (!isFile(path)) continue;
+      const st = statSync(path);
+      const identity = `${st.dev}:${st.ino}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      found.push(path);
+    }
     const up = dirname(d);
     if (up === d) return found;
     d = up;

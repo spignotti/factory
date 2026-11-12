@@ -6,7 +6,7 @@ import { FakeRunner, type FakeStep } from "../../src/agents/fake-runner.js";
 import { main } from "../../src/cli.js";
 import { auditAlias, hardenAlias, improve, improveCommand } from "../../src/commands/improve.js";
 import { FakeGitHub, type GitHub } from "../../src/gh.js";
-import { resolveProposals } from "../../src/harden/lifecycle.js";
+import { effectStatus, resolveProposals } from "../../src/harden/lifecycle.js";
 import { canonicalRepoId, loadMemory } from "../../src/memory.js";
 import { listProposals } from "../../src/proposals.js";
 import { loadProfile } from "../../src/schemas/profile.js";
@@ -14,6 +14,7 @@ import { ImproveReportSchema } from "../../src/schemas/proposal.js";
 import { makeRepo } from "../helpers/adopt-repo.js";
 import { ciRun, entry, PLAN, seedMemory, seedRun } from "../helpers/harden.js";
 import { FIXTURES } from "../helpers/repo.js";
+import { runScenario } from "../helpers/scenario.js";
 
 const NOW = new Date("2026-10-29T12:00:00.000Z");
 const CHECKS = "checks:\n  - { name: lint, run: \"true\", tier: fast }\n";
@@ -40,6 +41,18 @@ const selection = (...items: ReturnType<typeof item>[]) => ({ proposals: items }
 const answer = selection(item("Close the auth gap"));
 
 describe("factory improve", () => {
+  it("proves a chore's efficacy with the real red-on-base, green-on-head pipeline", async () => {
+    const r = await runScenario({ script: "bug-fixed.json", task: "max-bug.md", steps: (steps) => steps.map((s) => {
+      if (s.role !== "plan_high") return s;
+      const output = s.output as { acceptance: { text: string }[] };
+      return { ...s, output: { ...output, type: "chore", red_green: "required", acceptance: output.acceptance.map((a) => ({ ...a, text: `${a.text}; effect check: red_green` })) } };
+    }) });
+    expect(r.result.result, r.result.reason).toBe("done");
+    const plan = JSON.parse(r.file("plan.json"));
+    const checks = JSON.parse(r.file(`gates-${JSON.parse(r.file("state.json")).gate_count}.json`)).checks;
+    expect(checks).toContainEqual(expect.objectContaining({ name: "red_green", status: "pass", effect_proven: true }));
+    expect(effectStatus(plan, checks)).toBe("confirmed");
+  });
   it("runs configured aspects, and --aspect runs only that one", async () => {
     const ctx = setup();
     seedMemory(ctx.factoryHome, ctx.repoId, [
@@ -410,7 +423,7 @@ describe("factory improve", () => {
     expect(resolved.lifecycle).toEqual([expect.objectContaining({ id: proposal.id, status: "resolved", reason: "factory PR merged", pr: "https://github.com/o/r/pull/4" })]);
     expect(resolved.lifecycle.some((c) => c.status === "dropped")).toBe(false);
     expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === proposal.id)!.status).toBe("resolved");
-    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "resolved", ref: "https://github.com/o/r/pull/4" });
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed" });
     expect(resolved.results[0]!.ticket).toBeNull();
   });
 

@@ -84,7 +84,7 @@ export async function fixStep(
     const timeoutNote = prepared.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
       : "";
-    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(prepared.gates)}`;
+    prompt += `\n\nGates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${asData("current_gate_failures", failureSummary(prepared.gates))}`;
   }
   const sessionKey = `${ctx.runId}-fix-${label}`;
   for (;;) {
@@ -113,7 +113,7 @@ export async function fixStep(
     const timeoutNote = recovered.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
       : "";
-    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(recovered.gates)}`;
+    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${asData("current_gate_failures", failureSummary(recovered.gates))}`;
   }
 }
 

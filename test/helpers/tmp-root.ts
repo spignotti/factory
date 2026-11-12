@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,7 +24,9 @@ function makeWritable(dir: string): void {
  * (≈60k inodes; the box ran out of inodes on 31.10).
  */
 export default function setup(): () => void {
-  const root = mkdtempSync(join(tmpdir(), "factory-test-"));
+  // Git resolves /var to /private/var on macOS. One canonical root keeps lock keys and
+  // fixture identities identical to the paths git returns (not just assertion spellings).
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "factory-test-")));
   const prev = process.env.TMPDIR;
   process.env.TMPDIR = root;
   return () => {

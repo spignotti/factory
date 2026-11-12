@@ -121,6 +121,8 @@ export interface PrRequest {
 export interface GitHub {
   /** `since`: ignore check runs created before this time (PR CI after markReady: the draft-hold run is not the verdict). */
   baseStatus(repoDir: string, sha: string, opts?: { since?: string }): Promise<BaseStatus>;
+  /** Failed Actions checks on exactly this commit, with bounded diagnostic logs where available. */
+  headFailures(repoDir: string, sha: string): Promise<{ name: string; output_tail: string }[]>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
   /** Open (or any state) issues, newest page only (`--limit 100`). Not a full set. */
   listIssues(repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]>;
@@ -782,6 +784,27 @@ export class GhCli implements GitHub {
     return aggregateCheckRuns(checkRunsSince(runs, opts?.since));
   }
 
+  async headFailures(repoDir: string, sha: string): Promise<{ name: string; output_tail: string }[]> {
+    const raw = JSON.parse(await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`])) as {
+      total_count: number;
+      check_runs: { name: string; head_sha: string; conclusion: string | null; details_url?: string; app?: { slug?: string }; output?: { summary?: string; text?: string } }[];
+    };
+    if (raw.total_count > raw.check_runs.length) throw new Error("CI diagnostics incomplete; refusing a partial diagnosis");
+    const failed = raw.check_runs.filter((c) => c.head_sha === sha && c.app?.slug === "github-actions" && ["failure", "timed_out", "action_required"].includes(c.conclusion ?? ""));
+    const out: { name: string; output_tail: string }[] = [];
+    for (const check of failed.slice(0, 10)) {
+      let detail = [check.output?.summary, check.output?.text].filter(Boolean).join("\n");
+      const job = /\/job\/(\d+)(?:\D|$)/.exec(check.details_url ?? "")?.[1];
+      if (job) {
+        const logs = await gh(repoDir, ["run", "view", "--job", job, "--log-failed"]).catch(() => "");
+        detail += `\n${logs}`;
+      }
+      out.push({ name: check.name, output_tail: detail.trim().slice(-12_000) });
+    }
+    if (failed.length > 10) throw new Error("too many failed checks for bounded automatic repair");
+    return out;
+  }
+
   async getIssue(repoDir: string, n: number): Promise<Issue> {
     const out = await gh(repoDir, ["issue", "view", String(n), "--json", "number,title,body,labels,state"]);
     return issueFromGh(JSON.parse(out));
@@ -1004,6 +1027,11 @@ export class FakeGitHub implements GitHub {
 
   async baseStatus(): Promise<BaseStatus> {
     return this.status;
+  }
+
+  failures: { name: string; output_tail: string }[] = [];
+  async headFailures(): Promise<{ name: string; output_tail: string }[]> {
+    return this.failures;
   }
 
   async getIssue(_repoDir: string, n: number): Promise<Issue> {

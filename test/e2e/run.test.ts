@@ -488,17 +488,20 @@ ${fixed}` } };
     expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
   });
 
-  it("no security reviewer for ordinary files; no standards reviewer when review.checklist is off or all items are marked", async () => {
+  it("keeps marked standards in review; only an explicit checklist opt-out disables that reviewer", async () => {
     const off = await runScenario({
       script: "clean.json",
       patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
       setup: (repo) => commitFile(repo, ".factory/standards.md", "- Every exported function has a test\n"),
     });
-    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: suite -->\n") });
-    for (const r of [off, marked]) {
-      expect(r.result.result).toBe("done");
-      expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
-    }
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: suite -->\n"),
+      steps: (steps) => [...steps, { role: "review_standards", output: { reviewer: "standards", prior: [], findings: [] } }],
+    });
+    expect(off.result.result).toBe("done");
+    expect(marked.result.result).toBe("done");
+    expect(eventsOf(off, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
+    expect(eventsOf(marked, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "standards"]);
+    expect(marked.runner.calls.find((c) => c.role === "review_standards")?.prompt).toContain("Tests pass");
   });
 
   it("a dependency file anywhere activates security", async () => {
