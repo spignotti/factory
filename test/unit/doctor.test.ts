@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PiRunner } from "../../src/agents/pi-runner.js";
 import { isZenEndpoint, pingRequestOptions, piProviderView, type ProviderView } from "../../src/agents/provider-guard.js";
-import { diskChecks, doctorCommand, type DoctorReport, evaluatorChecks, repoConfigError, uiAuthChecks } from "../../src/commands/doctor.js";
+import { diskChecks, doctorCommand, type DoctorReport, evaluatorChecks, repoConfigError, testsCheck, uiAuthChecks } from "../../src/commands/doctor.js";
 import { loadRepoConfig, parseRepoConfig, type RepoConfig } from "../../src/schemas/repo.js";
 import { defaultSecretsFile, type ResolvedSecrets } from "../../src/secrets.js";
 import { FakeGitHub } from "../../src/gh.js";
@@ -362,6 +362,32 @@ describe("factory doctor: GitHub hints (no admin token, no GitHub Pro needed)", 
     const c3 = capture();
     expect(await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: gh }, c3.io)).toBe(0);
     expect(check(JSON.parse(c3.text()) as DoctorReport, "github settings")).toMatchObject({ status: "info" });
+  });
+});
+
+describe("factory doctor: tests", () => {
+  it("warns when checks or globs exist but nothing runs tests", () => {
+    const bare = parseRepoConfig("checks:\n  - { name: lint, run: 'eslint .', tier: fast }\n");
+    expect(testsCheck(bare)).toMatchObject({ status: "warn", detail: expect.stringMatching(/tests\.run is unset/) });
+    const globsOnly = parseRepoConfig("tests:\n  globs: ['**/*.test.*']\n");
+    expect(testsCheck(globsOnly).status).toBe("warn");
+    const suite = parseRepoConfig("checks:\n  - { name: unit, run: \"node --test 'test/**/*.test.js'\", tier: fast }\n");
+    expect(testsCheck(suite)).toMatchObject({ status: "ok", detail: "a check runs tests" });
+    const configured = parseRepoConfig("checks:\n  - { name: lint, run: 'eslint .', tier: fast }\ntests:\n  run: 'node --test {files}'\n");
+    expect(testsCheck(configured)).toMatchObject({ status: "ok", detail: "tests.run is set" });
+    expect(testsCheck(parseRepoConfig("checks: []\n")).status).toBe("ok");
+    const plugin = parseRepoConfig("checks:\n  - { name: lint, run: 'eslint . -c jest.config.js --plugin eslint-plugin-jest', tier: fast }\n");
+    expect(testsCheck(plugin)).toMatchObject({ status: "warn" });
+  });
+
+  it("doctor reports the tests check for a repo", async () => {
+    const repo = createFixtureRepo((c) => {
+      c.checks = [{ name: "lint", run: "eslint .", tier: "fast" }];
+      c.tests = { globs: ["test/**"] };
+    });
+    const c = capture();
+    await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c.io);
+    expect(check(JSON.parse(c.text()) as DoctorReport, "tests")).toMatchObject({ status: "warn" });
   });
 });
 

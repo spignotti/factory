@@ -344,6 +344,36 @@ export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): Doct
   return checks;
 }
 
+/** Whether a check command executes a test suite. Names alone do not count. */
+function commandRunsTests(run: string): boolean {
+  // The tool name has to be the command, not a substring of a package or a config file (`eslint-plugin-jest`, `jest.config.js`).
+  const tool = /(?:^|[\s;'"`])(?:[\w@./-]*\/)?(?:vitest|jest|mocha|ava|pytest)(?:\s|$)/;
+  return (
+    tool.test(run) ||
+    /\b(?:cargo|go|bun|deno)\s+test\b/.test(run) ||
+    /\b(?:node|tsx|ts-node)\b(?:\s+\S+)*\s+--test\b/.test(run) ||
+    /\b(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?test\b/.test(run) ||
+    /\bnox\b[^\n]*\s-s\s+\S*test/.test(run)
+  );
+}
+
+/**
+ * Bug plans need a test suite. Warn when the repo has checks or test globs, none of the checks
+ * runs tests, and `tests.run` is unset.
+ */
+export function testsCheck(repo: RepoConfig): DoctorCheck {
+  const suite = repo.checks.some((c) => commandRunsTests(c.run));
+  const configured = Boolean(repo.tests.run?.trim());
+  if (suite || configured) {
+    const how = [suite ? "a check runs tests" : "", configured ? "tests.run is set" : ""].filter(Boolean).join("; ");
+    return { name: "tests", status: "ok", detail: how };
+  }
+  if (repo.checks.length || repo.tests.globs.length) {
+    return { name: "tests", status: "warn", detail: "no check runs tests and tests.run is unset (bug plans stop with needs_human)" };
+  }
+  return { name: "tests", status: "ok", detail: "no checks and no test globs" };
+}
+
 /**
  * How many runs this repo allows. Warns when `max_runs` is above 1 and a migration directory
  * in `files` is outside `exclusive_paths`, or when a second run would share fixed host ports.
@@ -566,6 +596,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
         tracked = [];
       }
       checks.push(concurrencyCheck(repo, tracked));
+      checks.push(testsCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
       checks.push(...standardsDoctorNotes(repoDir, repo.checks));
       checks.push(...baselineConfigChecks(repoDir, repo, await probeBaselineTools()));

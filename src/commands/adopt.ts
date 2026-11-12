@@ -178,6 +178,15 @@ function prBody(r: AdoptReport, d: Detection): string {
   ].join("\n");
 }
 
+/** Paths adopt just wrote that this repo's ignore rules would keep out of `git add`. */
+async function ignoredWritten(wt: string, paths: string[]): Promise<string[]> {
+  const ignored: string[] = [];
+  for (const rel of paths) {
+    if (await gitOk(wt, ["check-ignore", "-q", "--", rel])) ignored.push(rel);
+  }
+  return ignored;
+}
+
 /** `factory adopt`: detect, measure, draft, remove legacy setup, baseline plan, one PR. */
 export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptReport> {
   const repoDir = resolve(opts.repo);
@@ -249,6 +258,11 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
       agentsNext = withTestStrategy(agentsBase, testStrategySection(detection, checks)) ?? (agentsBase !== agentsMd ? agentsBase : undefined);
     }
     if (agentsNext !== undefined) write("AGENTS.md", agentsNext);
+    const ignored = await ignoredWritten(wt, written);
+    if (ignored.length) {
+      await git(wt, ["add", "-f", "--", ...ignored]);
+      warnings.push(`gitignored files adopt wrote were force-added: ${ignored.join(", ")} (a normal git add skips them)`);
+    }
     for (const item of legacy.removed) await git(wt, ["rm", "-q", "-r", "--", item.path]);
 
     const settings = await deps.github.repoSettings(repoDir, baseBranch).catch((e: Error) => ({ private: null, auto_merge_allowed: null, branch_protected: null, required_checks: null, error: e.message }));

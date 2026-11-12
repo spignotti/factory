@@ -371,12 +371,7 @@ export function detect(dir: string, files: string[]): Detection {
   const globs = TEST_GLOBS.filter((g) => testFiles.some((f) => matchesAny(f, [g])));
   let testRun: string | null = null;
   const testScript = String((pkg?.scripts as Record<string, string> | undefined)?.test ?? "");
-  if (pm) {
-    const exec = pm === "npm" ? "npx" : `${pm} exec`;
-    if (/\bvitest\b/.test(testScript)) testRun = `${exec} vitest run {files}`;
-    else if (/\bjest\b/.test(testScript)) testRun = `${exec} jest {files}`;
-    else if (/node --test/.test(testScript)) testRun = "node --test {files}";
-  }
+  if (pm) testRun = singleFileTestCommand(testScript, pm);
   if (!testRun && python && candidates.some((c) => c.kind === "test")) {
     const prefix = python.runner === "uv" ? "uv run --locked " : python.runner === "poetry" ? "poetry run " : python.runner === "pip" ? ".venv/bin/" : "";
     testRun = `${prefix}pytest {files}`;
@@ -398,6 +393,196 @@ export function detect(dir: string, files: string[]): Detection {
     secrets: { ...envTemplateNames(dir), ...infisicalConfig(dir) },
     migration_globs: migrationDirGlobs(files),
   };
+}
+
+const LOADER_VALUE = new Set(["--import", "--loader", "--require", "-r", "--experimental-loader", "--tsconfig"]);
+
+/** Shell words. `KEY='a b'` stays one word so a loader in `NODE_OPTIONS` is not split. */
+function shellWords(segment: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  const s = segment.trim();
+  while (i < s.length) {
+    while (s[i] === " ") i++;
+    if (i >= s.length) break;
+    const env = /^([A-Za-z_][A-Za-z0-9_]*)=(['"])/.exec(s.slice(i));
+    if (env) {
+      const start = i + env[0].length;
+      const end = s.indexOf(env[2]!, start);
+      out.push(`${env[1]}=${end < 0 ? s.slice(start) : s.slice(start, end)}`);
+      i = end < 0 ? s.length : end + 1;
+      continue;
+    }
+    if (s[i] === "'" || s[i] === '"') {
+      const q = s[i]!;
+      const end = s.indexOf(q, i + 1);
+      out.push(end < 0 ? s.slice(i + 1) : s.slice(i + 1, end));
+      i = end < 0 ? s.length : end + 1;
+      continue;
+    }
+    const word = /^\S+/.exec(s.slice(i));
+    if (!word) break;
+    out.push(word[0]);
+    i += word[0].length;
+  }
+  return out;
+}
+
+function shellQuote(value: string): string {
+  return /[\s'"]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
+}
+
+/** Node loader options (`--import`, `--loader`, `--require`, `--experimental-*`) and their values. */
+function loaderFlags(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (LOADER_VALUE.has(a)) {
+      const v = args[i + 1];
+      if (v && !v.startsWith("-")) {
+        out.push(a, shellQuote(v));
+        i++;
+      }
+      continue;
+    }
+    if (/^--(?:import|loader|require)=/.test(a)) {
+      out.push(quotedEquals(a));
+      continue;
+    }
+    if (a.startsWith("--experimental-")) out.push(a);
+  }
+  return out;
+}
+
+const WATCH = new Set(["run", "--watch", "--watchAll", "-w"]);
+
+function isWatch(token: string): boolean {
+  return WATCH.has(token) || token.startsWith("--watch=") || token.startsWith("--watchAll=");
+}
+
+/** Flags that do not take the next word. A following path is a file selection, not a value. */
+const BOOLEAN_FLAG = new Set([
+  "--coverage",
+  "--silent",
+  "--ci",
+  "--runInBand",
+  "--forceExit",
+  "--detectOpenHandles",
+  "--passWithNoTests",
+  "--onlyChanged",
+  "--updateSnapshot",
+  "-u",
+  "--colors",
+  "--no-colors",
+  "--no-coverage",
+  "--no-file-parallelism",
+  "--dangerouslyIgnoreUnhandledErrors",
+  "--standalone",
+  "--experimental-vm-modules",
+]);
+
+function quotedEquals(token: string): string {
+  const eq = token.indexOf("=");
+  let value = token.slice(eq + 1);
+  const quote = value[0];
+  if ((quote === '"' || quote === "'") && value.endsWith(quote) && value.length >= 2) value = value.slice(1, -1);
+  return `${token.slice(0, eq + 1)}${shellQuote(value)}`;
+}
+
+/** Keeps flags and their values. Drops watch mode and positional files so `{files}` is the selection. */
+function toolFlags(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (isWatch(a) || !a.startsWith("-")) continue;
+    if (a.includes("=")) {
+      out.push(quotedEquals(a));
+      continue;
+    }
+    const v = args[i + 1];
+    if (v && !v.startsWith("-") && !BOOLEAN_FLAG.has(a) && !a.startsWith("--experimental-")) {
+      out.push(a, shellQuote(v));
+      i++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+/**
+ * Flags for `node --test`. Loader flags stay even when they follow `--test`
+ * (`node --test --import tsx`). Other flags stay only when they precede `--test`.
+ * Watch mode and file arguments are dropped.
+ */
+function nodeTestFlags(args: string[], runnerAt: number, testAt: number): string[] {
+  const out: string[] = [];
+  for (let i = runnerAt + 1; i < args.length; i++) {
+    if (i === testAt) continue;
+    const a = args[i]!;
+    const loaderEquals = /^--(?:import|loader|require)=/.test(a);
+    const loader = LOADER_VALUE.has(a) || a.startsWith("--experimental-") || loaderEquals;
+    if (loader) {
+      if (loaderEquals) out.push(quotedEquals(a));
+      else if (LOADER_VALUE.has(a)) {
+        const v = args[i + 1];
+        if (v && !v.startsWith("-")) {
+          out.push(a, shellQuote(v));
+          i++;
+        } else out.push(a);
+      } else out.push(a);
+      continue;
+    }
+    if (i < testAt && a.startsWith("-") && !isWatch(a)) {
+      const v = args[i + 1];
+      if (v && !v.startsWith("-") && !BOOLEAN_FLAG.has(a) && i + 1 !== testAt) {
+        out.push(a, shellQuote(v));
+        i++;
+      } else out.push(a);
+    }
+  }
+  return out;
+}
+
+function binName(token: string, name: string): boolean {
+  return new RegExp(`(?:^|/)${name}(?:\\.m?js)?$`).test(token);
+}
+
+/**
+ * Command that runs the cited test files. Taken from the repo's `test` script.
+ * Node loader flags stay (`--import tsx`, `--loader`, `--experimental-strip-types`, a loader in `NODE_OPTIONS`).
+ * File arguments and watch mode (`--watch`, `--watchAll`, `-w`) do not: `{files}` is the selection.
+ */
+export function singleFileTestCommand(script: string, pm: NonNullable<Detection["package_manager"]>): string | null {
+  const exec = pm === "npm" ? "npx" : `${pm} exec`;
+  for (const segment of script.split(/\s*(?:&&|\|\||;)\s*/)) {
+    const words = shellWords(segment);
+    const env = words.filter((w) => w.startsWith("NODE_OPTIONS=") && /import|loader|require|experimental/.test(w));
+    const args = words.filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+    const prefix = env.map((w) => `NODE_OPTIONS=${shellQuote(w.slice("NODE_OPTIONS=".length))}`).join(" ");
+    const lead = prefix ? `${prefix} ` : "";
+    const vitest = args.findIndex((a) => binName(a, "vitest"));
+    const jest = args.findIndex((a) => binName(a, "jest"));
+    const tool = vitest >= 0 ? vitest : jest;
+    if (tool >= 0) {
+      const before = args.slice(0, tool);
+      const nodeAt = before.findIndex((a) => binName(a, "node"));
+      const keptLoaders = nodeAt >= 0 ? loaderFlags(before.slice(nodeAt + 1)) : [];
+      const flags = toolFlags(args.slice(tool + 1));
+      const tail = `${vitest >= 0 ? "run " : ""}${flags.length ? `${flags.join(" ")} ` : ""}{files}`;
+      if (nodeAt >= 0 && keptLoaders.length) return `${lead}node ${keptLoaders.join(" ")} ${shellQuote(args[tool]!)} ${tail}`;
+      const bin = vitest >= 0 ? "vitest" : "jest";
+      return `${lead}${exec} ${bin} ${tail}`;
+    }
+    const runnerAt = args.findIndex((a) => binName(a, "node") || binName(a, "tsx") || binName(a, "ts-node"));
+    const testAt = args.indexOf("--test");
+    if (runnerAt >= 0 && testAt > runnerAt) {
+      const flags = nodeTestFlags(args, runnerAt, testAt);
+      const flagText = flags.length ? `${flags.join(" ")} ` : "";
+      return `${lead}${args[runnerAt]} ${flagText}--test {files}`;
+    }
+  }
+  return null;
 }
 
 /** `.infisical.json` presence and its `workspaceId` (the project id), only when it is a plain id (it ends up in a shell command). */
