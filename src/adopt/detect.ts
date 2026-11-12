@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { CI_STUB_PATH } from "../ci.js";
+import { migrationDirGlobs } from "../paths.js";
 import { matchesAny } from "../schemas/plan.js";
 import { joinArgv, mutatingName, noxSessionBodies, readOnlyCommand, analyzeCommand } from "./mutation.js";
 
@@ -72,6 +73,8 @@ export interface Detection {
   special_jobs: SpecialJob[];
   /** Secret names from an env template (never values) and whether a secrets-manager config is present. */
   secrets: { names: string[]; sources: string[]; infisical: boolean; infisicalProjectId?: string };
+  /** Migration directories in the tree, as exclusive-path globs (`supabase/migrations/**`). */
+  migration_globs: string[];
 }
 
 export const ENV_TEMPLATES = [".env.example", ".env.sample", ".env.template", ".env.dist"];
@@ -393,6 +396,7 @@ export function detect(dir: string, files: string[]): Detection {
     workflows,
     special_jobs: specialJobs(workflows),
     secrets: { ...envTemplateNames(dir), ...infisicalConfig(dir) },
+    migration_globs: migrationDirGlobs(files),
   };
 }
 

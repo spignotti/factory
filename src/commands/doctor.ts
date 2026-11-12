@@ -6,8 +6,10 @@ import { baselineConfigChecks, baselineGithubChecks, probeBaselineTools } from "
 import { ciStubCheck, ciStubMode, defaultRef, LEGACY_REQUIRED_CHECK, otherPrWorkflows, REQUIRED_CHECK } from "../ci.js";
 import { describeToolchains, resolveToolchains } from "../toolchains.js";
 import { GhCli, type GitHub } from "../gh.js";
-import { baseRef, remotesWithCredentials, revParse, withBaseWorktree } from "../git.js";
+import { baseRef, git, remotesWithCredentials, revParse, withBaseWorktree } from "../git.js";
 import { describeProfile, loadLayers, resolveProfile, withRepoModels } from "../config.js";
+import { migrationDirGlobs } from "../paths.js";
+import { touchesExclusive } from "../pipeline/overlap.js";
 import { loadRepoConfig, REPO_CONFIG_PATH, repoConfigHasFastLane, type RepoConfig } from "../schemas/repo.js";
 import type { Profile } from "../schemas/profile.js";
 import type { Io } from "./gates.js";
@@ -342,18 +344,25 @@ export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): Doct
   return checks;
 }
 
-/** How many runs this repo allows, and whether fixed host ports make a second run env_missing. */
-export function concurrencyCheck(repo: RepoConfig): DoctorCheck {
+/**
+ * How many runs this repo allows. Warns when `max_runs` is above 1 and a migration directory
+ * in `files` is outside `exclusive_paths`, or when a second run would share fixed host ports.
+ */
+export function concurrencyCheck(repo: RepoConfig, files: readonly string[] = []): DoctorCheck {
   const { max_runs, exclusive_paths, resources } = repo.concurrency;
   const paths = exclusive_paths.length ? exclusive_paths.join(", ") : "(none)";
   const showPaths = exclusive_paths.length > 0 || max_runs > 1;
   let base = showPaths ? `max_runs ${max_runs}; exclusive_paths ${paths}` : `max_runs ${max_runs}`;
   // An empty list is the default: doctor output stays the same until a resource is named.
   if (resources.length) base += `; resources ${resources.join(", ")}`;
-  const fixed = repo.services.filter((s) => s.host && (s.ports?.length ?? 0) > 0);
-  if (max_runs > 1 && fixed.length) {
-    return { name: "concurrency", status: "warn", detail: `${base}; ${fixed.map((s) => s.name).join(", ")} has fixed host ports (one instance per box)` };
+  const notes: string[] = [];
+  if (max_runs > 1) {
+    const uncovered = migrationDirGlobs(files).filter((glob) => !touchesExclusive([glob.replace(/\/\*\*$/, "/x")], exclusive_paths));
+    if (uncovered.length) notes.push(`migrations not covered by exclusive_paths: ${uncovered.join(", ")}`);
+    const fixed = repo.services.filter((s) => s.host && (s.ports?.length ?? 0) > 0);
+    if (fixed.length) notes.push(`${fixed.map((s) => s.name).join(", ")} has fixed host ports (one instance per box)`);
   }
+  if (notes.length) return { name: "concurrency", status: "warn", detail: `${base}; ${notes.join("; ")}` };
   return { name: "concurrency", status: "ok", detail: base };
 }
 
@@ -550,7 +559,13 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       if (repoConfigHasFastLane(readFileSync(join(repoDir, REPO_CONFIG_PATH), "utf8"))) {
         checks.push({ name: "fast_lane", status: "warn", detail: "fast_lane: is ignored; the fast lane was removed" });
       }
-      checks.push(concurrencyCheck(repo));
+      let tracked: string[] = [];
+      try {
+        tracked = (await git(repoDir, ["ls-files"])).split("\n").filter(Boolean);
+      } catch {
+        tracked = [];
+      }
+      checks.push(concurrencyCheck(repo, tracked));
       checks.push(...ciChecks(repoDir, repo));
       checks.push(...standardsDoctorNotes(repoDir, repo.checks));
       checks.push(...baselineConfigChecks(repoDir, repo, await probeBaselineTools()));

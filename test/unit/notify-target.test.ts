@@ -277,7 +277,7 @@ describe("named notify targets", () => {
 
   it("resume of a stored target notifies that target", async () => {
     const factoryHome = home();
-    const repo = createFixtureRepo();
+    const repo = createFixtureRepo((c) => void (c.concurrency = { max_runs: 1 }));
     execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/widgets.git"], { cwd: repo });
     const runId = "20261030-101010-abcdef";
     const runDir = join(factoryHome, "runs", runId);

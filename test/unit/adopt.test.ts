@@ -133,6 +133,23 @@ describe("adopt draft", () => {
     expect(tiers).toEqual({ typecheck: "full", lint: "manual", test: "full", e2e: "full", deploy: "manual" });
   });
 
+  it("drafts max_runs 2 and the migration directories that are present", () => {
+    const dir = makeRepo({
+      "package.json": JSON.stringify({ name: "app" }),
+      "supabase/migrations/001_init.sql": "select 1;\n",
+      "prisma/migrations/002_add/migration.sql": "select 1;\n",
+      "alembic/versions/abc.py": "revision = 'abc'\n",
+      "src/migrations/003.sql": "select 1;\n",
+    });
+    const listed = files(dir);
+    const { config } = draftRepoYaml({ detection: detect(dir, listed), checks: [], baseBranch: "main", date: "2026-10-29" });
+    expect(config.concurrency).toEqual({
+      max_runs: 2,
+      exclusive_paths: ["alembic/versions/**", "prisma/migrations/**", "src/migrations/**", "supabase/migrations/**"],
+      resources: [],
+    });
+  });
+
   it("repo.yaml is valid, commented and has the defaults adopt promises", () => {
     const dir = legacyNodeRepo();
     const d = detect(dir, files(dir));
@@ -143,6 +160,8 @@ describe("adopt draft", () => {
     expect(config.checks.map((c) => c.tier)).toEqual(["fast", "fast", "fast", "full", "full"]);
     expect(config.human_only_paths).toEqual([".factory/**", ".github/workflows/**"]);
     expect(config.sensitive_paths).toEqual(["**/migrations/**"]);
+    expect(config.concurrency).toEqual({ max_runs: 2, exclusive_paths: [], resources: [] });
+    expect(text).toContain("exclusive_paths are migration directories found at adopt");
     expect(config.merge.auto_merge_max_risk).toBe("none");
     expect(config.tests.run).toBe("pnpm exec vitest run {files}");
   });

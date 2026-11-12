@@ -197,9 +197,17 @@ describe("risk and host steps", () => {
   });
 
   it("doctor concurrency line", () => {
-    expect(concurrencyCheck(repo)).toEqual({ name: "concurrency", status: "ok", detail: "max_runs 1" });
+    expect(concurrencyCheck(repo)).toEqual({ name: "concurrency", status: "ok", detail: "max_runs 2; exclusive_paths (none)" });
     const parallel = parseRepoConfig("concurrency: { max_runs: 2 }\n");
     expect(concurrencyCheck(parallel).detail).toBe("max_runs 2; exclusive_paths (none)");
+    const migration = ["supabase/migrations/001.sql", "alembic/versions/a.py", "src/migrations/002.sql"];
+    const warned = concurrencyCheck(repo, migration);
+    expect(warned.status).toBe("warn");
+    expect(warned.detail).toContain("migrations not covered by exclusive_paths: alembic/versions/**, src/migrations/**, supabase/migrations/**");
+    const covered = parseRepoConfig('concurrency: { max_runs: 2, exclusive_paths: ["**/migrations/**", "alembic/versions/**"] }\n');
+    expect(concurrencyCheck(covered, migration).status).toBe("ok");
+    const single = parseRepoConfig("concurrency: { max_runs: 1 }\n");
+    expect(concurrencyCheck(single, migration)).toEqual({ name: "concurrency", status: "ok", detail: "max_runs 1" });
   });
 
   it("open factory PR files ignore other branches and overlap like path claims", () => {
@@ -298,9 +306,10 @@ describe("risk and host steps", () => {
   });
 
   it("needsConcurrencyPathClaim when max_runs>1 or exclusive_paths set", () => {
-    expect(needsConcurrencyPathClaim(parseRepoConfig(""))).toBe(false);
+    expect(needsConcurrencyPathClaim(parseRepoConfig(""))).toBe(true);
+    expect(needsConcurrencyPathClaim(parseRepoConfig("concurrency: { max_runs: 1 }\n"))).toBe(false);
     expect(needsConcurrencyPathClaim(parseRepoConfig("concurrency: { max_runs: 2 }\n"))).toBe(true);
-    expect(needsConcurrencyPathClaim(parseRepoConfig('concurrency: { exclusive_paths: ["a/**"] }\n'))).toBe(true);
+    expect(needsConcurrencyPathClaim(parseRepoConfig('concurrency: { max_runs: 1, exclusive_paths: ["a/**"] }\n'))).toBe(true);
   });
 
   it("parallel slot acquires retry through brief alloc guard contention", async () => {

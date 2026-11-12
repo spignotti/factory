@@ -84,6 +84,7 @@ describe("notify hook on run_finished", () => {
     let release: (() => void) | undefined;
     const r = await runScenario({
       script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
       setup: h.setup,
       // Lock id is the origin URL git reports. A credential rewrite (https://token@github.com/…) must not miss the lock.
       before: (repo, home) => (h.before(repo, home), void (release = acquireRepoLock(home, git(repo, "remote", "get-url", "origin").trim(), "20261029-000000-aaaaaa"))),
@@ -327,7 +328,11 @@ describe("E2E with fake-runner on a fixture repo", () => {
   });
 
   it("a branch name taken on the remote gets the run id suffix; result.json says where the work is", async () => {
-    const r = await runScenario({ script: "clean.json", setup: (repo) => void addOrigin(repo, ["factory/task-add-a-multiply-function"]) });
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
+      setup: (repo) => void addOrigin(repo, ["factory/task-add-a-multiply-function"]),
+    });
     expect(r.result.result).toBe("done");
     const head = r.github.prs[0]!.head;
     expect(head).toBe(`factory/task-add-a-multiply-function-${r.result.run_id.slice(-6)}`);
@@ -1045,10 +1050,11 @@ describe("base moved before finalize", () => {
 });
 
 describe("one run per repo", () => {
-  it("a second run on the same repo (another task) returns locked, naming the holder", async () => {
+  it("an explicit max_runs of 1 locks a second run and names the holder", async () => {
     let release: (() => void) | undefined;
     const r = await runScenario({
       script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
       before: (repo, home) => void (release = acquireRepoLock(home, repo, "20261029-000000-aaaaaa")),
     });
     release?.();
@@ -1060,6 +1066,7 @@ describe("one run per repo", () => {
   it("--wait queues until the repo is free, then runs", async () => {
     const r = await runScenario({
       script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
       options: { wait: true },
       deps: { lockPollMs: 10 },
       before: (repo, home) => {
@@ -1259,7 +1266,11 @@ describe("base_red resume", () => {
     local.github.status = "green";
     expect(await continueBaseRed(local.runId, depsOf(local))).toBeUndefined();
 
-    const locked = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "red") });
+    const locked = await runScenario({
+      script: "clean.json",
+      github: (gh) => void (gh.status = "red"),
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
+    });
     const release = acquireRepoLock(locked.factoryHome, locked.repo, "20261029-000000-bbbbbb")!;
     locked.github.status = "green";
     try {

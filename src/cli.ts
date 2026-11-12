@@ -37,7 +37,8 @@ const USAGE = `usage:
   factory --version
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>)
               [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait] [--run-id <id>]
-              (one run per repo at a time: busy repo → result "locked", or queue with --wait)
+              (up to concurrency.max_runs runs per repo, default 2; a full repo or an overlapping
+               plan → result "locked", or queue with --wait; exclusive_paths run alone)
               [--notify <target>] [--no-notify]
               (refuse to start without a notify hook for the repo unless --no-notify;
                --notify names a targets: entry in notify.yaml, stored on the run)
