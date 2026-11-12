@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
-import { autoMergeAlreadyEnabled, FakeGitHub } from "../../src/gh.js";
+import { autoMergeAlreadyEnabled, autoMergeNotEnabled, FakeGitHub } from "../../src/gh.js";
 import { autoMergeCompletes, mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../../src/pipeline/merge-ready.js";
 import { enableReadyMerges } from "../../src/queue/worker.js";
 
@@ -16,14 +16,18 @@ describe("merge readiness", () => {
     expect(autoMergeCompletes({ enabled: false, requiredChecks: ["done"], checks: [{ name: "done", conclusion: "success" }] })).toBe(false);
     // The live factory ruleset requires `check`, not `done`. That path does not count as enforced.
     expect(autoMergeCompletes({ enabled: true, requiredChecks: ["check"], checks: [{ name: "check", conclusion: "success" }] })).toBe(false);
-    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "bbb", ci: "green", draft: false, state: "open" })).toBe(false);
-    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "pending", draft: false, state: "open" })).toBe(false);
-    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: true, state: "open" })).toBe(false);
-    expect(mayEnableAutoMerge({ policy: "human_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(false);
-    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(true);
-    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(true);
-    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "bbb", ci: "green", draft: false, state: "open" })).toBe(false);
-    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(false);
+    const done = ["done"];
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "bbb", ci: "green", draft: false, state: "open", requiredChecks: done })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "pending", draft: false, state: "open", requiredChecks: done })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: true, state: "open", requiredChecks: done })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "human_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open", requiredChecks: done })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open", requiredChecks: null })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open", requiredChecks: ["Lint"] })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open", requiredChecks: done })).toBe(true);
+    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "aaa", ci: "green", draft: false, state: "open", requiredChecks: done })).toBe(true);
+    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "bbb", ci: "green", draft: false, state: "open", requiredChecks: done })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open", requiredChecks: done })).toBe(false);
   });
 
   it("self-merge and CI wait are one predicate for finalize and the worker", () => {
@@ -43,6 +47,8 @@ describe("merge readiness", () => {
   it("a restarted enable that GitHub already accepted is not a second merge", () => {
     expect(autoMergeAlreadyEnabled("GraphQL: Auto merge is already enabled (enablePullRequestAutoMerge)")).toBe(true);
     expect(autoMergeAlreadyEnabled("pull request is not mergeable")).toBe(false);
+    expect(autoMergeNotEnabled("auto merge is not enabled")).toBe(true);
+    expect(autoMergeNotEnabled("pull request is not mergeable")).toBe(false);
   });
 
   it("V02/V03: the runner enables auto-merge once for the approved green SHA and not for a newer head", async () => {
@@ -64,6 +70,7 @@ describe("merge readiness", () => {
       merge_policy: "auto", pr, rounds: 1, minutes: 1, cost_usd: 0, reason: "", branch, worktree: null, run_dir: dir,
     }));
     const github = new FakeGitHub();
+    github.settings.required_checks = ["done"];
     github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
     github.remoteShas.set(branch, "bbb");
     github.prStates.set(pr, { state: "open", draft: false, ci: "green" });
@@ -71,15 +78,30 @@ describe("merge readiness", () => {
     const io = { out: () => undefined, err: () => undefined };
     expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(false);
     expect(github.autoMerged).toEqual([]);
+    expect(github.autoMergeDisabled).toEqual([pr]);
 
     github.remoteShas.set(branch, "aaa");
     github.prStates.set(pr, { state: "open", draft: false, ci: "pending" });
     expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(true);
     expect(github.autoMerged).toEqual([]);
 
+    github.settings.required_checks = [];
     github.prStates.set(pr, { state: "open", draft: false, ci: "green" });
     expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(false);
+    expect(github.autoMerged).toEqual([]);
+    github.settings.required_checks = null;
+    expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(false);
+    expect(github.autoMerged).toEqual([]);
+    github.repoSettings = async () => {
+      throw new Error("settings down");
+    };
+    expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(false);
+    expect(github.autoMerged).toEqual([]);
+    github.repoSettings = async () => github.settings;
+    github.settings.required_checks = ["done"];
+    expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(false);
     expect(github.autoMerged).toEqual([pr]);
+    expect(github.autoMergeShas).toEqual([{ pr, sha: "aaa" }]);
     expect(await enableReadyMerges(github, repo, home, enabled, io, 1_000)).toBe(false);
     expect(github.autoMerged).toEqual([pr]);
 
@@ -120,6 +142,7 @@ describe("merge readiness", () => {
       merge_policy: "bot_review", pr, rounds: 1, minutes: 1, cost_usd: 0, reason: "", branch, worktree: null, run_dir: dir,
     }));
     const github = new FakeGitHub();
+    github.settings.required_checks = ["done"];
     github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
     github.remoteShas.set(branch, "ccc");
     github.prStates.set(pr, { state: "open", draft: false, ci: "green" });

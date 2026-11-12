@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -756,6 +756,7 @@ describe("factory queue", () => {
       pr, pr_draft: false, approved_sha: "abc123", ci_wait: "pending", updated_at: "2026-11-12T00:00:00.000Z",
     }));
     writeFileSync(join(dir, "result.json"), JSON.stringify(outcome(repo, 8, "done", "", { run_id: runId, pr, branch, merge_policy: "auto" })) + "\n");
+    github.settings.required_checks = ["done"];
     github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
     github.remoteShas.set(branch, "abc123");
     github.prStates.set(pr, { state: "open", draft: false, ci: "pending" });
@@ -786,6 +787,98 @@ describe("factory queue", () => {
     expect(github.autoMerged).toEqual([pr]);
     expect(polls).toBeGreaterThanOrEqual(2);
     expect(cap.out()).toContain(`queue: auto-merge ${pr}`);
+  });
+
+  it("re-approves the head an update-branch just produced and disables auto-merge", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    const runId = "20261112-140000-bbbbbb";
+    const pr = "https://github.test/pr/7";
+    const branch = "factory/7-goal";
+    const oldSha = "a".repeat(40);
+    const newSha = "b".repeat(40);
+    const dir = join(factoryHome, "runs", runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({
+      version: 1, run_id: runId, repo, task: { ref: "#7", title: "t", text: "", labels: [] }, no_pr: false,
+      step: "finished", result: "done", reason: "", branch, worktree: null, base_sha: null,
+      packages: {}, failures: {}, handoffs: [], rounds: 1, findings: [], gate_count: 1,
+      pr, pr_draft: false, approved_sha: oldSha, updated_at: "2026-11-12T00:00:00.000Z",
+    }));
+    writeFileSync(join(dir, "result.json"), JSON.stringify(outcome(repo, 7, "done", "", { run_id: runId, pr, branch, merge_policy: "auto" })) + "\n");
+    github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
+    github.remoteShas.set(branch, oldSha);
+    github.updateBranchHead = newSha;
+    github.factoryPrs.push({ number: 7, branch, files: ["src/a.js"] });
+    github.prStates.set(pr, { state: "open", draft: false, behind: true });
+    await runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 15,
+      start: () => {
+        throw new Error("should not start");
+      },
+      io: capture().io,
+    });
+    expect(github.updatedBranches).toEqual(["7"]);
+    expect(github.autoMergeDisabled).toEqual([pr]);
+    expect(github.approvedShas).toEqual([newSha]);
+    expect(github.autoMerged).toEqual([]);
+    expect((await github.findOpenPr(repo, branch))?.headSha).toBe(newSha);
+    expect(github.remoteShas.get(branch)).toBe(newSha);
+    expect(JSON.parse(readFileSync(join(dir, "state.json"), "utf8")).approved_sha).toBe(newSha);
+  });
+
+  it("bot_review re-approves and re-reviews the update-branch head; human_review does not", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    const plant = (id: string, n: number, policy: "bot_review" | "human_review", branch: string, sha: string) => {
+      const pr = `https://github.test/pr/${n}`;
+      const dir = join(factoryHome, "runs", id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "state.json"), JSON.stringify({
+        version: 1, run_id: id, repo, task: { ref: `#${n}`, title: "t", text: "", labels: [] }, no_pr: false,
+        step: "finished", result: "done", reason: "", branch, worktree: null, base_sha: null,
+        packages: {}, failures: {}, handoffs: [], rounds: 1, findings: [], gate_count: 1,
+        pr, pr_draft: false, approved_sha: sha, reviewed_sha: sha, updated_at: "2026-11-12T00:00:00.000Z",
+      }));
+      writeFileSync(join(dir, "result.json"), JSON.stringify(outcome(repo, n, "done", "", { run_id: id, pr, branch, merge_policy: policy })) + "\n");
+      github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
+      github.remoteShas.set(branch, sha);
+      github.factoryPrs.push({ number: n, branch, files: [`src/${n}.js`] });
+      github.prStates.set(pr, { state: "open", draft: false, behind: true });
+      return { dir, pr, sha };
+    };
+    const bot = plant("20261112-150000-bbbbbb", 8, "bot_review", "factory/8-goal", "a".repeat(40));
+    const human = plant("20261112-150001-cccccc", 9, "human_review", "factory/9-goal", "c".repeat(40));
+    await runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 15,
+      start: () => {
+        throw new Error("should not start");
+      },
+      io: capture().io,
+    });
+    const botHead = github.remoteShas.get("factory/8-goal");
+    expect(botHead).toBeTruthy();
+    expect(botHead).not.toBe(bot.sha);
+    expect(github.autoMergeDisabled).toContain(bot.pr);
+    expect(github.approvedShas).toEqual([botHead]);
+    const botState = JSON.parse(readFileSync(join(bot.dir, "state.json"), "utf8")) as { approved_sha?: string; reviewed_sha?: string };
+    expect(botState.approved_sha).toBe(botHead);
+    expect(botState.reviewed_sha).toBe(botHead);
+    const humanState = JSON.parse(readFileSync(join(human.dir, "state.json"), "utf8")) as { approved_sha?: string };
+    expect(humanState.approved_sha).toBe(human.sha);
+    expect(github.approvedShas).not.toContain(github.remoteShas.get("factory/9-goal"));
   });
 
   it("uses result.json on restart even when the stored pid is alive, and ignores a pid whose command line is not the run", async () => {

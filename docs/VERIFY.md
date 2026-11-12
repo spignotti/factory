@@ -66,7 +66,7 @@ Unverified (needs a real provider):
   process and no network). A failed rules request leaves the classic result in place.
 - Factory full gates invoke `zizmor --offline`. UNVERIFIED against a current zizmor binary (the flag is
   the documented switch that skips the GitHub API). Tests inject the command and do not spawn it.
-- `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash`), `getIssue`, `updatePr`, `markReady` and
+- `createPr`, `enableAutoMerge` (`gh pr merge --auto --squash --match-head-commit <sha>`), `disableAutoMerge` (`gh pr merge --disable-auto`; ignore when auto-merge was not enabled), `getIssue`, `updatePr`, `markReady` and
   `prStatus` have not yet run from a factory run against a real repository (tests use `FakeGitHub`;
   `push` is verified against a local bare remote).
 - `getIssue` also reads `state` (`OPEN` / `CLOSED`) for `queue add`. UNVERIFIED against a live `gh`.
@@ -83,8 +83,9 @@ Unverified (needs a real provider):
   does not create an issue. UNVERIFIED against a live `gh`. Tests drive `paginateOpenIssues` without `gh`.
 - `findFactoryPr` lists with `gh pr list --state all --search head:factory/<issue> --json number,state,headRefName`
   and keeps only a head that is exactly `factory/<issue>` or `factory/<issue>-*`. UNVERIFIED against a live `gh`.
-- `updateBranch` runs `gh pr update-branch <pr>` (merge from the base, no `--rebase`, no force-push)
-  so a behind factory PR can auto-merge after CI. UNVERIFIED against a live `gh`. Tests use `FakeGitHub`.
+- `updateBranch` runs `gh pr update-branch <pr>` (merge from the base, no `--rebase`, no force-push).
+  For `auto` and `bot_review` the worker disables auto-merge and approves the new head; CI has to pass on that head.
+  UNVERIFIED against a live `gh`. Tests use `FakeGitHub`.
 - `openFactoryPrFiles` uses `gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository,files`.
   UNVERIFIED against a live `gh`: `files` is an exportable field; the parser accepts `{path}` / `{filename}`
   and a `{nodes}` wrapper. A page that hits 1000 is incomplete: the run blocks instead of treating it as every open PR.

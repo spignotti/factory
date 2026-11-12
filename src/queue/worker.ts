@@ -2,11 +2,12 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { realSleep, type Sleep } from "../agents/fake-runner.js";
-import { ResultSchema, type RunResult } from "../events.js";
+import { EventLog, ResultSchema, type RunResult } from "../events.js";
 import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
-import { mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { readState, saveState } from "../pipeline/state.js";
 import { deliveryForDone } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
@@ -776,9 +777,21 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
   });
 }
 
+/** Branch protection contexts, or null when they cannot be read. Null does not enable auto-merge. */
+async function requiredChecksFor(github: GitHub, repo: string, timeoutMs: number): Promise<readonly string[] | null> {
+  let branch = "main";
+  try {
+    branch = loadRepoConfig(repo).base_branch;
+  } catch {
+    // no repo.yaml (unit tests): settings still decide
+  }
+  return (await withTimeout(github.repoSettings(repo, branch), timeoutMs, "repo settings")).required_checks;
+}
+
 /**
- * Done runs whose policy is auto or bot_review: enable auto-merge once the approved SHA is the head and CI is green.
- * bot_review also requires that head to be the reviewed SHA. A newer head, a draft, or CI that is not green does not merge.
+ * Done runs whose policy is auto or bot_review: enable auto-merge once the approved SHA is the head and CI is green,
+ * and `done` is required. bot_review also requires that head to be the reviewed SHA.
+ * A live head that is not the approved SHA disables auto-merge and is not enabled.
  * Pending CI keeps the worker up only while `untilMs` is set; it does not take a coding slot.
  * Returns true when a PR is still waiting on CI.
  */
@@ -793,6 +806,14 @@ export async function enableReadyMerges(
 ): Promise<boolean> {
   const runs = listRuns(factoryHome).filter((run) => sameRepo(run, repo));
   let waiting = false;
+  let requiredChecks: readonly string[] | null;
+  try {
+    requiredChecks = await requiredChecksFor(github, repo, timeoutMs);
+  } catch (e) {
+    onFailure?.();
+    io.err(`factory: repo settings failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
+    requiredChecks = null;
+  }
   for (const run of runs) {
     const policy = run.result?.merge_policy;
     const approved = run.state?.approved_sha;
@@ -820,12 +841,22 @@ export async function enableReadyMerges(
         continue;
       }
     }
+    if (status.state === "open" && head && head !== approved) {
+      try {
+        await withTimeout(github.disableAutoMerge(repo, pr), timeoutMs, `disable auto-merge ${pr}`);
+      } catch (e) {
+        onFailure?.();
+        io.err(`factory: disable auto-merge ${pr} failed: ${(e as Error).message.slice(0, 200)}\n`);
+        waiting = true;
+      }
+      continue;
+    }
     if (waitingOnMergeCi({ policy, ci: status.ci, draft: status.draft, state: status.state })) waiting = true;
-    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, reviewedSha: run.state?.reviewed_sha, ci: status.ci, draft: status.draft, state: status.state })) continue;
+    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, reviewedSha: run.state?.reviewed_sha, ci: status.ci, draft: status.draft, state: status.state, requiredChecks })) continue;
     const key = `${pr}@${approved}`;
     if (enabled.has(key)) continue;
     try {
-      await withTimeout(github.enableAutoMerge(repo, pr), timeoutMs, `auto-merge ${pr}`);
+      await withTimeout(github.enableAutoMerge(repo, pr, approved), timeoutMs, `auto-merge ${pr}`);
       enabled.add(key);
       io.out(`queue: auto-merge ${pr}\n`);
     } catch (e) {
@@ -837,9 +868,73 @@ export async function enableReadyMerges(
   return waiting;
 }
 
+function selfMergeRuns(runs: RunRecord[], pr: OpenFactoryPr): RunRecord[] {
+  return runs.filter((r) => selfMergePolicy(r.result?.merge_policy) && runEndedDone([r], pr));
+}
+
+/** Persist the SHA this update-branch produced. A missing or unchanged head is not approved. */
+function writeApprovedHead(run: RunRecord, sha: string, policy: string | null | undefined): void {
+  const state = readState(run.dir);
+  state.approved_sha = sha;
+  if (policy === "bot_review") state.reviewed_sha = sha;
+  saveState({ runDir: run.dir, events: new EventLog(run.dir, run.run_id) }, state);
+}
+
+/**
+ * Drop a pin to the pre-update head, then approve only the head this update-branch call just produced.
+ * `beforeSha` undefined means the previous head could not be read: do not approve whatever is there now.
+ */
+async function reapproveUpdatedHead(
+  github: GitHub,
+  repo: string,
+  pr: OpenFactoryPr,
+  runs: RunRecord[],
+  beforeSha: string | null | undefined,
+  timeoutMs: number,
+  io: Io,
+  onFailure?: () => void,
+): Promise<void> {
+  const owners = selfMergeRuns(runs, pr);
+  if (!owners.length) return;
+  const prRef = owners.map((r) => r.result?.pr ?? r.state?.pr).find((url) => url) ?? String(pr.number);
+  try {
+    await withTimeout(github.disableAutoMerge(repo, prRef), timeoutMs, `disable auto-merge #${pr.number}`);
+  } catch (e) {
+    onFailure?.();
+    io.err(`factory: disable auto-merge #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+  }
+  if (beforeSha === undefined) return;
+  let afterSha: string | null;
+  try {
+    afterSha = (await withTimeout(github.findOpenPr(repo, pr.branch), timeoutMs, `open pr #${pr.number}`))?.headSha ?? null;
+  } catch (e) {
+    onFailure?.();
+    io.err(`factory: open pr #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    return;
+  }
+  // Same SHA as before this call, or none: not the commit update-branch just produced.
+  if (!afterSha || afterSha === beforeSha) return;
+  try {
+    await withTimeout(github.approveHead(repo, afterSha), timeoutMs, `approve #${pr.number}`);
+  } catch (e) {
+    onFailure?.();
+    io.err(`factory: approve #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    return;
+  }
+  for (const run of owners) {
+    try {
+      writeApprovedHead(run, afterSha, run.result?.merge_policy);
+    } catch (e) {
+      onFailure?.();
+      io.err(`factory: persist approved sha #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
+}
+
 /**
  * Every behind `factory/*` PR whose run ended `done`, one `update-branch` at a time.
  * A failure is logged and left for a later tick; it does not skip the rest of the list.
+ * `auto` and `bot_review` drop the old auto-merge and approve only the head this call just produced.
  */
 const BEHIND_RETRY_MS = 10 * 60_000;
 
@@ -895,6 +990,18 @@ async function updateBehind(
       needsUpdate = true;
       continue;
     }
+    const approvable = selfMergeRuns(runs, pr);
+    // Head before this call. undefined: unreadable, so a later SHA is not treated as the one this update produced.
+    let beforeSha: string | null | undefined = null;
+    if (approvable.length) {
+      try {
+        beforeSha = (await withTimeout(github.findOpenPr(repo, pr.branch), timeoutMs, `open pr #${pr.number}`))?.headSha ?? null;
+      } catch (e) {
+        beforeSha = undefined;
+        onFailure?.();
+        io.err(`factory: open pr #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      }
+    }
     const job = github.updateBranch(repo, key);
     const tracked = job.finally(() => {
       if (flight.get(repo) === tracked) flight.delete(repo);
@@ -923,6 +1030,7 @@ async function updateBehind(
     updated.set(key, Date.now());
     needsUpdate = true;
     io.out(`queue: updated PR #${pr.number} (behind)\n`);
+    if (approvable.length) await reapproveUpdatedHead(github, repo, pr, runs, beforeSha, timeoutMs, io, onFailure);
   }
   return { needsUpdate, openDone };
 }

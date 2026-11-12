@@ -559,6 +559,19 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         }
       }
       // Merge only. Deploy is a separate action and is not called here.
+      // Re-read the open head after the CI poll: a push that landed since approveHead is not this SHA.
+      let liveSha: string | null = null;
+      try {
+        liveSha = (await ctx.deps.github.findOpenPr(ctx.worktree, ctx.branch))?.headSha ?? null;
+      } catch (e) {
+        ctx.events.emit({ step: "finalize", event: "progress", data: { pr_head_unreadable: (e as Error).message.slice(0, 200) } });
+      }
+      let requiredChecks: readonly string[] | null = null;
+      try {
+        requiredChecks = (await ctx.deps.github.repoSettings(ctx.worktree, ctx.repo.base_branch)).required_checks;
+      } catch (e) {
+        ctx.events.emit({ step: "finalize", event: "progress", data: { repo_settings: (e as Error).message.slice(0, 200) } });
+      }
       const pause = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
       if (pause && result === "done") {
         // The queue asked this run to stop. A green head is not a reason to merge.
@@ -568,17 +581,19 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         draft = held.draft;
       } else if (
         result === "done" &&
+        liveSha === head &&
         mayEnableAutoMerge({
           policy,
           approvedSha,
-          headSha: head,
+          headSha: liveSha,
           reviewedSha,
           ci: headGreen ? "green" : "pending",
           draft: draft === true,
           state: "open",
+          requiredChecks,
         })
       ) {
-        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!, head);
       }
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;

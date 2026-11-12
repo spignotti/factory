@@ -7,7 +7,7 @@ import { classifyLegacy, isReviewFile, type LegacyReport, withMigratedReviewRule
 import { type Detection, detect } from "../adopt/detect.js";
 import { agentsTemplate, type DraftCheck, draftChecks, draftRepoYaml, dropMutating, projectPurpose, testStrategySection, withTestStrategy } from "../adopt/draft.js";
 import { type MeasureResult, measureChecks } from "../adopt/measure.js";
-import { CI_STUB_PATH, type CiStubMode, ciStubMode, LEGACY_REQUIRED_CHECK, renderCiStubFor, REQUIRED_CHECK } from "../ci.js";
+import { CI_STUB_PATH, type CiStubMode, ciStubMode, renderCiStubFor, REQUIRED_CHECK } from "../ci.js";
 import { describeToolchains, detectToolchains } from "../toolchains.js";
 import type { Io } from "./gates.js";
 import type { GitHub, RepoSettings } from "../gh.js";
@@ -72,16 +72,12 @@ async function freeBranch(repoDir: string, stem: string): Promise<string> {
   for (let n = 2; ; n++) if (!(await taken(`${stem}-${n}`))) return `${stem}-${n}`;
 }
 
-/** Printed hints only: adopt never changes repository settings (no admin token, works without GitHub Pro). */
-export function settingsHints(s: RepoSettings, base: string, mode: CiStubMode = "full"): string[] {
+/** Printed hints only: adopt never changes repository settings (no admin token, works without GitHub Pro). Both stub modes require `done`. */
+export function settingsHints(s: RepoSettings, base: string, _mode: CiStubMode = "full"): string[] {
   const hints: string[] = [];
   const required = s.required_checks ?? [];
-  // `done` on the minimal stub succeeds on every ready PR, so requiring it gates nothing beside the repo's own jobs.
-  if (mode === "minimal") {
-    if (required.includes(LEGACY_REQUIRED_CHECK)) {
-      hints.push(`Remove the required status check "${LEGACY_REQUIRED_CHECK}" on ${base}: no check run reports it, so every PR stays blocked. "${REQUIRED_CHECK}" gates nothing here (no check runs in CI).`);
-    }
-  } else if (s.branch_protected === false || (s.branch_protected && !required.includes(REQUIRED_CHECK))) {
+  // `done` checks the factory status on the full stub and on the minimal stub.
+  if (s.branch_protected === false || (s.branch_protected && !required.includes(REQUIRED_CHECK))) {
     hints.push(
       `Protect ${base}: require the status check "${REQUIRED_CHECK}" (the CI stub's job name, as GitHub Actions reports it) and dismiss stale approvals on new commits (Settings → Branches or Rulesets).` +
         (s.private ? " Private repos need GitHub Pro/Team for this; without it the factory's merge policy (human review) still applies." : ""),

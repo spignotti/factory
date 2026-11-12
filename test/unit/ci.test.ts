@@ -315,7 +315,7 @@ describe("CI stub", () => {
     expect(ciChecks(manualCi, loadRepoConfig(manualCi))[0]).toMatchObject({ status: "fail", detail: expect.stringMatching(/differs from the template/) });
   });
 
-  it("doctor and adopt do not suggest requiring done when it gates nothing", async () => {
+  it("doctor and adopt warn when a minimal stub does not require done", async () => {
     const repo = createFixtureRepo((c) => {
       for (const check of c.checks as { local_only?: boolean }[]) check.local_only = true;
     });
@@ -324,18 +324,24 @@ describe("CI stub", () => {
     const gh = new FakeGitHub();
     gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["Lint"] };
     const checks = await githubChecks(gh, repo, loadRepoConfig(repo));
-    expect(checks.map((c) => c.detail).join("\n")).not.toMatch(/require the status check "done"|not a required check yet/);
-    expect(checks.find((c) => c.name === "required checks")).toMatchObject({ status: "ok", detail: expect.stringMatching(/\bLint\b/) });
+    const text = checks.map((c) => c.detail).join("\n");
+    expect(text).not.toMatch(/gates nothing/);
+    expect(checks.find((c) => c.name === "branch protection")).toMatchObject({ detail: expect.stringMatching(/not a required check yet/) });
+    expect(checks.find((c) => c.name === "required checks")).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
     gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: [] };
     const missing = (await githubChecks(gh, repo, loadRepoConfig(repo))).find((c) => c.name === "required checks");
-    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/Lint/) });
-    expect(missing!.detail).not.toMatch(/\bdone\b/);
+    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
+    expect(missing!.detail).toMatch(/Lint/);
+    expect(missing!.detail).not.toMatch(/gates nothing/);
     const gated = (await githubChecks(gh, repo, loadRepoConfig(createFixtureRepo()))).find((c) => c.name === "required checks");
     expect(gated).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
     expect(gated!.detail).toMatch(/Lint/);
     const hints = settingsHints({ private: false, auto_merge_allowed: true, branch_protected: false, required_checks: ["Lint"] }, "main", "minimal");
-    expect(hints.join("\n")).not.toContain('status check "done"');
-    expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main", "minimal")[0]).toMatch(/Remove the required status check "factory \/ done"/);
+    expect(hints.join("\n")).toContain('status check "done"');
+    expect(hints.join("\n")).not.toMatch(/gates nothing/);
+    const legacy = settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main", "minimal");
+    expect(legacy[0]).toMatch(/require the status check "done"/);
+    expect(legacy.join("\n")).not.toMatch(/gates nothing/);
   });
 
   it("factory ci-stub --ref resolves a tag to its commit SHA and keeps the tag as a comment", async () => {

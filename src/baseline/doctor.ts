@@ -207,7 +207,7 @@ export function baselineConfigChecks(dir: string, repo: RepoConfig, tools: { git
   ];
 }
 
-/** Branch protection and secret scanning. Unknown GitHub fields do not fail. `factoryDoneGates` is false when the stub's `done` runs no check. */
+/** Branch protection and secret scanning. Unknown GitHub fields do not fail. `factoryDoneGates` is true for both stubs: `done` checks the factory status. */
 export function baselineGithubChecks(dir: string, settings: RepoSettings, opts?: { factoryDoneGates?: boolean }): BaselineCheck[] {
   const factoryDoneGates = opts?.factoryDoneGates !== false;
   const checks: BaselineCheck[] = [];
