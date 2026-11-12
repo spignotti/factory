@@ -84,8 +84,10 @@ Unverified (needs a real provider):
 - `findFactoryPr` lists with `gh pr list --state all --search head:factory/<issue> --json number,state,headRefName`
   and keeps only a head that is exactly `factory/<issue>` or `factory/<issue>-*`. UNVERIFIED against a live `gh`.
 - `updateBranch` runs `gh pr update-branch <pr>` (merge from the base, no `--rebase`, no force-push).
-  For `auto` and `bot_review` the worker disables auto-merge and approves the new head; CI has to pass on that head.
-  UNVERIFIED against a live `gh`. Tests use `FakeGitHub`.
+  For `auto` and `bot_review` the worker disables auto-merge and approves the new head only when that
+  commit's first parent is the previous head and it has a second parent. CI has to pass on that head.
+  `commitParents` reads `GET /repos/{owner}/{repo}/commits/{sha}` `parents[].sha`. UNVERIFIED against a live `gh`.
+  Tests use `FakeGitHub`.
 - `openFactoryPrFiles` uses `gh pr list --state open --limit 1000 --json number,headRefName,isCrossRepository,files`.
   UNVERIFIED against a live `gh`: `files` is an exportable field; the parser accepts `{path}` / `{filename}`
   and a `{nodes}` wrapper. A page that hits 1000 is incomplete: the run blocks instead of treating it as every open PR.

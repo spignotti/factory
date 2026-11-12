@@ -766,8 +766,24 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([r.result.pr]);
     expect(r.github.approvedShas).toEqual([r.github.remoteShas.get(r.result.branch!)]);
+    expect(r.github.autoMergeShas).toEqual([{ pr: r.result.pr, sha: r.github.remoteShas.get(r.result.branch!) }]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([]);
+  });
+
+  it("does not enable auto-merge when the open head is no longer the approved SHA", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.findOpenPr = async () => ({ url: "https://github.test/pr/moved", draft: false, headSha: "f".repeat(40) });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(r.github.autoMerged).toEqual([]);
   });
 
   it("pr_ci_wait_minutes 0 does not wait; a pending head still does not fail or auto-merge", async () => {

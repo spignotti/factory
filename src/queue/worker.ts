@@ -842,6 +842,7 @@ export async function enableReadyMerges(
       }
     }
     if (status.state === "open" && head && head !== approved) {
+      for (const key of [...enabled]) if (key.startsWith(`${pr}@`)) enabled.delete(key);
       try {
         await withTimeout(github.disableAutoMerge(repo, pr), timeoutMs, `disable auto-merge ${pr}`);
       } catch (e) {
@@ -881,8 +882,8 @@ function writeApprovedHead(run: RunRecord, sha: string, policy: string | null | 
 }
 
 /**
- * Drop a pin to the pre-update head, then approve only the head this update-branch call just produced.
- * `beforeSha` undefined means the previous head could not be read: do not approve whatever is there now.
+ * Drop a pin to the pre-update head, then approve only the merge commit this update-branch call just produced.
+ * No previous head, a failed disable, or a commit that is not that merge: do not approve whatever is there now.
  */
 async function reapproveUpdatedHead(
   github: GitHub,
@@ -902,8 +903,10 @@ async function reapproveUpdatedHead(
   } catch (e) {
     onFailure?.();
     io.err(`factory: disable auto-merge #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    return;
   }
-  if (beforeSha === undefined) return;
+  // null: the open PR had no head. undefined: the read failed. Neither is a known previous commit.
+  if (!beforeSha) return;
   let afterSha: string | null;
   try {
     afterSha = (await withTimeout(github.findOpenPr(repo, pr.branch), timeoutMs, `open pr #${pr.number}`))?.headSha ?? null;
@@ -914,6 +917,16 @@ async function reapproveUpdatedHead(
   }
   // Same SHA as before this call, or none: not the commit update-branch just produced.
   if (!afterSha || afterSha === beforeSha) return;
+  let parents: string[] | null;
+  try {
+    parents = await withTimeout(github.commitParents(repo, afterSha), timeoutMs, `commit #${pr.number}`);
+  } catch (e) {
+    onFailure?.();
+    io.err(`factory: commit #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    return;
+  }
+  // update-branch merges the base into the PR: first parent is the previous head, and there is a second.
+  if (!parents || parents[0] !== beforeSha || parents.length < 2) return;
   try {
     await withTimeout(github.approveHead(repo, afterSha), timeoutMs, `approve #${pr.number}`);
   } catch (e) {
@@ -991,7 +1004,7 @@ async function updateBehind(
       continue;
     }
     const approvable = selfMergeRuns(runs, pr);
-    // Head before this call. undefined: unreadable, so a later SHA is not treated as the one this update produced.
+    // Head before this call. Missing or unreadable: a later SHA is not treated as the one this update produced.
     let beforeSha: string | null | undefined = null;
     if (approvable.length) {
       try {

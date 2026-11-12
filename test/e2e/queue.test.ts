@@ -881,6 +881,54 @@ describe("factory queue", () => {
     expect(github.approvedShas).not.toContain(github.remoteShas.get("factory/9-goal"));
   });
 
+  it("does not approve an update when the previous head was missing, disable failed, or the new commit is not the merge", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const plant = async (github: FakeGitHub, sha: string) => {
+      await updateQueue(factoryHome, repo, () => undefined);
+      const runId = "20261112-160000-bbbbbb";
+      const pr = "https://github.test/pr/7";
+      const branch = "factory/7-goal";
+      const dir = join(factoryHome, "runs", runId);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "state.json"), JSON.stringify({
+        version: 1, run_id: runId, repo, task: { ref: "#7", title: "t", text: "", labels: [] }, no_pr: false,
+        step: "finished", result: "done", reason: "", branch, worktree: null, base_sha: null,
+        packages: {}, failures: {}, handoffs: [], rounds: 1, findings: [], gate_count: 1,
+        pr, pr_draft: false, approved_sha: sha, updated_at: "2026-11-12T00:00:00.000Z",
+      }));
+      writeFileSync(join(dir, "result.json"), JSON.stringify(outcome(repo, 7, "done", "", { run_id: runId, pr, branch, merge_policy: "auto" })) + "\n");
+      github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
+      github.factoryPrs.push({ number: 7, branch, files: ["src/a.js"] });
+      github.prStates.set(pr, { state: "open", draft: false, behind: true });
+      return { dir, pr, branch };
+    };
+    const missing = new FakeGitHub();
+    const oldSha = "a".repeat(40);
+    const missingRun = await plant(missing, oldSha);
+    await runQueue({ factoryHome, github: missing, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
+    expect(missing.approvedShas).toEqual([]);
+    expect(JSON.parse(readFileSync(join(missingRun.dir, "state.json"), "utf8")).approved_sha).toBe(oldSha);
+
+    const broken = new FakeGitHub();
+    const brokenRun = await plant(broken, oldSha);
+    broken.remoteShas.set(brokenRun.branch, oldSha);
+    broken.disableError = "disable refused";
+    await runQueue({ factoryHome, github: broken, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
+    expect(broken.approvedShas).toEqual([]);
+    expect(broken.autoMergeDisabled).toEqual([]);
+    expect(JSON.parse(readFileSync(join(brokenRun.dir, "state.json"), "utf8")).approved_sha).toBe(oldSha);
+
+    const pushed = new FakeGitHub();
+    const pushedRun = await plant(pushed, oldSha);
+    pushed.remoteShas.set(pushedRun.branch, oldSha);
+    pushed.updateBranchParents = [oldSha];
+    await runQueue({ factoryHome, github: pushed, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
+    expect(pushed.autoMergeDisabled).toContain(pushedRun.pr);
+    expect(pushed.approvedShas).toEqual([]);
+    expect(JSON.parse(readFileSync(join(pushedRun.dir, "state.json"), "utf8")).approved_sha).toBe(oldSha);
+  });
+
   it("uses result.json on restart even when the stored pid is alive, and ignores a pid whose command line is not the run", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
