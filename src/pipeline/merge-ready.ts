@@ -37,10 +37,11 @@ export function waitingOnMergeCi(opts: {
 }
 
 /**
- * The runner may ask GitHub to enable auto-merge only for the SHA it approved, once that head is green.
+ * The runner may ask GitHub to enable auto-merge only for the SHA it approved, once that head is green,
+ * and only when `done` is a required check. GitHub enforces the factory status only then.
  * `auto` is the risk policy. `bot_review` is the same merge, and only when this head is the reviewed tree.
  * `human_review` waits for a person. A newer commit, a draft, or CI that is not green does not qualify.
- * Deploy is not this decision.
+ * Unknown required checks (null, or settings that could not be read) do not qualify. Deploy is not this decision.
  */
 export function mayEnableAutoMerge(opts: {
   policy: string | null | undefined;
@@ -51,7 +52,10 @@ export function mayEnableAutoMerge(opts: {
   ci: string | null | undefined;
   draft: boolean;
   state: string;
+  /** Branch protection contexts. Null when settings were unreadable. */
+  requiredChecks?: readonly string[] | null;
 }): boolean {
+  if (!opts.requiredChecks?.includes("done")) return false;
   const aligned =
     opts.state === "open" &&
     !opts.draft &&

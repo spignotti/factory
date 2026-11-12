@@ -10,10 +10,10 @@ copy a workflow per tool.
 `factory ci-stub` renders `templates/ci/factory.yml` when a check is not `local_only` (including
 `tier: manual`, so `workflow_dispatch` can run it), and `templates/ci/factory-minimal.yml` when every
 check is `local_only` (or there is none).
-Doctor hashes the rendering that matches the repo. Branch protection requires one status, `done`,
-when the stub runs checks; that status is red when selection or any check fails. When the stub is
-minimal, `done` gates nothing beside the repo's own jobs, so doctor and adopt do not suggest
-requiring it. `pull_request` has no branch filter. A draft event does not run select/check (the
+Doctor hashes the rendering that matches the repo. Branch protection requires the status `done`
+for both stubs. On the full stub that status is red when selection or any check fails. On the minimal
+stub `done` fails unless the commit status `factory` is success on the branch head, so doctor and adopt
+require it there too. `pull_request` has no branch filter. A draft event does not run select/check (the
 minimal stub runs a `draft` marker instead), but `done` still runs and fails, so a draft is never a
 skipped (and therefore passing) required check. On that stub, draft and ready events share one
 concurrency group: marking ready cancels the in-flight draft run. A failed or cancelled `done` on a

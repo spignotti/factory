@@ -300,8 +300,8 @@ A run whose process is still alive is not abandoned. Resume refuses an abandoned
 Skip this for Cloud-Agent-only repos; use branch + PR + CI there instead.
 
 - [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection with the required status check `done`
-      when the stub runs checks (GitHub Actions; not `factory / done`, which never reports and blocks every PR).
-      When every check is `local_only` (or there is none), do not require `done`: it gates nothing beside the repo's own jobs.
+      (GitHub Actions; not `factory / done`, which never reports and blocks every PR).
+      Require `done` for the minimal stub too: that job checks the commit status `factory=success`.
       A `tier: manual` check is not local-only: it keeps the full stub so `workflow_dispatch` can run it.
 - [ ] CI toolchains: the adopt PR and `factory doctor --repo <path>` list what the stub installs (node, pnpm,
       python, uv). Wrong or missing → `ci.toolchains` in `.factory/repo.yaml` (config PR), no install steps in `setup`.

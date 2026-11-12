@@ -645,9 +645,9 @@ before the PR. When every check is `local_only` (or there is none), `factory ci-
 `templates/ci/factory-minimal.yml` instead: no npx, no `select`, no `check`. A `draft` job runs only on a
 draft pull request so a failed `done` there is not a settled red; on a ready pull request a failed or
 cancelled `done` is red. Draft and ready events share one concurrency group, so marking ready cancels
-the in-flight draft run. It fails on a draft or a cancelled run and succeeds on a ready pull request.
-Doctor accepts that file for those repos and does not suggest requiring `done` (it gates nothing beside
-the repo's own jobs). A check that is not `local_only`, including `tier: manual`, keeps the full stub so
+the in-flight draft run. It fails on a draft or a cancelled run. On a ready pull request `done` succeeds
+only when the commit status `factory` is success on the branch head. Doctor and adopt require `done` for
+this stub as well as the full one. A check that is not `local_only`, including `tier: manual`, keeps the full stub so
 `workflow_dispatch` can run it.
 
 **Toolchains:** GitHub runners (`ubuntu-latest`) have node and python3 but no pnpm or uv. Before the
@@ -865,7 +865,7 @@ It starts nothing for a repo while the base branch CI is red. It does not start 
 
 Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when an acceptance line `fulfills #N` is evidenced. File overlap alone is not a bundle.
 
-Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time, so auto-merge can proceed after CI. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish. The worker does not assume an overnight stop.
+Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time. For `auto` and `bot_review` the new head is approved again and CI has to pass on that head before auto-merge can proceed. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish. The worker does not assume an overnight stop.
 
 ```
 factory queue run --slots 2

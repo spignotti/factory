@@ -258,17 +258,8 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
     checks.push({ name: "auto-merge", status: "info", detail: `merge.auto_merge_max_risk is ${repo.merge.auto_merge_max_risk} but the repo does not allow auto-merge (Settings → General → Allow auto-merge); auto PRs will wait for a manual merge` });
   }
   const required = s.required_checks ?? [];
-  // A minimal stub's `done` succeeds on every ready PR. Requiring it adds nothing beside the repo's own jobs.
-  const gates = ciStubMode(repo.checks) === "full";
-  if (!gates) {
-    if (required.includes(LEGACY_REQUIRED_CHECK)) {
-      checks.push({
-        name: "branch protection",
-        status: "warn",
-        detail: `${repo.base_branch} requires "${LEGACY_REQUIRED_CHECK}", which no check run reports, so every PR stays blocked; remove it ("${REQUIRED_CHECK}" gates nothing: no check runs in CI)`,
-      });
-    }
-  } else if (s.branch_protected === false) {
+  // Both stubs: `done` reads commit status `factory`. GitHub enforces that only when `done` is required.
+  if (s.branch_protected === false) {
     checks.push({
       name: "branch protection",
       status: "info",
@@ -283,7 +274,7 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   } else if (s.branch_protected && !required.includes(REQUIRED_CHECK)) {
     checks.push({ name: "branch protection", status: "info", detail: `${repo.base_branch} is protected; "${REQUIRED_CHECK}" is not a required check yet` });
   }
-  checks.push(...baselineGithubChecks(repoDir, s, { factoryDoneGates: gates }));
+  checks.push(...baselineGithubChecks(repoDir, s, { factoryDoneGates: true }));
   return checks;
 }
 

@@ -688,6 +688,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
       },
       patch: autoMerge,
@@ -720,6 +721,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
       },
       patch: autoMerge,
@@ -756,6 +758,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
       },
       patch: autoMerge,
@@ -869,6 +872,7 @@ ${fixed}` } };
       const r = await runScenario({
         script: "clean.json",
         github: (gh) => {
+          gh.settings.required_checks = ["done"];
           gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
         },
         patch: (c) => void (c.merge = { auto_merge_max_risk: "low" }),
@@ -881,6 +885,7 @@ ${fixed}` } };
       const r = await runScenario({
         script: "clean.json",
         github: (gh) => {
+          gh.settings.required_checks = ["done"];
           gh.status = "green";
         },
         patch: (c) => void (c.merge = { auto_merge_max_risk: "low", policy: { medium: "bot_review" } }),
