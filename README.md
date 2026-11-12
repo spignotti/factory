@@ -83,7 +83,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   retried on the same model (`retry.attempts`). A `Connection error.` with a TLS appendix (`certificate verify failed`,
   `unable to verify the first certificate`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `TLS handshake`) is the same class.
   Auth, quota, missing configuration and invalid output are not. Network retries already spent stay on the run
-  and are not reset by resume. A provider that closes the token stream before a finish reason
+  and are not reset by resume. Fallback models share that same budget, so nested retries do not each start over. A provider that closes the token stream before a finish reason
   (`Stream ended without finish_reason`, premature EOF, connection reset while streaming) is a `stream` error:
   the same model is retried up to `limits.stream_retries` (default 2) with the profile backoff, recorded as
   `step_retry` and shown by `factory status` while that call is still in flight. The retry is the current agent

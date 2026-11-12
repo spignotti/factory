@@ -71,8 +71,10 @@ describe("factory resume", () => {
     });
     expect(r.result.result).toBe("needs_human");
     expect(r.result.reason).toMatch(/^transient network error after retries: Request timed out\.; factory resume /);
-    expect(r.events.filter((e) => e.event === "model_retry")).toHaveLength(4);
+    // retry.attempts is one run budget. The implement fallback does not get a fresh set.
+    expect(r.events.filter((e) => e.event === "model_retry")).toHaveLength(2);
     const st = readState(r.runDir);
+    expect(st.repair).toMatchObject({ network_retries: 2 });
     expect(st).toMatchObject({ step: "implement", result: "needs_human", transient: true });
     const wt = join(r.runDir, "worktree");
     expect(git(wt, "status", "--porcelain")).toContain("leftover.txt");
