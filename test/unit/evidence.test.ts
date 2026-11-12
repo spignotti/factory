@@ -160,6 +160,44 @@ describe("executed test evidence", () => {
     expect(executed).toEqual([{ file: "c.py", name: "test_skip", result: "skip" }]);
     expect(matchTestEvidence("c.py", executed, true).reason).toMatch(/skipped test/);
   });
+
+  it("attributes pytest's verbose progress line and not a shorter path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-verbose-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["a/b.py", "b.py"],
+      testCommand: "printf '%s\\n' 'a/b.py::test_one PASSED [ 50%]' 'b.py::test_two FAILED'",
+      env,
+    });
+    expect(executed).toEqual([
+      { file: "a/b.py", name: "test_one", result: "pass" },
+      { file: "b.py", name: "test_two", result: "fail" },
+    ]);
+  });
+
+  it("treats an XFAIL result line as a skip even next to a pass footer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-xfail-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["c.py"],
+      testCommand: "printf '%s\\n' 'c.py::test_x XFAIL' '=== 1 passed in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([{ file: "c.py", name: "test_x", result: "skip" }]);
+    expect(matchTestEvidence("c.py", executed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("treats a long or colored pytest skip footer as a skip", () => {
+    expect(parseTestReport("test_foo.py", "2 skipped in 62.34s (0:01:02)\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+    expect(parseTestReport("test_foo.py", "1 xfailed in 1m 2.34s\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+    expect(parseTestReport("test_foo.py", "\u001b[32m2 skipped in 0.01s\u001b[0m\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+  });
 });
 
 describe("evidence prompts", () => {

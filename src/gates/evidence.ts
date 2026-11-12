@@ -60,16 +60,25 @@ interface PytestCounts {
 }
 
 const PYTEST_COUNT = String.raw`\d+\s+[A-Za-z]+`;
+/**
+ * Pytest's own duration (`0.01s`, or `62.34s (0:01:02)` past a minute) and the
+ * minute form some reporters print (`1m 2.34s`).
+ */
+const PYTEST_DURATION = String.raw`(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?s(?:\s+\([^)]*\))?`;
 /** Banner (`=== 2 skipped in 0.01s ===`) or pytest -q (`2 skipped in 0.01s`). */
 const PYTEST_SUMMARY = new RegExp(
-  `^(?:=+\\s*)?(${PYTEST_COUNT}(?:,\\s*${PYTEST_COUNT})*)\\s+in\\s+\\d+(?:\\.\\d+)?s(?:\\s+\\([^)]*\\))?\\s*(?:=+)?$`,
+  `^(?:=+\\s*)?(${PYTEST_COUNT}(?:,\\s*${PYTEST_COUNT})*)\\s+in\\s+${PYTEST_DURATION}\\s*(?:=+)?$`,
 );
+
+function stripAnsi(text: string): string {
+  return text.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "");
+}
 
 /** Pytest footer counts. Warnings, xfailed and xpassed are not passes. */
 function pytestCounts(output: string): PytestCounts | undefined {
   let body: string | undefined;
   for (const line of output.split("\n")) {
-    const m = PYTEST_SUMMARY.exec(line.trim());
+    const m = PYTEST_SUMMARY.exec(stripAnsi(line).trim());
     if (m) body = m[1] ?? "";
   }
   if (body === undefined) return undefined;
@@ -142,18 +151,31 @@ function parseTap(file: string, output: string): ExecutedTest[] {
   return out;
 }
 
-/** Verbose pytest line `PASSED path::name`. The path must match the cited file exactly. */
-const PYTEST_RESULT = /^(PASSED|FAILED|ERROR|SKIPPED)\s+(\S+?)::(.+)$/;
+const PYTEST_STATUS = "PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS";
+/** Short summary (`-r`): `PASSED path::name`. Verbose progress: `path::name PASSED`. */
+const PYTEST_SHORT = new RegExp(`^(${PYTEST_STATUS})\\s+(\\S+?)::(\\S+)`);
+const PYTEST_VERBOSE = new RegExp(`^(\\S+?)::(.+?)\\s+(${PYTEST_STATUS})\\b`);
 
+function pytestResultOf(status: string): "pass" | "fail" | "skip" {
+  if (status === "PASSED") return "pass";
+  if (status === "SKIPPED" || status === "XFAIL" || status === "XPASS") return "skip";
+  return "fail";
+}
+
+/** A cited file counts only when a result line names that path exactly. */
 function pytestResultLines(file: string, output: string): ExecutedTest[] {
   const out: ExecutedTest[] = [];
-  for (const line of output.split("\n")) {
-    const m = PYTEST_RESULT.exec(line.trim());
-    if (!m || m[2] !== file) continue;
-    const status = m[1] ?? "";
-    const name = (m[3] ?? "").replace(/\s+-\s+.*$/, "").trim();
-    const result = status === "PASSED" ? "pass" : status === "SKIPPED" ? "skip" : "fail";
-    out.push({ file, name, result });
+  for (const raw of output.split("\n")) {
+    const line = stripAnsi(raw).trim();
+    const short = PYTEST_SHORT.exec(line);
+    if (short && short[2] === file) {
+      out.push({ file, name: short[3] ?? "", result: pytestResultOf(short[1] ?? "") });
+      continue;
+    }
+    const verbose = PYTEST_VERBOSE.exec(line);
+    if (verbose && verbose[1] === file) {
+      out.push({ file, name: (verbose[2] ?? "").trim(), result: pytestResultOf(verbose[3] ?? "") });
+    }
   }
   return out;
 }
@@ -197,9 +219,9 @@ export function matchCheckEvidence(
  * Runs `tests.run` for the cited files and parses the result.
  * With `{files}`, one invocation per cited path, that path substituted, parsed as a report.
  * Without it, the command runs once and a cited file is attributed only from a pytest result
- * line that names that file (`PASSED path::name`). A path that is only a substring of another,
- * or a file the output merely mentions beside a suite footer, was not executed. No command means
- * nothing was executed.
+ * line that names that file (`path::name PASSED`, or the short form `PASSED path::name`).
+ * XFAIL and XPASS are skips. A path that is only a substring of another, or a file the output
+ * merely mentions beside a suite footer, was not executed. No command means nothing was executed.
  */
 export async function runCitedTests(opts: {
   cwd: string;
