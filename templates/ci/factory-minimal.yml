@@ -6,7 +6,9 @@
 # succeed before `done`: that check-run name is how ci-status tells a draft hold from a settled
 # red. A ready run skips `draft`, so a failed or cancelled `done` there is red. `done` fails on
 # a draft or a cancelled run and succeeds on a tag and a manual run. A ready pull request also
-# needs the commit status `factory=success` on this SHA (the runner posts it after local gates).
+# needs the commit status `factory=success` on the branch head. `github.sha` for that event is
+# the merge commit, which the runner does not approve, so the job reads
+# `github.event.pull_request.head.sha`. A tag or workflow_dispatch keeps `github.sha`.
 # A push the runner did not verify has no status, so `done` fails and auto-merge cannot finish.
 # The job retries briefly because the status is posted just after the push. A
 # skipped `done` would count as passed, so it still runs. Draft and ready events share one
@@ -54,7 +56,8 @@ jobs:
       - env:
           DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
           EVENT: ${{ github.event_name }}
-          SHA: ${{ github.sha }}
+          # Branch head on a pull request (the commit the runner approves). github.sha otherwise.
+          SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           REPO: ${{ github.repository }}
           TOKEN: ${{ github.token }}
         run: |

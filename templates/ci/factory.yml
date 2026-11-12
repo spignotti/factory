@@ -13,8 +13,10 @@ name: factory
 # `done` would turn a draft into a green gate. ready_for_review and a later push to a ready PR run
 # the full matrix. converted_to_draft cancels an in-flight full run and fails `done`. Nothing is
 # skipped because of author, branch, labels, or the PR body. Tags and workflow_dispatch are unchanged.
-# On a pull request, `done` also requires the commit status `factory=success` on this SHA. The runner
-# posts that only after it has verified the commit. A later push has no status, so auto-merge cannot
+# On a pull request, `done` also requires the commit status `factory=success` on the branch head.
+# `github.sha` for that event is the temporary merge commit. The runner posts the status on the
+# head, so the job reads `github.event.pull_request.head.sha`. A tag or workflow_dispatch keeps
+# `github.sha` and does not ask for the status. A later push has no status, so auto-merge cannot
 # finish that head while the runner is asleep. The job retries briefly: the status is posted just after the push.
 # Action `uses` values are full commit SHAs of the named major tag. A floating tag fails a blocking semgrep rule.
 on:
@@ -133,7 +135,8 @@ jobs:
           CHECK: ${{ needs.check.result }}
           DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
           EVENT: ${{ github.event_name }}
-          SHA: ${{ github.sha }}
+          # Branch head on a pull request (the commit the runner approves). github.sha otherwise.
+          SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           REPO: ${{ github.repository }}
           TOKEN: ${{ github.token }}
         run: |

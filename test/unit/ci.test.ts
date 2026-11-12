@@ -101,6 +101,15 @@ describe("CI stub", () => {
     const minimal = renderCiStubFor("v1.2.3", "minimal");
     expect(minimal).toContain("statuses: read");
     expect(minimal).toContain('i.context==="factory"');
+    // approveHead posts on the branch head. github.sha on pull_request is the merge commit.
+    const approvalSha = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
+    for (const rendered of [text, minimal]) {
+      const wf = parse(rendered) as { jobs: Record<string, { steps: { env?: Record<string, string>; run?: string }[] }> };
+      const step = wf.jobs.done!.steps.find((s) => s.env?.SHA);
+      expect(step?.env?.SHA).toBe(approvalSha);
+      expect(step?.run ?? "").not.toContain("${{");
+      expect(rendered).not.toContain("SHA: ${{ github.sha }}");
+    }
     const bin = mkdtempSync(join(tmpdir(), "factory-curl-"));
     const log = join(bin, "curl.log");
     const body = join(bin, "body.json");
