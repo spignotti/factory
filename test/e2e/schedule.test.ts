@@ -231,9 +231,9 @@ describe("queue schedule", () => {
     const worker2 = runQueue({ factoryHome: home2, github: gh2, slots: 1, pollMs: 15, signal: ctl2.signal, start: g2.start, io: capture().io });
     try {
       await waitFor("global one", () => g2.calls.length === 1);
-      await new Promise((r) => setTimeout(r, 40));
-      expect(g2.calls).toHaveLength(1);
       const other = g2.calls[0]!.issue === 1 ? right : left;
+      await waitFor("global coding cap", async () => (await entries(home2, other))[0]?.reason === "global coding cap");
+      expect(g2.calls).toHaveLength(1);
       expect((await entries(home2, other))[0]?.reason).toBe("global coding cap");
       g2.release(g2.calls[0]!.issue, outcome(g2.calls[0]!.repo, g2.calls[0]!.issue, "done"));
       await waitFor("global second", () => g2.calls.length === 2);
