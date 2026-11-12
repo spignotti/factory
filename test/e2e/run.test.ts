@@ -552,15 +552,16 @@ ${fixed}` } };
       steps: (steps) => steps.map((st) => (st.role === "implement" ? { ...st, writes: { ...st.writes, "test/multiply.test.js": testFile } } : st)),
     });
     expect(r.result.result).toBe("done");
-    // Production diff fits the gate; the same lines plus tests still raise merge risk.
+    // Production diff fits the gate. Test lines stay visible as a size signal and do not raise risk.
     expect(r.result.counted_lines).toBeGreaterThan(0);
     expect(r.result.counted_lines!).toBeLessThanOrEqual(20);
     expect(r.result.excluded_test_lines).toBeGreaterThan(40);
     const riskLines = r.result.counted_lines! + r.result.excluded_test_lines!;
     expect(riskLines).toBeGreaterThan(30);
-    expect(r.result.risk).toBe("medium");
-    expect(r.result.risk_reasons).toContain(`diff ${riskLines} lines > 30`);
-    expect(r.github.prs[0]?.body).toContain(`diff ${riskLines} lines > 30`);
+    expect(r.result.risk).toBe("low");
+    expect(r.result.risk_reasons ?? []).not.toContain(`diff ${riskLines} lines > 30`);
+    expect(r.github.prs[0]?.body).toContain(`size signal (does not change risk): diff ${riskLines} lines > 30`);
+    expect(r.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("padding 0");
     expect(r.resultFile).toEqual(r.result);
     const gateEvents = eventsOf(r, "gate_result").filter((e) => e.data.check === "max_diff_lines");
     expect(gateEvents.length).toBeGreaterThan(0);
@@ -876,13 +877,47 @@ ${fixed}` } };
       expect(r.github.autoMerged).toEqual([r.result.pr]);
     });
 
-    it("bot_review (medium risk above auto_merge_max_risk)", async () => {
+    it("bot_review merges the reviewed medium diff when CI is green", async () => {
       const r = await runScenario({
         script: "clean.json",
-        patch: (c) => void (c.merge = { auto_merge_max_risk: "low", low_max_diff_lines: 1, policy: { medium: "bot_review" } }),
+        github: (gh) => {
+          gh.status = "green";
+        },
+        patch: (c) => void (c.merge = { auto_merge_max_risk: "low", policy: { medium: "bot_review" } }),
+        steps: (steps) => {
+          const plan = steps[0]!.output as {
+            packages: { files: string[] }[];
+            acceptance: { id: string; package: string; text: string; verify: string; kind: string; risk: boolean }[];
+          };
+          plan.packages[0]!.files.push("src/auth/token.js");
+          // A package on sensitive_paths is an invalid plan without a risk criterion.
+          plan.acceptance.push({
+            id: "A2",
+            package: "P1",
+            text: "token stays a constant",
+            verify: "test",
+            kind: "edge_case",
+            risk: true,
+          });
+          const impl = steps.find((s) => s.role === "implement")!;
+          impl.writes = { ...impl.writes, "src/auth/token.js": "export const token = \"t\";\n" };
+          (impl.output as { evidence: { acceptance_id: string; kind: string; ref: string }[] }).evidence.push({
+            acceptance_id: "A2",
+            kind: "test",
+            ref: "test/multiply.test.js::multiply",
+          });
+          const at = steps.findIndex((s) => s.role === "pr_writer");
+          return [
+            ...steps.slice(0, at),
+            { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } },
+            ...steps.slice(at),
+          ];
+        },
       });
       expect(r.result).toMatchObject({ result: "done", risk: "medium", merge_policy: "bot_review" });
-      expect(r.github.autoMerged).toEqual([]);
+      expect(r.result.risk_reasons?.join(" ")).toMatch(/sensitive_paths: src\/auth\/token.js/);
+      expect(r.github.autoMerged).toEqual([r.result.pr]);
+      expect(r.runner.calls.find((c) => c.role === "review_security")?.prompt).toContain("src/auth/token.js");
     });
 
     it("human_review (default config)", async () => {
@@ -934,9 +969,25 @@ describe("base moved before finalize", () => {
     };
   };
 
-  it("clean merge: base merged into the branch as git.author (no rebase), full gates re-run, done", async () => {
-    const r = await runScenario({ script: "clean.json", onCall: moveBaseOnReview("src/other.js", "export const other = 1;\n") });
+  it("clean merge: base merged into the branch as git.author (no rebase), full gates re-run, delta reviewed, done", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      onCall: moveBaseOnReview("src/other.js", "export const other = 1;\n"),
+      steps: (steps) => {
+        const at = steps.findIndex((s) => s.role === "pr_writer");
+        const extra = [
+          { role: "review_plan", output: { reviewer: "plan", prior: [], findings: [] } },
+          { role: "review_simplicity", output: { reviewer: "simplicity", prior: [], findings: [] } },
+        ];
+        return [...steps.slice(0, at), ...extra, ...steps.slice(at)];
+      },
+    });
     expect(r.result).toMatchObject({ result: "done" });
+    const delta = r.runner.calls.filter((c) => c.role === "review_plan");
+    expect(delta).toHaveLength(2);
+    expect(delta[1]!.prompt).toContain("incremental_diff");
+    expect(delta[1]!.prompt).toContain("src/other.js");
+    expect(delta[0]!.prompt).not.toContain("incremental_diff");
     const head = r.github.prs[0]!.head;
     const [subject, parents, author] = git(r.repo, "log", "-1", "--format=%s|%P|%an", head).trim().split("|");
     expect(subject).toBe(`chore: merge main into ${head}`);

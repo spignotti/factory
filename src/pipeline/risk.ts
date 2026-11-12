@@ -61,9 +61,17 @@ export function riskReasonLine(risk: RiskAssessment): string {
   return line.length > 300 ? `${line.slice(0, 297)}...` : line;
 }
 
-/** Risk classification, in code: paths, diff size and protected files. */
+/**
+ * Diff size is a split signal, not a risk class. Test lines stay in the count so a large
+ * test or fixture diff is visible, and they do not by themselves become product risk.
+ */
+export function diffSizeSignal(diffLines: number, limit: number): string | null {
+  return diffLines > limit ? `diff ${diffLines} lines > ${limit}` : null;
+}
+
+/** Risk classification, in code: sensitive paths, dependencies, migrations and protected files. */
 export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig }): RiskAssessment {
-  const { changed, diffLines, repo } = input;
+  const { changed, repo } = input;
   const hits = (globs: string[]) => changed.filter((f) => matchesAny(f, globs));
   const humanOnly = changed.filter((f) => isProtected(f, repo.human_only_paths));
   if (humanOnly.length) {
@@ -76,7 +84,6 @@ export function riskClass(input: { changed: string[]; diffLines: number; repo: R
   if (deps.length) reasons.push(`dependencies: ${deps.join(", ")}`);
   const migrations = hits(MIGRATION_GLOBS);
   if (migrations.length) reasons.push(`migrations: ${migrations.join(", ")}`);
-  if (diffLines > repo.merge.low_max_diff_lines) reasons.push(`diff ${diffLines} lines > ${repo.merge.low_max_diff_lines}`);
   return reasons.length ? { risk: "medium", reasons } : { risk: "low", reasons: [] };
 }
 

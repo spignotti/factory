@@ -611,9 +611,9 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
 }
 
 /**
- * Done runs whose policy is still auto: enable auto-merge once the approved SHA is the head and CI is green.
- * A newer head, a draft, or CI that is not green does not merge. Pending CI keeps the worker up only
- * while `untilMs` is set; it does not take a coding slot.
+ * Done runs whose policy is auto or bot_review: enable auto-merge once the approved SHA is the head and CI is green.
+ * bot_review also requires that head to be the reviewed SHA. A newer head, a draft, or CI that is not green does not merge.
+ * Pending CI keeps the worker up only while `untilMs` is set; it does not take a coding slot.
  * Returns true when a PR is still waiting on CI.
  */
 export async function enableReadyMerges(
@@ -650,8 +650,8 @@ export async function enableReadyMerges(
         continue;
       }
     }
-    if (status.state === "open" && !status.draft && policy === "auto" && status.ci !== "green" && status.ci !== "red") waiting = true;
-    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, ci: status.ci, draft: status.draft, state: status.state })) continue;
+    if (status.state === "open" && !status.draft && (policy === "auto" || policy === "bot_review") && status.ci !== "green" && status.ci !== "red") waiting = true;
+    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, reviewedSha: run.state?.reviewed_sha, ci: status.ci, draft: status.draft, state: status.state })) continue;
     const key = `${pr}@${approved}`;
     if (enabled.has(key)) continue;
     try {

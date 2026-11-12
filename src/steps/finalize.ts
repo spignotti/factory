@@ -6,10 +6,10 @@ import { baseRef, changedFiles, diffCountFields, diffFiles, diffTotals, isAncest
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
-import { fixStep } from "../pipeline/loop.js";
+import { fixStep, reviewDelta } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { protectedFiles } from "../gates/builtin.js";
-import { type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
+import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
 import type { HostSteps } from "../schemas/plan.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
@@ -32,6 +32,8 @@ export interface FinalizeInput {
   startedAt: number;
   /** Resume: the run already opened this PR; update it instead of creating one. */
   existingPr?: { url: string; draft: boolean };
+  /** SHA the in-run review covered. A later commit is reviewed as a delta before merge. */
+  reviewedSha?: string;
 }
 
 /** Label of every PR that changes `human_only_paths`. */
@@ -81,6 +83,8 @@ export interface FinalizeOutput {
   approvedSha?: string;
   /** Head CI still unsettled. The auto policy stays; auto-merge waits for this SHA. */
   ciWait?: "pending" | "none";
+  /** SHA the review evidence covers after a delta review. */
+  reviewedSha?: string;
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -178,6 +182,8 @@ export function renderPrBody(ctx: RunContext, v: {
   evaluation?: { report?: EvaluateReport; link: EvidenceLink; notes: string[] };
   /** Rendered protectedSection, "" when no protected file changed. */
   protectedConfig?: string;
+  /** Diff-size signal. It is not a risk reason and does not force a human gate. */
+  sizeSignal?: string | null;
 }): string {
   const { plan, handoffs } = ctx;
   const { input, out } = v;
@@ -202,7 +208,7 @@ export function renderPrBody(ctx: RunContext, v: {
     summary: v.summary,
     protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
     risk: out.risk.risk,
-    risk_reason: cell(riskReasonLine(out.risk)),
+    risk_reason: cell([riskReasonLine(out.risk), v.sizeSignal ? `size signal (does not change risk): ${v.sizeSignal}` : ""].filter(Boolean).join("; ")),
     security_rows: securityRows(v.changed)
       .map((r) => `| ${cell(r.area)} | ${r.touched ? "yes" : "no"} | ${cell(r.note)} |`)
       .join("\n"),
@@ -338,11 +344,26 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     }
   }
 
+  let reviewedSha = input.reviewedSha;
+  if (result === "done" && reviewedSha && gates) {
+    const headNow = await revParse(ctx.worktree, "HEAD");
+    if (headNow !== reviewedSha) {
+      const delta = await reviewDelta(ctx, { round: input.rounds + 1, gates, findings: input.findings, reviewedSha });
+      input.findings = delta.findings;
+      if (!delta.ok) {
+        result = "needs_human";
+        reason = delta.reason;
+      } else reviewedSha = delta.reviewedSha;
+    }
+  }
+
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const countTests = ctx.repo.limits.diff_count_tests;
   const totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
-  // Final tree, after a base merge: this is what result.json reports. Test lines still count for risk.
+  // Final tree, after a base merge. Test lines stay in the size signal and do not raise the risk class.
   const diffLines = linesCountingTests(totals);
+  const sizeSignal = diffSizeSignal(diffLines, ctx.repo.merge.low_max_diff_lines);
+  if (sizeSignal) ctx.events.emit({ step: "finalize", event: "progress", data: { diff_signal: sizeSignal } });
   const diffReport = diffCountFields(totals, countTests);
   if (diffReport) {
     ctx.events.diffCount = diffReport;
@@ -368,10 +389,10 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         } catch (e) {
           const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
           ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-          return { result: "needs_human", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...skippedField(gates) };
+          return { result: "needs_human", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
         }
       }
-      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft };
+      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft, ...(reviewedSha ? { reviewedSha } : {}) };
     }
     if (!claim.ok && claim.kind === "github") {
       githubClaimError = `PR step failed: ${claim.reason.slice(0, 300)}`;
@@ -390,7 +411,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits && !blockPush);
   const protectedConfig = protectedSection(ctx, guarded, await diffFiles(ctx.worktree, ctx.baseSha, guarded));
   if (guarded.length) ctx.events.emit({ step: "finalize", event: "progress", data: { protected_changes: guarded } });
-  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig }));
+  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig, sizeSignal }));
   writeRunFile(ctx, "pr.md", body);
 
   throwIfInterrupted(ctx.deps);
@@ -408,12 +429,12 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+      return { result: "needs_human", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
   }
   if (githubClaimError) {
     ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: githubClaimError } });
-    return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+    return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
@@ -522,17 +543,23 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           draft = held.draft;
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
           await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
-        } else if (!headGreen && policy === "auto") {
-          // The short poll ends here. Risk and the auto policy stay. The runner enables auto-merge
+        } else if (!headGreen && (policy === "auto" || policy === "bot_review")) {
+          // The short poll ends here. Risk and the merge policy stay. The runner enables auto-merge
           // once this SHA is green. A later commit is a different SHA and is not approved.
+          // bot_review also waits here: it merges this reviewed SHA, it does not wait for a person.
           ciWait = ci.status === "pending" ? "pending" : "none";
         }
       }
-      if (policy === "auto" && result === "done" && headGreen) await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+      // Merge only. Deploy is a separate action and is not called here.
+      // bot_review merges when the in-run review covered this head. A reviewer cannot widen that.
+      const reviewBound = policy !== "bot_review" || reviewedSha === head;
+      if ((policy === "auto" || policy === "bot_review") && reviewBound && result === "done" && headGreen) {
+        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+      }
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
@@ -548,6 +575,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     draft,
     ...(approvedSha && result === "done" ? { approvedSha } : {}),
     ...(ciWait && result === "done" ? { ciWait } : {}),
+    ...(reviewedSha ? { reviewedSha } : {}),
     ...skippedField(gates),
   };
 }

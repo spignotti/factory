@@ -21,6 +21,9 @@ describe("merge readiness", () => {
     expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: true, state: "open" })).toBe(false);
     expect(mayEnableAutoMerge({ policy: "human_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(false);
     expect(mayEnableAutoMerge({ policy: "auto", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(true);
+    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(true);
+    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "bbb", ci: "green", draft: false, state: "open" })).toBe(false);
+    expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(false);
   });
 
   it("a restarted enable that GitHub already accepted is not a second merge", () => {
@@ -82,5 +85,37 @@ describe("merge readiness", () => {
     github.prStates.set(pr, { state: "merged", draft: false, ci: "green" });
     const merged = renderStatus(await statusReport({ factoryHome: home, github, since: "24h" }));
     expect(merged).toContain("merged https://github.test/pull/7");
+  });
+
+  it("bot_review merges the reviewed green head and does not join the morning human queue", async () => {
+    const home = mkdtempSync(join(tmpdir(), "factory-merge-"));
+    const repo = mkdtempSync(join(tmpdir(), "factory-repo-"));
+    const runId = "20261112-130000-abcdef";
+    const pr = "https://github.test/pull/8";
+    const branch = "factory/8-goal";
+    const dir = join(home, "runs", runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({
+      version: 1, run_id: runId, repo, task: { ref: "#8", title: "t", text: "", labels: [] }, no_pr: false,
+      step: "finished", result: "done", reason: "", branch, worktree: null, base_sha: null,
+      packages: {}, failures: {}, handoffs: [], rounds: 1, findings: [], gate_count: 1,
+      pr, pr_draft: false, approved_sha: "aaa", reviewed_sha: "aaa", ci_wait: "pending", updated_at: "2026-11-12T00:00:00.000Z",
+    }));
+    writeFileSync(join(dir, "result.json"), JSON.stringify({
+      run_id: runId, repo, task: "#8", type: "feature", lane: "standard", result: "done", risk: "medium",
+      merge_policy: "bot_review", pr, rounds: 1, minutes: 1, cost_usd: 0, reason: "", branch, worktree: null, run_dir: dir,
+    }));
+    const github = new FakeGitHub();
+    github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
+    github.remoteShas.set(branch, "ccc");
+    github.prStates.set(pr, { state: "open", draft: false, ci: "green" });
+    const io = { out: () => undefined, err: () => undefined };
+    expect(await enableReadyMerges(github, repo, home, new Set(), io, 1_000)).toBe(false);
+    expect(github.autoMerged).toEqual([]);
+    github.remoteShas.set(branch, "aaa");
+    expect(await enableReadyMerges(github, repo, home, new Set(), io, 1_000)).toBe(false);
+    expect(github.autoMerged).toEqual([pr]);
+    const report = await statusReport({ factoryHome: home, github, since: "24h" });
+    expect(report.since?.human_review).toEqual([]);
   });
 });

@@ -226,8 +226,8 @@ human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]   # changed 
 review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
 merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
-  policy: { low: human_review, medium: human_review }   # bot_review | human_review
-  low_max_diff_lines: 300            # larger diffs are at least medium
+  policy: { low: human_review, medium: human_review }   # bot_review merges the reviewed green head; human_review waits
+  low_max_diff_lines: 300            # size signal only; a larger diff is not medium by itself
 limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true, stream_retries: 2, step_token_warn: 1000000 }
 # limits.stream_retries [2]: same-model retries after a provider stream abort (0–5; 0 = off). The current
 # agent call only. Auth, quota and invalid output are not retried. Exhausted retries end needs_human.
@@ -253,7 +253,7 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
 # commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
 # factory resume <run-id>"), the worktree keeps the work and resume re-runs the gates over it.
-# Diff line limits (limits.max_diff_lines, merge.low_max_diff_lines) count
+# limits.max_diff_lines is a gate. merge.low_max_diff_lines is a size signal and does not change the risk class. Both count
 # added + removed lines since base (renames detected: a moved file counts only its changed lines; a
 # move into or out of an excluded path counts as delete + add), without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
 # not manifests), binary files and limits.diff_exclude (generated paths; test files under tests.globs

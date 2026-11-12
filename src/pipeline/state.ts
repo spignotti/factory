@@ -42,6 +42,8 @@ export interface RunState {
   pr_draft: boolean | null;
   /** SHA the runner approved. A newer head is not this commit, so auto-merge stays off. */
   approved_sha?: string;
+  /** SHA the in-run review finished on. A later commit is not this evidence. */
+  reviewed_sha?: string;
   /** Head CI was still pending or unregistered when the coding run ended. Policy stays auto. */
   ci_wait?: "pending" | "none";
   /**

@@ -171,9 +171,11 @@ describe("factory resume", () => {
     gitAs(clone, "commit", "-q", "--no-edit");
     git(clone, "push", "-q", "origin", branch);
 
-    const r3 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
+    const r3 = await resumeScenario(r, { script: "clean.json", steps: roles("review_plan", "review_simplicity", "pr_writer") });
     expect(r3.result).toMatchObject({ result: "done", pr: r.result.pr });
-    expect(r3.runner.calls.map((c) => c.role)).toEqual(["pr_writer"]);
+    expect(r3.runner.calls.map((c) => c.role)).toEqual(["review_plan", "review_simplicity", "pr_writer"]);
+    expect(r3.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("incremental_diff");
+    expect(r3.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("divide");
     expect(r3.github.prs).toHaveLength(1); // no second PR
     expect(r3.github.updates.map((u) => u.pr)).toEqual([r.result.pr]);
     expect(r3.github.readied).toEqual([r.result.pr]);

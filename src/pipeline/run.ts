@@ -773,9 +773,12 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   if (st.step === "review") {
     loop = await reviewLoop(ctx, gates!, {
       firstRound: st.rounds + 1,
-      onRound: (round, findings) => {
+      findings: st.findings,
+      reviewedSha: st.reviewed_sha,
+      onRound: (round, findings, reviewedSha) => {
         st.rounds = round;
         st.findings = findings;
+        if (reviewedSha) st.reviewed_sha = reviewedSha;
         sync();
       },
     });
@@ -784,7 +787,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
       sync();
     }
   }
-  loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates };
+  loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates, reviewedSha: st.reviewed_sha };
 
   const fin = await finalize(ctx, {
     ...loop,
@@ -793,11 +796,13 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     noPr: opts.noPr,
     startedAt: opts.startedAt,
     existingPr: st.pr ? { url: st.pr, draft: st.pr_draft ?? true } : undefined,
+    reviewedSha: loop.reviewedSha ?? st.reviewed_sha,
   });
   st.pr = fin.pr;
   st.pr_draft = fin.draft;
   if (fin.approvedSha) st.approved_sha = fin.approvedSha;
   else delete st.approved_sha;
+  if (fin.reviewedSha) st.reviewed_sha = fin.reviewedSha;
   if (fin.ciWait) st.ci_wait = fin.ciWait;
   else delete st.ci_wait;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";

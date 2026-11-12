@@ -317,6 +317,102 @@ export function planReviewNotes(plan: Plan, taskText: string, labels: string[] =
   return lines.join("\n");
 }
 
+const CLAIM_PATH = /[A-Za-z0-9_@][\w.@+-]*(?:\/[\w.@+-]+)+/g;
+
+/** File paths named in a review claim. Globs and bare words are not paths. */
+export function pathsInText(text: string): string[] {
+  return [...text.matchAll(CLAIM_PATH)].map((m) => m[0]);
+}
+
+function stripOnly(text: string, path: string): string {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`\\bonly\\b(?:\\s+(?:${ONLY_FILLER}))*\\s+\`?${escaped}\`?`, "gi");
+  return text.replace(re, " ").replace(/\s{2,}/g, " ").replace(/\s+([.,;:])/g, "$1").trim();
+}
+
+/**
+ * Drops invented `only <path>` restrictions the task does not state.
+ * An acceptance line that was only that restriction becomes the plan goal, which is the released task.
+ * Nothing is added.
+ */
+export function correctInventedRestrictions(plan: Plan, taskText: string): { plan: Plan; notes: string[] } {
+  const warnings = scopeNarrowingWarnings(plan, taskText);
+  if (!warnings.length) return { plan, notes: [] };
+  const next = structuredClone(plan);
+  const notes: string[] = [];
+  const dropScope: number[] = [];
+  for (const warning of warnings) {
+    const parsed = warning.match(/^(.*?): restricts to only ([^,\s]+),/);
+    if (!parsed) continue;
+    const where = parsed[1]!;
+    const path = parsed[2]!;
+    const note = `removed invented restriction only ${path} from ${where}`;
+    if (where.startsWith("out_of_scope[")) {
+      const i = Number(where.slice("out_of_scope[".length, -1));
+      const before = next.out_of_scope[i];
+      if (before === undefined) continue;
+      const after = stripOnly(before, path).trim();
+      if (after === before) continue;
+      if (after) next.out_of_scope[i] = after;
+      else dropScope.push(i);
+      notes.push(note);
+      continue;
+    }
+    const acceptance = next.acceptance.find((a) => a.id === where);
+    if (acceptance) {
+      const after = stripOnly(acceptance.text, path).trim() || next.goal;
+      if (after === acceptance.text) continue;
+      acceptance.text = after;
+      notes.push(note);
+      continue;
+    }
+    const pkg = next.packages.find((p) => p.id === where);
+    if (!pkg) continue;
+    const description = stripOnly(pkg.description, path).trim();
+    const title = stripOnly(pkg.title, path).trim();
+    let changed = false;
+    if (description !== pkg.description) {
+      pkg.description = description;
+      changed = true;
+    }
+    if (title && title !== pkg.title) {
+      pkg.title = title;
+      changed = true;
+    }
+    if (changed) notes.push(note);
+  }
+  if (dropScope.length) {
+    const drop = new Set(dropScope);
+    next.out_of_scope = next.out_of_scope.filter((_, i) => !drop.has(i));
+  }
+  return { plan: next, notes };
+}
+
+/**
+ * Removes a plan file the reviewer called stale when the tree does not have it and the task does not name it.
+ * The package keeps at least one file: emptying it would invent a replacement path.
+ */
+export function dropStalePlanPaths(
+  plan: Plan,
+  taskText: string,
+  exists: (file: string) => boolean,
+  claimText: string,
+): { plan: Plan; notes: string[] } {
+  const named = new Set(pathsInText(claimText));
+  const task = taskText.toLowerCase();
+  const next = structuredClone(plan);
+  const notes: string[] = [];
+  for (const pkg of next.packages) {
+    const stale = pkg.files.filter((file) => named.has(file) && !file.includes("*") && !exists(file) && !task.includes(file.toLowerCase()));
+    if (!stale.length) continue;
+    const kept = pkg.files.filter((file) => !stale.includes(file));
+    if (!kept.length) continue;
+    pkg.files = kept;
+    notes.push(`dropped stale path ${stale.join(", ")} from ${pkg.id}`);
+  }
+  return { plan: next, notes };
+}
+
 let planJsonSchema: Record<string, unknown> | undefined;
 
 function planSchemaRoot(): Record<string, unknown> {
