@@ -865,7 +865,7 @@ It starts nothing for a repo while the base branch CI is red. It does not start 
 
 Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when an acceptance line `fulfills #N` is evidenced. File overlap alone is not a bundle.
 
-Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time. For `auto` and `bot_review` the new head is approved again and CI has to pass on that head before auto-merge can proceed. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish. The worker does not assume an overnight stop.
+Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time. For `auto` and `bot_review` that merge commit is approved again, and only that commit: CI has to pass on it before auto-merge can proceed. A head that was not readable before the update, or a commit that is not that merge, is not approved. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish. The worker does not assume an overnight stop.
 
 ```
 factory queue run --slots 2

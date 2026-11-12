@@ -161,6 +161,11 @@ export interface GitHub {
    * fails a pull request without it, including while this process is not running.
    */
   approveHead(repoDir: string, sha: string): Promise<void>;
+  /**
+   * Parent SHAs of `sha`, first parent first. Null when the commit cannot be read.
+   * An `update-branch` merge has the previous head as its first parent and the base as the second.
+   */
+  commitParents(repoDir: string, sha: string): Promise<string[] | null>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
   /** Resume: refresh title/body of the run's existing PR. */
@@ -900,6 +905,18 @@ export class GhCli implements GitHub {
     ]);
   }
 
+  async commitParents(repoDir: string, sha: string): Promise<string[] | null> {
+    try {
+      // UNVERIFIED: `parents[].sha` on GET /repos/{owner}/{repo}/commits/{sha}.
+      const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}`, "--jq", "[.parents[].sha]"]);
+      const parsed = JSON.parse(out) as unknown;
+      if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) return null;
+      return parsed as string[];
+    } catch {
+      return null;
+    }
+  }
+
   async updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void> {
     await gh(repoDir, ["pr", "edit", pr, "--title", update.title, "--body", update.body]);
   }
@@ -1104,12 +1121,25 @@ export class FakeGitHub implements GitHub {
     this.autoMergeShas.push({ pr, sha });
   }
 
+  /** When set, `disableAutoMerge` throws this instead of recording the call. */
+  disableError: string | null = null;
+
   async disableAutoMerge(_repoDir: string, pr: string): Promise<void> {
+    if (this.disableError) throw new Error(this.disableError);
     this.autoMergeDisabled.push(pr);
   }
 
   async approveHead(_repoDir: string, sha: string): Promise<void> {
     this.approvedShas.push(sha);
+  }
+
+  /** Parents recorded by `updateBranch`, or set by a test. Missing means unreadable. */
+  readonly commitParentsBySha = new Map<string, string[]>();
+  /** When set, the next `updateBranch` records these parents instead of [previous head, base]. */
+  updateBranchParents: string[] | null = null;
+
+  async commitParents(_repoDir: string, sha: string): Promise<string[] | null> {
+    return this.commitParentsBySha.get(sha) ?? null;
   }
 
   readonly updates: { pr: string; title: string; body: string }[] = [];
@@ -1203,7 +1233,10 @@ export class FakeGitHub implements GitHub {
     const prev = this.remoteShas.get(branch);
     const forced = this.updateBranchHead;
     this.updateBranchHead = null;
-    this.remoteShas.set(branch, forced && forced !== prev ? forced : nextUpdateHead(prev));
+    const next = forced && forced !== prev ? forced : nextUpdateHead(prev);
+    this.remoteShas.set(branch, next);
+    const parents = this.updateBranchParents ?? (prev ? [prev, "b".repeat(40)] : []);
+    this.commitParentsBySha.set(next, parents);
   }
 }
 
