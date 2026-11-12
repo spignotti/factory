@@ -61,6 +61,105 @@ describe("executed test evidence", () => {
     expect(testPresence(plan, ["P1"], [handoff], evidence).ok).toBe(true);
     expect(handoff.evidence).toHaveLength(1);
   });
+
+  it("treats a pytest skip-only summary as a skip, not a pass", () => {
+    const parsed = parseTestReport("test_foo.py", "=== 2 skipped in 0.01s ===\n", 0);
+    expect(parsed).toEqual([{ file: "test_foo.py", name: "", result: "skip" }]);
+    expect(matchTestEvidence("test_foo.py", parsed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("fails a pytest summary that reports a failure", () => {
+    expect(parseTestReport("test_foo.py", "=== 1 failed, 1 skipped in 0.01s ===\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "fail" },
+    ]);
+  });
+
+  it("accepts a pytest summary with passes as a file-level pass", () => {
+    expect(parseTestReport("test_foo.py", "=== 2 passed, 1 skipped in 0.01s ===\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "pass" },
+    ]);
+  });
+
+  it("treats a lowercase TAP skip directive as a skip", () => {
+    const output = "TAP version 13\nok 1 - name # skip reason\n";
+    expect(parseTestReport("test/a.test.js", output, 0)).toEqual([
+      { file: "test/a.test.js", name: "name", result: "skip" },
+    ]);
+  });
+
+  it("treats a quiet pytest skip footer as a skip", () => {
+    const parsed = parseTestReport("test_foo.py", "2 skipped in 0.01s\n", 0);
+    expect(parsed).toEqual([{ file: "test_foo.py", name: "", result: "skip" }]);
+    expect(matchTestEvidence("test_foo.py", parsed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("treats an xfailed-only footer as a skip, not a pass", () => {
+    expect(parseTestReport("test_foo.py", "1 xfailed in 0.01s\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+    expect(parseTestReport("test_foo.py", "=== 1 xpassed in 0.01s ===\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+  });
+
+  it("fails a pytest footer when the command exits non-zero", () => {
+    expect(parseTestReport("test_foo.py", "=== 2 passed in 0.01s ===\n", 1)).toEqual([
+      { file: "test_foo.py", name: "", result: "fail" },
+    ]);
+    expect(parseTestReport("test_foo.py", "1 error in 0.01s\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "fail" },
+    ]);
+  });
+
+  it("treats a TAP # skipped directive as a skip", () => {
+    const output = "TAP version 13\nok 1 - name # skipped reason\n";
+    expect(parseTestReport("test/a.test.js", output, 0)).toEqual([
+      { file: "test/a.test.js", name: "name", result: "skip" },
+    ]);
+  });
+
+  it("treats a TAP skip without a dash description as a skip", () => {
+    const output = "TAP version 13\nok 1 # skip reason\n";
+    const parsed = parseTestReport("test/a.test.js", output, 0);
+    expect(parsed).toEqual([{ file: "test/a.test.js", name: "", result: "skip" }]);
+    expect(matchTestEvidence("test/a.test.js", parsed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("does not record a cited file a command without {files} merely mentions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["a/b.py", "c.py"],
+      testCommand: "printf '%s\\n' 'a/b.py' '=== 1 passed in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([]);
+    expect(matchTestEvidence("a/b.py", executed, true).reason).toMatch(/not executed/);
+  });
+
+  it("does not attribute a path that is only a substring of a pytest result path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-sub-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["a/b.py", "b.py"],
+      testCommand: "printf '%s\\n' 'PASSED a/b.py::test_one' '=== 1 passed in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([{ file: "a/b.py", name: "test_one", result: "pass" }]);
+    expect(matchTestEvidence("b.py", executed, true).reason).toMatch(/not executed/);
+  });
+
+  it("does not let a suite pass footer override a SKIPPED pytest line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-skip-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["c.py"],
+      testCommand: "printf '%s\\n' 'SKIPPED c.py::test_skip' '=== 1 passed, 1 skipped in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([{ file: "c.py", name: "test_skip", result: "skip" }]);
+    expect(matchTestEvidence("c.py", executed, true).reason).toMatch(/skipped test/);
+  });
 });
 
 describe("evidence prompts", () => {
