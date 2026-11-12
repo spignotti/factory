@@ -371,12 +371,7 @@ export function detect(dir: string, files: string[]): Detection {
   const globs = TEST_GLOBS.filter((g) => testFiles.some((f) => matchesAny(f, [g])));
   let testRun: string | null = null;
   const testScript = String((pkg?.scripts as Record<string, string> | undefined)?.test ?? "");
-  if (pm) {
-    const exec = pm === "npm" ? "npx" : `${pm} exec`;
-    if (/\bvitest\b/.test(testScript)) testRun = `${exec} vitest run {files}`;
-    else if (/\bjest\b/.test(testScript)) testRun = `${exec} jest {files}`;
-    else if (/node --test/.test(testScript)) testRun = "node --test {files}";
-  }
+  if (pm) testRun = singleFileTestCommand(testScript, pm);
   if (!testRun && python && candidates.some((c) => c.kind === "test")) {
     const prefix = python.runner === "uv" ? "uv run --locked " : python.runner === "poetry" ? "poetry run " : python.runner === "pip" ? ".venv/bin/" : "";
     testRun = `${prefix}pytest {files}`;
@@ -398,6 +393,133 @@ export function detect(dir: string, files: string[]): Detection {
     secrets: { ...envTemplateNames(dir), ...infisicalConfig(dir) },
     migration_globs: migrationDirGlobs(files),
   };
+}
+
+const LOADER_VALUE = new Set(["--import", "--loader", "--require", "-r", "--experimental-loader", "--tsconfig"]);
+
+/** Shell words. `KEY='a b'` stays one word so a loader in `NODE_OPTIONS` is not split. */
+function shellWords(segment: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  const s = segment.trim();
+  while (i < s.length) {
+    while (s[i] === " ") i++;
+    if (i >= s.length) break;
+    const env = /^([A-Za-z_][A-Za-z0-9_]*)=(['"])/.exec(s.slice(i));
+    if (env) {
+      const start = i + env[0].length;
+      const end = s.indexOf(env[2]!, start);
+      out.push(`${env[1]}=${end < 0 ? s.slice(start) : s.slice(start, end)}`);
+      i = end < 0 ? s.length : end + 1;
+      continue;
+    }
+    if (s[i] === "'" || s[i] === '"') {
+      const q = s[i]!;
+      const end = s.indexOf(q, i + 1);
+      out.push(end < 0 ? s.slice(i + 1) : s.slice(i + 1, end));
+      i = end < 0 ? s.length : end + 1;
+      continue;
+    }
+    const word = /^\S+/.exec(s.slice(i));
+    if (!word) break;
+    out.push(word[0]);
+    i += word[0].length;
+  }
+  return out;
+}
+
+function shellQuote(value: string): string {
+  return /[\s'"]/.test(value) ? `'${value.replaceAll("'", "'\\''")}'` : value;
+}
+
+/** Node loader options (`--import`, `--loader`, `--require`, `--experimental-*`) and their values. */
+function loaderFlags(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (LOADER_VALUE.has(a)) {
+      const v = args[i + 1];
+      if (v && !v.startsWith("-")) {
+        out.push(a, v);
+        i++;
+      }
+      continue;
+    }
+    if (/^--(?:import|loader|require)=/.test(a) || a.startsWith("--experimental-")) out.push(a);
+  }
+  return out;
+}
+
+function toolFlags(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "run" || a === "--watch" || a === "--watch=true") continue;
+    if (!a.startsWith("-")) continue;
+    if (LOADER_VALUE.has(a) || a === "--config" || a === "-c") {
+      const v = args[i + 1];
+      if (v && !v.startsWith("-")) {
+        out.push(a, v);
+        i++;
+        continue;
+      }
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+function binName(token: string, name: string): boolean {
+  return new RegExp(`(?:^|/)${name}(?:\\.m?js)?$`).test(token);
+}
+
+/**
+ * Command that runs the cited test files. Taken from the repo's `test` script.
+ * Node loader flags stay (`--import tsx`, `--loader`, `--experimental-strip-types`, a loader in `NODE_OPTIONS`).
+ * File arguments and watch mode do not: `{files}` is the selection.
+ */
+export function singleFileTestCommand(script: string, pm: NonNullable<Detection["package_manager"]>): string | null {
+  const exec = pm === "npm" ? "npx" : `${pm} exec`;
+  for (const segment of script.split(/\s*(?:&&|\|\||;)\s*/)) {
+    const words = shellWords(segment);
+    const env = words.filter((w) => w.startsWith("NODE_OPTIONS=") && /import|loader|require|experimental/.test(w));
+    const args = words.filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w));
+    const prefix = env.map((w) => `NODE_OPTIONS=${shellQuote(w.slice("NODE_OPTIONS=".length))}`).join(" ");
+    const lead = prefix ? `${prefix} ` : "";
+    const vitest = args.findIndex((a) => binName(a, "vitest"));
+    const jest = args.findIndex((a) => binName(a, "jest"));
+    const tool = vitest >= 0 ? vitest : jest;
+    if (tool >= 0) {
+      const before = args.slice(0, tool);
+      const nodeAt = before.findIndex((a) => binName(a, "node"));
+      const keptLoaders = nodeAt >= 0 ? loaderFlags(before.slice(nodeAt + 1)) : [];
+      const flags = toolFlags(args.slice(tool + 1));
+      const tail = `${vitest >= 0 ? "run " : ""}${flags.length ? `${flags.join(" ")} ` : ""}{files}`;
+      if (nodeAt >= 0 && keptLoaders.length) return `${lead}node ${keptLoaders.join(" ")} ${args[tool]} ${tail}`;
+      const bin = vitest >= 0 ? "vitest" : "jest";
+      return `${lead}${exec} ${bin} ${tail}`;
+    }
+    const runnerAt = args.findIndex((a) => binName(a, "node") || binName(a, "tsx") || binName(a, "ts-node"));
+    const testAt = args.indexOf("--test");
+    if (runnerAt >= 0 && testAt > runnerAt) {
+      const between: string[] = [];
+      for (let i = runnerAt + 1; i < testAt; i++) {
+        const a = args[i]!;
+        if (!a.startsWith("-")) continue;
+        between.push(a);
+        if (LOADER_VALUE.has(a)) {
+          const v = args[i + 1];
+          if (v && !v.startsWith("-")) {
+            between.push(v);
+            i++;
+          }
+        }
+      }
+      const flags = between.length ? `${between.join(" ")} ` : "";
+      return `${lead}${args[runnerAt]} ${flags}--test {files}`;
+    }
+  }
+  return null;
 }
 
 /** `.infisical.json` presence and its `workspaceId` (the project id), only when it is a plain id (it ends up in a shell command). */

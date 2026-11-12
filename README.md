@@ -671,7 +671,10 @@ base branch; the user's checkout is not touched):
 
 - **Detect** (code): stack (node: package manager and scripts; python: uv/poetry/pip, nox sessions or
   ruff/mypy/pytest; rust; go), test files and the command that runs specific ones, UI, database, cloud/secrets,
-  CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …). Mutating commands
+  CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …). `tests.run` comes from
+  the `test` script and keeps Node loader flags (`--import`, `--loader`, `--require`, `--experimental-*`,
+  and the same flags inside `NODE_OPTIONS`). File arguments and `--watch` are dropped; `{files}` is the
+  selection. Mutating commands
   (`--fix`, `--write`, `format` without `--check`, …) become their read-only variant or are skipped, never a
   check that rewrites files; identical commands are drafted once.
 - **Measure**: setup and every check once in a clean base worktree, in the sandbox (`--no-measure` skips).
@@ -679,6 +682,8 @@ base branch; the user's checkout is not touched):
   the base → `manual`; reasons as comments), `.factory/review-rules.md`, the CI stub for `--ref`, and
   `AGENTS.md`: a full template (purpose, stack & commands, test strategy, architecture, conventions, domain,
   data & secrets, do not, verify) when there is none, else a "Test strategy" section when missing.
+  A file adopt writes that this repo gitignores (for example `.factory/` or `AGENTS.md`) is force-added
+  and named in a warning; a normal `git add` would leave it out of the commit.
 - **Legacy setup**: Claude Code (`CLAUDE.md`, `.claude/`), Cursor rules and Bugbot, opencode and grok configs,
   workflows running coding bots, and PR/push workflows whose every command a drafted check covers are deleted
   in the same PR. Operator tooling (commands, skills, agents someone runs by hand), skills with scripts, other
@@ -694,7 +699,8 @@ base branch; the user's checkout is not touched):
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
 - **After the merge**: if the repo has tests, check that `tests.globs` and `tests.run` are set (bug plans
-  stop with `needs_human` without `tests.run`; adopt prints a hint when it found tests but no runner). The
+  stop with `needs_human` without `tests.run`; adopt prints a hint when it found tests but no runner).
+  `factory doctor` warns when the repo has checks or test globs, no check runs tests, and `tests.run` is unset. The
   repo bot sets up its webhook routine and writes its own `notify.yaml` entry, then runs
   `factory notify test <owner/name>` (checklist in [docs/BOTS.md](docs/BOTS.md#onboarding-checklist-new-repo--new-bot)).
 

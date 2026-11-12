@@ -152,6 +152,21 @@ describe("factory adopt", () => {
     expect(report.branch).toBe("factory/adopt-2");
   });
 
+  it("force-adds gitignored files it writes and keeps loader flags on tests.run", async () => {
+    const repo = makeRepo({
+      "package.json": JSON.stringify({ scripts: { test: "node --import tsx --test" } }),
+      "src/a.test.js": "// test\n",
+      ".gitignore": ".factory/\nAGENTS.md\n",
+    });
+    const { report } = await runAdopt(repo, [], { plan: false, pr: false });
+    const files = tree(repo, report.branch);
+    expect(files).toEqual(expect.arrayContaining([".factory/repo.yaml", ".factory/review-rules.md", "AGENTS.md", CI_STUB_PATH]));
+    expect(report.warnings).toContain(
+      "gitignored files adopt wrote were force-added: .factory/repo.yaml, .factory/review-rules.md, AGENTS.md (a normal git add skips them)",
+    );
+    expect(parseRepoConfig(show(repo, report.branch, ".factory/repo.yaml")).tests.run).toBe("node --import tsx --test {files}");
+  });
+
   it("hints at a missing tests.run when tests exist but no single-file runner was found", async () => {
     const pkg = { scripts: { test: "mocha" } };
     const repo = makeRepo({ "package.json": JSON.stringify(pkg), "src/a.test.js": "// test\n" });

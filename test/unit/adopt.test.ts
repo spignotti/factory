@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { detect, noxSessions } from "../../src/adopt/detect.js";
+import { detect, noxSessions, singleFileTestCommand } from "../../src/adopt/detect.js";
 import { draftChecks, draftRepoYaml, SLOW_CHECK_SECONDS, testStrategySection, withTestStrategy } from "../../src/adopt/draft.js";
 import { classifyLegacy, keepMatcher, lineCovered } from "../../src/adopt/legacy.js";
 import { measureChecks } from "../../src/adopt/measure.js";
@@ -52,6 +52,21 @@ describe("adopt detect", () => {
     const dir = makeRepo({ "pyproject.toml": "[tool.ruff]\n[tool.mypy]\n[tool.pytest.ini_options]\n", "poetry.lock": "" });
     const d = detect(dir, files(dir));
     expect(d.candidates.map((c) => c.run)).toEqual(["poetry run ruff check .", "poetry run ruff format --check .", "poetry run mypy .", "poetry run pytest"]);
+  });
+
+  it("keeps node loader flags in tests.run and drops file arguments and watch mode", () => {
+    expect(singleFileTestCommand("node --import tsx --test", "pnpm")).toBe("node --import tsx --test {files}");
+    expect(singleFileTestCommand("tsx --test", "npm")).toBe("tsx --test {files}");
+    expect(singleFileTestCommand("node --experimental-strip-types --test src/a.test.ts", "pnpm")).toBe("node --experimental-strip-types --test {files}");
+    expect(singleFileTestCommand("NODE_OPTIONS='--import tsx' node --test", "pnpm")).toBe("NODE_OPTIONS='--import tsx' node --test {files}");
+    expect(singleFileTestCommand("node --import tsx ./node_modules/vitest/vitest.mjs --config vitest.config.ts src/a.test.ts", "pnpm")).toBe(
+      "node --import tsx ./node_modules/vitest/vitest.mjs run --config vitest.config.ts {files}",
+    );
+    expect(singleFileTestCommand("vitest --watch src/a.test.ts", "pnpm")).toBe("pnpm exec vitest run {files}");
+    expect(singleFileTestCommand("jest --watch", "yarn")).toBe("yarn exec jest {files}");
+    expect(singleFileTestCommand("mocha", "npm")).toBeNull();
+    const dir = makeRepo({ "package.json": JSON.stringify({ scripts: { test: "node --import tsx --test" } }), "src/a.test.ts": "" });
+    expect(detect(dir, files(dir)).tests.run).toBe("node --import tsx --test {files}");
   });
 });
 
