@@ -45,15 +45,58 @@ export function citedTestFiles(handoffs: Handoff[]): string[] {
 }
 
 function cleanTestName(raw: string): { name: string; skip: boolean } {
-  const skip = /#\s*SKIP\b/.test(raw);
-  const name = raw.replace(/\s+#\s*SKIP\b.*$/, "").replace(/\s+\([\d.]+ms\)\s*$/, "").trim();
+  const skip = /#\s*skip(?:ped)?\b/i.test(raw);
+  const name = raw.replace(/\s*#\s*skip(?:ped)?\b.*$/i, "").replace(/\s+\([\d.]+ms\)\s*$/, "").trim();
   return { name, skip };
 }
 
+interface PytestCounts {
+  passed: number;
+  failed: number;
+  errors: number;
+  skipped: number;
+  xfailed: number;
+  xpassed: number;
+}
+
+const PYTEST_COUNT = String.raw`\d+\s+[A-Za-z]+`;
+/** Banner (`=== 2 skipped in 0.01s ===`) or pytest -q (`2 skipped in 0.01s`). */
+const PYTEST_SUMMARY = new RegExp(
+  `^(?:=+\\s*)?(${PYTEST_COUNT}(?:,\\s*${PYTEST_COUNT})*)\\s+in\\s+\\d+(?:\\.\\d+)?s(?:\\s+\\([^)]*\\))?\\s*(?:=+)?$`,
+);
+
+/** Pytest footer counts. Warnings, xfailed and xpassed are not passes. */
+function pytestCounts(output: string): PytestCounts | undefined {
+  let body: string | undefined;
+  for (const line of output.split("\n")) {
+    const m = PYTEST_SUMMARY.exec(line.trim());
+    if (m) body = m[1] ?? "";
+  }
+  if (body === undefined) return undefined;
+  const counts: PytestCounts = { passed: 0, failed: 0, errors: 0, skipped: 0, xfailed: 0, xpassed: 0 };
+  let found = false;
+  for (const m of body.matchAll(/(\d+)\s+(xfailed|xpassed|passed|failed|errors?|skipped)\b/gi)) {
+    found = true;
+    const n = Number(m[1]);
+    const kind = (m[2] ?? "").toLowerCase();
+    if (kind === "passed") counts.passed += n;
+    else if (kind === "failed") counts.failed += n;
+    else if (kind === "error" || kind === "errors") counts.errors += n;
+    else if (kind === "xfailed") counts.xfailed += n;
+    else if (kind === "xpassed") counts.xpassed += n;
+    else counts.skipped += n;
+  }
+  return found ? counts : undefined;
+}
+
 /**
- * Node's spec reporter and TAP. A command that exits 0 without per-test lines (a SQL file,
- * an integration script) is one file-level pass. A non-zero exit without per-test lines is
- * a file-level failure, not a pass.
+ * Node's spec reporter, TAP, and a pytest summary footer (`= … in 0.02s =`, or the quiet
+ * `2 skipped in 0.01s` form). Per-test Node/TAP lines win when present, including a non-zero
+ * exit. Otherwise a pytest footer is one file-level result: failed or error fails; a non-zero
+ * exit fails even when passed > 0; xfailed and xpassed are not passes; skip-only or xfailed-only
+ * with exit 0 is a skip. Warnings are not passes. A command that exits 0 without those marks (a
+ * SQL file, an integration script) is one file-level pass. A non-zero exit without per-test lines
+ * is a file-level failure, not a pass.
  */
 export function parseTestReport(file: string, output: string, code: number): ExecutedTest[] {
   if (output.includes("TAP version")) {
@@ -63,6 +106,12 @@ export function parseTestReport(file: string, output: string, code: number): Exe
   const spec = parseSpec(file, output);
   if (spec.length) return spec;
   if (shTimedOut({ code, signal: null, output, durationMs: 0 })) return [{ file, name: "", result: "fail" }];
+  const pytest = pytestCounts(output);
+  if (pytest) {
+    if (code !== 0 || pytest.failed > 0 || pytest.errors > 0) return [{ file, name: "", result: "fail" }];
+    if (pytest.passed > 0) return [{ file, name: "", result: "pass" }];
+    if (pytest.skipped > 0 || pytest.xfailed > 0 || pytest.xpassed > 0) return [{ file, name: "", result: "skip" }];
+  }
   return [{ file, name: "", result: code === 0 ? "pass" : "fail" }];
 }
 
@@ -83,12 +132,27 @@ function parseSpec(file: string, output: string): ExecutedTest[] {
 function parseTap(file: string, output: string): ExecutedTest[] {
   const out: ExecutedTest[] = [];
   for (const line of output.split("\n")) {
-    const m = /^(not )?ok\s+\d+\s+-\s+(.+)$/.exec(line.trim());
+    const m = /^(not )?ok\s+\d+(?:\s+-\s+|\s+)(.+)$/.exec(line.trim());
     if (!m) continue;
     const cleaned = cleanTestName(m[2] ?? "");
-    const name = cleaned.name;
-    if (!name) continue;
+    if (!cleaned.name && !cleaned.skip) continue;
     const result = cleaned.skip ? "skip" : m[1] ? "fail" : "pass";
+    out.push({ file, name: cleaned.name, result });
+  }
+  return out;
+}
+
+/** Verbose pytest line `PASSED path::name`. The path must match the cited file exactly. */
+const PYTEST_RESULT = /^(PASSED|FAILED|ERROR|SKIPPED)\s+(\S+?)::(.+)$/;
+
+function pytestResultLines(file: string, output: string): ExecutedTest[] {
+  const out: ExecutedTest[] = [];
+  for (const line of output.split("\n")) {
+    const m = PYTEST_RESULT.exec(line.trim());
+    if (!m || m[2] !== file) continue;
+    const status = m[1] ?? "";
+    const name = (m[3] ?? "").replace(/\s+-\s+.*$/, "").trim();
+    const result = status === "PASSED" ? "pass" : status === "SKIPPED" ? "skip" : "fail";
     out.push({ file, name, result });
   }
   return out;
@@ -130,9 +194,12 @@ export function matchCheckEvidence(
 }
 
 /**
- * Runs `tests.run` once per cited file that exists and parses the result.
- * `{files}` is that one file, so a pass belongs to the cited path and not to another test.
- * No command means nothing was executed.
+ * Runs `tests.run` for the cited files and parses the result.
+ * With `{files}`, one invocation per cited path, that path substituted, parsed as a report.
+ * Without it, the command runs once and a cited file is attributed only from a pytest result
+ * line that names that file (`PASSED path::name`). A path that is only a substring of another,
+ * or a file the output merely mentions beside a suite footer, was not executed. No command means
+ * nothing was executed.
  */
 export async function runCitedTests(opts: {
   cwd: string;
@@ -145,17 +212,22 @@ export async function runCitedTests(opts: {
   heartbeatMs?: number;
 }): Promise<ExecutedTest[]> {
   if (!opts.testCommand || opts.files.length === 0) return [];
-  const out: ExecutedTest[] = [];
-  for (const file of opts.files) {
-    const command = opts.testCommand.includes("{files}")
-      ? opts.testCommand.replaceAll("{files}", shellQuote(file))
-      : opts.testCommand;
-    const result = await watchCheck("evidence", () => sh(command, { cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs, jail: opts.jail }), {
-      where: file,
+  const run = (command: string, where: string) =>
+    watchCheck("evidence", () => sh(command, { cwd: opts.cwd, env: opts.env, timeoutMs: opts.timeoutMs, jail: opts.jail }), {
+      where,
       onCheck: opts.onCheck,
       heartbeatMs: opts.heartbeatMs,
     });
-    out.push(...parseTestReport(file, result.output, result.code));
+  if (opts.testCommand.includes("{files}")) {
+    const out: ExecutedTest[] = [];
+    for (const file of opts.files) {
+      const result = await run(opts.testCommand.replaceAll("{files}", shellQuote(file)), file);
+      out.push(...parseTestReport(file, result.output, result.code));
+    }
+    return out;
   }
+  const result = await run(opts.testCommand, "suite");
+  const out: ExecutedTest[] = [];
+  for (const file of opts.files) out.push(...pytestResultLines(file, result.output));
   return out;
 }
