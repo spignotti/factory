@@ -7,6 +7,7 @@ import type { GitHub, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge } from "../pipeline/merge-ready.js";
+import { deliveryForDone } from "../pipeline/outcome.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
@@ -246,6 +247,7 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
   delete entry.pid;
   if (result.result === "done") {
     entry.status = "done";
+    entry.delivery = deliveryForDone(result);
     delete entry.reason;
     delete entry.blocked_by;
     return "done";

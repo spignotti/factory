@@ -55,6 +55,13 @@ export interface RunState {
     infra_reruns: number;
     class?: "format" | "code" | "infra" | "base" | "config" | "unknown";
   };
+  /**
+   * Coding attempts on this checkpoint. Absent on runs stored before attempt counts existed;
+   * resume must not invent one. A new run starts at 1.
+   */
+  attempts?: number;
+  /** Plan effort chosen at intake. Absent when this run never chose one. */
+  plan_effort?: "none" | "medium" | "high";
   /** Always `standard`. Older states may say `fast` (the removed fast lane). */
   lane?: "standard" | "fast";
   /** Fast-lane escalation reasons. No longer written. */
@@ -106,6 +113,7 @@ export function newState(v: { runId: string; repo: string; task: Task; noPr: boo
     pr: null,
     pr_draft: null,
     lane: "standard",
+    attempts: 1,
     updated_at: new Date().toISOString(),
   };
 }

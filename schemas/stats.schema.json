@@ -320,6 +320,86 @@
         },
         "reverted": {
           "type": "null"
+        },
+        "outcomes": {
+          "type": "object",
+          "properties": {
+            "tickets": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tickets_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attempts_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "delivered_prs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "delivered_prs_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "confirmed_merges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "merges_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "ended_without_merge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "ended_without_merge_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "open_decisions": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "open_decisions_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "tickets",
+            "tickets_unknown",
+            "attempts",
+            "attempts_unknown",
+            "delivered_prs",
+            "delivered_prs_unknown",
+            "confirmed_merges",
+            "merges_unknown",
+            "ended_without_merge",
+            "ended_without_merge_unknown",
+            "open_decisions",
+            "open_decisions_unknown"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -344,7 +424,8 @@
         "watchdog_aborts",
         "merge_policy",
         "auto_merged",
-        "reverted"
+        "reverted",
+        "outcomes"
       ],
       "additionalProperties": false
     },
@@ -652,6 +733,86 @@
         },
         "reverted": {
           "type": "null"
+        },
+        "outcomes": {
+          "type": "object",
+          "properties": {
+            "tickets": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tickets_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attempts_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "delivered_prs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "delivered_prs_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "confirmed_merges": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "merges_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "ended_without_merge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "ended_without_merge_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "open_decisions": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "open_decisions_unknown": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "tickets",
+            "tickets_unknown",
+            "attempts",
+            "attempts_unknown",
+            "delivered_prs",
+            "delivered_prs_unknown",
+            "confirmed_merges",
+            "merges_unknown",
+            "ended_without_merge",
+            "ended_without_merge_unknown",
+            "open_decisions",
+            "open_decisions_unknown"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -676,7 +837,8 @@
         "watchdog_aborts",
         "merge_policy",
         "auto_merged",
-        "reverted"
+        "reverted",
+        "outcomes"
       ],
       "additionalProperties": false
     },

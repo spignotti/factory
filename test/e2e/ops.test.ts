@@ -334,12 +334,33 @@ describe("factory stats", () => {
     expect(c.roles.implement).toEqual({ calls: 1, tokens_in: 100, tokens_out: 10, cost_usd: 0 });
     expect(c.cost_usd).toBe(0.02);
     expect(c.subscription_tokens).toEqual({ tokens_in: 101, tokens_out: 11 });
-    expect(c).toMatchObject({ lane_escalations: 1, watchdog_aborts: 1, merge_policy: { auto: 1, human_review: 1 }, auto_merged: 1, reverted: null });
+    expect(c).toMatchObject({
+      lane_escalations: 1,
+      watchdog_aborts: 1,
+      merge_policy: { auto: 1, human_review: 1 },
+      auto_merged: 0,
+      reverted: null,
+      outcomes: {
+        tickets: 0,
+        tickets_unknown: 2,
+        attempts: 0,
+        attempts_unknown: 2,
+        delivered_prs: 0,
+        delivered_prs_unknown: 2,
+        confirmed_merges: 0,
+        merges_unknown: 2,
+        ended_without_merge: 0,
+        ended_without_merge_unknown: 2,
+        open_decisions: 0,
+        open_decisions_unknown: 2,
+      },
+    });
     expect(s.previous).toMatchObject({ runs: 1, by_result: { failed: 1 }, done_rate: 0 });
     expect(s.delta).toEqual({ runs: 3, done_rate: 0.5, cost_usd: 0.02, subscription_tokens: 112, median_rounds: -1 });
     const lines: string[] = [];
     statsCommand({ factoryHome: home, since: "7d", json: false, now: () => Date.parse("2026-10-29T00:00:00Z") }, { out: (line) => lines.push(line), err: () => {} });
     const text = lines.join("");
+    expect(text).toContain("confirmed merges 0 (2 unknown)");
     expect(text).toContain("gate failures: unit 1");
     expect(text).toContain("reasons: needs_human (1) stalemate: x");
     const empty: string[] = [];

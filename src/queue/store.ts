@@ -28,6 +28,15 @@ export interface QueueEntry {
   blocked_runs?: string[];
   pid?: number;
   added_at: string;
+  /**
+   * Written when a coding run reaches `done`. Absent on older entries: those stay unknown,
+   * even when `status` is `done` and `pr` is set. `merged: "no"` is not a confirmed merge.
+   */
+  delivery?: {
+    merged: "no" | "confirmed" | "unknown";
+    pr: string | null;
+    attempts: number | null;
+  };
 }
 
 export interface QueueFile {
@@ -50,6 +59,13 @@ const EntrySchema = z.object({
   blocked_runs: z.array(z.string()).optional(),
   pid: z.number().int().optional(),
   added_at: z.string(),
+  delivery: z
+    .object({
+      merged: z.enum(["no", "confirmed", "unknown"]),
+      pr: z.string().nullable(),
+      attempts: z.number().int().min(0).nullable(),
+    })
+    .optional(),
 });
 
 const FileSchema = z.object({

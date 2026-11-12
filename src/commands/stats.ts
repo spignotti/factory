@@ -9,6 +9,7 @@ import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatsPeriodSchema, StatsReportSchema } from "../schemas/reports.js";
 import { billingOf, type BillingKind, DEFAULT_BILLING } from "../schemas/profile.js";
+import { addOutcome, emptyOutcomeCounts, readOutcome } from "../pipeline/outcome.js";
 
 /** One period of `factory stats` (schema `schemas/stats.schema.json`). */
 export type StatsPeriod = z.infer<typeof StatsPeriodSchema>;
@@ -53,7 +54,7 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
   const p: StatsPeriod = {
     from: from.toISOString(), to: to.toISOString(), runs: 0, by_result: {}, by_lane: {}, by_type: {}, by_repo: {}, done_rate: null,
     rounds: { median: null, p90: null }, minutes: { median: null, p90: null }, gate_failures: {}, flaky_checks: {}, reasons: [],
-    providers: {}, roles: {}, cost_usd: 0, subscription_tokens: { tokens_in: 0, tokens_out: 0 }, lane_escalations: 0, watchdog_aborts: 0, merge_policy: {}, auto_merged: 0, reverted: null,
+    providers: {}, roles: {}, cost_usd: 0, subscription_tokens: { tokens_in: 0, tokens_out: 0 }, lane_escalations: 0, watchdog_aborts: 0, merge_policy: {}, auto_merged: 0, reverted: null, outcomes: emptyOutcomeCounts(),
   };
   const rounds: number[] = [];
   const minutes: number[] = [];
@@ -73,7 +74,10 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
       rounds.push(res.rounds);
       minutes.push(res.minutes);
       if (res.merge_policy) inc(p.merge_policy, res.merge_policy);
-      if (res.merge_policy === "auto" && res.pr) p.auto_merged++;
+      const outcome = readOutcome(res);
+      addOutcome(p.outcomes, outcome);
+      // A delivered PR is not a merge. Only an explicitly confirmed auto merge counts.
+      if (outcome.merged === "confirmed" && res.merge_policy === "auto") p.auto_merged++;
     }
     if (result === "needs_human" || result === "needs_input" || result === "abandoned") {
       const reason = (r.state?.reason ?? res?.reason ?? "").slice(0, 160);
@@ -160,6 +164,10 @@ function formatCounts(label: string, counts: Record<string, number>, limit = 8):
   return `${label}: ${top.length ? top.map(([k, v]) => `${k} ${v}`).join(", ") : "–"}`;
 }
 
+function formatOutcomes(outcomes: StatsPeriod["outcomes"]): string {
+  return `outcomes: tickets ${outcomes.tickets} (${outcomes.tickets_unknown} unknown), attempts ${outcomes.attempts} (${outcomes.attempts_unknown} unknown), delivered PRs ${outcomes.delivered_prs} (${outcomes.delivered_prs_unknown} unknown), confirmed merges ${outcomes.confirmed_merges} (${outcomes.merges_unknown} unknown), ended without merge ${outcomes.ended_without_merge} (${outcomes.ended_without_merge_unknown} unknown), open decisions ${outcomes.open_decisions} (${outcomes.open_decisions_unknown} unknown)`;
+}
+
 function formatReasons(reasons: StatsPeriod["reasons"], limit = 8): string {
   const top = reasons.slice(0, limit);
   return `reasons: ${top.length ? top.map((r) => `${r.result} (${r.count}) ${r.reason || "–"}`).join("; ") : "–"}`;
@@ -182,6 +190,7 @@ export function statsCommand(opts: { factoryHome: string; since?: string; repo?:
       `subscription tokens: ${c.subscription_tokens.tokens_in} in / ${c.subscription_tokens.tokens_out} out (previous ${s.previous.subscription_tokens.tokens_in} / ${s.previous.subscription_tokens.tokens_out})`,
       `cost (metered providers): $${c.cost_usd.toFixed(4)} (previous $${s.previous.cost_usd.toFixed(4)})`,
       `lane escalations ${c.lane_escalations}, watchdog aborts ${c.watchdog_aborts}`,
+      formatOutcomes(c.outcomes),
       formatCounts("gate failures", c.gate_failures),
       formatReasons(c.reasons),
       s.audit_tickets.length

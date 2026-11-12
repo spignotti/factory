@@ -180,8 +180,30 @@ export const StatsPeriodSchema = z.strictObject({
   lane_escalations: z.number().int(),
   watchdog_aborts: z.number().int(),
   merge_policy: counts,
+  /**
+   * Confirmed merges whose stored policy was `auto`. A delivered unmerged PR is not counted.
+   * Older results without `outcome.merged: "confirmed"` stay out of this number.
+   */
   auto_merged: z.number().int(),
   reverted: z.null(),
+  /**
+   * Separate outcome counters for the period. `*_unknown` counts runs that did not store the field.
+   * An empty period is zeros, not unknowns. Attempts are a sum; the other known fields count runs.
+   */
+  outcomes: z.strictObject({
+    tickets: z.number().int().min(0),
+    tickets_unknown: z.number().int().min(0),
+    attempts: z.number().int().min(0),
+    attempts_unknown: z.number().int().min(0),
+    delivered_prs: z.number().int().min(0),
+    delivered_prs_unknown: z.number().int().min(0),
+    confirmed_merges: z.number().int().min(0),
+    merges_unknown: z.number().int().min(0),
+    ended_without_merge: z.number().int().min(0),
+    ended_without_merge_unknown: z.number().int().min(0),
+    open_decisions: z.number().int().min(0),
+    open_decisions_unknown: z.number().int().min(0),
+  }),
 });
 
 export const StatsReportSchema = z.strictObject({

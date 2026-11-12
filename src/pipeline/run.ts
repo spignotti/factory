@@ -28,6 +28,7 @@ import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { budgetFrom, budgetTo, missingPlanQuotes, openPrProblem } from "./recovery.js";
+import { buildOutcome, buildProvenance, implementModel, nextAttempt, writeRecoveryNote } from "./outcome.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
@@ -247,6 +248,10 @@ class RunFrame {
   memory?: { factoryHome: string; repoId: string };
   /** For the run-end notification. */
   deps?: RunDeps;
+  /** Repo config the attempt was judged with. Provenance fingerprints this, not a secret value. */
+  provenanceRepo?: RepoConfig;
+  /** Base commit once intake resolved it, including when the run stops before `state.base_sha` is kept. */
+  baseSha?: string;
 
   constructor(
     readonly runId: string,
@@ -292,7 +297,7 @@ class RunFrame {
     if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
     let result: RunResult;
     try {
-      result = this.finish();
+      result = await this.finish();
     } finally {
       this.release?.();
     }
@@ -312,8 +317,29 @@ class RunFrame {
     }
   }
 
-  private finish(): RunResult {
+  private async finish(): Promise<RunResult> {
     const { out } = this;
+    const known = this.state;
+    const outcome = known
+      ? buildOutcome({
+          ticket: known.task.issue ?? null,
+          attempts: typeof known.attempts === "number" ? known.attempts : null,
+          pr: out.pr,
+          result: out.result,
+        })
+      : undefined;
+    let head: string | null = null;
+    const worktree = out.worktree ?? known?.worktree ?? null;
+    if (worktree && existsSync(worktree)) head = await headSha(worktree).catch(() => null);
+    const provenance = buildProvenance({
+      model: implementModel(join(this.runDir, "events.jsonl")),
+      effort: known?.plan_effort ?? "unknown",
+      repo: this.provenanceRepo ?? { source: "unavailable" },
+      secrets: this.events.secrets,
+      base: known?.base_sha ?? this.baseSha ?? null,
+      head,
+      checks: this.provenanceRepo?.checks ?? [],
+    });
     const result: RunResult = {
       run_id: this.runId,
       repo: this.repoDir,
@@ -329,6 +355,8 @@ class RunFrame {
       minutes: Math.round(((this.now() - this.startedAt) / 60_000) * 10) / 10,
       cost_usd: Math.round(this.events.totals.cost_usd * 10_000) / 10_000,
       reason: out.reason,
+      ...(outcome ? { outcome } : {}),
+      provenance,
       ...(this.events.diffCount ?? {}),
       ...(out.questions ? { questions: out.questions } : {}),
       ...(out.skipped_gates?.length ? { skipped_gates: out.skipped_gates } : {}),
@@ -443,6 +471,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     f.taskRef = task.ref;
     // Persist the starter's target before the lock, so a locked run still records who to wake.
     const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, wait: opts.wait ?? false, notifyTarget: opts.notifyTarget }));
+    st.plan_effort = resolvePlanEffort(opts.planEffort, task.labels);
     f.save();
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
@@ -452,9 +481,11 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
     // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
     const baseSha = await revParse(repoDir, await baseRef(repoDir, checkout.base_branch));
+    f.baseSha = baseSha;
     // Checks, policies and secrets come from the base commit: a change to repo.yaml on the branch
     // (a protected change) takes effect only after a human merged it.
     const repo = await baseRepoConfig(repoDir, baseSha, checkout, events, "intake");
+    f.provenanceRepo = repo;
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
     if (!secrets) return;
@@ -892,10 +923,23 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   // as current while it runs; finish() writes the new one (every exit path, errors included).
   const previous = st.result;
   rmSync(join(runDir, "result.json"), { force: true });
+  const attempt = nextAttempt(st.attempts);
+  if (attempt !== null) st.attempts = attempt;
+  const recovery = writeRecoveryNote(
+    runDir,
+    { previous_result: previous, attempts: attempt, branch: st.branch, checkpoint: st.step },
+    events.secrets,
+  );
+  events.emit({
+    step: "resume",
+    event: "progress",
+    data: { recovery: { previous_result: recovery.previous_result, attempts: recovery.attempts, checkpoint: recovery.checkpoint, plan_kept: recovery.plan_kept } },
+  });
 
   return f.execute(async () => {
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: previous } });
     const repo = st.base_sha ? await baseRepoConfig(st.repo, st.base_sha, loadRepoConfig(st.repo), events, "resume") : loadRepoConfig(st.repo);
+    f.provenanceRepo = repo;
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
     if (!secrets) return;

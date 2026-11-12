@@ -142,6 +142,8 @@ its own outcome at the end. The PR step is idempotent: a push that errors but la
 HEAD) counts as pushed, and an open PR on the run's branch at HEAD is adopted and updated instead of a second
 `gh pr create`.
 
+A coding result stores `outcome.merged` as `no`. `done` is not a confirmed merge. The same object counts the ticket, the attempts, the delivered PR, work that ended without a merge, and an open decision separately. `provenance` records the factory version and commit, a hash of the role prompts, the implementer model, the plan effort, a hash of the redacted repo config, base and head, and a hash per check command. The command text and secret values are not stored. Resume writes `recovery.json` (previous result, the attempt count when the checkpoint already had one, the checkpoint step, and that the plan was kept) and does not start a new plan. A result or queue entry written before `outcome` / `delivery` stays unknown when it is read; a stored `pr` is not backfilled into a merge.
+
 ## Notify (bots)
 
 On every `run_finished` (also after `resume`, `abandon` and a `gc` abandon) the factory POSTs `{run_id, repo, result, reason, pr,

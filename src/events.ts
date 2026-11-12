@@ -188,6 +188,36 @@ export function redact(text: string, secrets: string[]): string {
 export const RESULTS = ["done", "needs_human", "needs_input", "failed", "base_red", "locked", "abandoned"] as const;
 export type RunResultKind = (typeof RESULTS)[number];
 
+/**
+ * Stored per finished attempt. `merged: "no"` is a coding result, not a confirmed merge.
+ * Absent on results written before outcomes existed; readers leave those unknown.
+ */
+export const OutcomeSchema = z.object({
+  /** Issue number, or null when the task is known to have no ticket. */
+  ticket: z.number().int().positive().nullable(),
+  /** Attempts on this checkpoint, or null when the checkpoint did not record a count. */
+  attempts: z.number().int().min(0).nullable(),
+  delivered_pr: z.string().nullable(),
+  merged: z.enum(["no", "confirmed", "unknown"]),
+  ended_without_merge: z.boolean(),
+  open_decision: z.boolean(),
+});
+export type RunOutcome = z.infer<typeof OutcomeSchema>;
+
+/** How this attempt was produced. Check commands and secret values are not stored. */
+export const ProvenanceSchema = z.object({
+  factory_version: z.string(),
+  factory_commit: z.string(),
+  prompt_revision: z.string(),
+  model: z.string(),
+  effort: z.string(),
+  config_fingerprint: z.string(),
+  base: z.string().nullable(),
+  head: z.string().nullable(),
+  checks: z.array(z.object({ name: z.string(), version: z.string() })),
+});
+export type RunProvenance = z.infer<typeof ProvenanceSchema>;
+
 export const ResultSchema = z.object({
   run_id: z.string(),
   repo: z.string(),
@@ -209,6 +239,10 @@ export const ResultSchema = z.object({
   /** USD of metered providers only; subscription usage (see profile `billing`) is reported in tokens. */
   cost_usd: z.number().min(0),
   reason: z.string(),
+  /** Separate counters. Omitted on results written before this field. A `done` run is not a merge. */
+  outcome: OutcomeSchema.optional(),
+  /** Factory version, prompts, model, effort, sanitized config, base/head, check versions. No secrets. */
+  provenance: ProvenanceSchema.optional(),
   /**
    * Security gates that did not scan because the binary was missing (`baseline.require_tools` off).
    * Omitted when none were skipped. A missing binary with `require_tools` on is a failing gate.
