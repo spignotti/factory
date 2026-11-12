@@ -596,6 +596,29 @@ describe("baseline run gates", () => {
     ]);
     expect(passedRan.some((command) => command.startsWith("semgrep"))).toBe(false);
   });
+
+  it("does not start a baseline scanner whose name already ran as a repo check", async () => {
+    const seen: string[] = [];
+    const results = await runBaselineGates({
+      cwd: tree({ "src/app.py": "x = 1\n" }),
+      tier: "fast",
+      changed: ["src/app.py"],
+      baseSha: "abc1234",
+      toolchains: none,
+      timeoutMs: 1000,
+      skipNames: ["gitleaks"],
+      binExists: async (bin) => {
+        seen.push(`bin:${bin}`);
+        return true;
+      },
+      run: async (command) => {
+        seen.push(command);
+        return { code: 0, output: "", durationMs: 1 };
+      },
+    });
+    expect(seen.join("\n")).not.toMatch(/gitleaks/);
+    expect(results.map((g) => g.name)).toEqual(["semgrep"]);
+  });
 });
 
 describe("doctor wires baseline failures into the exit code", () => {

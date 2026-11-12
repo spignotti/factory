@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { sh, tail } from "../exec.js";
 import { changedFiles, diffCountFields, diffTotals, git, repoDiffStat, stageAll } from "../git.js";
 import {
@@ -17,7 +18,7 @@ import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { runBaselineGates } from "../baseline/gates.js";
 import { baseProbeFiles, redGreenProof } from "../gates/redgreen.js";
 import { RED_GREEN_NEEDS_REASON, redGreenDecision, redGreenExemptDetail } from "../schemas/plan.js";
-import { selectChecks } from "../gates/select.js";
+import { dedupeChecks, omitRepeatedNames, selectChecks } from "../gates/select.js";
 import { gateCheckTimeoutMs, shTimedOut, watchCheck, type CheckPulse } from "../gates/timeout.js";
 import { resolveToolchains } from "../toolchains.js";
 import { topoOrder } from "../pipeline/dag.js";
@@ -31,9 +32,32 @@ export interface CheckResult {
   name: string;
   kind: "check" | "builtin";
   status: "pass" | "fail" | "flaky" | "timeout";
+  /** Sum of every attempt of this check, not one chosen attempt. */
   duration_ms: number;
   output_tail: string;
   timed_out?: boolean;
+  /** Set when a product red-then-green is allowed by this check's `flake_allow` reason. */
+  flake_allowed?: boolean;
+}
+
+/** A fail, a timeout, or a product flake that no repo rule allows. */
+export function checkBlocksGate(check: CheckResult): boolean {
+  if (check.status === "fail" || check.status === "timeout") return true;
+  return check.status === "flaky" && !check.flake_allowed;
+}
+
+const INFRA_FAILURE = /\b(ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|socket hang up|connection reset by peer|Could not resolve host|TLS handshake|temporary failure in name resolution)\b/i;
+const PRODUCT_FAILURE = /\bERR_ASSERTION\b|\bAssertionError\b|^not ok\s|^FAILED\s|\bFAIL\b|^E\s+assert\s+/m;
+
+/**
+ * An infrastructure failure may be retried once and then pass. A product failure that turns green
+ * is instability. An assertion wins when the output names both.
+ */
+export function failureKind(output: string, signal?: NodeJS.Signals | null): "infra" | "product" {
+  if (signal) return "infra";
+  if (PRODUCT_FAILURE.test(output)) return "product";
+  if (INFRA_FAILURE.test(output)) return "infra";
+  return "product";
 }
 
 export interface GateReport {
@@ -52,7 +76,10 @@ export function withEnvCommand(run: string, envCommand: string): string {
 }
 
 /**
- * Runs checks; a red check is re-run once and counts as flaky (not a blocker) when it turns green.
+ * Runs checks. A red check is re-run once. An infrastructure failure that then passes is a pass
+ * and keeps both attempts. A product red-then-green is `flaky` and blocks the gate unless the
+ * check names `flake_allow`. `duration_ms` is the sum of the attempts.
+ * A `manual` check with no `owner` fails closed and does not run.
  * A check with `services` starts them first (EnvMissing when one does not come up), gets their
  * env and, jailed, reaches exactly their ports.
  */
@@ -79,6 +106,16 @@ export async function runChecks(
       heartbeatMs: opts.heartbeatMs,
     });
   for (const check of checks) {
+    if (check.tier === "manual" && !check.owner?.trim()) {
+      results.push({
+        name: check.name,
+        kind: "check",
+        status: "fail",
+        duration_ms: 0,
+        output_tail: "manual check has no owner; it is not a proof",
+      });
+      continue;
+    }
     const needs = check.services ?? [];
     let env = opts.env;
     let jail = opts.jail;
@@ -92,28 +129,46 @@ export async function runChecks(
       throw new EnvMissing(`check ${check.name} needs services ${needs.join(", ")} but none are configured for this call`);
     }
     const cmd = withEnvCommand(command, opts.envCommand);
-    let r = await spawnCheck(check, cmd, env, jail);
+    const r = await spawnCheck(check, cmd, env, jail);
     // Timeout wins over exit 0: a kill that races a clean exit is still a timeout, not a pass.
     let status: CheckResult["status"] = shTimedOut(r) ? "timeout" : r.code === 0 ? "pass" : "fail";
+    let duration = r.durationMs;
+    let output_tail = status === "pass" ? "" : tail(r.output);
+    let flake_allowed = false;
     if (status === "fail") {
+      const kind = failureKind(r.output, r.signal);
+      const firstTail = tail(r.output);
       const again = await spawnCheck(check, cmd, env, jail);
+      duration += again.durationMs;
       if (shTimedOut(again)) {
-        r = again;
         status = "timeout";
-      } else if (again.code === 0) status = "flaky";
-      else {
-        r = again;
+        output_tail = tail(again.output);
+      } else if (again.code === 0 && kind === "infra") {
+        status = "pass";
+        output_tail = `infrastructure retry: first attempt failed, second passed\n${firstTail}`;
+      } else if (again.code === 0) {
+        status = "flaky";
+        flake_allowed = !!check.flake_allow;
+        output_tail = flake_allowed
+          ? `flake allowed (${check.flake_allow}): red then green\nfirst:\n${firstTail}`
+          : `instability: red then green; not a pass\nfirst:\n${firstTail}`;
+      } else {
         status = "fail";
+        output_tail = tail(again.output);
       }
+    }
+    if (status === "pass" && check.tier === "manual" && check.owner) {
+      output_tail = output_tail ? `owner: ${check.owner}\n${output_tail}` : `owner: ${check.owner}`;
     }
     const timed_out = status === "timeout";
     results.push({
       name: check.name,
       kind: "check",
       status,
-      duration_ms: r.durationMs,
-      output_tail: status === "pass" ? "" : tail(r.output),
+      duration_ms: duration,
+      output_tail,
       ...(timed_out ? { timed_out: true } : {}),
+      ...(flake_allowed ? { flake_allowed: true } : {}),
     });
   }
   return results;
@@ -128,17 +183,35 @@ const fromBuiltin = (b: BuiltinResult): CheckResult => ({
   ...(b.timedOut ? { timed_out: true } : {}),
 });
 
-/** First line of a gate detail the PR body should show (skipped scanners, red-green exemption). */
+/** First line of a gate detail the PR body should show (skipped scanners, red-green exemption, flake and dedupe). */
 export function visibleGateDetail(output: string): string {
   const head = output.split("\n")[0]?.trim() ?? "";
-  if (head.startsWith("SKIPPED") || head.startsWith("EXEMPT") || head.startsWith("loosening:")) return head;
+  if (
+    head.startsWith("SKIPPED") ||
+    head.startsWith("EXEMPT") ||
+    head.startsWith("loosening:") ||
+    head.startsWith("infrastructure retry:") ||
+    head.startsWith("instability:") ||
+    head.startsWith("flake allowed") ||
+    head.startsWith("same command as") ||
+    head.startsWith("owner:") ||
+    head.startsWith("manual check has no owner") ||
+    head.startsWith("base probe reused")
+  ) {
+    return head;
+  }
   return "";
 }
 
-/** Fast checks on a base commit: a timeout is inconclusive, a real failure is `base_red`. */
+/**
+ * Fast checks on a base commit. A timeout is inconclusive. A product red-then-green is not a pass.
+ * A real failure is `base_red`.
+ */
 export function baseCheckOutcome(results: CheckResult[]): { result: "base_red" | "needs_human"; reason: string } | undefined {
   const timed = results.filter((r) => r.status === "timeout").map((r) => r.name);
   if (timed.length) return { result: "needs_human", reason: `fast checks timed out on base (inconclusive): ${timed.join(", ")}` };
+  const unstable = results.filter((r) => r.status === "flaky" && checkBlocksGate(r)).map((r) => r.name);
+  if (unstable.length) return { result: "needs_human", reason: `fast checks unstable on base (red then green, not a pass): ${unstable.join(", ")}` };
   const red = results.filter((r) => r.status === "fail").map((r) => r.name);
   if (red.length) return { result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` };
   return undefined;
@@ -167,7 +240,8 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       event: e.event,
       data: { check: e.check, phase: "running", ...(e.where ? { where: e.where } : {}) },
     });
-  const checks = await runChecks(selectChecks(repo.checks, tier, changed), {
+  const selected = dedupeChecks(selectChecks(repo.checks, tier, changed));
+  const checks = await runChecks(selected.checks, {
     cwd: worktree,
     env,
     envCommand: repo.env_command,
@@ -177,6 +251,18 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     services: ctx.services,
     onCheck,
   });
+  for (const dup of selected.sameCommand) {
+    const src = checks.find((c) => c.name === dup.sameAs);
+    checks.push({
+      name: dup.name,
+      kind: "check",
+      status: src?.status ?? "fail",
+      duration_ms: 0,
+      output_tail: `same command as ${dup.sameAs}; not run again`,
+      ...(src?.timed_out ? { timed_out: true } : {}),
+      ...(src?.flake_allowed ? { flake_allowed: true } : {}),
+    });
+  }
 
   // A check killed at the deadline is not a red check: the run stops on the wall limit instead.
   checkDeadline(ctx);
@@ -213,17 +299,21 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     evidenceCheck(handoffs, evidence),
     guideUpdate(plan, packages, changed, repo),
     configGuard({ plan, packages, labels: ctx.task.labels, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
-    ...(await runBaselineGates({
-      cwd: worktree,
-      tier,
-      changed,
-      baseSha: ctx.baseSha,
-      toolchains: resolveToolchains(worktree, repo).toolchains,
-      timeoutMs: gateCheckTimeoutMs({ gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline: ctx.deadline }) ?? repo.limits.gate_timeout_minutes * 60_000,
-      onCheck,
-      secrets: ctx.secrets?.redact,
-      requireTools: repo.baseline.require_tools,
-    })),
+    ...omitRepeatedNames(
+      await runBaselineGates({
+        cwd: worktree,
+        tier,
+        changed,
+        baseSha: ctx.baseSha,
+        toolchains: resolveToolchains(worktree, repo).toolchains,
+        timeoutMs: gateCheckTimeoutMs({ gateTimeoutMinutes: repo.limits.gate_timeout_minutes, deadline: ctx.deadline }) ?? repo.limits.gate_timeout_minutes * 60_000,
+        onCheck,
+        secrets: ctx.secrets?.redact,
+        requireTools: repo.baseline.require_tools,
+        skipNames: checks.map((c) => c.name),
+      }),
+      checks.map((c) => c.name),
+    ),
   ];
   let reproRedOnBase: boolean | undefined;
   const first = topoOrder(plan.packages)[0];
@@ -248,6 +338,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         deadline: ctx.deadline,
         jail: (cwd) => jailFor(ctx, cwd),
         onCheck,
+        cacheFile: join(ctx.runDir, "red-green-base.json"),
       });
       checkDeadline(ctx);
       reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
@@ -258,7 +349,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const report: GateReport = {
     n: ++ctx.gateCount,
     tier,
-    green: all.every((c) => c.status !== "fail" && c.status !== "timeout"),
+    green: all.every((c) => !checkBlocksGate(c)),
     changed_files: changed,
     checks: all,
     scope_report: scopeReport(plan, changed),
@@ -309,7 +400,7 @@ export function formatGateResults(checks: CheckResult[]): string {
 /** Failure tail handed back to the implementer. */
 export function failureSummary(report: GateReport): string {
   return report.checks
-    .filter((c) => c.status === "fail" || c.status === "timeout")
+    .filter((c) => checkBlocksGate(c))
     .map((c) => `### ${c.name} (${c.kind})${c.status === "timeout" ? " [timed out]" : ""}\n${c.output_tail}`)
     .join("\n\n");
 }

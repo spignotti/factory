@@ -128,6 +128,16 @@ limits: { forbidden_paths: [".env*"] }
     expect(repoConfigLoosening(base, exclusive)).toEqual([]);
     expect(repoConfigLoosening(`${base}concurrency: { max_runs: 2 }\n`, base)).toEqual([]);
   });
+
+  it("setting or editing flake_allow, or removing an owner, is loosening", () => {
+    const allow = base.replace("tier: fast", "tier: fast, flake_allow: known clock");
+    expect(repoConfigLoosening(base, allow)).toEqual(["check typecheck flake_allow set (known clock)"]);
+    expect(repoConfigLoosening(allow, allow.replace("known clock", "other clock"))).toEqual(["check typecheck flake_allow set (other clock)"]);
+    expect(repoConfigLoosening(allow, base)).toEqual([]);
+    const owned = base.replace("tier: fast", "tier: manual, owner: ops");
+    expect(repoConfigLoosening(base, owned)).toEqual(["check typecheck changed (run, tier, paths, services or local_only)"]);
+    expect(repoConfigLoosening(owned, owned.replace(", owner: ops", ""))).toEqual(["check typecheck owner removed"]);
+  });
 });
 
 describe("PR section", () => {

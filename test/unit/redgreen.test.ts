@@ -1,4 +1,5 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { assertionName, baseProbeFiles, classifyReproRun, redGreenProof } from "../../src/gates/redgreen.js";
@@ -213,4 +214,124 @@ describe("red-green proof environment", () => {
     expect(r).toMatchObject({ ok: false, inconclusive: true, redOnBase: false });
     expect(r.detail).toMatch(/setup failed/);
   });
+});
+
+function cachePath(): string {
+  return join(mkdtempSync(join(tmpdir(), "rg-cache-")), "red-green-base.json");
+}
+
+const FIXED = "export const sum = (a, b) => a + b;\nexport const max = (a, b) => (a > b ? a : b);\n";
+
+describe("red-green base reuse", () => {
+  it("reuses an unchanged base probe and spends less time on the second call", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "test/max.test.js"), REPRO);
+    writeFileSync(join(dir, "src/math.js"), FIXED);
+    const cacheFile = cachePath();
+    const command = "sleep 0.3 && node --test {files}";
+    const first = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: command, gateTimeoutMinutes: 20, env, cacheFile });
+    const second = await redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: command, gateTimeoutMinutes: 20, env, cacheFile });
+    expect(first).toMatchObject({ ok: true, redOnBase: true, greenOnHead: true, base_reused: false });
+    expect(first.detail).not.toMatch(/base probe reused/);
+    expect(second).toMatchObject({ ok: true, redOnBase: true, greenOnHead: true, base_reused: true });
+    expect(second.detail.startsWith("base probe reused")).toBe(true);
+    expect(second.detail).toMatch(/repro passes on HEAD/);
+    expect(second.duration_ms).toBeLessThan(first.duration_ms - 200);
+    expect(gitIn(dir, "worktree", "list").trim().split("\n")).toHaveLength(1);
+  }, 20_000);
+
+  it("a changed support file or base runs the base probe again", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "test/helper.js"), "export const extra = 1;\n");
+    writeFileSync(
+      join(dir, "test/with-helper.test.js"),
+      "import assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { extra } from \"./helper.js\";\nimport { max } from \"../src/math.js\";\ntest(\"max returns the larger\", () => { assert.equal(extra, 1); assert.equal(max(1, 2), 2); });\n",
+    );
+    writeFileSync(join(dir, "src/math.js"), FIXED);
+    const cacheFile = cachePath();
+    const proof = (sha: string) =>
+      redGreenProof({
+        worktree: dir,
+        baseSha: sha,
+        files: ["test/with-helper.test.js"],
+        supportFiles: ["test/helper.js"],
+        testCommand: "sleep 0.2 && node --test {files}",
+        gateTimeoutMinutes: 20,
+        env,
+        cacheFile,
+      });
+    const first = await proof(baseSha);
+    const again = await proof(baseSha);
+    expect(first.base_reused).toBe(false);
+    expect(again.base_reused).toBe(true);
+    writeFileSync(join(dir, "test/helper.js"), "export const extra = 1;\n// fixture revision\n");
+    const changedFixture = await proof(baseSha);
+    expect(changedFixture.base_reused).toBe(false);
+    expect(changedFixture.detail.startsWith("base probe reused")).toBe(false);
+    expect(changedFixture.duration_ms).toBeGreaterThan(again.duration_ms);
+    gitIn(dir, "-c", "user.name=fixture", "-c", "user.email=fixture@test", "commit", "--allow-empty", "-q", "-m", "marker");
+    const other = gitIn(dir, "rev-parse", "HEAD").trim();
+    const changedBase = await proof(other);
+    expect(changedBase.base_reused).toBe(false);
+  }, 20_000);
+
+  it("a product edit reuses the base probe, and HEAD follows the current tree", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "test/max.test.js"), REPRO);
+    writeFileSync(join(dir, "src/math.js"), FIXED);
+    const cacheFile = cachePath();
+    const proof = () => redGreenProof({ worktree: dir, baseSha, files: ["test/max.test.js"], testCommand: "node --test {files}", gateTimeoutMinutes: 20, env, cacheFile });
+    expect(await proof()).toMatchObject({ ok: true, base_reused: false, greenOnHead: true });
+    writeFileSync(join(dir, "src/math.js"), `${FIXED}// comment only\n`);
+    expect(await proof()).toMatchObject({ ok: true, base_reused: true, greenOnHead: true });
+    writeFileSync(join(dir, "src/math.js"), "export const sum = (a, b) => a + b;\nexport const max = () => 0;\n");
+    const broken = await proof();
+    expect(broken).toMatchObject({ ok: false, base_reused: true, redOnBase: true, greenOnHead: false });
+    expect(broken.detail.startsWith("base probe reused")).toBe(true);
+    expect(broken.detail).toMatch(/repro fails on HEAD/);
+  });
+
+  it("does not store an inconclusive or timed-out base probe", async () => {
+    const missing = setup();
+    writeFileSync(join(missing.dir, "test/max.test.js"), REPRO);
+    const cacheFile = cachePath();
+    const unclear = await redGreenProof({
+      worktree: missing.dir,
+      baseSha: missing.baseSha,
+      files: ["test/max.test.js"],
+      testCommand: "exit 2",
+      gateTimeoutMinutes: 20,
+      env,
+      cacheFile,
+    });
+    expect(unclear.inconclusive).toBe(true);
+    expect(existsSync(cacheFile)).toBe(false);
+    writeFileSync(join(missing.dir, "src/math.js"), FIXED);
+    const real = await redGreenProof({
+      worktree: missing.dir,
+      baseSha: missing.baseSha,
+      files: ["test/max.test.js"],
+      testCommand: "node --test {files}",
+      gateTimeoutMinutes: 20,
+      env,
+      cacheFile,
+    });
+    expect(real).toMatchObject({ ok: true, base_reused: false });
+
+    const hung = setup();
+    writeFileSync(join(hung.dir, "test/max.test.js"), REPRO);
+    const timedCache = cachePath();
+    const timed = await redGreenProof({
+      worktree: hung.dir,
+      baseSha: hung.baseSha,
+      files: ["test/max.test.js"],
+      testCommand: "sleep 30",
+      gateTimeoutMinutes: 10,
+      timeoutS: 0.2,
+      env,
+      cacheFile: timedCache,
+    });
+    expect(timed).toMatchObject({ inconclusive: true, timedOut: true, base_reused: false });
+    expect(existsSync(timedCache)).toBe(false);
+  }, 15_000);
 });

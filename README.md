@@ -50,7 +50,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   reason (test-stabilization, where the repro cannot fail on base). That opt-out is a loosening: the reason is required,
   and the gate result, config guard and PR body name it. The plan reviewer must justify it. Without the field and the
   label, the proof is unchanged.
-- **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, flaky re-run, built-ins
+- **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, one command per phase, an infrastructure retry versus a blocking product flake, built-ins
   (forbidden paths, diff size, test presence, evidence, guide update, scope report, red-green proof, config
   guard). The config guard fails the gates when the change loosens lint/type/format/test-runner config
   (`ruff.toml`, `[tool.ruff|mypy|pyright|…]`, eslint/biome/prettier config, `tsconfig` strictness flags,
@@ -101,6 +101,18 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   and is not retried as flaky. A red-green timeout on the base worktree is inconclusive: it is not treated as a
   failing repro, and the run result says so. While a check runs, progress and heartbeat events name it so
   `factory status` can show the current check.
+  A red check runs once more. The first attempt decides the kind. An infrastructure failure (dropped
+  connection, DNS, a killed process) that then passes is a pass, and the tail names both attempts. Any other
+  red-then-green is `flaky`: it stays visible and fails the gate, including on the base commit. `flake_allow`
+  on that check is the only exception (a concrete reason); setting or editing it is a loosening. `duration_ms`
+  adds every attempt. Two checks with the same `run` command run once in that phase; the later row names the
+  check it repeated. `factory gates --select` schedules the first name and says so on stderr, so CI does not
+  start the command twice. A change to a dependency, shared config, fixture or package entrypoint selects
+  every check of the tier instead of trusting path filters. The red-green base probe is stored in the run
+  directory (`red-green-base.json`) and reused only when the base commit, the repro and support files, the
+  test command and setup are the same. The HEAD command always runs against the current tree. A changed
+  fixture or base runs the base probe again. An inconclusive or timed-out probe is not stored. This does not
+  add a benchmark harness: a gate timeout still only stops a hang.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
 - **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
@@ -238,6 +250,10 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # max_wall_minutes). The process tree is killed; the result is `timeout`, not a pass, and is not retried
 # as flaky. A timeout of the repro on the base worktree is inconclusive (not a red repro) and is named in
 # the run result. Progress and heartbeat events name the running check for `factory status`.
+# A product red-then-green is flaky and fails the gate unless the check sets flake_allow (a short reason;
+# setting or editing it is a loosening). An infrastructure retry that then passes is a pass. duration_ms is
+# the sum of the attempts. A later check with the same run is not executed again in that gate.
+# manual: a check with no owner fails closed and does not run. owner is who attests that external proof.
 # Raising a timeout is a loosening (config_guard); lowering is not. `factory adopt` sets timeout_minutes
 # from measured durations (5×, at least 5 min).
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at

@@ -3,12 +3,12 @@ import { join, resolve } from "node:path";
 import { factoryHomeOf } from "../config.js";
 import { sh } from "../exec.js";
 import { baseRef, changedFiles } from "../git.js";
-import { selectChecks } from "../gates/select.js";
+import { dedupeChecks, selectChecks } from "../gates/select.js";
 import { loadRepoConfig, type Tier, TierSchema } from "../schemas/repo.js";
 import { redact } from "../events.js";
 import { resolveSecrets, SecretsError } from "../secrets.js";
 import { EnvMissing, Services } from "../services.js";
-import { type CheckResult, runChecks } from "../steps/gates.js";
+import { type CheckResult, checkBlocksGate, runChecks } from "../steps/gates.js";
 import { describeToolchains, resolveToolchains } from "../toolchains.js";
 
 export interface GatesOptions {
@@ -60,7 +60,8 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
     const checks = opts.all
       ? selectChecks(repo.checks, tier, [], { all: true })
       : selectChecks(repo.checks, tier, await changedFiles(repoDir, opts.base ?? (await baseRef(repoDir, repo.base_branch))));
-    return ci ? checks.filter((c) => !c.local_only) : checks;
+    // Same command once per phase. CI schedules these names, so the duplicate must not be a second job.
+    return dedupeChecks(ci ? checks.filter((c) => !c.local_only) : checks);
   };
 
   if (opts.toolchains) {
@@ -70,7 +71,9 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
     return 0;
   }
   if (opts.select) {
-    const names = (await selected()).map((c) => c.name);
+    const picked = await selected();
+    for (const dup of picked.sameCommand) io.err(`gates: ${dup.name} not scheduled; same command as ${dup.sameAs}\n`);
+    const names = picked.checks.map((c) => c.name);
     io.out(opts.json ? JSON.stringify(names) + "\n" : names.map((n) => n + "\n").join(""));
     return 0;
   }
@@ -78,7 +81,8 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
     io.err("gates: one of --select, --toolchains or --run <check|selected> is required\n");
     return 2;
   }
-  const checks = opts.run === "selected" ? await selected() : repo.checks.filter((c) => c.name === opts.run);
+  const picked = opts.run === "selected" ? await selected() : undefined;
+  const checks = picked ? picked.checks : repo.checks.filter((c) => c.name === opts.run);
   if (checks.length === 0 && opts.run !== "selected") {
     io.err(`gates: unknown check ${opts.run}\n`);
     return 2;
@@ -123,6 +127,18 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   let results: CheckResult[];
   try {
     results = await runChecks(checks, { cwd: repoDir, env, envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, services });
+    for (const dup of picked?.sameCommand ?? []) {
+      const src = results.find((c) => c.name === dup.sameAs);
+      results.push({
+        name: dup.name,
+        kind: "check",
+        status: src?.status ?? "fail",
+        duration_ms: 0,
+        output_tail: `same command as ${dup.sameAs}; not run again`,
+        ...(src?.timed_out ? { timed_out: true } : {}),
+        ...(src?.flake_allowed ? { flake_allowed: true } : {}),
+      });
+    }
     const hide = [...secretValues, ...services.redactValues].sort((a, b) => b.length - a.length);
     results = results.map((r) => (hide.length && r.output_tail ? { ...r, output_tail: redact(r.output_tail, hide) } : r));
   } catch (e) {
@@ -134,7 +150,7 @@ export async function gatesCommand(opts: GatesOptions, io: Io): Promise<number> 
   } finally {
     await services.stopAll();
   }
-  const green = results.every((r) => r.status !== "fail" && r.status !== "timeout");
+  const green = results.every((r) => !checkBlocksGate(r));
   if (opts.json) io.out(JSON.stringify({ green, checks: results }) + "\n");
   else for (const r of results) io.out(`${r.status.padEnd(5)} ${r.name}${r.output_tail ? "\n" + r.output_tail : ""}\n`);
   return green ? 0 : 1;

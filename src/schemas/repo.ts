@@ -28,6 +28,17 @@ export const CheckSchema = z.object({
    * is set): for checks that need a host-side stack CI does not have. Setting it is a loosening (config_guard).
    */
   local_only: z.boolean().optional(),
+  /**
+   * Who owns a `manual` check. Without a name the check is not a proof and fails closed.
+   * Removing it is a loosening (config_guard).
+   */
+  owner: z.string().trim().min(1).optional(),
+  /**
+   * Bounded reason a product red-then-green on this check may still pass.
+   * Absent: that instability fails the gate. An infrastructure retry does not need this.
+   * Setting it is a loosening (config_guard).
+   */
+  flake_allow: z.string().trim().min(1).max(200).optional(),
 });
 export type Check = z.infer<typeof CheckSchema>;
 

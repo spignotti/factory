@@ -368,6 +368,8 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
     const now = a.checks.find((x) => x.name === c.name);
     if (!now) out.push(`check ${c.name} removed`);
     else if (!c.local_only && now.local_only) out.push(`check ${c.name} made local_only (dropped from CI)`);
+    else if (now.flake_allow && c.flake_allow !== now.flake_allow) out.push(`check ${c.name} flake_allow set (${now.flake_allow})`);
+    else if (c.owner && !now.owner) out.push(`check ${c.name} owner removed`);
     else if (!same(checkIdentity(c), checkIdentity(now))) out.push(`check ${c.name} changed (run, tier, paths, services or local_only)`);
   }
   if (a.limits.gate_timeout_minutes > b.limits.gate_timeout_minutes) out.push("limits.gate_timeout_minutes raised");
