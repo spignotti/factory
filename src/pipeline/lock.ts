@@ -274,11 +274,18 @@ export function claimResources(
   };
 }
 
-/** Drop resource locks held by `runId`. A lock held by another run stays. */
+/**
+ * Drop resource locks held by `runId` after an ownership check.
+ * This process may release its own claim. A different live pid keeps the claim.
+ * A dead pid is not an owner, so a restarted worker can take the name.
+ */
 export function releaseResourceClaims(factoryHome: string, names: string[], runId: string): void {
   for (const name of new Set(names)) {
     const path = resourcePath(factoryHome, name);
-    if (readHolder(path)?.runId === runId) rmSync(path, { force: true });
+    const holder = readHolder(path);
+    if (!holder || holder.runId !== runId) continue;
+    if (holder.pid !== process.pid && alive(holder.pid)) continue;
+    rmSync(path, { force: true });
   }
 }
 

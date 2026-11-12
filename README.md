@@ -880,6 +880,20 @@ factory queue list
 
 `factory queue remove --repo <path> <issue...>` drops entries. `factory queue list --json` is the same list for scripts.
 
+One worker per factory home. A second `queue run` exits with `a queue worker is already running` and starts nothing. The lock is `queue/worker.lock`; a dead pid is not treated as a live holder.
+
+`queue run --stay` keeps that worker up when the queue is empty. Idle ticks, and ticks whose GitHub or git call failed, wait with backoff and jitter (at most five minutes). Nothing calls a model unless a pending issue is actually started. `--until HH:MM` is still the work window: after it, no new starts, and the worker exits once live runs have finished. `--stay` does not raise `--slots` or `concurrency.max_runs`. A durable runner is continuous responsibility, not unlimited load.
+
+`queue pause` stops new starts. The worker keeps polling, and a run that already started keeps going. `queue drain` stops new starts, lets a live coding run finish, then exits. Waiting CI and queued issues stay on disk; the next `queue run` after `queue resume` can take them up. `queue resume` clears pause or drain. `queue stop` makes the worker exit at its next tick. It does not signal the run, and a laptop suspend (the same gap the run watchdog already ignores) does not kill other processes.
+
+A crash before the run directory exists puts the issue back to pending. A resource claim is released only when this process holds it or the holder pid is dead. A different live pid keeps the claim, so the issue is not started on top of that owner. A crash after `plan.json` and the worktree exist resumes that same run id. A written `result.json` is classified and is not started again.
+
+`queue preview` prints what would start, in order, and the limits (mode, slots, `max_runs`, room). It does not write the queue, claim a lock, call GitHub, or start a run. Labels are not loaded; admission still happens at start.
+
+`queue run` does not call `improve`. Monday (`findings`, `ci`, `security`) and the first Monday (`tests`, `performance`, `structure`) stay the only `improve` triggers.
+
+Do not replace `dist/` while a worker is running, and do not copy a worktree build over the checkout that worker was started from. A later install drains or stops the worker, keeps the previous commit, and starts one worker from the new build only after the old process has exited. Rollback is that previous commit's build, started the same way, after the new process has exited. This tree does not perform that switch.
+
 ## Status, stats, cleanup
 
 ```
