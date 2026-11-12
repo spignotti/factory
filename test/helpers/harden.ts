@@ -5,7 +5,7 @@ import type { Plan } from "../../src/schemas/plan.js";
 import { updateMemory, type MemoryEntry } from "../../src/memory.js";
 
 export function entry(key: string, over: Partial<MemoryEntry> = {}): MemoryEntry {
-  return { key, text: `finding ${key}`, reviewer: "plan", checkable: "no", check_sketch: "", count: 1, first_seen: "2026-10-01T00:00:00.000Z", last_seen: "2026-10-20T00:00:00.000Z", runs: [`r-${key}`], status: "open", ref: null, ...over };
+  return { key, text: `finding ${key}`, reviewer: "plan", checkable: "no", check_sketch: "", count: 1, first_seen: "2026-10-01T00:00:00.000Z", last_seen: "2026-10-20T00:00:00.000Z", runs: [`r-${key}`], status: "open", ref: null, disposition: "confirmed", ...over };
 }
 
 export function seedMemory(home: string, repoId: string, entries: MemoryEntry[]): void {

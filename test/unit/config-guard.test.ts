@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { addedSuppressions, configChange, configGuard, configGuardInputs, coverageRatchet, workflowJobLoosening } from "../../src/gates/config-guard.js";
+import { addedSuppressions, configChange, configGuard, configGuardInputs, coverageRatchet, equivalentReplacement, workflowJobLoosening } from "../../src/gates/config-guard.js";
 import { standardsRemovals } from "../../src/standards.js";
 import type { Plan } from "../../src/schemas/plan.js";
 import { gitIn } from "../helpers/repo.js";
@@ -339,5 +339,36 @@ describe("config guard: scope", () => {
     const inputs = await configGuardInputs(dir, base, [file]);
     expect(inputs.jobLoosening).toEqual([{ file, id: "done", name: "done", kind: "removed" }]);
     expect(configGuard({ plan: listed, packages: ["P1"], ...inputs }).ok).toBe(false);
+  });
+
+  it("retires a removed check only when the plan probes an added replacement", () => {
+    const removed = ["check typecheck removed"];
+    const bare = plan([".factory/repo.yaml"], "remove typecheck");
+    expect(equivalentReplacement(bare, ["P1"], "typecheck", ["lint"])).toBe(false);
+    const blocked = configGuard({ plan: bare, packages: ["P1"], configChanges: [], suppressions: [], loosening: removed, addedChecks: ["lint"] });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.detail).toMatch(/check typecheck removed/);
+
+    const replacement = plan([".factory/repo.yaml"], "replace typecheck with lint");
+    replacement.goal = "replace typecheck with lint";
+    replacement.acceptance = [
+      { id: "A1", package: "P1", text: "probe fail: lint", verify: "test", kind: "behavior", risk: false },
+      { id: "A2", package: "P1", text: "probe pass: lint", verify: "test", kind: "behavior", risk: false },
+    ];
+    expect(equivalentReplacement(replacement, ["P1"], "typecheck", [])).toBe(false);
+    expect(equivalentReplacement(replacement, ["P1"], "typecheck", ["lint"])).toBe(true);
+    const ok = configGuard({ plan: replacement, packages: ["P1"], configChanges: [], suppressions: [], loosening: removed, addedChecks: ["lint"] });
+    expect(ok.ok).toBe(true);
+
+    const flake = configGuard({
+      plan: replacement,
+      packages: ["P1"],
+      configChanges: [],
+      suppressions: [],
+      loosening: ["check typecheck flake_allow set (known clock)"],
+      addedChecks: ["lint"],
+    });
+    expect(flake.ok).toBe(false);
+    expect(flake.detail).toMatch(/flake_allow/);
   });
 });

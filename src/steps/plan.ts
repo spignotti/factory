@@ -4,7 +4,7 @@ import { extractJson } from "../agents/runner.js";
 import { git } from "../git.js";
 import { callAgent, type RunContext } from "../pipeline/context.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
-import { readRepoStandards } from "../standards.js";
+import { readRepoStandards, rulesForReview } from "../standards.js";
 import { QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import type { PlanOutcome } from "./intake.js";
 
@@ -24,7 +24,7 @@ async function planInput(ctx: PlanContext): Promise<string> {
   const tree = files.slice(0, 400).join("\n") + (files.length > 400 ? `\n… ${files.length - 400} more` : "");
   const standards = ctx.repo.review.checklist ? readRepoStandards(ctx.repoDir, asset("standards/review-rules.md")) : undefined;
   if (standards?.deprecated) ctx.events.emit({ step: "plan", event: "progress", data: { standards_deprecated: standards.deprecated } });
-  const unmarked = standards?.unmarked ?? [];
+  const unmarked = standards ? rulesForReview(standards.items, ctx.repo.checks) : [];
   const areas = ctx.repo.verify.areas.map((a) => `- ${a.name}: ${a.paths.join(", ")}`).join("\n") || "(none)";
   return [
     asData("task", ctx.task.text),

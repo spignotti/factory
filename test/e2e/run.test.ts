@@ -455,13 +455,13 @@ ${fixed}` } };
     const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
     expect(prompt("review_security")).toMatch(/security_trigger_files[\s\S]*src\/auth\/session\.js/);
     expect(prompt("review_standards")).toContain("S1 (standards.md:3): Every exported function has a test");
-    expect(prompt("review_standards")).not.toContain("No TODO comments");
+    expect(prompt("review_standards")).toContain("No TODO comments");
     expect(prompt("review_standards")).toContain("custom-severity-token");
     expect(prompt("review_plan")).toContain("custom-severity-token");
     expect(prompt("review_plan")).not.toContain("standards_items");
     expect(prompt("review_plan")).not.toContain("Style is never a `bug`");
     expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
-    expect(prompt("plan_high")).not.toContain("No TODO comments");
+    expect(prompt("plan_high")).toContain("No TODO comments");
   });
 
   it("falls back to checklist.md and review-rules.md when standards.md is missing", async () => {
@@ -483,7 +483,7 @@ ${fixed}` } };
     expect(started?.data.standards_deprecated).toMatch(/factory standards migrate/);
     const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
     expect(prompt("review_standards")).toContain("S1 (checklist.md:1): Every exported function has a test");
-    expect(prompt("review_standards")).not.toContain("No TODO comments");
+    expect(prompt("review_standards")).toContain("No TODO comments");
     expect(prompt("review_standards")).toContain("legacy-severity-token");
     expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
   });
@@ -494,7 +494,7 @@ ${fixed}` } };
       patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
       setup: (repo) => commitFile(repo, ".factory/standards.md", "- Every exported function has a test\n"),
     });
-    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: unit -->\n") });
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: suite -->\n") });
     for (const r of [off, marked]) {
       expect(r.result.result).toBe("done");
       expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);

@@ -33,7 +33,7 @@ export interface FindingSignal {
 /** `open` entries seen at least twice or checkable, plus flaky checks. */
 export function findingSignals(mem: MemoryFile): FindingSignal[] {
   return mem.entries
-    .filter((e) => e.status === "open" && (e.count >= 2 || e.checkable !== "no" || e.key.startsWith("flaky:")))
+    .filter((e) => e.status === "open" && (e.disposition ?? "confirmed") === "confirmed" && (e.count >= 2 || e.checkable !== "no" || e.key.startsWith("flaky:")))
     .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
     .map((e) => ({ key: e.key, text: e.text, reviewer: e.reviewer, count: e.count, checkable: e.checkable, check_sketch: e.check_sketch, flaky: e.key.startsWith("flaky:") }));
 }

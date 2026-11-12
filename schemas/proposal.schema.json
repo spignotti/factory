@@ -369,6 +369,14 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "effect": {
+                    "type": "string",
+                    "enum": [
+                      "confirmed",
+                      "negative",
+                      "unclear"
+                    ]
                   }
                 },
                 "required": [

@@ -722,21 +722,30 @@ Aspects:
 - **findings** — recurring or checkable findings, flaky checks, unmarked checklist items, reverted factory
   PRs. Near-duplicate open findings are compacted first (`plan_medium`). A metrics line is appended.
   No signals and no open proposal to refresh: no model call.
-- **security**, **performance**, **structure** — one read-only session each. Structure is refactor and
-  simplify together. Performance also sees the 30-day CI audit (at most 200 runs). The model sees open
-  findings, the latest metrics line, and findings already on an open proposal of that aspect.
+- **security**, **performance**, **structure** — one read-only session each, and only when there is
+  evidence. Security needs an open confirmed finding from the security reviewer. Structure needs an open
+  confirmed simplicity finding seen at least twice. Performance needs a CI audit that shows a check that
+  never failed, a slow check without paths, a flake rate above zero, or at least 60 CI minutes per week.
+  A dry-run or a failed audit is not that evidence. An open proposal of the aspect still refreshes it.
+  Structure is refactor and simplify together. Performance also sees the 30-day CI audit (at most 200 runs).
+  The model sees open confirmed findings, the latest metrics line, and findings already on an open proposal
+  of that aspect. Labels stay `factory-proposal` until a person relabels the issue.
 - **ci** — workflow runs over 30 days, paged (100 per page, at most 1000). A truncated window's per-week
   figures use the days actually covered. Per job: runs, minutes/week, p50/p90, failure rate, never failed.
   Flags slow jobs without path filters, report-only steps (full job minutes only when every step is
-  report-only), an empty factory stub, duplicate commands, push-to-main runs. High minutes alone calls the
-  model. A failed `gh run view` skips that run (`skipped`) and keeps the rest; `ci` and `tests` share one
+  report-only), an empty factory stub, duplicate commands, push-to-main runs. A `shellcheck`, `quality`, or
+  `validate` job that ran but reported no duration is a measurement gap: it is not a never-failed clean bill
+  and does not by itself call the model. High minutes alone calls the model. A failed `gh run view` skips that run (`skipped`) and keeps the rest; `ci` and `tests` share one
   window. Workflow edits only as declared `protected_changes`. Removing or renaming a job fails
   `config_guard` unless that entry names the job.
 - **tests** — slow tests when the repo's runner can report them (pytest `--durations`, vitest/jest JSON).
   `repo.setup` runs first in a temporary base worktree (removed afterwards; not the checkout), with
   `env_command` and the shared package cache, then duration and coverage commands. A failed setup, or a
   non-zero run that produced nothing parsable, is a signal error (the model may propose fixing the
-  measurement). Coverage paths are repo-relative before they are matched or reported.
+  measurement). A coverage command that exits 0 but writes nothing parsable, and a shell suite (`bats`,
+  `shellcheck`, `shunit`, or a `.sh` command) with no duration parser, are measurement gaps. A gap is not
+  zero missed lines, not a slow-test count of zero, and not by itself a reason to call the model. Coverage
+  paths are repo-relative before they are matched or reported.
   Flaky checks from memory, test jobs that never fail, and uncovered critical paths when `tests.coverage`
   (a command that writes a coverage report) is set. Proposals speed up or split slow tests, remove redundant
   ones, add tests for uncovered critical code, and add or raise a coverage threshold. Lowering one fails
@@ -759,7 +768,10 @@ files only and does not call `gh`, including lifecycle. A `gh` error while readi
 that proposal as it is.
 
 Lifecycle, on the next `factory improve`: a merged factory PR resolves the proposal and its findings.
-The PR is matched by plan file, goal or `resolves_findings`, or because the run closes the proposal's issue.
+That merge means the proposal was implemented. It is a proven improvement only when every `effect check: <name>`
+named in its acceptance passed on the merged run's latest gates report. No such name, a missing report, or a
+named check that is absent stays an unclear effect. A named check that did not pass is a negative effect.
+Neither is reported as proven. The PR is matched by plan file, goal or `resolves_findings`, or because the run closes the proposal's issue.
 That issue match counts even when the run started before the ticket. An issue closed without that PR, a PR
 closed unmerged, or no merged or open PR within 28 days, drops it and reopens its findings. A proposal may change
 `.factory/` or CI files only as declared `protected_changes` (see [Protected config](#protected-config)).
@@ -799,7 +811,7 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Standards
 
-Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations; add `<!-- check: name -->` once that name is a `repo.yaml` check or a pull_request job in `.github/workflows/`. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
+Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations. `<!-- check: name -->` hides the rule only when that name is a blocking `repo.yaml` check whose command can fail, and which runs on a path the rule names (a check with no `paths` covers a rule that names none). A workflow job name, a manual or `local_only` check, or a constant command such as `true` does not hide the rule. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). Removing a `repo.yaml` check is also a loosening, unless the plan lists `.factory/repo.yaml`, names the removed check and a check the diff adds, and acceptance contains both `probe fail: <new>` and `probe pass: <new>`. Weakening without that replacement stays a loosening. `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
 
 ```markdown
 ## Severity
@@ -814,7 +826,7 @@ Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every 
 
 ## Findings memory
 
-Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory improve --aspect findings` turns them into checks. Delete the file to forget.
+Confirmed review findings are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL), including defects that were fixed before the run ended. Rejected (`accepted_wontfix`), duplicate, and ungrounded (no evidence) rows stay in the file and are not counted as repeats. Nits are skipped. A repeat matches an error class built from the file, the severity, and one token in the evidence (a backticked name, an `Error`/`Exception` name, or `rule:<id>`), not the claim sentence. Another round or a resume of the same run does not increment the count. The ten most frequent open confirmed entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. A class that shows up again after an improvement merged is reopened. `factory improve --aspect findings` turns open confirmed entries into checks. Delete the file to forget.
 
 ## Doctor and the Zen guard
 

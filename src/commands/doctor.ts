@@ -559,7 +559,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       }
       checks.push(concurrencyCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
-      checks.push(...standardsDoctorNotes(repoDir, repo.checks.map((c) => c.name)));
+      checks.push(...standardsDoctorNotes(repoDir, repo.checks));
       checks.push(...baselineConfigChecks(repoDir, repo, await probeBaselineTools()));
       checks.push(...serviceConfigChecks(repo));
       const sec = await secretsChecks(repoDir, repo, opts.factoryHome);

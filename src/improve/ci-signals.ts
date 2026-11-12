@@ -87,6 +87,8 @@ export interface CiSignal {
   empty_stub: { select_p50_s: number; select_runs: number; check_skipped: number; check_ran: number } | null;
   duplicates: { command: string; workflows: string[] }[];
   push_to_main: { workflow: string; file: string | null; runs: number; minutes_per_week: number }[];
+  /** Shell or aggregate jobs that ran but reported no duration. Not zero defects and not a clean bill. */
+  measurement_gaps: string[];
 }
 
 /** Attach `gh run view` JSON to list rows that fall inside the window. */
@@ -356,6 +358,10 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; skipped?: 
     .map(([command, files]) => ({ command, workflows: [...files].sort() }))
     .sort((a, b) => a.command.localeCompare(b.command));
 
+  const timingGap = (job: { name: string; runs: number; p50_s: number | null }) =>
+    job.runs > 0 && job.p50_s === null && /\b(?:shellcheck|quality|validate)\b/i.test(job.name);
+  const measurement_gaps = jobs.filter(timingGap).map((job) => `CI/${job.name}: timing not reported`);
+
   const push_to_main = [...pushSeconds.values()]
     .map((p) => ({
       workflow: p.label,
@@ -373,12 +379,13 @@ export function ciSignals(input: { runs: CiRun[]; truncated: boolean; skipped?: 
     truncation: covered.note,
     minutes_per_week: perWeek(seconds, windowDays),
     jobs,
-    never_failed: jobs.filter((j) => j.never_failed).map((j) => ({ workflow: j.workflow, name: j.name, runs: j.runs })),
+    never_failed: jobs.filter((j) => j.never_failed && !timingGap(j)).map((j) => ({ workflow: j.workflow, name: j.name, runs: j.runs })),
     slow_without_paths,
     report_only,
     empty_stub: empty,
     duplicates,
     push_to_main,
+    measurement_gaps,
   };
 }
 

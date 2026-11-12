@@ -84,10 +84,35 @@ describe("standards.md", () => {
     const dir = mkdtempSync(join(tmpdir(), "std-"));
     mkdirSync(join(dir, ".factory"));
     writeFileSync(join(dir, ".factory", "checklist.md"), "- old rule\n");
-    writeFileSync(join(dir, ".factory", "standards.md"), "- new rule\n- automated <!-- check: unit -->\n\n## Severity\n\n- not a rule\n");
+    writeFileSync(
+      join(dir, ".factory", "repo.yaml"),
+      [
+        "checks:",
+        '  - { name: unit, run: "node --test test/math.test.js", tier: fast, paths: ["src/**", "test/**"] }',
+        '  - { name: suite, run: "node --test test/math.test.js", tier: full }',
+        '  - { name: cloud, run: "false", tier: manual }',
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, ".factory", "standards.md"),
+      [
+        "- new rule",
+        "- automated <!-- check: unit -->",
+        "- src/math.js is tested <!-- check: unit -->",
+        "- the suite passes <!-- check: suite -->",
+        "- lint job <!-- check: lint -->",
+        "- manual cloud <!-- check: cloud -->",
+        "",
+        "## Severity",
+        "",
+        "- not a rule",
+        "",
+      ].join("\n"),
+    );
     const repo = parseRepoConfig("review: { checklist: true }\n");
-    expect(unmarkedStandardRules(dir)).toEqual(["new rule"]);
-    expect(checklistSignals(dir, repo)).toEqual(["new rule"]);
+    expect(unmarkedStandardRules(dir)).toEqual(["new rule", "automated", "lint job", "manual cloud"]);
+    expect(checklistSignals(dir, repo)).toEqual(["new rule", "automated", "lint job", "manual cloud"]);
     expect(checklistSignals(dir, parseRepoConfig("review: { checklist: false }\n"))).toEqual([]);
 
     writeFileSync(join(dir, ".factory", "standards.md"), "# Standards\n\n## Severity\n\n- not a rule\n\n## Rules\n\n- appended later\n");

@@ -6,7 +6,7 @@ import { extractJson } from "../agents/runner.js";
 import { withRepoModels } from "../config.js";
 import type { GitHub, Issue } from "../gh.js";
 import { originUrl } from "../git.js";
-import { resolveProposals } from "../harden/lifecycle.js";
+import { formatLifecycle, resolveProposals } from "../harden/lifecycle.js";
 import { ASPECTS, collectAspect } from "../improve/aspects.js";
 import { dedupeProposals, issueWrite, matchingIssue, parseProposalIssue, proposalLabels } from "../improve/issues.js";
 import { canonicalRepoId, markFindingsProposed, updateMemory } from "../memory.js";
@@ -117,7 +117,7 @@ function selectShape(max: number, aspect: ImproveAspect, checklist: boolean): st
     ? `"rationale":"<2-4 sentences naming the evidence>","checklist":["<unmarked_standards text the plan turns into a check>"],"plan":<plan.json>`
     : `"rationale":"<2-4 sentences naming the evidence>","plan":<plan.json>`;
   return `Return a single \`\`\`json block: {"proposals":[{${fields}}, …]}.
-Up to ${max} ${aspect} proposals, ranked: the most valuable first. Each is its own factory run and PR: distinct goals, and a
+At most ${max} ${aspect} proposals, ranked: the most valuable first. Zero is the right answer when the signals show no evidenced benefit. Each is its own factory run and PR: distinct goals, and a
 memory key${checklist ? " or checklist item" : ""} belongs to at most one proposal. Fewer is fine when the signals do not justify more.
 ${PLAN_SHAPE.split("\nor ")[0]}
 plan.resolves_findings: memory keys from the signals (including refresh_findings), or []. Do not return questions.`;
@@ -468,7 +468,7 @@ export async function improveCommand(opts: ImproveOptions & { json: boolean }, d
   for (const w of r.warnings) io.err(`factory: ${w}\n`);
   if (opts.json) io.out(JSON.stringify(r) + "\n");
   else {
-    for (const c of r.lifecycle) io.out(`proposal ${c.id}: ${c.status} (${c.reason})\n`);
+    for (const c of r.lifecycle) io.out(formatLifecycle(c));
     if (r.compaction.merged || r.compaction.error) io.out(`compaction: ${r.compaction.merged} merged${r.compaction.error ? `; ${r.compaction.error}` : ""}\n`);
     if (r.dry_run) io.out("dry-run: proposal files only, no issues\n");
     for (const result of r.results) {

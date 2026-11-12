@@ -17,7 +17,7 @@ import type { Metrics } from "../schemas/proposal.js";
 import { type ImproveAspect, type RepoConfig } from "../schemas/repo.js";
 import { statsReport } from "../commands/stats.js";
 import { CI_RUN_LIMIT, FACTORY_REPO } from "../commands/harden.js";
-import { ciSignals, ciWorth, readCiWorkflows } from "./ci-signals.js";
+import { ciSignals, ciWorth, HIGH_CI_MINUTES_PER_WEEK, readCiWorkflows } from "./ci-signals.js";
 import { collectTestSignals, testWorth } from "./test-signals.js";
 
 /**
@@ -60,9 +60,19 @@ export interface AspectContext {
 
 function openFindings(mem: MemoryFile) {
   return mem.entries
-    .filter((e) => e.status === "open")
+    .filter((e) => e.status === "open" && (e.disposition ?? "confirmed") === "confirmed")
     .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
     .map((e) => ({ key: e.key, text: e.text, reviewer: e.reviewer, count: e.count, checkable: e.checkable, check_sketch: e.check_sketch }));
+}
+
+/** A dry-run or a failed audit is `{ error }` and is not evidence. An empty audit is not either. */
+function evidencedPerformance(ci: unknown): boolean {
+  if (!ci || typeof ci !== "object" || !("never_failed" in ci)) return false;
+  const audit = ci as { never_failed?: unknown; slow_without_paths?: unknown; flaky_rate?: unknown; minutes_per_week?: unknown };
+  const listed = (value: unknown) => Array.isArray(value) && value.length > 0;
+  const rate = typeof audit.flaky_rate === "number" ? audit.flaky_rate : 0;
+  const minutes = typeof audit.minutes_per_week === "number" ? audit.minutes_per_week : 0;
+  return listed(audit.never_failed) || listed(audit.slow_without_paths) || rate > 0 || minutes >= HIGH_CI_MINUTES_PER_WEEK;
 }
 
 function refreshEntries(mem: MemoryFile, refresh: string[]) {
@@ -124,10 +134,14 @@ export async function collectAspect(aspect: ImproveAspect, ctx: AspectContext): 
       }
     }
   }
+  const evidenced =
+    aspect === "security" ? findings.some((f) => f.reviewer === "security")
+    : aspect === "structure" ? findings.some((f) => f.reviewer === "simplicity" && f.count >= 2)
+    : evidencedPerformance(signals.ci);
   return {
     signals,
     keys: new Set([...findings.map((f) => f.key), ...ctx.refresh]),
-    worth: true,
+    worth: evidenced || ctx.refresh.length > 0,
     metrics,
   };
 }

@@ -5,7 +5,7 @@ import { extractJson } from "../agents/runner.js";
 import type { GitHub } from "../gh.js";
 import { baseRef, originUrl, revParse } from "../git.js";
 import { applyCompaction, CompactionSchema, validateCompaction } from "../harden/compact.js";
-import { resolveProposals } from "../harden/lifecycle.js";
+import { formatLifecycle, resolveProposals } from "../harden/lifecycle.js";
 import { appendMetrics, computeMetrics } from "../harden/metrics.js";
 import {
   checklistSignals,
@@ -244,7 +244,7 @@ export async function hardenCommand(opts: HardenOptions & { json: boolean }, dep
   const r = await harden(opts, deps);
   if (opts.json) io.out(JSON.stringify(r) + "\n");
   else {
-    for (const c of r.lifecycle) io.out(`proposal ${c.id}: ${c.status} (${c.reason})\n`);
+    for (const c of r.lifecycle) io.out(formatLifecycle(c));
     if (r.compaction.merged || r.compaction.error) io.out(`compaction: ${r.compaction.merged} merged${r.compaction.error ? `; ${r.compaction.error}` : ""}\n`);
     io.out(`metrics: determinism ${r.metrics.determinism_ratio ?? "–"}, open findings ${r.metrics.open_findings}, CI min/week ${r.metrics.ci_minutes_per_week ?? "–"}\n`);
     if (r.ticket) {
