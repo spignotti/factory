@@ -229,6 +229,59 @@ function tryClaim(path: string, runId: string): (() => void) | undefined {
   }
 }
 
+function resourcePath(factoryHome: string, name: string): string {
+  return join(locksDir(factoryHome), `resource.${safe(name)}.lock`);
+}
+
+export interface ResourceHeld {
+  name: string;
+  runId?: string;
+  pid: number;
+}
+
+/**
+ * Claim each named resource (a shared database or test fixture) for `runId`.
+ * The same live run already holding the name is not claimed again: this caller's release
+ * does not delete that file, so a queue pre-claim and `takeRepoLock` do not drop it early.
+ * A different live holder fails the whole call and releases only the names this call took.
+ */
+export function claimResources(
+  factoryHome: string,
+  names: string[],
+  runId: string,
+): { ok: true; release: () => void } | { ok: false; held: ResourceHeld } {
+  const unique = [...new Set(names)];
+  if (!unique.length) return { ok: true, release: () => undefined };
+  mkdirSync(locksDir(factoryHome), { recursive: true });
+  const releases: Array<() => void> = [];
+  for (const name of unique) {
+    const path = resourcePath(factoryHome, name);
+    const holder = readHolder(path);
+    if (holder && alive(holder.pid) && holder.runId === runId) continue;
+    const rel = tryClaim(path, runId);
+    if (!rel) {
+      for (const undo of releases) undo();
+      const held = readHolder(path);
+      return { ok: false, held: { name, runId: held?.runId, pid: held?.pid ?? 0 } };
+    }
+    releases.push(rel);
+  }
+  return {
+    ok: true,
+    release: () => {
+      for (const undo of releases) undo();
+    },
+  };
+}
+
+/** Drop resource locks held by `runId`. A lock held by another run stays. */
+export function releaseResourceClaims(factoryHome: string, names: string[], runId: string): void {
+  for (const name of new Set(names)) {
+    const path = resourcePath(factoryHome, name);
+    if (readHolder(path)?.runId === runId) rmSync(path, { force: true });
+  }
+}
+
 export type LockRelease = (() => void) & { slot: number };
 
 export type AcquireLockResult = { status: "acquired"; release: LockRelease } | { status: "alloc_busy" } | { status: "unavailable" };

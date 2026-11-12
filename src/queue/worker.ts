@@ -1,17 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { realSleep, type Sleep } from "../agents/fake-runner.js";
 import { ResultSchema, type RunResult } from "../events.js";
-import type { GitHub, OpenFactoryPr, PrStatus } from "../gh.js";
+import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
-import { activeHolders, tryPathLock } from "../pipeline/lock.js";
+import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge } from "../pipeline/merge-ready.js";
 import { deliveryForDone } from "../pipeline/outcome.js";
+import { newRunId } from "../pipeline/run.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import type { Io } from "../commands/gates.js";
+import { admissionBlock, cycleReasons, fulfilledIssues, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
+import { clearPause, pauseRequested, requestPause } from "./pause.js";
 import { loadAllQueues, loadQueueByKey, queueDir, repoQueueKey, type QueueEntry, type QueueFile, updateQueue } from "./store.js";
 
 /** Transient `needs_human` goes to the back at most this many times, then parks. */
@@ -42,6 +45,12 @@ export interface StartRunRequest {
   repo: string;
   issue: number;
   factoryHome: string;
+  /** Id the resource claim and the child process share. */
+  runId?: string;
+  /** Set when the saved plan and worktree still match the issue text. */
+  resumeRunId?: string;
+  /** Extra issues in a mutual bundle. They are not started on their own. */
+  bundle?: number[];
 }
 
 /** Injected so tests run the worker in-process. The CLI passes `spawnFactoryRun`. */
@@ -110,6 +119,8 @@ interface TickCtx {
   redLogged: Set<string>;
   /** `pr@sha` already asked to auto-merge in this process. */
   mergeEnabled: Set<string>;
+  /** `repo#pr` whose update-branch hit a conflict. Not retried. */
+  behindConflict: Set<string>;
 }
 
 interface BehindWatch {
@@ -231,13 +242,19 @@ function moveToEnd(q: QueueFile, entry: QueueEntry): void {
   q.entries.push(entry);
 }
 
-function releaseToPending(entry: QueueEntry): void {
+function releaseToPending(entry: QueueEntry, keepRun = false): void {
   entry.status = "pending";
   delete entry.reason;
-  delete entry.run_id;
+  // Overlap unpark keeps the run id so a still-valid plan can resume. A fresh start drops it.
+  if (!keepRun) {
+    delete entry.run_id;
+    delete entry.issue_rev;
+  }
   delete entry.blocked_by;
   delete entry.blocked_runs;
   delete entry.pid;
+  delete entry.paused;
+  delete entry.choice;
 }
 
 /** `done` records the PR. Transient `needs_human` requeues. Overlap `locked` parks on the PR numbers. A repo-lock `locked` goes back to pending. Everything else parks. */
@@ -318,6 +335,94 @@ function runIsLive(factoryHome: string, run: RunRecord, holders: Set<string>): b
   }
 }
 
+function resourceNames(repo: string): string[] {
+  try {
+    return loadRepoConfig(repo).concurrency.resources;
+  } catch {
+    return [];
+  }
+}
+
+function releaseEntryResources(factoryHome: string, repo: string, entry: QueueEntry): void {
+  if (!entry.run_id) return;
+  const names = resourceNames(repo);
+  if (names.length) releaseResourceClaims(factoryHome, names, entry.run_id);
+}
+
+/** Review lines count as evidenced. Other lines count when a handoff recorded evidence for them. */
+function evidencedIds(factoryHome: string, runId: string): Set<string> {
+  const dir = join(factoryHome, "runs", runId);
+  const plan = JSON.parse(readFileSync(join(dir, "plan.json"), "utf8")) as { acceptance?: { id: string; verify?: string }[] };
+  const ids = new Set<string>();
+  for (const row of plan.acceptance ?? []) if (row.verify === "review" && row.id) ids.add(row.id);
+  try {
+    const st = JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as { handoffs?: { evidence?: { acceptance_id?: string }[] }[] };
+    for (const handoff of st.handoffs ?? []) for (const ev of handoff.evidence ?? []) if (ev.acceptance_id) ids.add(ev.acceptance_id);
+  } catch {
+    // no state yet: review lines above still count
+  }
+  return ids;
+}
+
+function settleBundle(q: QueueFile, entry: QueueEntry, factoryHome: string, io: Io): void {
+  const extras = q.entries.filter((e) => e.bundled_with === entry.issue);
+  if (!extras.length) return;
+  let met = new Set<number>();
+  if (entry.run_id) {
+    try {
+      const plan = JSON.parse(readFileSync(join(factoryHome, "runs", entry.run_id, "plan.json"), "utf8")) as { acceptance?: { id: string; text: string }[] };
+      met = new Set(fulfilledIssues({ acceptance: plan.acceptance ?? [] }, evidencedIds(factoryHome, entry.run_id)));
+    } catch {
+      met = new Set();
+    }
+  }
+  for (const extra of extras) {
+    delete extra.bundled_with;
+    if (met.has(extra.issue)) {
+      extra.status = "done";
+      extra.reason = `fulfilled with #${entry.issue}`;
+      io.out(`queue: #${extra.issue} done (fulfilled with #${entry.issue})\n`);
+    } else {
+      extra.status = "pending";
+      extra.reason = `not fulfilled with #${entry.issue}`;
+      io.out(`queue: #${extra.issue} pending (not fulfilled with #${entry.issue})\n`);
+    }
+  }
+}
+
+function releaseBundle(q: QueueFile, issue: number): void {
+  for (const extra of q.entries) {
+    if (extra.bundled_with !== issue) continue;
+    delete extra.bundled_with;
+    if (extra.status !== "done") {
+      extra.status = "pending";
+      extra.reason = `bundle with #${issue} did not finish`;
+    }
+  }
+}
+
+function finishEntry(q: QueueFile, entry: QueueEntry, factoryHome: string, result: RunResult, transient: boolean, io: Io): ReturnType<typeof applyOutcome> {
+  releaseEntryResources(factoryHome, q.repo, entry);
+  const action = applyOutcome(q, entry, result, { transient });
+  if (action === "done") settleBundle(q, entry, factoryHome, io);
+  else releaseBundle(q, entry.issue);
+  return action;
+}
+
+/** A saved plan is reused only when the worktree exists and the issue text is unchanged. */
+function canResume(factoryHome: string, entry: QueueEntry, issue: Issue): boolean {
+  if (!entry.run_id || !entry.issue_rev) return false;
+  if (entry.issue_rev !== issueRevision(issue.title, issue.body)) return false;
+  const dir = join(factoryHome, "runs", entry.run_id);
+  if (!existsSync(join(dir, "plan.json")) || !existsSync(join(dir, "worktree"))) return false;
+  try {
+    const st = JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as { step?: string };
+    return st.step !== undefined && st.step !== "intake" && st.step !== "finished";
+  } catch {
+    return false;
+  }
+}
+
 function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>): void {
   const runs = listRuns(factoryHome).filter((r) => sameRepo(r, q.repo));
   const holders = holderIds(factoryHome);
@@ -331,7 +436,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
     if (entry.status === "running" && own?.result) {
       const finished = asResult(own.result);
       if (finished) {
-        applyOutcome(q, entry, finished, { transient: own.state?.transient === true || transientStop(factoryHome, finished) });
+        finishEntry(q, entry, factoryHome, finished, own.state?.transient === true || transientStop(factoryHome, finished), { out: () => {}, err: () => {} });
         continue;
       }
     }
@@ -345,7 +450,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
     if (entry.status !== "running") continue;
     const finished = asResult(entry.run_id ? undefined : related.filter((r) => r.result).at(-1)?.result);
     if (finished) {
-      applyOutcome(q, entry, finished, { transient: transientStop(factoryHome, finished) });
+      finishEntry(q, entry, factoryHome, finished, transientStop(factoryHome, finished), { out: () => {}, err: () => {} });
       continue;
     }
     if (!entry.run_id && !pidLive) {
@@ -354,7 +459,10 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
       delete entry.pid;
       continue;
     }
-    if (entry.run_id && !holders.has(entry.run_id) && !pidLive) park(entry, "run ended without result.json", entry.run_id);
+    if (entry.run_id && !holders.has(entry.run_id) && !pidLive) {
+      releaseEntryResources(factoryHome, q.repo, entry);
+      park(entry, "run ended without result.json", entry.run_id);
+    }
   }
 }
 
@@ -370,12 +478,14 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
     handles.delete(key);
     if (entry.status === "done" || (entry.status === "parked" && entry.reason?.startsWith("stalled:"))) continue;
     if (tracked.failed && !tracked.settled) {
+      releaseEntryResources(factoryHome, q.repo, entry);
+      releaseBundle(q, entry.issue);
       park(entry, tracked.failed);
       io.out(`queue: #${entry.issue} parked: ${tracked.failed}\n`);
       continue;
     }
     if (!tracked.settled) continue;
-    const action = applyOutcome(q, entry, tracked.settled, { transient: transientStop(factoryHome, tracked.settled) });
+    const action = finishEntry(q, entry, factoryHome, tracked.settled, transientStop(factoryHome, tracked.settled), io);
     if (action === "done") io.out(`queue: #${entry.issue} done${entry.pr ? ` ${entry.pr}` : ""}\n`);
     else if (action === "requeue" && tracked.settled.result === "locked") io.out(`queue: #${entry.issue} pending (repo lock held)\n`);
     else if (action === "requeue") io.out(`queue: #${entry.issue} requeued (${entry.requeues}/${MAX_REQUEUES})\n`);
@@ -498,6 +608,8 @@ function localBookkeeping(q: QueueFile, repo: string, ctx: TickCtx): void {
     if (entry.status !== "running") continue;
     const tracked = ctx.handles.get(handleKey(repo, entry.issue));
     noteRunId(entry, tracked);
+    // A pause leaves the process running. Signalling it would drop the checkpoint.
+    if (entry.paused) continue;
     considerStall(entry, repo, ctx, tracked);
   }
 }
@@ -566,7 +678,7 @@ function applyUnpark(q: QueueFile, ready: Set<number>, io: Io): void {
   for (const entry of q.entries) {
     if (!ready.has(entry.issue) || entry.status !== "parked" || !(entry.blocked_by?.length || entry.blocked_runs?.length)) continue;
     const byRun = (entry.blocked_runs?.length ?? 0) > 0;
-    releaseToPending(entry);
+    releaseToPending(entry, true);
     io.out(`queue: #${entry.issue} pending (${byRun ? "overlapping run finished" : "blocking PR closed"})\n`);
   }
 }
@@ -588,14 +700,6 @@ async function baseBlocks(github: GitHub, repo: string, io: Io, redLogged: Set<s
   } catch (e) {
     io.err(`factory: base CI check failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
     return true;
-  }
-}
-
-function slotCap(repo: string, slots: number): number {
-  try {
-    return Math.min(slots, loadRepoConfig(repo).concurrency.max_runs);
-  } catch {
-    return Math.min(slots, 1);
   }
 }
 
@@ -632,6 +736,7 @@ export async function enableReadyMerges(
     const pr = run.result?.pr ?? run.state?.pr ?? null;
     const branch = run.state?.branch ?? run.result?.branch ?? null;
     if (run.result?.result !== "done" || !pr || !approved) continue;
+    if (run.run_id && pauseRequested(factoryHome, { runId: run.run_id })) continue;
     let status: PrStatus;
     try {
       status = await withTimeout(github.prStatus(repo, pr), timeoutMs, `pr status ${pr}`);
@@ -672,7 +777,16 @@ export async function enableReadyMerges(
  */
 const BEHIND_RETRY_MS = 10 * 60_000;
 
-async function updateBehind(github: GitHub, repo: string, factoryHome: string, updated: Map<string, number>, flight: Map<string, Promise<unknown>>, io: Io, timeoutMs: number): Promise<BehindWatch> {
+async function updateBehind(
+  github: GitHub,
+  repo: string,
+  factoryHome: string,
+  updated: Map<string, number>,
+  flight: Map<string, Promise<unknown>>,
+  conflicted: Set<string>,
+  io: Io,
+  timeoutMs: number,
+): Promise<BehindWatch> {
   let prs: OpenFactoryPr[];
   try {
     prs = await withTimeout(github.openFactoryPrFiles(repo), timeoutMs, "open PRs");
@@ -704,6 +818,8 @@ async function updateBehind(github: GitHub, repo: string, factoryHome: string, u
       updated.delete(key);
       continue;
     }
+    // A semantic conflict is a question for a person. Retrying update-branch would spin.
+    if (conflicted.has(`${repo}#${pr.number}`)) continue;
     // A PR still behind 10 minutes after its last update fell behind again (another PR merged): update it again.
     const last = updated.get(key);
     if ((last !== undefined && Date.now() - last < BEHIND_RETRY_MS) || flight.has(repo)) {
@@ -719,7 +835,14 @@ async function updateBehind(github: GitHub, repo: string, factoryHome: string, u
     try {
       await withTimeout(job, timeoutMs, `update-branch #${pr.number}`);
     } catch (e) {
-      io.err(`factory: update-branch #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      const msg = (e as Error).message;
+      if (updateNeedsDecision(msg)) {
+        conflicted.add(`${repo}#${pr.number}`);
+        io.err(`factory: update-branch #${pr.number} needs a decision: ${msg.slice(0, 200)}\n`);
+        if (!(await stillPending(job))) flight.delete(repo);
+        continue;
+      }
+      io.err(`factory: update-branch #${pr.number} failed: ${msg.slice(0, 200)}\n`);
       needsUpdate = true;
       // Still running: do not start a second update. A settled failure is retried later and does not skip the rest.
       if (await stillPending(job)) break;
@@ -761,15 +884,49 @@ function noteRunId(entry: QueueEntry, tracked: Tracked | undefined): void {
   if (tracked?.pid) entry.pid = tracked.pid;
 }
 
+async function discoverReady(q: QueueFile, ctx: TickCtx, repo: string): Promise<void> {
+  let list: { issues: Issue[]; complete: boolean };
+  try {
+    list = await withTimeout(ctx.github.listOpenIssues(repo), ctx.netTimeoutMs, "open issues");
+  } catch (e) {
+    ctx.io.err(`factory: open issue list failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
+    return;
+  }
+  // A short page must not invent tickets that a later page would also contain.
+  if (!list.complete) return;
+  const known = new Set(q.entries.map((e) => e.issue));
+  const at = new Date(ctx.nowMs).toISOString();
+  for (const issue of list.issues) {
+    if (known.has(issue.number) || admissionBlock(issue)) continue;
+    q.entries.push({ issue: issue.number, status: "pending", added_at: at });
+    known.add(issue.number);
+    ctx.io.out(`queue: #${issue.number} discovered\n`);
+  }
+}
+
+function othersRunning(factoryHome: string, repo: string): number {
+  return loadAllQueues(factoryHome)
+    .filter((file) => resolve(file.repo) !== resolve(repo))
+    .reduce((n, file) => n + file.entries.filter((e) => e.status === "running").length, 0);
+}
+
+function repoMaxRuns(repo: string): number {
+  try {
+    return loadRepoConfig(repo).concurrency.max_runs;
+  } catch {
+    return 1;
+  }
+}
+
 async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const gitOpts = { timeoutMs: ctx.netTimeoutMs };
   const key = await repoQueueKey(repo, gitOpts);
   if (!loadQueueByKey(ctx.factoryHome, key)) return false;
-  const cap = slotCap(repo, ctx.slots);
   const timeoutMs = ctx.netTimeoutMs;
 
-  await updateQueue(ctx.factoryHome, repo, (q) => {
+  await updateQueue(ctx.factoryHome, repo, async (q) => {
     localBookkeeping(q, repo, ctx);
+    if (!ctx.pastUntil) await discoverReady(q, ctx, repo);
   }, gitOpts);
   const snap = loadQueueByKey(ctx.factoryHome, key);
   if (!snap) return false;
@@ -795,6 +952,21 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   let blockStart = false;
   let openPrs: OpenFactoryPr[] | undefined;
   const issueState = new Map<number, "open" | "closed" | "missing" | "error">();
+  const issueByNumber = new Map<number, Issue>();
+  const pauseFor = new Map<number, string>();
+  const clearPauseFor = new Set<number>();
+  for (const entry of snap.entries) {
+    if (entry.status !== "running") continue;
+    try {
+      const issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), timeoutMs, `issue #${entry.issue}`);
+      const block = admissionBlock(issue);
+      // Closed is the run finishing, not a label pull. A missing ready label pauses in place.
+      if (block && block !== "is closed") pauseFor.set(entry.issue, block);
+      else if (!block && entry.paused) clearPauseFor.add(entry.issue);
+    } catch (e) {
+      ctx.io.err(`factory: issue #${entry.issue}: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
   if (mightStart) {
     blockStart = await baseBlocks(ctx.github, repo, ctx.io, ctx.redLogged, timeoutMs);
     if (!blockStart) {
@@ -811,6 +983,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
         if (waiting.has(entry.issue) || parkAfter.has(entry.issue)) continue;
         try {
           const issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), timeoutMs, `issue #${entry.issue}`);
+          issueByNumber.set(entry.issue, issue);
           issueState.set(entry.issue, (issue.state ?? "open") === "closed" ? "closed" : "open");
         } catch (e) {
           const msg = (e as Error).message;
@@ -824,8 +997,24 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     }
   }
 
+  const repoMax = repoMaxRuns(repo);
   const toStart = await updateQueue(ctx.factoryHome, repo, (q) => {
     localBookkeeping(q, repo, ctx);
+    for (const [issue, reason] of pauseFor) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "running");
+      if (!entry) continue;
+      entry.paused = true;
+      entry.reason = reason;
+      requestPause(ctx.factoryHome, { runId: entry.run_id, repo, issue }, reason);
+    }
+    for (const issue of clearPauseFor) {
+      if (pauseFor.has(issue)) continue;
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "running" && e.paused);
+      if (!entry) continue;
+      delete entry.paused;
+      delete entry.reason;
+      clearPause(ctx.factoryHome, { runId: entry.run_id, repo, issue });
+    }
     applyUnpark(q, unpark, ctx.io);
     for (const [issue, reason] of parkAfter) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "pending");
@@ -833,13 +1022,29 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       park(entry, reason);
       ctx.io.out(`queue: #${entry.issue} parked: ${entry.reason}\n`);
     }
-    const running = q.entries.filter((e) => e.status === "running").length;
-    let room = Math.max(0, cap - running);
-    const starts: number[] = [];
-    if (ctx.pastUntil || blockStart || room <= 0) return starts;
+    // A cycle has no merged predecessor to wait for. Park once so the worker can go idle.
+    const cycles = cycleReasons(q.entries);
     for (const entry of q.entries) {
-      if (room <= 0) break;
-      if (entry.status !== "pending" || waiting.has(entry.issue)) continue;
+      if (entry.status !== "pending") continue;
+      const reason = cycles.get(entry.issue);
+      if (!reason) continue;
+      park(entry, reason);
+      ctx.io.out(`queue: #${entry.issue} parked: ${reason}\n`);
+    }
+    const running = q.entries.filter((e) => e.status === "running").length;
+    let room = Math.max(0, Math.min(ctx.slots - (othersRunning(ctx.factoryHome, repo) + running), repoMax - running));
+    const starts: { issue: number; runId: string; resumeRunId?: string; bundle?: number[]; choice: string }[] = [];
+    if (ctx.pastUntil || blockStart || room <= 0) {
+      if (!ctx.pastUntil && !blockStart && room <= 0 && running < repoMax) {
+        for (const entry of q.entries) {
+          if (entry.status === "pending" && entry.after === undefined && !entry.reason && entry.bundled_with === undefined) entry.reason = "global coding cap";
+        }
+      }
+      return starts;
+    }
+    const candidates: QueueEntry[] = [];
+    for (const entry of q.entries) {
+      if (entry.status !== "pending" || waiting.has(entry.issue) || entry.bundled_with !== undefined) continue;
       if (entry.after !== undefined && !evaluatedAfter.has(entry.issue)) continue;
       const tracked = ctx.handles.get(handleKey(repo, entry.issue));
       if (tracked && tracked.settled === undefined && !tracked.failed && !tracked.ignoreResult) continue;
@@ -862,38 +1067,116 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
         ctx.io.out(`queue: #${entry.issue} parked: open factory PR #${hit.number}\n`);
         continue;
       }
+      const issue = issueByNumber.get(entry.issue);
+      if (!issue) continue;
+      const block = admissionBlock(issue);
+      if (block) {
+        entry.reason = block;
+        continue;
+      }
+      delete entry.reason;
+      candidates.push(entry);
+    }
+    const ranked = rankPending(
+      candidates.map((entry) => ({
+        issue: entry.issue,
+        addedAt: entry.added_at,
+        index: q.entries.indexOf(entry),
+        priority: priorityRank(issueByNumber.get(entry.issue)?.labels ?? []),
+      })),
+      ctx.nowMs,
+    );
+    const skip = new Set<number>();
+    const names = resourceNames(repo);
+    const bodies = [...issueByNumber.values()].map((issue) => ({ number: issue.number, body: issue.body }));
+    for (const choice of ranked) {
+      if (room <= 0) break;
+      if (skip.has(choice.issue)) continue;
+      const entry = q.entries.find((e) => e.issue === choice.issue && e.status === "pending");
+      const issue = entry ? issueByNumber.get(entry.issue) : undefined;
+      if (!entry || !issue) continue;
+      const resume = canResume(ctx.factoryHome, entry, issue);
+      const plannedId = resume && entry.run_id ? entry.run_id : newRunId(ctx.nowMs);
+      if (!resume) {
+        delete entry.run_id;
+        delete entry.issue_rev;
+      }
+      const claimed = claimResources(ctx.factoryHome, names, plannedId);
+      if (!claimed.ok) {
+        entry.reason = `resource ${claimed.held.name} held by run ${claimed.held.runId ?? "?"} (pid ${claimed.held.pid})`;
+        continue;
+      }
+      const partners = mutualBundle(bodies, entry.issue).filter((n) => {
+        const extra = q.entries.find((e) => e.issue === n && e.status === "pending" && e.bundled_with === undefined);
+        const extraIssue = issueByNumber.get(n);
+        return Boolean(extra) && !waiting.has(n) && !parkAfter.has(n) && extraIssue !== undefined && !admissionBlock(extraIssue);
+      });
+      for (const n of partners) {
+        const extra = q.entries.find((e) => e.issue === n);
+        if (!extra) continue;
+        extra.bundled_with = entry.issue;
+        delete extra.reason;
+        skip.add(n);
+      }
       entry.status = "running";
       delete entry.reason;
       delete entry.pid;
-      starts.push(entry.issue);
+      delete entry.paused;
+      entry.run_id = plannedId;
+      entry.issue_rev = issueRevision(issue.title, issue.body);
+      entry.choice = choice.choice;
+      starts.push({
+        issue: entry.issue,
+        runId: plannedId,
+        choice: choice.choice,
+        ...(resume ? { resumeRunId: plannedId } : {}),
+        ...(partners.length ? { bundle: partners } : {}),
+      });
       room -= 1;
+    }
+    const runningNow = q.entries.filter((e) => e.status === "running").length;
+    const globalLeft = ctx.slots - (othersRunning(ctx.factoryHome, repo) + runningNow);
+    if (globalLeft <= 0 && runningNow < repoMax) {
+      for (const entry of q.entries) {
+        if (entry.status === "pending" && entry.after === undefined && !entry.reason && entry.bundled_with === undefined) entry.reason = "global coding cap";
+      }
     }
     return starts;
   }, gitOpts);
 
-  for (const issue of toStart) {
+  for (const planned of toStart) {
     let started: StartedRun;
     try {
-      started = ctx.start({ repo, issue, factoryHome: ctx.factoryHome });
+      started = ctx.start({
+        repo,
+        issue: planned.issue,
+        factoryHome: ctx.factoryHome,
+        runId: planned.runId,
+        resumeRunId: planned.resumeRunId,
+        bundle: planned.bundle,
+      });
     } catch (e) {
       const msg = (e as Error).message;
+      releaseResourceClaims(ctx.factoryHome, resourceNames(repo), planned.runId);
       await updateQueue(ctx.factoryHome, repo, (q) => {
-        const entry = q.entries.find((en) => en.issue === issue && en.status === "running");
-        if (entry) park(entry, msg);
+        const entry = q.entries.find((en) => en.issue === planned.issue && en.status === "running");
+        if (!entry) return;
+        releaseBundle(q, entry.issue);
+        park(entry, msg);
       }, gitOpts);
-      ctx.io.out(`queue: #${issue} parked: ${msg}\n`);
+      ctx.io.out(`queue: #${planned.issue} parked: ${msg}\n`);
       continue;
     }
-    ctx.handles.set(handleKey(repo, issue), track(started, repo, issue));
-    ctx.io.out(`queue: #${issue} started\n`);
+    ctx.handles.set(handleKey(repo, planned.issue), track(started, repo, planned.issue));
+    ctx.io.out(`queue: #${planned.issue} started (${planned.choice})\n`);
     if (started.pid) {
       await updateQueue(ctx.factoryHome, repo, (q) => {
-        const entry = q.entries.find((en) => en.issue === issue && en.status === "running");
+        const entry = q.entries.find((en) => en.issue === planned.issue && en.status === "running");
         if (entry) entry.pid = started.pid;
       }, gitOpts);
     }
   }
-  const watch = await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.io, timeoutMs);
+  const watch = await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.behindConflict, ctx.io, timeoutMs);
   const waitingMerge = await enableReadyMerges(ctx.github, repo, ctx.factoryHome, ctx.mergeEnabled, ctx.io, timeoutMs);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
@@ -932,6 +1215,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
   const behindFlight = new Map<string, Promise<unknown>>();
   const redLogged = new Set<string>();
   const mergeEnabled = new Set<string>();
+  const behindConflict = new Set<string>();
   const dir = queueDir(opts.factoryHome);
   mkdirSync(dir, { recursive: true });
   const held = await tryPathLock(
@@ -969,6 +1253,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
                   behindFlight,
                   redLogged,
                   mergeEnabled,
+                  behindConflict,
                 },
                 repo,
               );

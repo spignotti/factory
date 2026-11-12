@@ -13,6 +13,8 @@ import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLin
 import type { HostSteps } from "../schemas/plan.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
+import { closesFooter, fulfilledIssues } from "../queue/admit.js";
+import { pauseRequested } from "../queue/pause.js";
 import { formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
@@ -242,7 +244,14 @@ export function renderPrBody(ctx: RunContext, v: {
     blockers: out.result === "needs_human"
       ? `\n## Blockers (needs_human)\n\n${out.reason}\n${list(openFindings(input.findings).filter((f) => f.severity === "bug").map((f) => `${f.id}: ${f.claim} (${f.file}:${f.line})`))}\n`
       : "",
-    closes: ctx.task.issue !== undefined && out.result === "done" ? `\nCloses #${ctx.task.issue}\n` : "",
+    closes: closesFooter(
+      ctx.task.issue,
+      out.result,
+      fulfilledIssues(
+        plan,
+        new Set(plan.acceptance.filter((a) => pkgDone(a.package) && (evidence(a.id).length > 0 || a.verify === "review")).map((a) => a.id)),
+      ),
+    ),
   };
   return asset("standards/pr-template.md").replace(/\{\{(\w+)\}\}/g, (_, k: string) => fill[k] ?? "");
 }
@@ -553,7 +562,14 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       // Merge only. Deploy is a separate action and is not called here.
       // bot_review merges when the in-run review covered this head. A reviewer cannot widen that.
       const reviewBound = policy !== "bot_review" || reviewedSha === head;
-      if ((policy === "auto" || policy === "bot_review") && reviewBound && result === "done" && headGreen) {
+      const pause = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
+      if (pause && result === "done") {
+        // The queue asked this run to stop. A green head is not a reason to merge.
+        result = "needs_human";
+        reason = `paused: ${pause}; resume with \`factory resume ${ctx.runId}\``;
+        const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr!, draft: false });
+        draft = held.draft;
+      } else if ((policy === "auto" || policy === "bot_review") && reviewBound && result === "done" && headGreen) {
         await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
       }
     } catch (e) {

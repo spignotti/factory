@@ -353,10 +353,12 @@ export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): Doct
 
 /** How many runs this repo allows, and whether fixed host ports make a second run env_missing. */
 export function concurrencyCheck(repo: RepoConfig): DoctorCheck {
-  const { max_runs, exclusive_paths } = repo.concurrency;
+  const { max_runs, exclusive_paths, resources } = repo.concurrency;
   const paths = exclusive_paths.length ? exclusive_paths.join(", ") : "(none)";
   const showPaths = exclusive_paths.length > 0 || max_runs > 1;
-  const base = showPaths ? `max_runs ${max_runs}; exclusive_paths ${paths}` : `max_runs ${max_runs}`;
+  let base = showPaths ? `max_runs ${max_runs}; exclusive_paths ${paths}` : `max_runs ${max_runs}`;
+  // An empty list is the default: doctor output stays the same until a resource is named.
+  if (resources.length) base += `; resources ${resources.join(", ")}`;
   const fixed = repo.services.filter((s) => s.host && (s.ports?.length ?? 0) > 0);
   if (max_runs > 1 && fixed.length) {
     return { name: "concurrency", status: "warn", detail: `${base}; ${fixed.map((s) => s.name).join(", ")} has fixed host ports (one instance per box)` };

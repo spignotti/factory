@@ -2,11 +2,10 @@ import { parseArgs } from "node:util";
 import type { GitHub } from "../gh.js";
 import { Interrupted } from "../interrupt.js";
 import { spawnFactoryRun } from "../queue/spawn.js";
+import { admissionBlock } from "../queue/admit.js";
 import {
-  FACTORY_READY_LABEL,
   loadAllQueues,
   loadQueueByKey,
-  NEEDS_PLAN_LABEL,
   repoQueueKey,
   updateQueue,
   type QueueEntry,
@@ -36,6 +35,7 @@ export interface QueueListEntry {
   pr: string | null;
   reason: string | null;
   requeues: number;
+  choice: string | null;
 }
 
 export interface QueueListReport {
@@ -82,6 +82,7 @@ function toList(q: QueueFile): QueueListReport["queues"][number] {
       pr: e.pr ?? null,
       reason: e.reason ?? null,
       requeues: e.requeues ?? 0,
+      choice: e.choice ?? null,
     })),
   };
 }
@@ -98,13 +99,14 @@ export function renderQueues(report: QueueListReport): string {
       if (e.status === "done" && e.pr) bits.push(e.pr);
       if (e.status === "parked" && e.reason) bits.push(e.reason);
       if (e.status === "pending" && e.after !== null) bits.push(`after #${e.after}`);
+      if (e.choice) bits.push(e.choice);
       lines.push(bits.join("  "));
     }
   }
   return lines.join("\n") + "\n";
 }
 
-/** Appends issues in order. Refuses the whole add when any issue is closed, unlabelled, or `needs-plan`. */
+/** Appends issues in order. Refuses the whole add when any issue fails admission (closed, label, or empty task). */
 export async function queueAdd(
   opts: { factoryHome: string; repo: string; issues: number[]; after?: number; github: GitHub },
   io: Io,
@@ -132,9 +134,8 @@ export async function queueAdd(
       problems.push(`#${n}: ${(e as Error).message}`);
       continue;
     }
-    if ((issue.state ?? "open") === "closed") problems.push(`#${n} is closed`);
-    else if (!issue.labels.includes(FACTORY_READY_LABEL)) problems.push(`#${n} lacks the ${FACTORY_READY_LABEL} label`);
-    else if (issue.labels.includes(NEEDS_PLAN_LABEL)) problems.push(`#${n} carries ${NEEDS_PLAN_LABEL}`);
+    const block = admissionBlock(issue);
+    if (block) problems.push(`#${n} ${block}`);
   }
   if (problems.length) {
     io.err(`factory: ${problems.join("; ")}\n`);

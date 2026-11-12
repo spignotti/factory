@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ResultSchema, type RunResult } from "../events.js";
 import { newRunId } from "../pipeline/run.js";
 import { listRuns, type RunRecord } from "../runs.js";
-import type { StartedRun } from "./worker.js";
+import type { StartedRun, StartRunRequest } from "./worker.js";
 
 /** `dist/cli.js` next to this module when the built CLI runs; the built file when tests import the source. */
 export function factoryCliScript(): string {
@@ -21,14 +21,20 @@ export function factoryRunArgs(script: string, req: { repo: string; issue: numbe
   return [script, "run", "--repo", req.repo, "--issue", String(req.issue), "--no-notify", "--run-id", req.runId];
 }
 
+/** Args for a detached `factory resume`. `--no-notify` matches `factory run` from the queue. */
+export function factoryResumeArgs(script: string, runId: string): string[] {
+  return [script, "resume", runId, "--no-notify"];
+}
+
 /**
  * Real `queue run` child: `node dist/cli.js run --issue N --no-notify --run-id <id>`.
  * Detached, stdio ignored, so the worker can exit (restart, Ctrl-C) without closing the child's pipes
  * and the run keeps its lock. The next worker adopts it. Outcome is `result.json`, not stdout.
  */
-export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome: string }): StartedRun {
+export function spawnFactoryRun(req: StartRunRequest): StartedRun {
+  if (req.resumeRunId) return spawnResume(req);
   const prior = new Set(issueRuns(req.factoryHome, req.repo, req.issue).map((r) => r.run_id));
-  const plannedId = newRunId(Date.now());
+  const plannedId = req.runId ?? newRunId(Date.now());
   const child = spawn(process.execPath, factoryRunArgs(factoryCliScript(), { repo: req.repo, issue: req.issue, runId: plannedId }), {
     cwd: req.repo,
     env: { ...process.env, FACTORY_HOME: req.factoryHome },
@@ -70,6 +76,50 @@ export function spawnFactoryRun(req: { repo: string; issue: number; factoryHome:
     },
     unref: () => child.unref(),
   };
+}
+
+function spawnResume(req: StartRunRequest): StartedRun {
+  const runId = req.resumeRunId ?? "";
+  const child = spawn(process.execPath, factoryResumeArgs(factoryCliScript(), runId), {
+    cwd: req.repo,
+    env: { ...process.env, FACTORY_HOME: req.factoryHome },
+    stdio: "ignore",
+    detached: true,
+  });
+  const done = new Promise<RunResult>((resolveResult, reject) => {
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      const parsed = readResult(req.factoryHome, runId);
+      if (parsed) resolveResult(parsed);
+      else reject(err ?? new Error(`resume ${runId} ended without result.json`));
+    };
+    child.on("error", (e) => finish(e));
+    child.on("close", () => finish());
+  });
+  return { done, pid: child.pid ?? 0, runId: () => runId, kill: signalChild(child.pid), unref: () => child.unref() };
+}
+
+function signalChild(pid: number | undefined): (signal?: NodeJS.Signals) => void {
+  return (signal = "SIGTERM") => {
+    if (!pid) return;
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        process.kill(pid, signal);
+      } catch {
+        // already gone
+      }
+    }
+  };
+}
+
+function readResult(factoryHome: string, runId: string): RunResult | undefined {
+  const run = listRuns(factoryHome).find((r) => r.run_id === runId);
+  const parsed = ResultSchema.safeParse(run?.result);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function readNewResult(factoryHome: string, repo: string, issue: number, prior: Set<string>): RunResult | undefined {

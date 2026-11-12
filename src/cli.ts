@@ -655,6 +655,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
         options: {
           wait: { type: "boolean", default: false },
           "no-pr": { type: "boolean" },
+          "no-notify": { type: "boolean", default: false },
           notify: { type: "string" },
           profile: { type: "string" },
         },
@@ -679,7 +680,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
         const result = await resumeFactory(
           positionals[0]!,
           { wait: values.wait, noPr: values["no-pr"], notifyTarget: values.notify },
-          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env), noNotify: values["no-notify"] },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);

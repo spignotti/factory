@@ -425,6 +425,7 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   if (!same(b.git, a.git)) out.push("git author changed");
   if (a.concurrency.max_runs > b.concurrency.max_runs) out.push("concurrency.max_runs raised");
   removed("concurrency.exclusive_paths", b.concurrency.exclusive_paths, a.concurrency.exclusive_paths);
+  removed("concurrency.resources", b.concurrency.resources, a.concurrency.resources);
   const exKey = (e: { tool: string; rule: string }) => `${e.tool}:${e.rule}`;
   const added = a.tool_exceptions.filter((e) => !b.tool_exceptions.some((x) => exKey(x) === exKey(e)));
   if (added.length) out.push(`tool_exceptions added: ${added.map(exKey).join(", ")}`);

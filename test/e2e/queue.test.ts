@@ -978,7 +978,8 @@ describe("factory queue", () => {
     const repo2 = createFixtureRepo();
     const home2 = home();
     const gh2 = new FakeGitHub();
-    gh2.issues.set(120, ready(120, { state: "open" }));
+    // Not factory-ready, so discovery leaves it unqueued. A merged factory PR is still enough.
+    gh2.issues.set(120, ready(120, { state: "open", labels: [] }));
     gh2.factoryPrByIssue.set(120, { number: 4, state: "merged" });
     await enqueue(home2, repo2, gh2, [131], 120);
     const g2 = gate();
@@ -996,7 +997,7 @@ describe("factory queue", () => {
     const repo3 = createFixtureRepo();
     const home3 = home();
     const gh3 = new FakeGitHub();
-    gh3.issues.set(120, ready(120, { state: "open" }));
+    gh3.issues.set(120, ready(120, { state: "open", labels: [] }));
     await enqueue(home3, repo3, gh3, [132], 120);
     const g3 = gate();
     const ctl3 = new AbortController();

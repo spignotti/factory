@@ -127,6 +127,9 @@ limits: { forbidden_paths: [".env*"] }
     expect(repoConfigLoosening(exclusive, base)).toEqual(["concurrency.exclusive_paths removed: supabase/migrations/**"]);
     expect(repoConfigLoosening(base, exclusive)).toEqual([]);
     expect(repoConfigLoosening(`${base}concurrency: { max_runs: 2 }\n`, base)).toEqual([]);
+    const resource = `${base}concurrency:\n  resources: ["db"]\n`;
+    expect(repoConfigLoosening(base, resource)).toEqual([]);
+    expect(repoConfigLoosening(resource, base)).toEqual(["concurrency.resources removed: db"]);
   });
 
   it("setting or editing flake_allow, or removing an owner, is loosening", () => {

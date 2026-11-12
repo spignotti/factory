@@ -23,7 +23,8 @@ import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
-import { acquireRepoLockWithRetry, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
+import { acquireRepoLockWithRetry, claimResources, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
+import { pauseRequested } from "../queue/pause.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
@@ -99,18 +100,47 @@ export async function takeRepoLock(
   wait: boolean,
   maxRuns = 1,
 ): Promise<{ release?: LockRelease; reason: string }> {
+  // Same resource files the queue claims before start. A manual run cannot pass a busy database.
+  // Waiting here would hold a coding slot; the caller stays out of the repo lock instead.
+  let names: string[];
+  try {
+    names = loadRepoConfig(repoDir).concurrency.resources;
+  } catch {
+    names = [];
+  }
+  const resources = claimResources(deps.factoryHome, names, runId);
+  if (!resources.ok) {
+    const who = resources.held.runId ?? "?";
+    return { reason: `resource ${resources.held.name} is held by run ${who} (pid ${resources.held.pid})` };
+  }
   const raw = await repoLockId(repoDir);
   const id = lockRepoKey(raw);
   const release = await acquireRepoLockWithRetry(deps.factoryHome, raw, runId, { maxRuns, signal: deps.signal });
-  if (release) return { release, reason: "" };
+  const wrap = (drop: LockRelease): LockRelease =>
+    Object.assign(
+      () => {
+        drop();
+        resources.release();
+      },
+      { slot: drop.slot },
+    );
+  if (release) return { release: wrap(release), reason: "" };
   const holder = repoLockHolder(deps.factoryHome, raw);
   const by = holder ? `run ${holder.runId ?? "?"} (pid ${holder.pid})` : "another run";
-  if (!wait) return { reason: `repo ${id} is locked by ${by}` };
+  if (!wait) {
+    resources.release();
+    return { reason: `repo ${id} is locked by ${by}` };
+  }
   events.emit({ step: "intake", event: "queued", data: { repo: id, holder_run_id: holder?.runId ?? null, holder_pid: holder?.pid ?? null, waiter_pid: process.pid } });
   const queuedAt = Date.now();
-  const got = await waitForRepoLock(deps.factoryHome, raw, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal, maxRuns });
-  events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
-  return { release: got, reason: "" };
+  try {
+    const got = await waitForRepoLock(deps.factoryHome, raw, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal, maxRuns });
+    events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
+    return { release: wrap(got), reason: "" };
+  } catch (e) {
+    resources.release();
+    throw e;
+  }
 }
 
 /**
@@ -727,11 +757,25 @@ export async function sweepBaseRed(deps: RunDeps, log?: (s: string) => void): Pr
 }
 
 /**
+ * A queue pause marker stops at this step boundary: the worktree and plan stay, the PR is put back
+ * to draft, and auto-merge is not reached. The process is not signalled.
+ */
+async function stopIfPaused(f: RunFrame, ctx: RunContext): Promise<boolean> {
+  const why = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
+  if (!why) return false;
+  const draftError = await keepDraft(f);
+  const reason = `paused: ${why}; resume with \`factory resume ${ctx.runId}\``;
+  f.set({ result: "needs_human", reason: draftError ? `${reason}; ${draftError}` : reason });
+  return true;
+}
+
+/**
  * implement → review loop → finalize, starting at `state.step`, persisting state.json after every
  * package, round and step. Shared by run and resume.
  */
 async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
   const st = f.state!;
+  if (await stopIfPaused(f, ctx)) return;
   const sync = () => {
     st.lane = "standard";
     delete st.lane_escalation;
@@ -771,6 +815,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     }
   }
   if (st.step === "review") {
+    if (await stopIfPaused(f, ctx)) return;
     loop = await reviewLoop(ctx, gates!, {
       firstRound: st.rounds + 1,
       findings: st.findings,
@@ -789,6 +834,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   }
   loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates, reviewedSha: st.reviewed_sha };
 
+  if (await stopIfPaused(f, ctx)) return;
   const fin = await finalize(ctx, {
     ...loop,
     packages: new Map(Object.entries(st.packages)),
