@@ -376,6 +376,8 @@ describe("factory doctor: tests", () => {
     const configured = parseRepoConfig("checks:\n  - { name: lint, run: 'eslint .', tier: fast }\ntests:\n  run: 'node --test {files}'\n");
     expect(testsCheck(configured)).toMatchObject({ status: "ok", detail: "tests.run is set" });
     expect(testsCheck(parseRepoConfig("checks: []\n")).status).toBe("ok");
+    const plugin = parseRepoConfig("checks:\n  - { name: lint, run: 'eslint . -c jest.config.js --plugin eslint-plugin-jest', tier: fast }\n");
+    expect(testsCheck(plugin)).toMatchObject({ status: "warn" });
   });
 
   it("doctor reports the tests check for a repo", async () => {

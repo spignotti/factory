@@ -440,31 +440,105 @@ function loaderFlags(args: string[]): string[] {
     if (LOADER_VALUE.has(a)) {
       const v = args[i + 1];
       if (v && !v.startsWith("-")) {
-        out.push(a, v);
+        out.push(a, shellQuote(v));
         i++;
       }
       continue;
     }
-    if (/^--(?:import|loader|require)=/.test(a) || a.startsWith("--experimental-")) out.push(a);
+    if (/^--(?:import|loader|require)=/.test(a)) {
+      out.push(quotedEquals(a));
+      continue;
+    }
+    if (a.startsWith("--experimental-")) out.push(a);
   }
   return out;
 }
 
+const WATCH = new Set(["run", "--watch", "--watchAll", "-w"]);
+
+function isWatch(token: string): boolean {
+  return WATCH.has(token) || token.startsWith("--watch=") || token.startsWith("--watchAll=");
+}
+
+/** Flags that do not take the next word. A following path is a file selection, not a value. */
+const BOOLEAN_FLAG = new Set([
+  "--coverage",
+  "--bail",
+  "--silent",
+  "--ci",
+  "--runInBand",
+  "--forceExit",
+  "--detectOpenHandles",
+  "--passWithNoTests",
+  "--onlyChanged",
+  "--changed",
+  "--updateSnapshot",
+  "-u",
+  "--colors",
+  "--no-colors",
+  "--no-coverage",
+  "--no-file-parallelism",
+  "--dangerouslyIgnoreUnhandledErrors",
+  "--standalone",
+  "--experimental-vm-modules",
+]);
+
+function quotedEquals(token: string): string {
+  const eq = token.indexOf("=");
+  return `${token.slice(0, eq + 1)}${shellQuote(token.slice(eq + 1))}`;
+}
+
+/** Keeps flags and their values. Drops watch mode and positional files so `{files}` is the selection. */
 function toolFlags(args: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "run" || a === "--watch" || a === "--watch=true") continue;
-    if (!a.startsWith("-")) continue;
-    if (LOADER_VALUE.has(a) || a === "--config" || a === "-c") {
-      const v = args[i + 1];
-      if (v && !v.startsWith("-")) {
-        out.push(a, v);
-        i++;
-        continue;
-      }
+    if (isWatch(a) || !a.startsWith("-")) continue;
+    if (a.includes("=")) {
+      out.push(quotedEquals(a));
+      continue;
+    }
+    const v = args[i + 1];
+    if (v && !v.startsWith("-") && !BOOLEAN_FLAG.has(a) && !a.startsWith("--experimental-")) {
+      out.push(a, shellQuote(v));
+      i++;
+      continue;
     }
     out.push(a);
+  }
+  return out;
+}
+
+/**
+ * Flags for `node --test`. Loader flags stay even when they follow `--test`
+ * (`node --test --import tsx`). Other flags stay only when they precede `--test`.
+ * Watch mode and file arguments are dropped.
+ */
+function nodeTestFlags(args: string[], runnerAt: number, testAt: number): string[] {
+  const out: string[] = [];
+  for (let i = runnerAt + 1; i < args.length; i++) {
+    if (i === testAt) continue;
+    const a = args[i]!;
+    const loaderEquals = /^--(?:import|loader|require)=/.test(a);
+    const loader = LOADER_VALUE.has(a) || a.startsWith("--experimental-") || loaderEquals;
+    if (loader) {
+      if (loaderEquals) out.push(quotedEquals(a));
+      else if (LOADER_VALUE.has(a)) {
+        const v = args[i + 1];
+        if (v && !v.startsWith("-")) {
+          out.push(a, shellQuote(v));
+          i++;
+        } else out.push(a);
+      } else out.push(a);
+      continue;
+    }
+    if (i < testAt && a.startsWith("-") && !isWatch(a)) {
+      const v = args[i + 1];
+      if (v && !v.startsWith("-") && !BOOLEAN_FLAG.has(a) && i + 1 !== testAt) {
+        out.push(a, shellQuote(v));
+        i++;
+      } else out.push(a);
+    }
   }
   return out;
 }
@@ -476,7 +550,7 @@ function binName(token: string, name: string): boolean {
 /**
  * Command that runs the cited test files. Taken from the repo's `test` script.
  * Node loader flags stay (`--import tsx`, `--loader`, `--experimental-strip-types`, a loader in `NODE_OPTIONS`).
- * File arguments and watch mode do not: `{files}` is the selection.
+ * File arguments and watch mode (`--watch`, `--watchAll`, `-w`) do not: `{files}` is the selection.
  */
 export function singleFileTestCommand(script: string, pm: NonNullable<Detection["package_manager"]>): string | null {
   const exec = pm === "npm" ? "npx" : `${pm} exec`;
@@ -495,28 +569,16 @@ export function singleFileTestCommand(script: string, pm: NonNullable<Detection[
       const keptLoaders = nodeAt >= 0 ? loaderFlags(before.slice(nodeAt + 1)) : [];
       const flags = toolFlags(args.slice(tool + 1));
       const tail = `${vitest >= 0 ? "run " : ""}${flags.length ? `${flags.join(" ")} ` : ""}{files}`;
-      if (nodeAt >= 0 && keptLoaders.length) return `${lead}node ${keptLoaders.join(" ")} ${args[tool]} ${tail}`;
+      if (nodeAt >= 0 && keptLoaders.length) return `${lead}node ${keptLoaders.join(" ")} ${shellQuote(args[tool]!)} ${tail}`;
       const bin = vitest >= 0 ? "vitest" : "jest";
       return `${lead}${exec} ${bin} ${tail}`;
     }
     const runnerAt = args.findIndex((a) => binName(a, "node") || binName(a, "tsx") || binName(a, "ts-node"));
     const testAt = args.indexOf("--test");
     if (runnerAt >= 0 && testAt > runnerAt) {
-      const between: string[] = [];
-      for (let i = runnerAt + 1; i < testAt; i++) {
-        const a = args[i]!;
-        if (!a.startsWith("-")) continue;
-        between.push(a);
-        if (LOADER_VALUE.has(a)) {
-          const v = args[i + 1];
-          if (v && !v.startsWith("-")) {
-            between.push(v);
-            i++;
-          }
-        }
-      }
-      const flags = between.length ? `${between.join(" ")} ` : "";
-      return `${lead}${args[runnerAt]} ${flags}--test {files}`;
+      const flags = nodeTestFlags(args, runnerAt, testAt);
+      const flagText = flags.length ? `${flags.join(" ")} ` : "";
+      return `${lead}${args[runnerAt]} ${flagText}--test {files}`;
     }
   }
   return null;

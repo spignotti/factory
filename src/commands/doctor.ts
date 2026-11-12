@@ -346,8 +346,10 @@ export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): Doct
 
 /** Whether a check command executes a test suite. Names alone do not count. */
 function commandRunsTests(run: string): boolean {
+  // The tool name has to be the command, not a substring of a package or a config file (`eslint-plugin-jest`, `jest.config.js`).
+  const tool = /(?:^|[\s;'"`])(?:[\w@./-]*\/)?(?:vitest|jest|mocha|ava|pytest)(?:\s|$)/;
   return (
-    /\b(?:vitest|jest|mocha|ava|pytest)\b/.test(run) ||
+    tool.test(run) ||
     /\b(?:cargo|go|bun|deno)\s+test\b/.test(run) ||
     /\b(?:node|tsx|ts-node)\b(?:\s+\S+)*\s+--test\b/.test(run) ||
     /\b(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?test\b/.test(run) ||

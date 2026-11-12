@@ -673,8 +673,9 @@ base branch; the user's checkout is not touched):
   ruff/mypy/pytest; rust; go), test files and the command that runs specific ones, UI, database, cloud/secrets,
   CI workflows and special jobs (gitleaks, pip-audit, cosign, `systemd-analyze` …). `tests.run` comes from
   the `test` script and keeps Node loader flags (`--import`, `--loader`, `--require`, `--experimental-*`,
-  and the same flags inside `NODE_OPTIONS`). File arguments and `--watch` are dropped; `{files}` is the
-  selection. Mutating commands
+  and the same flags inside `NODE_OPTIONS`), including when they follow `--test`. Flag values stay
+  (`--reporter`, `--testTimeout`, `--project`). File arguments and watch mode (`--watch`, `--watchAll`, `-w`)
+  are dropped; `{files}` is the selection. Mutating commands
   (`--fix`, `--write`, `format` without `--check`, …) become their read-only variant or are skipped, never a
   check that rewrites files; identical commands are drafted once.
 - **Measure**: setup and every check once in a clean base worktree, in the sandbox (`--no-measure` skips).

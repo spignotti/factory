@@ -64,6 +64,14 @@ describe("adopt detect", () => {
     );
     expect(singleFileTestCommand("vitest --watch src/a.test.ts", "pnpm")).toBe("pnpm exec vitest run {files}");
     expect(singleFileTestCommand("jest --watch", "yarn")).toBe("yarn exec jest {files}");
+    expect(singleFileTestCommand("jest --watchAll", "npm")).toBe("npx jest {files}");
+    expect(singleFileTestCommand("vitest -w", "pnpm")).toBe("pnpm exec vitest run {files}");
+    expect(singleFileTestCommand("jest --testTimeout 10000", "yarn")).toBe("yarn exec jest --testTimeout 10000 {files}");
+    expect(singleFileTestCommand("vitest --reporter verbose src/a.test.ts", "pnpm")).toBe("pnpm exec vitest run --reporter verbose {files}");
+    expect(singleFileTestCommand("vitest --project unit", "pnpm")).toBe("pnpm exec vitest run --project unit {files}");
+    expect(singleFileTestCommand("vitest --coverage src/a.test.ts", "pnpm")).toBe("pnpm exec vitest run --coverage {files}");
+    expect(singleFileTestCommand("node --test --import tsx", "pnpm")).toBe("node --import tsx --test {files}");
+    expect(singleFileTestCommand("node --test --experimental-strip-types", "pnpm")).toBe("node --experimental-strip-types --test {files}");
     expect(singleFileTestCommand("mocha", "npm")).toBeNull();
     const dir = makeRepo({ "package.json": JSON.stringify({ scripts: { test: "node --import tsx --test" } }), "src/a.test.ts": "" });
     expect(detect(dir, files(dir)).tests.run).toBe("node --import tsx --test {files}");
