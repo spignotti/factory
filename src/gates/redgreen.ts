@@ -40,13 +40,22 @@ function isFileFailureName(name: string): boolean {
   return !name || name === "failing tests:" || name.startsWith("/") || name.startsWith("file:") || name.includes("/");
 }
 
-function namedTestFailed(output: string): boolean {
+/** Spec (`✖ name`) and TAP (`not ok N - name`). A file path is a load failure, not a test name. */
+function eachFailedTestName(output: string): string[] {
+  const names: string[] = [];
   for (const m of output.matchAll(/^\u2716\s+(.+)$/gm)) {
     const name = (m[1] ?? "").replace(/\s+\([\d.]+ms\)\s*$/, "").trim();
-    if (isFileFailureName(name)) continue;
-    return true;
+    if (!isFileFailureName(name)) names.push(name);
   }
-  return /^FAILED\s+\S+/m.test(output);
+  for (const m of output.matchAll(/^not ok\s+\d+\s+-\s+(.+)$/gm)) {
+    const name = (m[1] ?? "").replace(/\s+#\s*SKIP\b.*$/, "").trim();
+    if (!isFileFailureName(name)) names.push(name);
+  }
+  return names;
+}
+
+function namedTestFailed(output: string): boolean {
+  return eachFailedTestName(output).length > 0 || /^FAILED\s+\S+/m.test(output);
 }
 
 /** A test ran and failed. `ERR_ASSERTION` wins over words like SyntaxError inside the message. */
@@ -65,11 +74,8 @@ function hasCollection(output: string): boolean {
 }
 
 export function assertionName(output: string): string | undefined {
-  for (const m of output.matchAll(/^\u2716\s+(.+)$/gm)) {
-    const name = (m[1] ?? "").replace(/\s+\([\d.]+ms\)\s*$/, "").trim();
-    if (isFileFailureName(name)) continue;
-    return name;
-  }
+  const named = eachFailedTestName(output)[0];
+  if (named) return named;
   const pytest = /^FAILED\s+(\S+)/m.exec(output);
   return pytest?.[1];
 }

@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { baseProbeFiles, classifyReproRun, redGreenProof } from "../../src/gates/redgreen.js";
+import { assertionName, baseProbeFiles, classifyReproRun, redGreenProof } from "../../src/gates/redgreen.js";
 import { createFixtureRepo, gitIn } from "../helpers/repo.js";
 
 const REPRO = `import assert from "node:assert/strict";
@@ -105,7 +105,7 @@ describe("red-green proof", () => {
       worktree: dir,
       baseSha,
       files: ["test/msg.test.js"],
-      testCommand: "node --test {files}",
+      testCommand: "node --test --test-reporter=tap {files}",
       gateTimeoutMinutes: 20,
       env,
     });
@@ -172,6 +172,9 @@ describe("repro classification", () => {
     expect(classifyReproRun(137, "")).toBe("command");
     expect(classifyReproRun(1, "", "SIGKILL")).toBe("command");
     expect(classifyReproRun(1, "✖ msg (1ms)\nAssertionError [ERR_ASSERTION]: SyntaxError: No such file\n")).toBe("assertion");
+    const tap = "TAP version 13\n# Subtest: msg\nnot ok 1 - msg\n  ---\n  name: 'AssertionError'\n  error: 'SyntaxError: No such file'\n  ...\nnot ok 2 - test/msg.test.js\n";
+    expect(assertionName(tap)).toBe("msg");
+    expect(classifyReproRun(1, tap)).toBe("assertion");
     expect(classifyReproRun(1, "Error [ERR_MODULE_NOT_FOUND]: Cannot find module './nope.js'\n✖ /tmp/t.test.js (1ms)\n")).toBe("import");
     expect(classifyReproRun(2, "ERROR collecting test_a.py\nE   ModuleNotFoundError: No module named 'a'\ncollected 0 items\n")).toBe("collection");
     expect(classifyReproRun(0, "ℹ pass 0\nℹ fail 0\nℹ skipped 1\n")).toBe("unclear");
