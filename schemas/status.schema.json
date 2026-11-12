@@ -634,6 +634,13 @@
                   },
                   "result": {
                     "type": "string"
+                  },
+                  "origin": {
+                    "type": "string",
+                    "enum": [
+                      "confirmed",
+                      "unknown"
+                    ]
                   }
                 },
                 "required": [
@@ -853,6 +860,169 @@
           "type": "null"
         }
       ]
+    },
+    "brief": {
+      "type": "object",
+      "properties": {
+        "running": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "waiting_on": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "class": {
+                "type": "string",
+                "enum": [
+                  "dependency",
+                  "capacity",
+                  "ci_runner",
+                  "provider",
+                  "human_decision",
+                  "technical_repair",
+                  "unclassified"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              },
+              "artifact": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "detail",
+              "artifact"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "actually_merged": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "pr": {
+                "type": "string"
+              },
+              "origin": {
+                "type": "string",
+                "enum": [
+                  "confirmed",
+                  "unknown"
+                ]
+              }
+            },
+            "required": [
+              "run_id",
+              "pr",
+              "origin"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "closed_without_merge": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "pr": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id",
+              "pr"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "needs_silas": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "artifact": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "run_id",
+              "reason",
+              "artifact"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "running",
+        "waiting_on",
+        "actually_merged",
+        "closed_without_merge",
+        "needs_silas",
+        "artifacts"
+      ],
+      "additionalProperties": false
+    },
+    "automation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "full": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "partial": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "review_scope": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "repo",
+          "full",
+          "partial",
+          "review_scope"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -867,7 +1037,9 @@
     "stale_drafts",
     "audit_tickets",
     "queues",
-    "since"
+    "since",
+    "brief",
+    "automation"
   ],
   "additionalProperties": false
 }

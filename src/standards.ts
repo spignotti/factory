@@ -158,6 +158,33 @@ export function rulesForReview(items: readonly ChecklistItem[], checks: readonly
   return items.filter((item) => !markerCovers(item, checks));
 }
 
+/**
+ * Full coverage is a marker that actually blocks. Partial is a marker that does not.
+ * Review scope is every rule that is not fully covered. This is not a check-count quotient.
+ */
+export function automationCoverage(items: readonly ChecklistItem[], checks: readonly MarkerCheck[]): { full: string[]; partial: string[]; review_scope: string[] } {
+  const full: string[] = [];
+  const partial: string[] = [];
+  const review_scope: string[] = [];
+  for (const item of items) {
+    if (markerCovers(item, checks)) full.push(item.text);
+    else {
+      review_scope.push(item.text);
+      if (item.check) partial.push(item.text);
+    }
+  }
+  return { full, partial, review_scope };
+}
+
+/** Null when the repo has no standards file. That is unknown coverage, not zero rules. */
+export function coverageOfRepo(repoDir: string): { full: string[]; partial: string[]; review_scope: string[] } | null {
+  const checks = repoChecks(repoDir);
+  const standards = readOptionalFile(join(repoDir, STANDARDS_REL));
+  const text = standards !== undefined ? splitStandards(standards).rules : readOptionalFile(join(repoDir, CHECKLIST_REL));
+  if (text === undefined) return null;
+  return automationCoverage(parseChecklist(text), checks);
+}
+
 function repoChecks(repoDir: string): MarkerCheck[] {
   const text = readOptionalFile(join(repoDir, ".factory", "repo.yaml"));
   if (text === undefined) return [];

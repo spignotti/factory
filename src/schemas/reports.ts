@@ -106,6 +106,11 @@ export const StatusReportSchema = z.strictObject({
           pr: z.string(),
           pr_state: z.enum(["merged", "closed"]),
           result: z.string(),
+          /**
+           * Set only when `pr_state` is `merged`. `confirmed` is the stored outcome.
+           * `unknown` is a GitHub merge whose actor was not recorded. A login match is not `confirmed`.
+           */
+          origin: z.enum(["confirmed", "unknown"]).optional(),
         }),
       ),
       /** Open, CI green, not behind or conflicting, `merge_policy` human_review. `none` and a missing rollup are not green. */
@@ -149,6 +154,42 @@ export const StatusReportSchema = z.strictObject({
       ),
     })
     .nullable(),
+  /**
+   * Short answers for the text status. A GitHub `merged` state with `origin: "unknown"` is not an
+   * autonomous merge. Closed-without-merge is not listed under `actually_merged`.
+   */
+  brief: z.strictObject({
+    running: z.array(z.string()),
+    waiting_on: z.array(
+      z.strictObject({
+        class: z.enum(["dependency", "capacity", "ci_runner", "provider", "human_decision", "technical_repair", "unclassified"]),
+        detail: z.string(),
+        artifact: z.string(),
+      }),
+    ),
+    actually_merged: z.array(
+      z.strictObject({
+        run_id: z.string(),
+        pr: z.string(),
+        origin: z.enum(["confirmed", "unknown"]),
+      }),
+    ),
+    closed_without_merge: z.array(z.strictObject({ run_id: z.string(), pr: z.string() })),
+    needs_silas: z.array(z.strictObject({ run_id: z.string(), reason: z.string(), artifact: z.string() })),
+    artifacts: z.array(z.string()),
+  }),
+  /**
+   * Rule coverage from `.factory/standards.md`. Absent repos are omitted (unknown, not zero rules).
+   * This is not `determinism_ratio`.
+   */
+  automation: z.array(
+    z.strictObject({
+      repo: z.string(),
+      full: z.array(z.string()),
+      partial: z.array(z.string()),
+      review_scope: z.array(z.string()),
+    }),
+  ),
 });
 
 const quantiles = z.strictObject({ median: z.number().nullable(), p90: z.number().nullable() });
@@ -166,6 +207,32 @@ export const StatsPeriodSchema = z.strictObject({
   done_rate: z.number().min(0).max(1).nullable(),
   rounds: quantiles,
   minutes: quantiles,
+  /**
+   * Active work, wait and time-to-merge are separate. `summed_run_minutes` adds each run's stored
+   * minutes and is not wall-clock. Unknown samples stay null, not zero.
+   */
+  time: z.strictObject({
+    active_minutes: quantiles,
+    wait_minutes: quantiles,
+    time_to_merge_minutes: quantiles,
+    summed_run_minutes: z.number(),
+    wall_clock_minutes: z.number().nullable(),
+  }),
+  /** Classified wait reasons. Replan, retry and review are `round_kinds`, not these counters. */
+  waits: z.strictObject({
+    dependency: z.number().int().min(0),
+    capacity: z.number().int().min(0),
+    ci_runner: z.number().int().min(0),
+    provider: z.number().int().min(0),
+    human_decision: z.number().int().min(0),
+    technical_repair: z.number().int().min(0),
+    unclassified: z.number().int().min(0),
+  }),
+  round_kinds: z.strictObject({
+    replan: z.number().int().min(0),
+    retry: z.number().int().min(0),
+    review: z.number().int().min(0),
+  }),
   gate_failures: counts,
   flaky_checks: counts,
   reasons: z.array(z.strictObject({ result: z.string(), reason: z.string(), count: z.number().int() })),

@@ -130,6 +130,170 @@
           ],
           "additionalProperties": false
         },
+        "time": {
+          "type": "object",
+          "properties": {
+            "active_minutes": {
+              "type": "object",
+              "properties": {
+                "median": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "p90": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "median",
+                "p90"
+              ],
+              "additionalProperties": false
+            },
+            "wait_minutes": {
+              "type": "object",
+              "properties": {
+                "median": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "p90": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "median",
+                "p90"
+              ],
+              "additionalProperties": false
+            },
+            "time_to_merge_minutes": {
+              "type": "object",
+              "properties": {
+                "median": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "p90": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "median",
+                "p90"
+              ],
+              "additionalProperties": false
+            },
+            "summed_run_minutes": {
+              "type": "number"
+            },
+            "wall_clock_minutes": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "active_minutes",
+            "wait_minutes",
+            "time_to_merge_minutes",
+            "summed_run_minutes",
+            "wall_clock_minutes"
+          ],
+          "additionalProperties": false
+        },
+        "waits": {
+          "type": "object",
+          "properties": {
+            "dependency": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "capacity": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "ci_runner": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "provider": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "human_decision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "technical_repair": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unclassified": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "dependency",
+            "capacity",
+            "ci_runner",
+            "provider",
+            "human_decision",
+            "technical_repair",
+            "unclassified"
+          ],
+          "additionalProperties": false
+        },
+        "round_kinds": {
+          "type": "object",
+          "properties": {
+            "replan": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "retry": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "review": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "replan",
+            "retry",
+            "review"
+          ],
+          "additionalProperties": false
+        },
         "gate_failures": {
           "type": "object",
           "propertyNames": {
@@ -413,6 +577,9 @@
         "done_rate",
         "rounds",
         "minutes",
+        "time",
+        "waits",
+        "round_kinds",
         "gate_failures",
         "flaky_checks",
         "reasons",
@@ -543,6 +710,170 @@
           ],
           "additionalProperties": false
         },
+        "time": {
+          "type": "object",
+          "properties": {
+            "active_minutes": {
+              "type": "object",
+              "properties": {
+                "median": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "p90": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "median",
+                "p90"
+              ],
+              "additionalProperties": false
+            },
+            "wait_minutes": {
+              "type": "object",
+              "properties": {
+                "median": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "p90": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "median",
+                "p90"
+              ],
+              "additionalProperties": false
+            },
+            "time_to_merge_minutes": {
+              "type": "object",
+              "properties": {
+                "median": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "p90": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "median",
+                "p90"
+              ],
+              "additionalProperties": false
+            },
+            "summed_run_minutes": {
+              "type": "number"
+            },
+            "wall_clock_minutes": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "active_minutes",
+            "wait_minutes",
+            "time_to_merge_minutes",
+            "summed_run_minutes",
+            "wall_clock_minutes"
+          ],
+          "additionalProperties": false
+        },
+        "waits": {
+          "type": "object",
+          "properties": {
+            "dependency": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "capacity": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "ci_runner": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "provider": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "human_decision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "technical_repair": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unclassified": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "dependency",
+            "capacity",
+            "ci_runner",
+            "provider",
+            "human_decision",
+            "technical_repair",
+            "unclassified"
+          ],
+          "additionalProperties": false
+        },
+        "round_kinds": {
+          "type": "object",
+          "properties": {
+            "replan": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "retry": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "review": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "replan",
+            "retry",
+            "review"
+          ],
+          "additionalProperties": false
+        },
         "gate_failures": {
           "type": "object",
           "propertyNames": {
@@ -826,6 +1157,9 @@
         "done_rate",
         "rounds",
         "minutes",
+        "time",
+        "waits",
+        "round_kinds",
         "gate_failures",
         "flaky_checks",
         "reasons",
