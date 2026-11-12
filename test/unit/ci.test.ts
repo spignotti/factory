@@ -143,6 +143,18 @@ describe("CI stub", () => {
     for (const bad of ["", "v1; rm -rf /", "a b", "../x", "-x"]) expect(() => renderCiStub(bad)).toThrow(/invalid factory ref/);
   });
 
+  it("ci.runner is pasted into runs-on and is what the hash check expects", () => {
+    const text = renderCiStub("v1.2.3", undefined, "ubicloud-standard-2");
+    expect(text).toContain("runs-on: ubicloud-standard-2");
+    expect(text).not.toContain("ubuntu-latest");
+    expect(text).not.toContain("@RUNS_ON@");
+    for (const bad of ["ubuntu-latest\n  evil: true", "${{ github.actor }}", "a b"]) expect(() => renderCiStub("v1.2.3", undefined, bad)).toThrow(/invalid ci.runner/);
+    const repo = createFixtureRepo();
+    write(repo, CI_STUB_PATH, text);
+    expect(ciStubCheck(repo, undefined, undefined, "full", "ubicloud-standard-2")).toMatchObject({ status: "ok" });
+    expect(ciStubCheck(repo)).toMatchObject({ status: "fail" });
+  });
+
   it("hash check: equal → ok; edited → fail with both hashes; missing → warn; several refs → fail", () => {
     const repo = createFixtureRepo();
     expect(ciStubCheck(repo)).toMatchObject({ status: "warn", detail: expect.stringMatching(/missing/) });
@@ -281,7 +293,7 @@ describe("CI stub", () => {
     const bare = "d".repeat(40);
     let already = "";
     expect(await main(["ci-stub", "--ref", bare], { out: (s) => void (already += s), err: () => {} })).toBe(0);
-    expect(already).toBe(readFileSync(CI_TEMPLATE, "utf8").replaceAll("@FACTORY_REF@", bare));
+    expect(already).toBe(readFileSync(CI_TEMPLATE, "utf8").replaceAll("@FACTORY_REF@", bare).replaceAll("@RUNS_ON@", "ubuntu-latest"));
     const { version } = JSON.parse(readFileSync("package.json", "utf8")) as { version: string };
     expect(defaultRef()).toBe(`v${version}`); // follows package.json, so a release PR needs no test edit
   });

@@ -7,6 +7,10 @@ import { z } from "zod";
 const CATCH_ALL = new Set(["*", "**", "**/*", "**/**", "*/**"]);
 import { DocsLookupSchema, RoleOverridesSchema, THINKING_LEVELS } from "./profile.js";
 
+/** Actions `runs-on` label. No `${{ }}`: the value is pasted into the workflow. */
+export const CI_RUNNER_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const DEFAULT_CI_RUNNER = "ubuntu-latest";
+
 export const TierSchema = z.enum(["fast", "full", "manual"]);
 export type Tier = z.infer<typeof TierSchema>;
 
@@ -490,8 +494,15 @@ export const RepoConfigSchema = z
     secrets: SecretsSchema.optional(),
     // Agent steps with the `docs_lookup` tool for this repo; replaces the profile's list.
     docs_lookup: DocsLookupSchema.optional(),
-    // CI stub toolchains (node, pnpm, python, uv); unset fields are detected from the repo's files.
-    ci: z.object({ toolchains: CiToolchainsSchema.optional() }).strict().optional(),
+    // CI stub. `runner` is the Actions `runs-on` label, pasted into the workflow (no expressions).
+    // Unset means ubuntu-latest. `toolchains` are what the stub installs; unset fields are detected.
+    ci: z
+      .object({
+        runner: z.string().regex(CI_RUNNER_LABEL).optional(),
+        toolchains: CiToolchainsSchema.optional(),
+      })
+      .strict()
+      .optional(),
     // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
     /**

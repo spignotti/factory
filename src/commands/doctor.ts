@@ -289,7 +289,7 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
 
 /** CI stub hash and other workflows gating pull requests (hint). */
 export function ciChecks(repoDir: string, repo: RepoConfig, currentRef = defaultRef()): DoctorCheck[] {
-  const stub = ciStubCheck(repoDir, undefined, currentRef, ciStubMode(repo.checks));
+  const stub = ciStubCheck(repoDir, undefined, currentRef, ciStubMode(repo.checks), repo.ci?.runner);
   const checks: DoctorCheck[] = [{ name: "ci stub", ...stub }];
   const { toolchains, notes } = resolveToolchains(repoDir, repo);
   checks.push({ name: "ci toolchains", status: notes.length ? "warn" : "ok", detail: `${describeToolchains(toolchains)} (${repo.ci?.toolchains ? "repo.yaml ci.toolchains + detected" : "detected"})${notes.length ? `; ${notes.join("; ")}` : ""}` });
