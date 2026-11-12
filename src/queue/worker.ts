@@ -6,6 +6,7 @@ import { ResultSchema, type RunResult } from "../events.js";
 import type { GitHub, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, tryPathLock } from "../pipeline/lock.js";
+import { mayEnableAutoMerge } from "../pipeline/merge-ready.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
@@ -106,6 +107,8 @@ interface TickCtx {
   /** `update-branch` still running after a tick timeout. One per repo; a later tick does not start another. */
   behindFlight: Map<string, Promise<unknown>>;
   redLogged: Set<string>;
+  /** `pr@sha` already asked to auto-merge in this process. */
+  mergeEnabled: Set<string>;
 }
 
 interface BehindWatch {
@@ -606,6 +609,62 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
 }
 
 /**
+ * Done runs whose policy is still auto: enable auto-merge once the approved SHA is the head and CI is green.
+ * A newer head, a draft, or CI that is not green does not merge. Pending CI keeps the worker up only
+ * while `untilMs` is set; it does not take a coding slot.
+ * Returns true when a PR is still waiting on CI.
+ */
+export async function enableReadyMerges(
+  github: GitHub,
+  repo: string,
+  factoryHome: string,
+  enabled: Set<string>,
+  io: Io,
+  timeoutMs: number,
+): Promise<boolean> {
+  const runs = listRuns(factoryHome).filter((run) => sameRepo(run, repo));
+  let waiting = false;
+  for (const run of runs) {
+    const policy = run.result?.merge_policy;
+    const approved = run.state?.approved_sha;
+    const pr = run.result?.pr ?? run.state?.pr ?? null;
+    const branch = run.state?.branch ?? run.result?.branch ?? null;
+    if (run.result?.result !== "done" || !pr || !approved) continue;
+    let status: PrStatus;
+    try {
+      status = await withTimeout(github.prStatus(repo, pr), timeoutMs, `pr status ${pr}`);
+    } catch (e) {
+      io.err(`factory: pr status ${pr} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      waiting = true;
+      continue;
+    }
+    let head: string | null = null;
+    if (branch && status.state === "open") {
+      try {
+        head = (await withTimeout(github.findOpenPr(repo, branch), timeoutMs, `open pr ${branch}`))?.headSha ?? null;
+      } catch (e) {
+        io.err(`factory: open pr ${pr} failed: ${(e as Error).message.slice(0, 200)}\n`);
+        waiting = true;
+        continue;
+      }
+    }
+    if (status.state === "open" && !status.draft && policy === "auto" && status.ci !== "green" && status.ci !== "red") waiting = true;
+    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, ci: status.ci, draft: status.draft, state: status.state })) continue;
+    const key = `${pr}@${approved}`;
+    if (enabled.has(key)) continue;
+    try {
+      await withTimeout(github.enableAutoMerge(repo, pr), timeoutMs, `auto-merge ${pr}`);
+      enabled.add(key);
+      io.out(`queue: auto-merge ${pr}\n`);
+    } catch (e) {
+      io.err(`factory: auto-merge ${pr} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      waiting = true;
+    }
+  }
+  return waiting;
+}
+
+/**
  * Every behind `factory/*` PR whose run ended `done`, one `update-branch` at a time.
  * A failure is logged and left for a later tick; it does not skip the rest of the list.
  */
@@ -833,6 +892,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     }
   }
   const watch = await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.io, timeoutMs);
+  const waitingMerge = await enableReadyMerges(ctx.github, repo, ctx.factoryHome, ctx.mergeEnabled, ctx.io, timeoutMs);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
   const pending = q.entries.some((e) => e.status === "pending");
@@ -840,7 +900,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const overlap = q.entries.some((e) => e.status === "parked" && ((e.blocked_by?.length ?? 0) > 0 || (e.blocked_runs?.length ?? 0) > 0));
   const live = [...ctx.handles.values()].some((h) => resolve(h.repo) === resolve(repo) && h.settled === undefined && !h.failed && !h.ignoreResult);
   if (ctx.pastUntil) return running || live;
-  const behind = watch.needsUpdate || (ctx.untilMs !== undefined && watch.openDone);
+  const behind = watch.needsUpdate || (ctx.untilMs !== undefined && (watch.openDone || waitingMerge));
   return pending || running || overlap || live || behind;
 }
 
@@ -869,6 +929,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
   const behindUpdated = new Map<string, number>();
   const behindFlight = new Map<string, Promise<unknown>>();
   const redLogged = new Set<string>();
+  const mergeEnabled = new Set<string>();
   const dir = queueDir(opts.factoryHome);
   mkdirSync(dir, { recursive: true });
   const held = await tryPathLock(
@@ -905,6 +966,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
                   behindUpdated,
                   behindFlight,
                   redLogged,
+                  mergeEnabled,
                 },
                 repo,
               );

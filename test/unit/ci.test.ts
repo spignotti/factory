@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -91,6 +92,62 @@ describe("CI stub", () => {
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "failure", CHECK: "skipped" })).toBe(1);
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "success", CHECK: "failure" })).toBe(1);
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
+  });
+
+  it("V03: a pull request done fails without factory=success and a tag does not ask", () => {
+    const text = renderCiStub("v1.2.3");
+    expect(text).toContain("statuses: read");
+    expect(text).toContain('i.context==="factory"');
+    const minimal = renderCiStubFor("v1.2.3", "minimal");
+    expect(minimal).toContain("statuses: read");
+    expect(minimal).toContain('i.context==="factory"');
+    const bin = mkdtempSync(join(tmpdir(), "factory-curl-"));
+    const log = join(bin, "curl.log");
+    const body = join(bin, "body.json");
+    writeFileSync(join(bin, "curl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\ncat \"$FAKE_CURL_BODY\"\n");
+    chmodSync(join(bin, "curl"), 0o755);
+    const script = (rendered: string) => {
+      const wf = parse(rendered) as { jobs: Record<string, { steps: { run?: string }[] }> };
+      const run = wf.jobs.done!.steps.map((s) => s.run ?? "").find((s) => s.includes("factory"));
+      if (!run) throw new Error("done script missing");
+      return run;
+    };
+    const exec = (rendered: string, env: Record<string, string>) => {
+      try {
+        execFileSync("bash", ["-c", script(rendered)], {
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_CURL_LOG: log, FAKE_CURL_BODY: body, FACTORY_APPROVAL_TRIES: "2", FACTORY_APPROVAL_SLEEP: "0", TOKEN: "test-token", SHA: "abc", REPO: "acme/widgets", ...env },
+          encoding: "utf8",
+        });
+        return 0;
+      } catch (e) {
+        return (e as { status?: number }).status ?? 1;
+      }
+    };
+    writeFileSync(body, JSON.stringify({ statuses: [] }));
+    writeFileSync(log, "");
+    expect(exec(text, { EVENT: "pull_request", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(1);
+    expect(readFileSync(log, "utf8")).toContain("commits/abc/status");
+    expect(readFileSync(log, "utf8")).toContain("Bearer test-token");
+    writeFileSync(body, JSON.stringify({ statuses: [{ context: "other", state: "success" }, { context: "factory", state: "failure" }] }));
+    expect(exec(text, { EVENT: "pull_request", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(1);
+    writeFileSync(log, "");
+    writeFileSync(body, JSON.stringify({ statuses: [{ context: "factory", state: "pending" }] }));
+    const flip = join(bin, "curl");
+    writeFileSync(flip, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\nn=$(wc -l < \"$FAKE_CURL_LOG\")\nif [ \"$n\" -lt 2 ]; then printf '%s\\n' '{\"statuses\":[{\"context\":\"factory\",\"state\":\"pending\"}]}'; else cat \"$FAKE_CURL_BODY\"; fi\n");
+    chmodSync(flip, 0o755);
+    writeFileSync(body, JSON.stringify({ statuses: [{ context: "factory", state: "success" }] }));
+    expect(exec(text, { EVENT: "pull_request", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(0);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(2);
+    writeFileSync(log, "");
+    expect(exec(text, { EVENT: "workflow_dispatch", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(0);
+    expect(readFileSync(log, "utf8")).toBe("");
+    expect(exec(minimal, { EVENT: "push", DRAFT: "false" })).toBe(0);
+    expect(exec(minimal, { EVENT: "pull_request", DRAFT: "false" })).toBe(0);
+    writeFileSync(body, JSON.stringify({ statuses: [] }));
+    writeFileSync(flip, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\ncat \"$FAKE_CURL_BODY\"\n");
+    chmodSync(flip, 0o755);
+    expect(exec(minimal, { EVENT: "pull_request", DRAFT: "true" })).toBe(1);
+    expect(exec(minimal, { EVENT: "pull_request", DRAFT: "false" })).toBe(1);
   });
 
   it("git pin is installed by npm 11.21.1, not by Node 22's npm 10.9.9 npx", () => {

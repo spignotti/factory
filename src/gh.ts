@@ -153,6 +153,11 @@ export interface GitHub {
    */
   openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]>;
   enableAutoMerge(repoDir: string, pr: string): Promise<void>;
+  /**
+   * Commit status `factory` = success on a SHA the run verified. The required `done` job
+   * fails a pull request without it, including while this process is not running.
+   */
+  approveHead(repoDir: string, sha: string): Promise<void>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
   /** Resume: refresh title/body of the run's existing PR. */
@@ -433,6 +438,14 @@ function workflowOf(row: Record<string, unknown>): string | null {
   return text(record.name) || text(record.workflowName) || null;
 }
 
+/** Check suite finished. GraphQL uses `COMPLETED`. Absent means the check is not settled by the suite. */
+function suiteCompleted(row: Record<string, unknown>): boolean {
+  const nested = row.checkSuite ?? row.check_suite;
+  if (!nested || typeof nested !== "object") return false;
+  const status = text((nested as Record<string, unknown>).status).toLowerCase();
+  return status === "completed" || status === "complete";
+}
+
 /** Check suite creation time, when the payload nests it. Not the check run's own timestamp. */
 function suiteCreated(row: Record<string, unknown>): string | null {
   const nested = row.checkSuite ?? row.check_suite;
@@ -469,6 +482,7 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
       id: num(row.id) ?? num(row.databaseId),
       suite: suiteOf(row),
       workflow: workflowOf(row),
+      ...(suiteCompleted(row) ? { suite_completed: true } : {}),
     });
   }
   return runs;
@@ -672,6 +686,11 @@ async function workflowNames(repoDir: string): Promise<Map<string, string>> {
   return map;
 }
 
+/** GitHub says this when auto-merge is already on. A restarted runner asks again. */
+export function autoMergeAlreadyEnabled(message: string): boolean {
+  return /already enabled/i.test(message);
+}
+
 export class GhCli implements GitHub {
   async authenticated(repoDir: string): Promise<boolean> {
     try {
@@ -838,7 +857,28 @@ export class GhCli implements GitHub {
   }
 
   async enableAutoMerge(repoDir: string, pr: string): Promise<void> {
-    await gh(repoDir, ["pr", "merge", pr, "--auto", "--squash"]);
+    try {
+      await gh(repoDir, ["pr", "merge", pr, "--auto", "--squash"]);
+    } catch (e) {
+      // A later tick asks again after a restart. GitHub keeps the first enable.
+      if (autoMergeAlreadyEnabled((e as Error).message)) return;
+      throw e;
+    }
+  }
+
+  async approveHead(repoDir: string, sha: string): Promise<void> {
+    await gh(repoDir, [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/statuses/${sha}`,
+      "-f",
+      "state=success",
+      "-f",
+      "context=factory",
+      "-f",
+      "description=factory approved this commit",
+    ]);
   }
 
   async updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void> {
@@ -919,6 +959,8 @@ export class FakeGitHub implements GitHub {
   readonly pushes: string[] = [];
   readonly prs: (PrRequest & { url: string })[] = [];
   readonly autoMerged: string[] = [];
+  /** SHAs the runner approved. The required `done` check is what blocks a later push. */
+  readonly approvedShas: string[] = [];
 
   async baseStatus(): Promise<BaseStatus> {
     return this.status;
@@ -1036,6 +1078,10 @@ export class FakeGitHub implements GitHub {
 
   async enableAutoMerge(_repoDir: string, pr: string): Promise<void> {
     this.autoMerged.push(pr);
+  }
+
+  async approveHead(_repoDir: string, sha: string): Promise<void> {
+    this.approvedShas.push(sha);
   }
 
   readonly updates: { pr: string; title: string; body: string }[] = [];

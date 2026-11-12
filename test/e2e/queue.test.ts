@@ -283,6 +283,30 @@ describe("factory queue", () => {
     }
   });
 
+  it("does not start --after when the dependency PR closed without merge", async () => {
+    const repo = createFixtureRepo((c) => void (c.concurrency = { max_runs: 2 }));
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    await enqueue(factoryHome, repo, github, [2], 1);
+    const pr = "https://github.test/pr/1";
+    github.prStates.set(pr, { state: "open", draft: false });
+    const g = gate();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 2, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
+    try {
+      await waitFor("dependency started", () => g.calls.length === 1);
+      g.release(1, outcome(repo, 1, "done", "", { pr }));
+      github.prStates.set(pr, { state: "closed", draft: false });
+      await waitFor("dependent parked", async () => (await entries(factoryHome, repo))[1]?.status === "parked");
+      expect(g.calls).toEqual([1]);
+      expect((await entries(factoryHome, repo))[1]?.reason).toBe("after #1 closed without merge");
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
   it("does not start while base CI is red, and skips a closed issue or an open factory PR", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
@@ -713,6 +737,55 @@ describe("factory queue", () => {
     expect(polls).toBeGreaterThanOrEqual(2);
     expect(github.updatedBranches).toEqual(["7"]);
     expect(until.out()).toContain("queue: until reached");
+  });
+
+  it("V02: pending CI keeps the worker up under --until and does not take a coding slot", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    const runId = "20261112-120000-bbbbbb";
+    const pr = "https://github.test/pull/8";
+    const branch = "factory/8-goal";
+    const dir = join(factoryHome, "runs", runId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({
+      version: 1, run_id: runId, repo, task: { ref: "#8", title: "t", text: "", labels: [] }, no_pr: false,
+      step: "finished", result: "done", reason: "", branch, worktree: null, base_sha: null,
+      packages: {}, failures: {}, handoffs: [], rounds: 1, findings: [], gate_count: 1,
+      pr, pr_draft: false, approved_sha: "abc123", ci_wait: "pending", updated_at: "2026-11-12T00:00:00.000Z",
+    }));
+    writeFileSync(join(dir, "result.json"), JSON.stringify(outcome(repo, 8, "done", "", { run_id: runId, pr, branch, merge_policy: "auto" })) + "\n");
+    github.prs.push({ repoDir: repo, head: branch, base: "main", title: "t", body: "", draft: false, url: pr });
+    github.remoteShas.set(branch, "abc123");
+    github.prStates.set(pr, { state: "open", draft: false, ci: "pending" });
+    let clock = 1_700_000_000_000;
+    let polls = 0;
+    const cap = capture();
+    let started = 0;
+    await runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 15,
+      untilMs: clock + 60_000,
+      now: () => clock,
+      sleep: async () => {
+        polls += 1;
+        if (polls === 2) github.prStates.set(pr, { state: "open", draft: false, ci: "green" });
+        if (polls >= 3) clock += 60_000;
+      },
+      start: () => {
+        started += 1;
+        throw new Error("should not start");
+      },
+      io: cap.io,
+    });
+    expect(started).toBe(0);
+    expect(github.autoMerged).toEqual([pr]);
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(cap.out()).toContain(`queue: auto-merge ${pr}`);
   });
 
   it("uses result.json on restart even when the stored pid is alive, and ignores a pid whose command line is not the run", async () => {

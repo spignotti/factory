@@ -77,6 +77,10 @@ export interface FinalizeOutput {
   draft: boolean | null;
   /** Security gates that did not scan. Omitted when none were skipped. */
   skipped_gates?: string[];
+  /** SHA the runner approved after local gates. Absent when the run did not finish a PR. */
+  approvedSha?: string;
+  /** Head CI still unsettled. The auto policy stays; auto-merge waits for this SHA. */
+  ciWait?: "pending" | "none";
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -411,6 +415,8 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: githubClaimError } });
     return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
   }
+  let approvedSha: string | undefined;
+  let ciWait: "pending" | "none" | undefined;
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
@@ -433,6 +439,13 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
         }
         throw e;
+      }
+      // The required `done` job reads this status. Post it as soon as the commit is on the remote,
+      // before PR bookkeeping, so a pull_request run is not stuck waiting on an approval that
+      // itself waits for `done`. A later head has no status until this runs again.
+      if (result === "done") {
+        await ctx.deps.github.approveHead(ctx.worktree, head);
+        approvedSha = head;
       }
       // An open PR on this branch (an earlier attempt's create that looked failed, or one opened by hand)
       // is adopted, never duplicated. Known PRs were converted to draft before this push.
@@ -510,7 +523,9 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
           await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
         } else if (!headGreen && policy === "auto") {
-          policy = "human_review";
+          // The short poll ends here. Risk and the auto policy stay. The runner enables auto-merge
+          // once this SHA is green. A later commit is a different SHA and is not approved.
+          ciWait = ci.status === "pending" ? "pending" : "none";
         }
       }
       if (policy === "auto" && result === "done" && headGreen) await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
@@ -524,5 +539,15 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
   if (result !== "done") policy = "human_review";
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, result, reason, mergePolicy: policy, pr, draft, ...skippedField(gates) };
+  return {
+    ...out,
+    result,
+    reason,
+    mergePolicy: policy,
+    pr,
+    draft,
+    ...(approvedSha && result === "done" ? { approvedSha } : {}),
+    ...(ciWait && result === "done" ? { ciWait } : {}),
+    ...skippedField(gates),
+  };
 }

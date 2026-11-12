@@ -452,4 +452,35 @@ describe("idempotent PR step", () => {
     expect(r2.resultFile.result).toBe("done");
     expect(sent.map((p) => p.result)).toEqual(["needs_human", "done"]);
   });
+
+  it("V04: a crash after the PR exists and before auto-merge resumes the same PR and enables once", async () => {
+    let fail = true;
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        const enable = gh.enableAutoMerge.bind(gh);
+        gh.enableAutoMerge = async (dir, pr) => {
+          if (fail) throw new Error("gh: timeout");
+          await enable(dir, pr);
+        };
+      },
+      patch: (c) => {
+        (c.limits as Record<string, unknown>).pr_ci_wait_minutes = 2;
+        ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    expect(r.result.reason).toMatch(/PR step failed: gh: timeout/);
+    expect(r.github.prs).toHaveLength(1);
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.result.pr).toBe("https://github.test/pr/1");
+    fail = false;
+    const r2 = await resumeScenario(r, { script: "clean.json" });
+    expect(r2.result).toMatchObject({ result: "done", merge_policy: "auto", pr: "https://github.test/pr/1" });
+    expect(r2.github.prs).toHaveLength(1);
+    expect(r2.github.autoMerged).toEqual(["https://github.test/pr/1"]);
+    expect(r2.github.approvedShas.filter((sha) => sha === r2.github.remoteShas.get(r2.result.branch!)).length).toBeGreaterThan(0);
+  });
 });

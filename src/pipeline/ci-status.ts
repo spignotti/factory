@@ -19,6 +19,12 @@ export interface CheckRunView {
    * include it: that run keeps the job-name recognition below.
    */
   workflow?: string | null;
+  /**
+   * The check suite (workflow run) has finished. A check stuck at `in_progress` with a
+   * conclusion is then settled: a completed success must not wait forever. A success whose
+   * suite is still running is not settled.
+   */
+  suite_completed?: boolean;
 }
 
 /** Workflow `name:` of both CI stubs. Job names (`check`, `done`, `draft`) are not unique to it. */
@@ -111,11 +117,22 @@ function worse(a: BaseStatus, b: BaseStatus): BaseStatus {
  * Once a real suite has succeeded, a newer draft hold (the PR was converted back to draft) is red.
  * A skipped `done` is red: GitHub treats a skipped required check as passed.
  */
+/**
+ * A finished suite can leave a check at `in_progress` while its conclusion is already success.
+ * Settling that check is the completed result. An unfinished suite stays as reported, so one
+ * success does not turn a running workflow green.
+ */
+export function settleCompletedSuite(run: CheckRunView): CheckRunView {
+  if (run.status === "completed" || run.suite_completed !== true || !run.conclusion) return run;
+  return { ...run, status: "completed" };
+}
+
 export function aggregateCheckRuns(runs: CheckRunView[]): BaseStatus {
   if (runs.length === 0) return "none";
+  const settled = runs.map(settleCompletedSuite);
   const factory: CheckRunView[] = [];
   const other: CheckRunView[] = [];
-  for (const run of runs) (factoryRun(run) ? factory : other).push(run);
+  for (const run of settled) (factoryRun(run) ? factory : other).push(run);
   return worse(aggregateFactoryRuns(factory), aggregateOtherRuns(other));
 }
 

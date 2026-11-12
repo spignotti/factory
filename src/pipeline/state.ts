@@ -40,6 +40,10 @@ export interface RunState {
   gate_count: number;
   pr: string | null;
   pr_draft: boolean | null;
+  /** SHA the runner approved. A newer head is not this commit, so auto-merge stays off. */
+  approved_sha?: string;
+  /** Head CI was still pending or unregistered when the coding run ended. Policy stays auto. */
+  ci_wait?: "pending" | "none";
   /** Always `standard`. Older states may say `fast` (the removed fast lane). */
   lane?: "standard" | "fast";
   /** Fast-lane escalation reasons. No longer written. */

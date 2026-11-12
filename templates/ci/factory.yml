@@ -13,6 +13,9 @@ name: factory
 # `done` would turn a draft into a green gate. ready_for_review and a later push to a ready PR run
 # the full matrix. converted_to_draft cancels an in-flight full run and fails `done`. Nothing is
 # skipped because of author, branch, labels, or the PR body. Tags and workflow_dispatch are unchanged.
+# On a pull request, `done` also requires the commit status `factory=success` on this SHA. The runner
+# posts that only after it has verified the commit. A later push has no status, so auto-merge cannot
+# finish that head while the runner is asleep. The job retries briefly: the status is posted just after the push.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
@@ -25,6 +28,7 @@ on:
         default: manual
 permissions:
   contents: read
+  statuses: read
 # Draft events and ready events do not cancel each other: cancelling the full run can leave `done`
 # skipped (GitHub then treats it as passed) or can fail it after the ready run already succeeded.
 # A newer event of the same kind still cancels the older one. converted_to_draft uses the full
@@ -127,6 +131,10 @@ jobs:
           SELECT: ${{ needs.select.result }}
           CHECK: ${{ needs.check.result }}
           DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
         run: |
           set -eu
           if [ "$DRAFT" = "true" ]; then
@@ -136,3 +144,24 @@ jobs:
           echo "select: $SELECT, check: $CHECK"
           test "$SELECT" = success
           test "$CHECK" = success || test "$CHECK" = skipped
+          if [ "${EVENT:-}" != "pull_request" ]; then
+            exit 0
+          fi
+          # Combined status: latest state of each context. A missing or non-success `factory` status blocks.
+          tries="${FACTORY_APPROVAL_TRIES:-6}"
+          pause="${FACTORY_APPROVAL_SLEEP:-10}"
+          n=0
+          while [ "$n" -lt "$tries" ]; do
+            n=$((n + 1))
+            body="$(curl -sS --header "Authorization: Bearer ${TOKEN}" --header "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/commits/${SHA}/status" || true)"
+            state="$(printf '%s' "$body" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{let data={};try{data=JSON.parse(s||"{}")}catch(e){}const hit=(data.statuses||[]).find(i=>i&&i.context==="factory");process.stdout.write((hit&&hit.state)||"")})')"
+            if [ "$state" = "success" ]; then
+              echo "factory approval on ${SHA}"
+              exit 0
+            fi
+            if [ "$n" -lt "$tries" ]; then
+              sleep "$pause"
+            fi
+          done
+          echo "factory approval missing on ${SHA}"
+          exit 1

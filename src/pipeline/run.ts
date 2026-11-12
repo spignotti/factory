@@ -748,6 +748,10 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   });
   st.pr = fin.pr;
   st.pr_draft = fin.draft;
+  if (fin.approvedSha) st.approved_sha = fin.approvedSha;
+  else delete st.approved_sha;
+  if (fin.ciWait) st.ci_wait = fin.ciWait;
+  else delete st.ci_wait;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
   f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });

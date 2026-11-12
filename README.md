@@ -73,7 +73,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   the repo sets `pr.host_steps_section`, the body also has that section (copy-paste commands, verify, roll back);
   otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, `none` and pending
   CI on the head are polled up to `limits.pr_ci_wait_minutes` and do not fail the run. Still none or pending
-  leaves an auto policy as `human_review` (no auto-merge). Auto-merge is enabled only when that CI is green.
+  keeps an auto policy and does not enable auto-merge; the runner enables it later when that SHA is green.
   Red CI ends it `needs_human` and converts the PR back to draft.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/stream/limit/auth/invalid_output classification with same-model
@@ -241,8 +241,8 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # id) once that commit is green or has no checks, if it stopped within this many hours (0–168; 0 = off).
 # `factory gc` and the start of `factory run` do the check. A local fast-check base_red is not resumed.
 # limits.pr_ci_wait_minutes [20]: after the PR is pushed, none and pending CI on the head are polled
-# this long (0–120; 0 = one sample). Still none or pending does not fail the run and does not enable
-# auto-merge (an auto policy becomes human_review). Only green enables auto-merge. Red CI ends it
+# this long (0–120; 0 = one sample). Still none or pending does not fail the run, keeps an auto
+# policy, and does not enable auto-merge until that same SHA is green. Only green enables auto-merge. Red CI ends it
 # needs_human and marks the PR draft again. The wait is not work time.
 # max_wall_minutes [240, 4 h] is active time: time the box was suspended (VM paused, laptop asleep) is credited
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate

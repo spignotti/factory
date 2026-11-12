@@ -284,8 +284,8 @@ moves these runs if nobody starts another run. Fast checks that failed locally o
 
 After the PR is pushed, check runs on the head are polled up to `limits.pr_ci_wait_minutes` (default
 20, `0` = one sample). `none` (nothing registered yet) is polled like `pending`. Still none or pending does
-not fail the run, does not count as work time, and does not enable auto-merge (an auto policy becomes
-`human_review`). Auto-merge is enabled only when the head is green. Red checks end the run `needs_human`,
+not fail the run, does not count as work time, and does not enable auto-merge. An auto policy stays
+auto. The runner enables auto-merge later, only for that SHA, once the head is green. Red checks end the run `needs_human`,
 convert the PR back to draft, and do not enable auto-merge.
 
 ## needs_input and abandon

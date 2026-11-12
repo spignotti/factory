@@ -660,7 +660,7 @@ ${fixed}` } };
     ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
   };
 
-  it("pending CI on the PR head is polled; still pending is human_review and is not auto-merged", async () => {
+  it("pending CI on the PR head is polled; still pending keeps auto and is not auto-merged", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
@@ -670,10 +670,14 @@ ${fixed}` } };
       patch: autoMerge,
       deps: { baseCiPollMs: 30_000 },
     });
-    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
+    const state = JSON.parse(r.file("state.json")) as { ci_wait?: string; approved_sha?: string };
+    expect(state.ci_wait).toBe("pending");
+    expect(state.approved_sha).toBe(r.github.remoteShas.get(r.result.branch!));
+    expect(r.github.approvedShas).toEqual([state.approved_sha]);
     expect(r.events.some((e) => e.event === "progress" && (e.data.pr_ci as { status?: string } | undefined)?.status === "pending")).toBe(true);
   });
 
@@ -690,20 +694,22 @@ ${fixed}` } };
     });
     expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.github.approvedShas).toEqual([r.github.remoteShas.get(r.result.branch!)]);
     expect(r.slept).toEqual([30_000]);
   });
 
-  it("none on the PR head that never registers is human_review and is not auto-merged", async () => {
+  it("none on the PR head that never registers keeps auto and is not auto-merged", async () => {
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => void (gh.status = "none"),
       patch: autoMerge,
       deps: { baseCiPollMs: 30_000 },
     });
-    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.drafted).toEqual([]);
     expect(r.github.readied).toEqual([]);
+    expect(JSON.parse(r.file("state.json")).ci_wait).toBe("none");
     expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
   });
 
@@ -755,6 +761,7 @@ ${fixed}` } };
     });
     expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.github.approvedShas).toEqual([r.github.remoteShas.get(r.result.branch!)]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([]);
   });
@@ -771,8 +778,9 @@ ${fixed}` } };
         ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
       },
     });
-    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([]);
+    expect(JSON.parse(r.file("state.json")).ci_wait).toBe("pending");
     expect(r.slept).toEqual([]);
   });
 

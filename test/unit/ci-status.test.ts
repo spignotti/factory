@@ -10,6 +10,28 @@ const run = (over: Partial<CheckRunView> & Pick<CheckRunView, "name" | "status">
 });
 
 describe("aggregateCheckRuns", () => {
+  it("V01: a finished suite settles a stuck in_progress success, and a running suite does not", () => {
+    expect(
+      aggregateCheckRuns([
+        run({ name: "select", status: "completed", conclusion: "success", suite_completed: true, id: 1 }),
+        run({ name: "check", status: "completed", conclusion: "success", suite_completed: true, id: 2 }),
+        run({ name: "done", status: "in_progress", conclusion: "success", suite_completed: true, id: 3 }),
+      ]),
+    ).toBe("green");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "check", status: "completed", conclusion: "success", suite_completed: false, id: 1 }),
+        run({ name: "done", status: "in_progress", conclusion: "success", suite_completed: false, id: 2 }),
+      ]),
+    ).toBe("pending");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "done", status: "queued", conclusion: null, suite_completed: false, id: 1 }),
+      ]),
+    ).toBe("pending");
+    expect(aggregateCheckRuns([])).toBe("none");
+  });
+
   it("is none with no runs and green when the full suite succeeded", () => {
     expect(aggregateCheckRuns([])).toBe("none");
     expect(
