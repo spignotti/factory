@@ -1,20 +1,22 @@
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
-import { commitAll, diffText, discardChanges, gitOk, stageAll } from "../git.js";
+import { commitAll, diffText, discardChanges, gitOk, headSha, stageAll } from "../git.js";
 import { callAgent, checkDeadline, type RunContext, writeJson } from "../pipeline/context.js";
 import { type PackageStatus, runInDagOrder } from "../pipeline/dag.js";
 import { asData, taskBlock, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
 import type { Package } from "../schemas/plan.js";
-import { failureSummary, gateAttemptReason, type GateReport, runGates } from "./gates.js";
+import { failureSummary, type GateReport, runGates } from "./gates.js";
+import { blockedRepairReason, clearRepair, ensureBudget, MAX_GATE_ATTEMPTS, recoverRedGates, repairHandover } from "../pipeline/recovery.js";
 
-export const MAX_GATE_ATTEMPTS = 3;
+export { MAX_GATE_ATTEMPTS };
 
 const HANDOFF_SHAPE = `When done, reply with handoff.json as a single \`\`\`json block (in your reply; never write it to a file):
 {"package":"<id>","done":[],"decisions":[],"deviations_from_plan":[],"skipped":[],"uncertain":[],
- "evidence":[{"acceptance_id":"A1","kind":"test|check","ref":"<test file>[::<test name>] or <check name>"}],
- "responses":[{"finding_id":"R1-plan-1","status":"fixed|wontfix","response":"reason"}]}`;
+ "evidence":[{"acceptance_id":"A1","kind":"test|check","ref":"<existing or new test path>[::<test name>] or <check name>"}],
+ "responses":[{"finding_id":"R1-plan-1","status":"fixed|wontfix","response":"reason"}]}
+Cite a test this run executes. An unchanged test is valid evidence. Do not add a wrapper around a test that already runs, and do not cite a skipped test. A SQL or integration file is cited directly.`;
 
 /**
  * The handoff shape plus the check names a `kind:check` ref may use: the gates resolve refs against
@@ -143,10 +145,33 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
     }
     ctx.events.emit({ step: "implement", event: "step_started", data: { package: pkg.id } });
     const sessionKey = `${ctx.runId}-implement-${pkg.id}`;
+    const packages = [...done, pkg.id];
     let prompt = await packagePrompt(ctx, pkg);
     let reason = "";
     let report: GateReport | undefined;
-    for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS; attempt++) {
+    const succeed = async (attempts: number): Promise<void> => {
+      await dropStrayHandoff(ctx, "implement");
+      clearRepair(ensureBudget(ctx));
+      ctx.persist?.();
+      await commitAll(ctx.worktree, `feat(${pkg.id}): ${pkg.title}`, gitAuthor(ctx));
+      done.push(pkg.id);
+      ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "done", attempts } });
+    };
+    const blocked = await blockedRepairReason(ctx);
+    if (blocked) reason = blocked;
+    for (let guard = 0; !reason && guard < MAX_GATE_ATTEMPTS + 1; guard++) {
+      const spent = ensureBudget(ctx).gateAttempts;
+      if (spent >= MAX_GATE_ATTEMPTS) {
+        reason = repairHandover({
+          cls: ensureBudget(ctx).lastClass === "format" ? "format" : "code",
+          attempts: spent,
+          max: MAX_GATE_ATTEMPTS,
+          diagnosis: report ? failureSummary(report) : "repair budget already spent",
+          checkpoint: (await headSha(ctx.worktree).catch(() => "unknown")).slice(0, 12),
+          next: "Fix the failing checks on this branch, then factory resume. Do not open a new plan or a second pull request.",
+        });
+        break;
+      }
       checkDeadline(ctx);
       const turn = await implementerTurn(ctx, "implement", { sessionKey, packageId: pkg.id, prompt });
       if (!turn.handoff) {
@@ -155,20 +180,37 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       }
       setHandoff(ctx, turn.handoff);
       writeJson(ctx, `handoff-${pkg.id}.json`, turn.handoff);
-      report = await runGates(ctx, "fast", [...done, pkg.id]);
+      report = await runGates(ctx, "fast", packages);
       lastGates = report;
       if (report.green) {
-        await dropStrayHandoff(ctx, "implement");
-        await commitAll(ctx.worktree, `feat(${pkg.id}): ${pkg.title}`, gitAuthor(ctx));
-        done.push(pkg.id);
-        ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "done", attempts: attempt } });
+        await succeed(spent + 1);
         return true;
       }
-      reason = gateAttemptReason(attempt, report);
+      const recovered = await recoverRedGates(ctx, report, { tier: "fast", packages, spend: true });
+      lastGates = recovered.gates;
+      report = recovered.gates;
+      if (recovered.action === "green") {
+        await succeed(ensureBudget(ctx).gateAttempts + 1);
+        return true;
+      }
+      if (recovered.action === "stop") {
+        reason = recovered.reason;
+        break;
+      }
       const timeoutNote = report.checks.some((c) => c.status === "timeout")
         ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
         : "";
       prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(report)}\n\n${handoffShape(ctx, pkg.id)}`;
+    }
+    if (!reason) {
+      reason = repairHandover({
+        cls: "code",
+        attempts: ensureBudget(ctx).gateAttempts,
+        max: MAX_GATE_ATTEMPTS,
+        diagnosis: report ? failureSummary(report) : "repair budget already spent",
+        checkpoint: "unknown",
+        next: "Fix the failing checks on this branch, then factory resume. Do not open a new plan or a second pull request.",
+      });
     }
     failures[pkg.id] = reason;
     const firstOfBug = ctx.plan.type === "bug" && done.length === 0;

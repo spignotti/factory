@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { GitHub } from "../gh.js";
 import { updateMemory } from "../memory.js";
@@ -6,11 +6,70 @@ import { listProposals, saveProposal } from "../proposals.js";
 import type { RunRecord } from "../runs.js";
 import { type ProposalItem, STALE_DAYS } from "../schemas/proposal.js";
 
+export type EffectStatus = "confirmed" | "negative" | "unclear";
+
 export interface LifecycleChange {
   id: string;
   status: "resolved" | "dropped";
   reason: string;
   pr: string | null;
+  /** Set when a merged PR implemented the proposal. Confirmed only when its effect checks passed. */
+  effect?: EffectStatus;
+}
+
+/** A merged PR is a proven improvement only when the proposal's effect checks passed. */
+export function provenImprovement(effect: EffectStatus | undefined): boolean {
+  return effect === "confirmed";
+}
+
+export function formatLifecycle(c: Pick<LifecycleChange, "id" | "status" | "reason" | "effect">): string {
+  if (c.status === "resolved" && c.effect) {
+    const proof = provenImprovement(c.effect) ? "effect confirmed" : "not a proven improvement";
+    return `proposal ${c.id}: implemented (${c.reason}; effect ${c.effect}; ${proof})\n`;
+  }
+  return `proposal ${c.id}: ${c.status} (${c.reason})\n`;
+}
+
+/** Names written as `effect check: <name>` in acceptance text. No name means the effect is unclear. */
+export function effectCheckNames(plan: { acceptance?: readonly { text: string }[] }): string[] {
+  const names = new Set<string>();
+  for (const item of plan.acceptance ?? []) {
+    for (const match of item.text.matchAll(/\beffect check:\s*([A-Za-z0-9_-]+)/g)) names.add(match[1]!);
+  }
+  return [...names];
+}
+
+export function effectStatus(plan: { acceptance?: readonly { text: string }[] }, checks: readonly { name: string; status: string; effect_proven?: boolean }[] | null): EffectStatus {
+  const names = effectCheckNames(plan);
+  if (names.length === 0 || checks === null) return "unclear";
+  const byName = new Map(checks.map((check) => [check.name, check.status]));
+  if (names.some((name) => !byName.has(name))) return "unclear";
+  if (names.some((name) => byName.get(name) !== "pass")) return "negative";
+  // Only an executed negative control can confirm efficacy. A green named command alone cannot.
+  return names.every((name) => name === "red_green" && checks.some((c) => c.name === name && c.effect_proven === true)) ? "confirmed" : "unclear";
+}
+
+function latestGateChecks(dir: string): { name: string; status: string; effect_proven?: boolean }[] | null {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  let best: { n: number; checks: { name: string; status: string; effect_proven?: boolean }[] } | null = null;
+  for (const name of names) {
+    const match = /^gates-(\d+)\.json$/.exec(name);
+    if (!match) continue;
+    let report: { n?: number; checks?: { name: string; status: string; effect_proven?: boolean }[] };
+    try {
+      report = JSON.parse(readFileSync(join(dir, name), "utf8")) as typeof report;
+    } catch {
+      continue;
+    }
+    const n = typeof report.n === "number" ? report.n : Number(match[1]);
+    if (!best || n >= best.n) best = { n, checks: report.checks ?? [] };
+  }
+  return best?.checks ?? null;
 }
 
 function runPlan(run: RunRecord): { goal?: string; resolves_findings?: string[] } | undefined {
@@ -55,8 +114,8 @@ export async function resolveProposals(opts: { factoryHome: string; repoId: stri
     let dirty = false;
     const proposals: ProposalItem[] = [];
     for (const p of ticket.proposals) {
-      const change = p.status === "open" ? await decide(p, ticket.created_at, opts) : undefined;
-      if (!change) {
+      const change = p.status === "open" || (p.status === "resolved" && p.resolution?.effect !== "confirmed") ? await decide(p, ticket.created_at, opts) : undefined;
+      if (!change || (p.status === "resolved" && (change.status !== "resolved" || (p.resolution?.effect === change.effect && p.resolution?.pr === change.pr)))) {
         proposals.push(p);
         continue;
       }
@@ -65,17 +124,35 @@ export async function resolveProposals(opts: { factoryHome: string; repoId: stri
       updateMemory(opts.factoryHome, opts.repoId, (mem) => {
         for (const e of mem.entries) {
           if (!refs.has(e.key) || e.status !== "proposed" || e.ref !== p.id) continue;
-          if (change.status === "resolved") {
+          if (change.status === "resolved" && change.effect === "confirmed") {
             e.status = "resolved";
             e.ref = change.pr;
+          } else if (change.status === "resolved" && change.effect === "negative") {
+            e.status = "open";
+            e.ref = change.pr;
+          } else if (change.status === "resolved") {
+            // Implemented but unverified: retain ownership. Do not suppress it as fixed or
+            // generate a second proposal solely to manage the missing efficacy proof.
+            e.status = "proposed";
           } else {
             e.status = "open";
             e.ref = null;
           }
         }
       });
-      proposals.push({ ...p, status: change.status, resolution: { at: opts.now.toISOString(), status: change.status, reason: change.reason, run_id: change.run_id, pr: change.pr } });
-      changes.push({ id: change.id, status: change.status, reason: change.reason, pr: change.pr });
+      proposals.push({
+        ...p,
+        status: change.status,
+        resolution: {
+          at: opts.now.toISOString(),
+          status: change.status,
+          reason: change.reason,
+          run_id: change.run_id,
+          pr: change.pr,
+          ...(change.effect ? { effect: change.effect } : {}),
+        },
+      });
+      changes.push({ id: change.id, status: change.status, reason: change.reason, pr: change.pr, ...(change.effect ? { effect: change.effect } : {}) });
     }
     if (dirty) saveProposal(opts.factoryHome, { ...ticket, proposals });
   }
@@ -87,16 +164,25 @@ async function decide(
   createdAt: string,
   opts: { repoDir: string; runs: RunRecord[]; github: GitHub; now: Date },
 ): Promise<(LifecycleChange & { run_id: string | null }) | undefined> {
-  const prs: { pr: string; run_id: string; state: string }[] = [];
+  const prs: { pr: string; run_id: string; state: string; dir: string }[] = [];
   for (const r of runsFor(p, createdAt, opts.runs)) {
     const pr = r.result?.pr;
     if (!pr || prs.some((x) => x.pr === pr)) continue;
     const state = await opts.github.prStatus(opts.repoDir, pr).then((s) => s.state, () => "unknown");
-    prs.push({ pr, run_id: r.run_id, state });
+    prs.push({ pr, run_id: r.run_id, state, dir: r.dir });
   }
   const merged = prs.find((x) => x.state === "merged");
   const ageDays = (opts.now.getTime() - Date.parse(createdAt)) / 86_400_000;
-  if (merged) return { id: p.id, status: "resolved", reason: "factory PR merged", pr: merged.pr, run_id: merged.run_id };
+  if (merged) {
+    return {
+      id: p.id,
+      status: "resolved",
+      reason: "factory PR merged",
+      pr: merged.pr,
+      run_id: merged.run_id,
+      effect: effectStatus(p.plan, latestGateChecks(merged.dir)),
+    };
+  }
   if (p.issue) {
     // A failed read is unknown, not closed. Do not drop, and do not fall through to the stale drop.
     const issue = await opts.github.getIssue(opts.repoDir, p.issue).then(

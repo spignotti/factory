@@ -9,6 +9,9 @@ import { normalizeClaim, type TrackedFinding } from "./pipeline/merge.js";
  * repo in `$FACTORY_HOME/memory/<repo-id>/findings.json`. Fed after every run; the top open entries brief
  * the implementer and the reviewers; `harden` (M5) turns them into checks (`proposed`, `resolved`).
  */
+export const FindingDispositionSchema = z.enum(["confirmed", "rejected", "duplicate", "ungrounded"]);
+export type FindingDisposition = z.infer<typeof FindingDispositionSchema>;
+
 export const MemoryEntrySchema = z.object({
   key: z.string().min(1),
   text: z.string(),
@@ -21,6 +24,13 @@ export const MemoryEntrySchema = z.object({
   runs: z.array(z.string()),
   status: z.enum(["open", "proposed", "resolved"]),
   ref: z.string().nullable(),
+  /**
+   * Confirmed defects count as repeats. Rejected, duplicate and ungrounded rows stay in the file
+   * and do not increment that count. Missing on older files means confirmed.
+   */
+  disposition: FindingDispositionSchema.default("confirmed"),
+  /** File, severity and a token taken from evidence. Absent when evidence names no class. */
+  error_class: z.string().min(1).optional(),
 });
 export type MemoryEntry = z.infer<typeof MemoryEntrySchema>;
 
@@ -100,27 +110,80 @@ export function memoryKey(f: Pick<TrackedFinding, "reviewer" | "file" | "claim">
   return createHash("sha256").update(`${f.reviewer}\n${f.file}\n${normalizeClaim(f.claim)}`).digest("hex").slice(0, 16);
 }
 
+/**
+ * Error class from fields the review already has: file, severity, and one token in `evidence`
+ * (a backticked name, an Error/Exception, or `rule:<id>`). The claim sentence is not the class.
+ * Undefined when evidence names nothing traceable.
+ */
+export function errorClass(f: Pick<TrackedFinding, "file" | "severity" | "evidence">): string | undefined {
+  const token = classToken(f.evidence);
+  if (!token || !f.file.trim()) return undefined;
+  return `${f.severity}\n${f.file}\n${token}`;
+}
+
+function classToken(evidence: string): string | undefined {
+  const quoted = /`([A-Za-z_][\w.]*)`/.exec(evidence);
+  if (quoted) return quoted[1];
+  const named = /\b([A-Z][A-Za-z0-9_]*(?:Error|Exception))\b/.exec(evidence);
+  if (named) return named[1];
+  const rule = /\brule:([A-Za-z0-9_.:/-]+)/.exec(evidence);
+  if (rule) return `rule:${rule[1]}`;
+  return undefined;
+}
+
 export interface Observation {
   key: string;
   text: string;
   reviewer: string;
   checkable: MemoryEntry["checkable"];
   check_sketch: string;
+  disposition: FindingDisposition;
+  error_class?: string;
 }
 
-/** Open non-nit findings at exit plus flaky checks, as memory observations. */
+function observationText(f: TrackedFinding): string {
+  return `${f.claim}${f.file ? ` (${f.file})` : ""}`;
+}
+
+/**
+ * Confirmed findings, including ones fixed before the run ended, plus flaky checks.
+ * A second finding of the same class in this batch is a duplicate. Empty evidence is ungrounded.
+ * An accepted wontfix is rejected. Nits are not remembered.
+ */
 export function observations(findings: TrackedFinding[], flakyChecks: string[]): Observation[] {
-  const out: Observation[] = findings
-    .filter((f) => f.status === "open" && f.severity !== "nit")
-    .map((f) => ({
-      key: memoryKey(f),
-      text: `${f.claim}${f.file ? ` (${f.file})` : ""}`,
+  const out: Observation[] = [];
+  const seenKey = new Set<string>();
+  const seenClass = new Set<string>();
+  for (const f of findings) {
+    if (f.severity === "nit") continue;
+    const key = memoryKey(f);
+    const cls = errorClass(f);
+    const row = {
+      text: observationText(f),
       reviewer: f.reviewer,
       checkable: f.checkable,
       check_sketch: f.check_sketch,
-    }));
+      ...(cls ? { error_class: cls } : {}),
+    };
+    if (!f.evidence.trim()) {
+      out.push({ ...row, key: `ungrounded:${key}`, disposition: "ungrounded" });
+      continue;
+    }
+    if (f.status === "accepted_wontfix") {
+      out.push({ ...row, key: `rejected:${key}`, disposition: "rejected" });
+      continue;
+    }
+    if (f.status !== "open" && f.status !== "resolved") continue;
+    if (seenKey.has(key) || (cls !== undefined && seenClass.has(cls))) {
+      out.push({ ...row, key: `duplicate:${key}`, disposition: "duplicate" });
+      continue;
+    }
+    seenKey.add(key);
+    if (cls) seenClass.add(cls);
+    out.push({ ...row, key, disposition: "confirmed" });
+  }
   for (const name of flakyChecks) {
-    out.push({ key: `flaky:${name}`, text: `check "${name}" was flaky (red, then green on re-run)`, reviewer: "gates", checkable: "test", check_sketch: "" });
+    out.push({ key: `flaky:${name}`, text: `check "${name}" was flaky (red, then green on re-run)`, reviewer: "gates", checkable: "test", check_sketch: "", disposition: "confirmed" });
   }
   return out;
 }
@@ -307,19 +370,29 @@ export function markFindingsProposed(factoryHome: string, repoId: string, owner:
 }
 
 /**
- * Upserts this run's observations by key (locked, atomic). A run counts once per entry, so a resumed
- * run does not inflate counts. A `resolved` entry seen again is reopened.
+ * Upserts this run's observations (locked, atomic). A confirmed row matches an existing entry by key
+ * or by error class, so a different claim of the same class is one defect. A run id counts once, so
+ * another round or a resume does not. A resolved confirmed entry seen again is reopened. Rejected,
+ * duplicate and ungrounded rows stay on their own keys and do not add to the confirmed count.
  */
+function confirmedEntry(e: MemoryEntry): boolean {
+  return (e.disposition ?? "confirmed") === "confirmed";
+}
+
 export function flushMemory(opts: { factoryHome: string; repoId: string; runId: string; now: Date; observations: Observation[] }): MemoryFile {
   return updateMemory(opts.factoryHome, opts.repoId, (mem) => {
     const ts = opts.now.toISOString();
     const byKey = new Map(mem.entries.map((e) => [e.key, e]));
+    const byClass = new Map<string, MemoryEntry>();
+    for (const e of mem.entries) if (confirmedEntry(e) && e.error_class) byClass.set(e.error_class, e);
     for (const o of opts.observations) {
-      const e = byKey.get(o.key);
+      const confirmed = o.disposition === "confirmed";
+      const e = confirmed ? (byKey.get(o.key) ?? (o.error_class ? byClass.get(o.error_class) : undefined)) : byKey.get(o.key);
       if (!e) {
-        const entry: MemoryEntry = { ...o, count: 1, first_seen: ts, last_seen: ts, runs: [opts.runId], status: "open", ref: null };
+        const entry: MemoryEntry = { ...o, count: 1, first_seen: ts, last_seen: ts, runs: [opts.runId], status: "open", ref: null, disposition: o.disposition };
         mem.entries.push(entry);
-        byKey.set(o.key, entry);
+        byKey.set(entry.key, entry);
+        if (confirmed && entry.error_class) byClass.set(entry.error_class, entry);
         continue;
       }
       e.last_seen = ts;
@@ -327,16 +400,19 @@ export function flushMemory(opts: { factoryHome: string; repoId: string; runId: 
         e.count += 1;
         e.runs = [...e.runs, opts.runId].slice(-MAX_RUNS);
       }
-      if (e.status === "resolved") e.status = "open";
+      // Only a confirmed sighting of a class that was closed by an improvement becomes visible again.
+      if (confirmed && e.status === "resolved") e.status = "open";
+      if (confirmed && o.text) e.text = o.text;
+      if (o.error_class && !e.error_class) e.error_class = o.error_class;
       if (o.check_sketch && !e.check_sketch) e.check_sketch = o.check_sketch;
     }
   });
 }
 
-/** Top open entries (most frequent, then most recent) for the implement and review prompts. */
+/** Top open confirmed entries (most frequent, then most recent) for the implement and review prompts. */
 export function briefing(mem: MemoryFile, n = BRIEFING_SIZE): string {
   const top = mem.entries
-    .filter((e) => e.status === "open")
+    .filter((e) => e.status === "open" && confirmedEntry(e))
     .sort((a, b) => b.count - a.count || b.last_seen.localeCompare(a.last_seen))
     .slice(0, n);
   return top.map((e) => `- (${e.reviewer}, seen ${e.count}×) ${e.text}`).join("\n");

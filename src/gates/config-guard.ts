@@ -4,7 +4,7 @@ import { parse } from "yaml";
 import { diffText, git, mergeBase } from "../git.js";
 import { matchesAny, type Plan, redGreenLoosening } from "../schemas/plan.js";
 import { parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
-import { describeStandardsRemoval, STANDARDS_REL, standardsRemovalDeclared, standardsRemovals, type StandardsRemoval } from "../standards.js";
+import { describeStandardsRemoval, namesCheck, STANDARDS_REL, standardsRemovalDeclared, standardsRemovals, type StandardsRemoval } from "../standards.js";
 import type { BuiltinResult } from "./builtin.js";
 
 /**
@@ -368,6 +368,8 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
     const now = a.checks.find((x) => x.name === c.name);
     if (!now) out.push(`check ${c.name} removed`);
     else if (!c.local_only && now.local_only) out.push(`check ${c.name} made local_only (dropped from CI)`);
+    else if (now.flake_allow && c.flake_allow !== now.flake_allow) out.push(`check ${c.name} flake_allow set (${now.flake_allow})`);
+    else if (c.owner && !now.owner) out.push(`check ${c.name} owner removed`);
     else if (!same(checkIdentity(c), checkIdentity(now))) out.push(`check ${c.name} changed (run, tier, paths, services or local_only)`);
   }
   if (a.limits.gate_timeout_minutes > b.limits.gate_timeout_minutes) out.push("limits.gate_timeout_minutes raised");
@@ -423,6 +425,7 @@ export function repoConfigLoosening(before: string | undefined, after: string | 
   if (!same(b.git, a.git)) out.push("git author changed");
   if (a.concurrency.max_runs > b.concurrency.max_runs) out.push("concurrency.max_runs raised");
   removed("concurrency.exclusive_paths", b.concurrency.exclusive_paths, a.concurrency.exclusive_paths);
+  removed("concurrency.resources", b.concurrency.resources, a.concurrency.resources);
   const exKey = (e: { tool: string; rule: string }) => `${e.tool}:${e.rule}`;
   const added = a.tool_exceptions.filter((e) => !b.tool_exceptions.some((x) => exKey(x) === exKey(e)));
   if (added.length) out.push(`tool_exceptions added: ${added.map(exKey).join(", ")}`);
@@ -526,6 +529,41 @@ function describeJobRemoval(r: WorkflowJobRemoval): string {
   return `job ${label} ${verb} (loosens a required check; name the job in that file's protected_changes)`;
 }
 
+/**
+ * A removed check is retired, not weakened, when the plan lists repo.yaml, names the old check,
+ * adds the replacement it names, and the acceptance has both a failing and a passing probe for
+ * that replacement. Any other loosening stays a loosening.
+ */
+export function equivalentReplacement(plan: Plan, packages: string[], removed: string, added: readonly string[]): boolean {
+  const files = plan.packages.filter((p) => packages.includes(p.id)).flatMap((p) => p.files);
+  if (!files.includes(REPO_CONFIG_PATH)) return false;
+  const acceptance = plan.acceptance.map((a) => a.text).join("\n");
+  const fails = new Set([...acceptance.matchAll(/probe fail:\s*([A-Za-z0-9_-]+)/g)].map((m) => m[1]!));
+  const passes = new Set([...acceptance.matchAll(/probe pass:\s*([A-Za-z0-9_-]+)/g)].map((m) => m[1]!));
+  const text = [
+    plan.goal,
+    ...plan.packages.filter((p) => packages.includes(p.id)).flatMap((p) => [p.title, p.description]),
+    ...plan.acceptance.filter((a) => packages.includes(a.package)).map((a) => a.text),
+    ...(plan.protected_changes ?? []).flatMap((c) => [c.change, c.reason]),
+  ].join("\n");
+  if (!namesCheck(text, removed)) return false;
+  return added.some((name) => fails.has(name) && passes.has(name) && namesCheck(text, name));
+}
+
+function addedCheckNames(before: string | undefined, after: string | undefined): string[] {
+  if (before === undefined || after === undefined) return [];
+  let previous: RepoConfig;
+  let next: RepoConfig;
+  try {
+    previous = parseRepoConfig(before);
+    next = parseRepoConfig(after);
+  } catch {
+    return [];
+  }
+  const had = new Set(previous.checks.map((c) => c.name));
+  return next.checks.map((c) => c.name).filter((name) => !had.has(name));
+}
+
 /** The gate over precomputed inputs (pure, for tests). */
 export function configGuard(input: {
   plan: Plan;
@@ -540,6 +578,8 @@ export function configGuard(input: {
   standardsRemovals?: StandardsRemoval[];
   /** Workflow job removed or renamed. Declared only when a package lists the file and protected_changes names the job. */
   jobLoosening?: WorkflowJobRemoval[];
+  /** Check names present after the edit and absent before. A removal is retired only when one of these is the probed replacement. */
+  addedChecks?: readonly string[];
   /** Issue labels. `factory:red-green-not-applicable` is a red-green loosening and needs `red_green_reason`. */
   labels?: string[];
 }): BuiltinResult {
@@ -550,7 +590,12 @@ export function configGuard(input: {
   const bad = [
     ...input.configChanges.filter((c) => !inScope(c.file)).map((c) => `${c.file}: ${c.why} (not in the plan's files)`),
     ...input.suppressions.filter((s) => !text.includes(s.marker.toLowerCase())).map((s) => `${s.file}: adds \`${s.marker}\`: ${s.line.slice(0, 120)}`),
-    ...(input.loosening ?? []).map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
+    ...(input.loosening ?? [])
+      .filter((line) => {
+        const removed = /^check (\S+) removed$/.exec(line);
+        return !removed || !equivalentReplacement(input.plan, input.packages, removed[1]!, input.addedChecks ?? []);
+      })
+      .map((l) => `${REPO_CONFIG_PATH}: ${l} (loosens the factory's own checks; only a human makes this edit)`),
     ...(input.thresholdLoosening ?? []),
     ...(input.standardsRemovals ?? [])
       .filter((r) => !standardsRemovalDeclared(input.plan, r))
@@ -567,12 +612,13 @@ export function configGuard(input: {
 }
 
 /** Collects config changes and added suppressions in a worktree against `base` (stage first). */
-export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "thresholdLoosening" | "standardsRemovals" | "jobLoosening">> {
+export async function configGuardInputs(cwd: string, base: string, changed: string[]): Promise<Pick<Parameters<typeof configGuard>[0], "configChanges" | "suppressions" | "loosening" | "thresholdLoosening" | "standardsRemovals" | "jobLoosening" | "addedChecks">> {
   const mb = await mergeBase(cwd, base);
   const configChanges: { file: string; why: string }[] = [];
   const thresholdLoosening: string[] = [];
   const jobLoosening: WorkflowJobRemoval[] = [];
   let loosening: string[] = [];
+  let addedChecks: string[] = [];
   let standards: StandardsRemoval[] = [];
   for (const file of changed) {
     const before = await git(cwd, ["show", `${mb}:${file}`]).catch(() => undefined);
@@ -582,8 +628,11 @@ export async function configGuardInputs(cwd: string, base: string, changed: stri
     const lowered = coverageRatchet(file, before, after);
     if (lowered) thresholdLoosening.push(lowered);
     jobLoosening.push(...workflowJobLoosening(file, before, after));
-    if (file === REPO_CONFIG_PATH) loosening = repoConfigLoosening(before, after);
+    if (file === REPO_CONFIG_PATH) {
+      loosening = repoConfigLoosening(before, after);
+      addedChecks = addedCheckNames(before, after);
+    }
     if (file === STANDARDS_REL) standards = standardsRemovals(before, after);
   }
-  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, thresholdLoosening, standardsRemovals: standards, jobLoosening };
+  return { configChanges, suppressions: addedSuppressions(await diffText(cwd, base)), loosening, thresholdLoosening, standardsRemovals: standards, jobLoosening, addedChecks };
 }

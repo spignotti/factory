@@ -300,8 +300,9 @@ describe("factory doctor: standards", () => {
     expect(migrated[0]!.detail).toMatch(/checklist\.md is ignored\. Delete it/);
     expect(migrated[0]!.detail).not.toMatch(/factory standards migrate/);
     expect(migrated[1]!.detail).toContain('"missing"');
+    expect(migrated[1]!.detail).toContain('"lint"');
+    expect(migrated[1]!.detail).toContain("not a blocking check on the relevant path");
     expect(migrated[1]!.detail).not.toContain("ignored");
-    expect(migrated[1]!.detail).not.toContain("lint");
   });
 });
 

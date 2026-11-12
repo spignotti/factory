@@ -20,7 +20,16 @@ const repo = parseRepoConfig("checks:\n  - { name: lint, run: x, tier: fast }\n 
 describe("harden signals", () => {
   it("findings: open and (seen twice or checkable), plus flaky; most frequent first", () => {
     const s = findingSignals(
-      mem([entry("a", { count: 3 }), entry("b", { checkable: "lint" }), entry("c"), entry("flaky:unit", { checkable: "test" }), entry("d", { count: 5, status: "proposed" })]),
+      mem([
+        entry("a", { count: 3 }),
+        entry("b", { checkable: "lint" }),
+        entry("c"),
+        entry("flaky:unit", { checkable: "test" }),
+        entry("d", { count: 5, status: "proposed" }),
+        entry("gone", { count: 5, checkable: "lint", disposition: "rejected" }),
+        entry("dup", { count: 4, checkable: "lint", disposition: "duplicate" }),
+        entry("bare", { count: 4, checkable: "lint", disposition: "ungrounded" }),
+      ]),
     );
     expect(s.map((f) => [f.key, f.flaky])).toEqual([["a", false], ["b", false], ["flaky:unit", true]]);
   });

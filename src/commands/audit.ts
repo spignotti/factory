@@ -5,7 +5,7 @@ import { extractJson } from "../agents/runner.js";
 import { withRepoModels } from "../config.js";
 import type { GitHub } from "../gh.js";
 import { originUrl } from "../git.js";
-import { resolveProposals } from "../harden/lifecycle.js";
+import { formatLifecycle, resolveProposals } from "../harden/lifecycle.js";
 import { latestMetrics } from "../harden/metrics.js";
 import { ciAudit, stubText, WINDOW_DAYS } from "../harden/signals.js";
 import { canonicalRepoId, loadMemory, markFindingsProposed } from "../memory.js";
@@ -101,7 +101,7 @@ export async function audit(opts: AuditOptions, deps: AuditDeps): Promise<AuditR
   try {
     const mem = loadMemory(deps.factoryHome, repoId);
     const findings = mem.entries
-      .filter((e) => e.status === "open")
+      .filter((e) => e.status === "open" && (e.disposition ?? "confirmed") === "confirmed")
       .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
       .map((e) => ({ key: e.key, text: e.text, reviewer: e.reviewer, count: e.count, checkable: e.checkable, check_sketch: e.check_sketch }));
     const metrics = latestMetrics(deps.factoryHome, repoId);
@@ -166,7 +166,7 @@ export async function auditCommand(opts: AuditOptions & { json: boolean }, deps:
   const r = await audit(opts, deps);
   if (opts.json) io.out(JSON.stringify(r) + "\n");
   else {
-    for (const c of r.lifecycle) io.out(`proposal ${c.id}: ${c.status} (${c.reason})\n`);
+    for (const c of r.lifecycle) io.out(formatLifecycle(c));
     if (r.ticket) {
       io.out(`ticket ${r.path}: ${r.ticket.proposals.length} proposal(s)\n`);
       for (const p of r.ticket.proposals) io.out(`  ${p.rank}. ${p.plan.goal}\n     run: factory run --repo ${opts.repo} --plan ${p.plan_path}\n`);

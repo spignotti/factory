@@ -32,6 +32,17 @@ export const CheckSchema = z.object({
    * is set): for checks that need a host-side stack CI does not have. Setting it is a loosening (config_guard).
    */
   local_only: z.boolean().optional(),
+  /**
+   * Who owns a `manual` check. Without a name the check is not a proof and fails closed.
+   * Removing it is a loosening (config_guard).
+   */
+  owner: z.string().trim().min(1).optional(),
+  /**
+   * Bounded reason a product red-then-green on this check may still pass.
+   * Absent: that instability fails the gate. An infrastructure retry does not need this.
+   * Setting it is a loosening (config_guard).
+   */
+  flake_allow: z.string().trim().min(1).max(200).optional(),
 });
 export type Check = z.infer<typeof CheckSchema>;
 
@@ -393,9 +404,9 @@ export const RepoConfigSchema = z
         // (0 = do not resume). Checked by `factory gc` and at the start of `factory run`.
         base_red_resume_hours: z.number().min(0).max(168).default(48),
         // CI on the PR head after finalize pushes: none and pending are polled this long
-        // (0 = one sample). Still none or pending does not fail the run and does not enable
-        // auto-merge (an auto policy becomes human_review). Only green enables auto-merge.
-        // Red ends the run as needs_human and marks the PR draft again.
+        // (0 = one sample). Still none or pending does not fail the run, does not change an auto
+        // policy, and does not enable auto-merge. The runner enables it later on that same SHA.
+        // Only green enables auto-merge. Red ends the run as needs_human and marks the PR draft again.
         pr_ci_wait_minutes: z.number().min(0).max(120).default(20),
         forbidden_paths: z.array(z.string()).default([]),
         // Generated paths left out of the diff line limits (lockfiles and binaries already are).
@@ -508,15 +519,18 @@ export const RepoConfigSchema = z
     /**
      * How many factory runs may hold this repo at once. Default 1 keeps the single-run lock.
      * `exclusive_paths`: a plan that touches any of these globs runs alone (database migrations).
-     * Read from the checkout's repo.yaml at the start of the run. Raising `max_runs` or removing
-     * an exclusive path is a loosening (config_guard).
+     * `resources`: names of a shared database or test fixture. The queue and `takeRepoLock` claim
+     * each name with the repo lock, so a second coding run waits and does not take a coding slot.
+     * Read from the checkout's repo.yaml at the start of the run. Raising `max_runs`, or removing
+     * an exclusive path or a resource, is a loosening (config_guard).
      */
     concurrency: z
       .object({
         max_runs: z.number().int().min(1).max(32).default(1),
         exclusive_paths: z.array(z.string().min(1)).default([]),
+        resources: z.array(z.string().min(1)).default([]),
       })
-      .default({ max_runs: 1, exclusive_paths: [] }),
+      .default({ max_runs: 1, exclusive_paths: [], resources: [] }),
     /**
      * PR body options. `host_steps_section` is the heading for manual production-host commands
      * (for example "Mac install steps"). Unset: the section is omitted. Read from the base commit.

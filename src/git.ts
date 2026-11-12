@@ -274,8 +274,9 @@ export function diffTotals(stat: Map<string, DiffEntry>): DiffTotals {
 }
 
 /**
- * Lines for `merge.low_max_diff_lines`.
+ * Lines for the diff-size signal (`merge.low_max_diff_lines`).
  * Test files count here even when the max_diff_lines gate left them out.
+ * The number does not by itself raise the risk class.
  */
 export function linesCountingTests(t: DiffTotals): number {
   return t.counted + t.excludedTestLines;

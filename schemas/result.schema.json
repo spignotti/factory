@@ -105,6 +105,130 @@
     "reason": {
       "type": "string"
     },
+    "outcome": {
+      "type": "object",
+      "properties": {
+        "ticket": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempts": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivered_pr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "merged": {
+          "type": "string",
+          "enum": [
+            "no",
+            "confirmed",
+            "unknown"
+          ]
+        },
+        "ended_without_merge": {
+          "type": "boolean"
+        },
+        "open_decision": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ticket",
+        "attempts",
+        "delivered_pr",
+        "merged",
+        "ended_without_merge",
+        "open_decision"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "factory_version": {
+          "type": "string"
+        },
+        "factory_commit": {
+          "type": "string"
+        },
+        "prompt_revision": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "config_fingerprint": {
+          "type": "string"
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "factory_version",
+        "factory_commit",
+        "prompt_revision",
+        "model",
+        "effort",
+        "config_fingerprint",
+        "base",
+        "head",
+        "checks"
+      ],
+      "additionalProperties": false
+    },
     "skipped_gates": {
       "type": "array",
       "items": {

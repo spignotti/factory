@@ -12,7 +12,10 @@ export function asset(path: string): string {
   return text;
 }
 
-/** `review-checklist` is the old prompt name of `review-standards` (eval overrides may use either). */
+/**
+ * `review-checklist` is the old prompt name of `review-standards`.
+ * The checklist file is gone. Eval overrides may still use either name; a missing file uses the other.
+ */
 const PROMPT_ALIASES: Record<string, string> = {
   "review-standards": "review-checklist",
   "review-checklist": "review-standards",

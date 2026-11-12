@@ -16,7 +16,7 @@ import { gitCommonDir, type Jail, type Sandbox } from "../sandbox/sandbox.js";
 import { type EvalProfile, EvalProfileSchema, type EvalRecord, EvalRecordSchema, type EvalTask, EvalTaskSchema } from "../schemas/eval.js";
 import type { Profile } from "../schemas/profile.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
-import { runChecks } from "../steps/gates.js";
+import { checkBlocksGate, runChecks } from "../steps/gates.js";
 
 /** Shipped eval assets (`evals/tasks`, `profiles`), relative to the package root. */
 export const EVAL_TASKS_DIR = new URL("../../evals/tasks/", import.meta.url);
@@ -259,7 +259,7 @@ async function realFindings(task: EvalTask, deps: EvalDeps, repo: RepoConfig, ro
       if (hidden.output.startsWith("harness: setup failed")) return; // nothing verifiable on this commit
       if (hidden.status !== "harness") out.set("hidden", hidden.pass);
       for (const r of await runChecks(checks, { cwd: wt, env, envCommand: repo.env_command, gateTimeoutMinutes: repo.limits.gate_timeout_minutes, jail }))
-        out.set(`check:${r.name}`, r.status !== "fail" && r.status !== "timeout");
+        out.set(`check:${r.name}`, !checkBlocksGate(r));
     });
     cache.set(sha, out);
     return out;

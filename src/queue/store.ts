@@ -28,6 +28,23 @@ export interface QueueEntry {
   blocked_runs?: string[];
   pid?: number;
   added_at: string;
+  /** Label removed while the run was in progress. The process is left alive; the pipeline stops at a step boundary. */
+  paused?: boolean;
+  /** Why this issue was the one started (priority, age). Not a blocker reason. */
+  choice?: string;
+  /** Set on an extra issue while it is part of another issue's bundle. It is not started on its own. */
+  bundled_with?: number;
+  /** Hash of the issue title and body at the last start. A mismatch drops the saved plan. */
+  issue_rev?: string;
+  /**
+   * Written when a coding run reaches `done`. Absent on older entries: those stay unknown,
+   * even when `status` is `done` and `pr` is set. `merged: "no"` is not a confirmed merge.
+   */
+  delivery?: {
+    merged: "no" | "confirmed" | "unknown";
+    pr: string | null;
+    attempts: number | null;
+  };
 }
 
 export interface QueueFile {
@@ -50,6 +67,17 @@ const EntrySchema = z.object({
   blocked_runs: z.array(z.string()).optional(),
   pid: z.number().int().optional(),
   added_at: z.string(),
+  paused: z.boolean().optional(),
+  choice: z.string().optional(),
+  bundled_with: z.number().int().positive().optional(),
+  issue_rev: z.string().optional(),
+  delivery: z
+    .object({
+      merged: z.enum(["no", "confirmed", "unknown"]),
+      pr: z.string().nullable(),
+      attempts: z.number().int().min(0).nullable(),
+    })
+    .optional(),
 });
 
 const FileSchema = z.object({

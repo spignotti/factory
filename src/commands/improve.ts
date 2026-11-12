@@ -6,7 +6,7 @@ import { extractJson } from "../agents/runner.js";
 import { withRepoModels } from "../config.js";
 import type { GitHub, Issue } from "../gh.js";
 import { originUrl } from "../git.js";
-import { resolveProposals } from "../harden/lifecycle.js";
+import { formatLifecycle, resolveProposals } from "../harden/lifecycle.js";
 import { ASPECTS, collectAspect } from "../improve/aspects.js";
 import { dedupeProposals, issueWrite, matchingIssue, parseProposalIssue, proposalLabels } from "../improve/issues.js";
 import { canonicalRepoId, markFindingsProposed, updateMemory } from "../memory.js";
@@ -117,7 +117,7 @@ function selectShape(max: number, aspect: ImproveAspect, checklist: boolean): st
     ? `"rationale":"<2-4 sentences naming the evidence>","checklist":["<unmarked_standards text the plan turns into a check>"],"plan":<plan.json>`
     : `"rationale":"<2-4 sentences naming the evidence>","plan":<plan.json>`;
   return `Return a single \`\`\`json block: {"proposals":[{${fields}}, …]}.
-Up to ${max} ${aspect} proposals, ranked: the most valuable first. Each is its own factory run and PR: distinct goals, and a
+At most ${max} ${aspect} proposals, ranked: the most valuable first. Zero is the right answer when the signals show no evidenced benefit. Each is its own factory run and PR: distinct goals, and a
 memory key${checklist ? " or checklist item" : ""} belongs to at most one proposal. Fewer is fine when the signals do not justify more.
 ${PLAN_SHAPE.split("\nor ")[0]}
 plan.resolves_findings: memory keys from the signals (including refresh_findings), or []. Do not return questions.`;
@@ -340,7 +340,8 @@ async function select(
   let last: { accepted: Selected[]; errors: string[] } = { accepted: [], errors: [] };
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const text = last.errors.length ? `${prompt}\n\nYour previous answer was rejected:\n- ${last.errors.join("\n- ")}` : prompt;
+      const efficacy = "State the observed problem, expected benefit, added runtime/maintenance cost and an efficacy check. A green command or merged PR is not efficacy proof. For a meaningful negative control use red_green: required, a kind:repro verify:test criterion and acceptance text 'effect check: red_green'. The same behavioral test must assert-fail on base and pass on HEAD. Otherwise state that the effect remains unverified; do not add wrapper/prose tests or a bookkeeping issue.";
+      const text = `${prompt}\n\n${efficacy}${last.errors.length ? `\n\nYour previous answer was rejected:\n- ${last.errors.join("\n- ")}` : ""}`;
       const res = await shot.call("improve", { role, cwd: repoDir, tools: "read_only", system: rolePrompt(ASPECTS[aspect].prompt, prompts), prompt: text });
       last = validateSelection(extractJson(res.text), { repo, keys: ctx.keys, ...(ctx.items ? { items: ctx.items } : {}), max: ctx.max });
       if (!last.errors.length) return { accepted: last.accepted, rejected: [] };
@@ -468,7 +469,7 @@ export async function improveCommand(opts: ImproveOptions & { json: boolean }, d
   for (const w of r.warnings) io.err(`factory: ${w}\n`);
   if (opts.json) io.out(JSON.stringify(r) + "\n");
   else {
-    for (const c of r.lifecycle) io.out(`proposal ${c.id}: ${c.status} (${c.reason})\n`);
+    for (const c of r.lifecycle) io.out(formatLifecycle(c));
     if (r.compaction.merged || r.compaction.error) io.out(`compaction: ${r.compaction.merged} merged${r.compaction.error ? `; ${r.compaction.error}` : ""}\n`);
     if (r.dry_run) io.out("dry-run: proposal files only, no issues\n");
     for (const result of r.results) {
@@ -508,5 +509,4 @@ export async function auditAlias(opts: { repo: string; type: AuditType; max?: nu
   io.err(auditDeprecation(aspect));
   return improveCommand({ repo: opts.repo, aspects: [aspect], compact: false, json: opts.json, ...(opts.max ? { max: opts.max } : {}) }, deps, io);
 }
-
 

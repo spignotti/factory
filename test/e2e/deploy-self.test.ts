@@ -108,7 +108,8 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-describe("scripts/deploy-self.sh", () => {
+// The legacy box deployer depends on Linux /proc and util-linux flock. It is not the Mac cutover path.
+describe.skipIf(process.platform !== "linux")("scripts/deploy-self.sh (Linux)", () => {
   it("builds the first release, links current and the bin, and is idempotent", () => {
     const a = git(upstream, "rev-parse", "HEAD").slice(0, 12);
     const r = deploy();

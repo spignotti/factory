@@ -41,7 +41,15 @@ export const ProposalItemSchema = z
     /** Memory entry keys (`findings.json`) and checklist item texts the plan addresses. */
     references: z.object({ findings: z.array(z.string()), checklist: z.array(z.string()) }).strict(),
     resolution: z
-      .object({ at: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), run_id: z.string().nullable(), pr: z.string().nullable() })
+      .object({
+        at: z.string(),
+        status: z.enum(["resolved", "dropped"]),
+        reason: z.string(),
+        run_id: z.string().nullable(),
+        pr: z.string().nullable(),
+        /** Present when a merged PR implemented the proposal. `confirmed` is the only proven effect. */
+        effect: z.enum(["confirmed", "negative", "unclear"]).optional(),
+      })
       .strict()
       .nullable(),
   })
@@ -118,7 +126,7 @@ export const HardenReportSchema = z
     generated_at: z.string(),
     repo: z.string(),
     /** Earlier proposals (ids `<ticket>.<rank>`) resolved or dropped by this run. */
-    lifecycle: z.array(z.object({ id: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), pr: z.string().nullable() }).strict()),
+    lifecycle: z.array(z.object({ id: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), pr: z.string().nullable(), effect: z.enum(["confirmed", "negative", "unclear"]).optional() }).strict()),
     compaction: z.object({ merged: z.number().int(), error: z.string().nullable() }).strict(),
     signals: z.record(z.string(), z.unknown()),
     metrics: MetricsSchema,
@@ -152,7 +160,7 @@ export const AuditReportSchema = z
     repo: z.string(),
     type: AuditTypeSchema,
     /** Earlier proposals (ids `<ticket>.<rank>`) resolved or dropped by this run. */
-    lifecycle: z.array(z.object({ id: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), pr: z.string().nullable() }).strict()),
+    lifecycle: z.array(z.object({ id: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), pr: z.string().nullable(), effect: z.enum(["confirmed", "negative", "unclear"]).optional() }).strict()),
     /** Open findings, the latest metrics line, and (performance only) the CI audit. */
     signals: z.record(z.string(), z.unknown()),
     /** The ticket written by this run; null when the type is disabled or selection failed (`error`). */
@@ -166,7 +174,13 @@ export const AuditReportSchema = z
 export type AuditReport = z.infer<typeof AuditReportSchema>;
 
 const LifecycleChangeSchema = z
-  .object({ id: z.string(), status: z.enum(["resolved", "dropped"]), reason: z.string(), pr: z.string().nullable() })
+  .object({
+    id: z.string(),
+    status: z.enum(["resolved", "dropped"]),
+    reason: z.string(),
+    pr: z.string().nullable(),
+    effect: z.enum(["confirmed", "negative", "unclear"]).optional(),
+  })
   .strict();
 
 /** One GitHub issue written for an improve proposal. */

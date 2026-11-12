@@ -1,6 +1,6 @@
 Turn the task into plan.json. Define what, not how.
 Small packages (max 8 files) with explicit files and dependencies.
-Every acceptance criterion must be verifiable; prefer verify:test or verify:check over review.
+Every acceptance criterion must be verifiable. Use verify:test or verify:check for behavior. Documentation wording and organizational non-goals are verify:review, not verify:test. Do not add a test criterion that only wraps a test the repo already runs; cite that test. A SQL or integration suite is cited as that file; do not add a test whose only job is to read another test's source.
 Only add test criteria for behavior that matters; list edge cases explicitly as kind:edge_case.
 Bugs: the first criterion reproduces the bug (kind:repro, verify:test).
 Mark changes_flows for packages that change a user flow of a verify area.

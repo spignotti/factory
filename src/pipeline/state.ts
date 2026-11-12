@@ -40,6 +40,34 @@ export interface RunState {
   gate_count: number;
   pr: string | null;
   pr_draft: boolean | null;
+  /** SHA the runner approved. A newer head is not this commit, so auto-merge stays off. */
+  approved_sha?: string;
+  /** SHA the in-run review finished on. A later commit is not this evidence. */
+  reviewed_sha?: string;
+  /** Head CI was still pending or unregistered when the coding run ended. Policy stays auto. */
+  ci_wait?: "pending" | "none";
+  /** Pending bounded continuation on this same run/PR; no approval is carried to a new head. */
+  continuation?: { kind: "ci" | "head" | "base"; sha: string };
+  /** Persisted before each automatic continuation; restart never resets the two-attempt budget. */
+  continuation_attempts?: number;
+  /**
+   * Repair budget already spent. Resume continues it. A blocking `class` is not given another
+   * product-code edit. Network retries are the same-model connection budget for the whole run.
+   */
+  repair?: {
+    gate_attempts: number;
+    network_retries: number;
+    format_used: boolean;
+    infra_reruns: number;
+    class?: "format" | "code" | "infra" | "base" | "config" | "unknown";
+  };
+  /**
+   * Coding attempts on this checkpoint. Absent on runs stored before attempt counts existed;
+   * resume must not invent one. A new run starts at 1.
+   */
+  attempts?: number;
+  /** Plan effort chosen at intake. Absent when this run never chose one. */
+  plan_effort?: "none" | "medium" | "high";
   /** Always `standard`. Older states may say `fast` (the removed fast lane). */
   lane?: "standard" | "fast";
   /** Fast-lane escalation reasons. No longer written. */
@@ -91,6 +119,7 @@ export function newState(v: { runId: string; repo: string; task: Task; noPr: boo
     pr: null,
     pr_draft: null,
     lane: "standard",
+    attempts: 1,
     updated_at: new Date().toISOString(),
   };
 }

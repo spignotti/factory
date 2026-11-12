@@ -33,11 +33,18 @@ export interface UncoveredPath {
 export interface TestSignal {
   slowest: SlowTest[];
   duration_error: string | null;
+  /**
+   * `measured` when a duration parser returned rows. `gap` when a run or a shell suite produced none.
+   * `unavailable` when this repo has neither a duration parser nor a shell suite.
+   */
+  duration_measurement?: "measured" | "gap" | "unavailable";
   flaky: { key: string; text: string; count: number }[];
   never_failed: { workflow: string; name: string; runs: number }[];
-  /** Null when `tests.coverage` is unset. */
-  coverage: { uncovered: UncoveredPath[]; error: string | null } | null;
+  /** Null when `tests.coverage` is unset. `measurement` is set only after the command runs. */
+  coverage: { uncovered: UncoveredPath[]; error: string | null; measurement?: "measured" | "gap" } | null;
 }
+
+const SHELL_SUITE = /\b(?:bats|shellcheck|shunit2|shunit)\b|\.sh(?:\s|$)/;
 
 /** Vitest's default script is watch mode. `--run` (or the `vitest run` subcommand) forces a single run. */
 export function forceVitestRun(command: string): string {
@@ -198,6 +205,25 @@ function missedOf(value: unknown): number | null {
   return null;
 }
 
+function coverageJsonDocument(json: unknown): boolean {
+  if (!json || typeof json !== "object") return false;
+  const root = json as Record<string, unknown>;
+  const files = root.files && typeof root.files === "object" ? (root.files as Record<string, unknown>) : null;
+  return Object.entries(files ?? root).some(([key, value]) => key !== "total" && key !== "meta" && missedOf(value) !== null);
+}
+
+/** A coverage file or stdout that parsed as a report, including one with zero missed lines. */
+function coverageDocument(text: string, filename: string): boolean {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".xml") || text.includes("<coverage") || text.includes("<class ")) return /<class\b/i.test(text) && /filename="/i.test(text);
+  if (lower.endsWith(".info") || text.includes("\nSF:") || text.startsWith("SF:")) return /^SF:/m.test(text);
+  try {
+    return coverageJsonDocument(JSON.parse(text) as unknown);
+  } catch {
+    return false;
+  }
+}
+
 function parseCoverageJson(json: unknown): { path: string; missed: number }[] {
   if (!json || typeof json !== "object") return [];
   const root = json as Record<string, unknown>;
@@ -343,19 +369,26 @@ function neverFailedTests(runs: CiRun[]): TestSignal["never_failed"] {
     .sort((a, b) => a.workflow.localeCompare(b.workflow) || a.name.localeCompare(b.name));
 }
 
-function readReports(repoDir: string, sinceMs: number): { path: string; missed: number }[] {
-  const out: { path: string; missed: number }[] = [];
+function readReports(repoDir: string, sinceMs: number): { rows: { path: string; missed: number }[]; sawDocument: boolean } {
+  const rows: { path: string; missed: number }[] = [];
+  let sawDocument = false;
   for (const rel of COVERAGE_FILES) {
     const path = join(repoDir, rel);
     if (!existsSync(path)) continue;
     try {
       if (statSync(path).mtimeMs + 1000 < sinceMs) continue;
-      out.push(...parseCoverageReport(readFileSync(path, "utf8"), rel));
+      const text = readFileSync(path, "utf8");
+      if (coverageDocument(text, rel)) sawDocument = true;
+      rows.push(...parseCoverageReport(text, rel));
     } catch {
       continue;
     }
   }
-  return out;
+  return { rows, sawDocument };
+}
+
+function shellSuite(repo: RepoConfig): boolean {
+  return [repo.tests.run, ...repo.checks.map((c) => c.run)].some((command) => !!command && SHELL_SUITE.test(command));
 }
 
 /**
@@ -371,39 +404,49 @@ export async function collectTestSignals(input: TestSignalInput): Promise<TestSi
   let coverage: TestSignal["coverage"] = null;
   const invocation = runnerInvocation(input.repoDir, input.repo);
   const command = input.repo.tests.coverage;
+  let duration_measurement: NonNullable<TestSignal["duration_measurement"]> = !invocation && shellSuite(input.repo) ? "gap" : "unavailable";
   if (input.dryRun) {
     if (command) coverage = { uncovered: [], error: "dry-run: command not run" };
-    return { slowest, duration_error, flaky, never_failed, coverage };
+    return { slowest, duration_error, duration_measurement, flaky, never_failed, coverage };
   }
-  if (!invocation && !command) return { slowest, duration_error, flaky, never_failed, coverage };
+  if (!invocation && !command) return { slowest, duration_error, duration_measurement, flaky, never_failed, coverage };
 
   const exec = input.exec ?? defaultExec;
   const timeoutMs = localSignalTimeoutMs(input.repo.limits.command_timeout_minutes);
   const isolate = input.isolate ?? withSignalWorktree;
   const env = signalEnv(input.factoryHome ?? factoryHomeOf());
   await isolate(input.repoDir, input.repo, async (cwd) => {
-    const runIn = (command: string, ms: number) => exec(prefixed(command, input.repo.env_command), cwd, ms, env);
+    const runIn = (cmd: string, ms: number) => exec(prefixed(cmd, input.repo.env_command), cwd, ms, env);
     if (input.repo.setup) {
       try {
         await runIn(input.repo.setup, input.repo.limits.command_timeout_minutes * 60_000);
       } catch (e) {
         const msg = `setup failed: ${signalError(e)}`.slice(0, 200);
-        if (invocation) duration_error = msg;
-        if (command) coverage = { uncovered: [], error: msg };
+        if (invocation) {
+          duration_error = msg;
+          duration_measurement = "gap";
+        }
+        if (command) coverage = { uncovered: [], error: msg, measurement: "gap" };
         return;
       }
     }
     if (invocation) {
+      const applyTotals = (totals: Map<string, number>, failed: unknown) => {
+        if (totals.size > 0) {
+          slowest = ranked(totals);
+          duration_measurement = "measured";
+          return;
+        }
+        duration_measurement = "gap";
+        if (failed) duration_error = signalError(failed);
+      };
       try {
         const out = await runIn(invocation.command, timeoutMs);
-        const text = `${out.stdout}\n${out.stderr}`;
-        slowest = ranked(durationTotals(invocation.kind, text));
+        applyTotals(durationTotals(invocation.kind, `${out.stdout}\n${out.stderr}`), null);
       } catch (e) {
         const partial = outputOf(e);
         const text = partial ? `${partial.stdout}\n${partial.stderr}` : "";
-        const totals = durationTotals(invocation.kind, text);
-        if (totals.size > 0) slowest = ranked(totals);
-        else duration_error = signalError(e);
+        applyTotals(durationTotals(invocation.kind, text), e);
       }
     }
     if (command) {
@@ -420,17 +463,36 @@ export async function collectTestSignals(input: TestSignalInput): Promise<TestSi
         if (partial) stdout = partial.stdout;
         else error = failedClip;
       }
-      const reports = [...readReports(cwd, started), ...parseCoverageReport(stdout, "stdout")];
-      if (failedClip && reports.length === 0 && error === null) error = failedClip;
-      coverage = { uncovered: uncoveredCritical(cwd, reports, input.repo.sensitive_paths), error };
+      const files = readReports(cwd, started);
+      const saw = files.sawDocument || coverageDocument(stdout, "stdout");
+      const reports = [...files.rows, ...parseCoverageReport(stdout, "stdout")];
+      if (failedClip && !saw && error === null) error = failedClip;
+      coverage = { uncovered: uncoveredCritical(cwd, reports, input.repo.sensitive_paths), error, measurement: saw ? "measured" : "gap" };
     }
   });
-  return { slowest, duration_error, flaky, never_failed, coverage };
+  return { slowest, duration_error, duration_measurement, flaky, never_failed, coverage };
+}
+
+/** A gap is missing data. Measured zero is a real zero. No coverage command is absent. */
+export function coverageReading(signal: Pick<TestSignal, "coverage">): { kind: "gap"; missed: null } | { kind: "measured"; missed: number } | { kind: "absent" } {
+  const coverage = signal.coverage;
+  if (!coverage?.measurement) return { kind: "absent" };
+  if (coverage.measurement === "gap") return { kind: "gap", missed: null };
+  return { kind: "measured", missed: coverage.uncovered.reduce((n, row) => n + row.missed, 0) };
+}
+
+/** A gap is missing timings. Measured slow is how many tests crossed the slow threshold. */
+export function durationReading(signal: Pick<TestSignal, "duration_measurement" | "slowest">): { kind: "gap"; slow: null } | { kind: "measured"; slow: number } | { kind: "absent" } {
+  if (signal.duration_measurement === "gap") return { kind: "gap", slow: null };
+  if (signal.duration_measurement === "measured") return { kind: "measured", slow: signal.slowest.length };
+  return { kind: "absent" };
 }
 
 function countsAsError(error: string | null | undefined): boolean {
   return !!error && !error.startsWith("dry-run:");
 }
+
+// A measurement gap is missing data, not an uncovered defect and not a slow test.
 
 export function testWorth(signal: TestSignal, refresh: number): boolean {
   return refresh > 0 || signal.slowest.length > 0 || countsAsError(signal.duration_error) || signal.flaky.length > 0 || signal.never_failed.length > 0 || (signal.coverage?.uncovered.length ?? 0) > 0 || countsAsError(signal.coverage?.error);

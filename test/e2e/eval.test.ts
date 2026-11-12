@@ -253,7 +253,8 @@ describe("factory eval (fake runner)", () => {
         hidden: { from_commit: t.fix, paths: ["test/hidden/multiply.test.js"], check: ".venv/bin/python --test test/hidden/multiply.test.js" },
         plan_effort: "high",
         timeout_min: 5,
-        repo_config: { setup },
+        // repo_config replaces the whole repo.yaml. tests.run must stay, or the cited test is never executed.
+        repo_config: { setup, tests: { globs: ["test/**"], run: "node --test {files}" } },
         license: "MIT",
         source: "test fixture",
       }),
@@ -314,11 +315,11 @@ describe("factory eval (fake runner)", () => {
     const code = await evalCommand({ profiles: ["a.yaml"], tasks: "*-multiply.yaml", repeat: 1, cwd: dir }, d, { out: () => undefined, err: (s) => void (err += s) });
     expect(code).toBe(1);
     expect(err).toMatch(/hidden harness/);
-    expect(err).toMatch(/\.venv\/bin\/python: not found/);
+    expect(err).toMatch(/\.venv\/bin\/python: (?:not found|No such file or directory)/);
     const day = new Date().toISOString().slice(0, 10);
     const record = EvalRecordSchema.parse(JSON.parse(readFileSync(join(dir, "evals", "results", `${day}.jsonl`), "utf8").trim()));
     expect(record).toMatchObject({ result: "done", hidden_pass: false, hidden_status: "harness" });
-    expect(record.hidden_output).toMatch(/^harness:.*not found/);
+    expect(record.hidden_output).toMatch(/^harness:.*(?:not found|No such file or directory)/);
     expect(record.usage.every((u) => u.errors === 0)).toBe(true);
     expect(summarize("a", [record])).toMatchObject({ runs: 1, passes: 0, pass_rate: null, harness_errors: 1 });
   });

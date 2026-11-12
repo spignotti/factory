@@ -6,18 +6,21 @@ import { baseRef, changedFiles, diffCountFields, diffFiles, diffTotals, isAncest
 import { Interrupted } from "../interrupt.js";
 import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
-import { fixStep } from "../pipeline/loop.js";
+import { fixStep, reviewDelta } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { protectedFiles } from "../gates/builtin.js";
-import { type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
+import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
 import type { HostSteps } from "../schemas/plan.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
+import { closesFooter, fulfilledIssues } from "../queue/admit.js";
+import { pauseRequested } from "../queue/pause.js";
 import { formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
+import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
@@ -32,6 +35,8 @@ export interface FinalizeInput {
   startedAt: number;
   /** Resume: the run already opened this PR; update it instead of creating one. */
   existingPr?: { url: string; draft: boolean };
+  /** SHA the in-run review covered. A later commit is reviewed as a delta before merge. */
+  reviewedSha?: string;
 }
 
 /** Label of every PR that changes `human_only_paths`. */
@@ -77,6 +82,13 @@ export interface FinalizeOutput {
   draft: boolean | null;
   /** Security gates that did not scan. Omitted when none were skipped. */
   skipped_gates?: string[];
+  /** SHA the runner approved after local gates. Absent when the run did not finish a PR. */
+  approvedSha?: string;
+  /** Head CI still unsettled. The auto policy stays; auto-merge waits for this SHA. */
+  ciWait?: "pending" | "none";
+  /** SHA the review evidence covers after a delta review. */
+  reviewedSha?: string;
+  continuation?: { kind: "ci"; sha: string };
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -174,6 +186,8 @@ export function renderPrBody(ctx: RunContext, v: {
   evaluation?: { report?: EvaluateReport; link: EvidenceLink; notes: string[] };
   /** Rendered protectedSection, "" when no protected file changed. */
   protectedConfig?: string;
+  /** Diff-size signal. It is not a risk reason and does not force a human gate. */
+  sizeSignal?: string | null;
 }): string {
   const { plan, handoffs } = ctx;
   const { input, out } = v;
@@ -198,7 +212,7 @@ export function renderPrBody(ctx: RunContext, v: {
     summary: v.summary,
     protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
     risk: out.risk.risk,
-    risk_reason: cell(riskReasonLine(out.risk)),
+    risk_reason: cell([riskReasonLine(out.risk), v.sizeSignal ? `size signal (does not change risk): ${v.sizeSignal}` : ""].filter(Boolean).join("; ")),
     security_rows: securityRows(v.changed)
       .map((r) => `| ${cell(r.area)} | ${r.touched ? "yes" : "no"} | ${cell(r.note)} |`)
       .join("\n"),
@@ -232,7 +246,14 @@ export function renderPrBody(ctx: RunContext, v: {
     blockers: out.result === "needs_human"
       ? `\n## Blockers (needs_human)\n\n${out.reason}\n${list(openFindings(input.findings).filter((f) => f.severity === "bug").map((f) => `${f.id}: ${f.claim} (${f.file}:${f.line})`))}\n`
       : "",
-    closes: ctx.task.issue !== undefined && out.result === "done" ? `\nCloses #${ctx.task.issue}\n` : "",
+    closes: closesFooter(
+      ctx.task.issue,
+      out.result,
+      fulfilledIssues(
+        plan,
+        new Set(plan.acceptance.filter((a) => pkgDone(a.package) && (evidence(a.id).length > 0 || a.verify === "review")).map((a) => a.id)),
+      ),
+    ),
   };
   return asset("standards/pr-template.md").replace(/\{\{(\w+)\}\}/g, (_, k: string) => fill[k] ?? "");
 }
@@ -334,11 +355,26 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     }
   }
 
+  let reviewedSha = input.reviewedSha;
+  if (result === "done" && reviewedSha && gates) {
+    const headNow = await revParse(ctx.worktree, "HEAD");
+    if (headNow !== reviewedSha) {
+      const delta = await reviewDelta(ctx, { round: input.rounds + 1, gates, findings: input.findings, reviewedSha });
+      input.findings = delta.findings;
+      if (!delta.ok) {
+        result = "needs_human";
+        reason = delta.reason;
+      } else reviewedSha = delta.reviewedSha;
+    }
+  }
+
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const countTests = ctx.repo.limits.diff_count_tests;
   const totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
-  // Final tree, after a base merge: this is what result.json reports. Test lines still count for risk.
+  // Final tree, after a base merge. Test lines stay in the size signal and do not raise the risk class.
   const diffLines = linesCountingTests(totals);
+  const sizeSignal = diffSizeSignal(diffLines, ctx.repo.merge.low_max_diff_lines);
+  if (sizeSignal) ctx.events.emit({ step: "finalize", event: "progress", data: { diff_signal: sizeSignal } });
   const diffReport = diffCountFields(totals, countTests);
   if (diffReport) {
     ctx.events.diffCount = diffReport;
@@ -364,10 +400,10 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         } catch (e) {
           const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
           ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-          return { result: "needs_human", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...skippedField(gates) };
+          return { result: "needs_human", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
         }
       }
-      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft };
+      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft, ...(reviewedSha ? { reviewedSha } : {}) };
     }
     if (!claim.ok && claim.kind === "github") {
       githubClaimError = `PR step failed: ${claim.reason.slice(0, 300)}`;
@@ -386,7 +422,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits && !blockPush);
   const protectedConfig = protectedSection(ctx, guarded, await diffFiles(ctx.worktree, ctx.baseSha, guarded));
   if (guarded.length) ctx.events.emit({ step: "finalize", event: "progress", data: { protected_changes: guarded } });
-  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig }));
+  const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig, sizeSignal }));
   writeRunFile(ctx, "pr.md", body);
 
   throwIfInterrupted(ctx.deps);
@@ -404,13 +440,16 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+      return { result: "needs_human", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
   }
   if (githubClaimError) {
     ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: githubClaimError } });
-    return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+    return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
   }
+  let approvedSha: string | undefined;
+  let ciWait: "pending" | "none" | undefined;
+  let continuation: FinalizeOutput["continuation"];
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
@@ -433,6 +472,13 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
         }
         throw e;
+      }
+      // The required `done` job reads this status. Post it as soon as the commit is on the remote,
+      // before PR bookkeeping, so a pull_request run is not stuck waiting on an approval that
+      // itself waits for `done`. A later head has no status until this runs again.
+      if (result === "done") {
+        await ctx.deps.github.approveHead(ctx.worktree, head);
+        approvedSha = head;
       }
       // An open PR on this branch (an earlier attempt's create that looked failed, or one opened by hand)
       // is adopted, never duplicated. Known PRs were converted to draft before this push.
@@ -503,26 +549,76 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         ctx.deadline.extend?.(ci.waitedMs);
         headGreen = ci.status === "green";
         if (ci.status === "red") {
+          if (selfMergePolicy(policy)) continuation = { kind: "ci", sha: head };
           result = "needs_human";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
           const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr, draft: false });
           draft = held.draft;
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
           await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
-        } else if (!headGreen && policy === "auto") {
-          policy = "human_review";
+        } else if (waitingOnMergeCi({ policy, ci: ci.status, draft: draft === true, state: "open" })) {
+          // The same predicate as the worker. A later commit is a different SHA and is not approved.
+          ciWait = ci.status === "pending" ? "pending" : "none";
         }
       }
-      if (policy === "auto" && result === "done" && headGreen) await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+      // Merge only. Deploy is a separate action and is not called here.
+      // Re-read the open head after the CI poll: a push that landed since approveHead is not this SHA.
+      let liveSha: string | null = null;
+      try {
+        liveSha = (await ctx.deps.github.findOpenPr(ctx.worktree, ctx.branch))?.headSha ?? null;
+      } catch (e) {
+        ctx.events.emit({ step: "finalize", event: "progress", data: { pr_head_unreadable: (e as Error).message.slice(0, 200) } });
+      }
+      let requiredChecks: readonly string[] | null = null;
+      try {
+        requiredChecks = (await ctx.deps.github.repoSettings(ctx.worktree, ctx.repo.base_branch)).required_checks;
+      } catch (e) {
+        ctx.events.emit({ step: "finalize", event: "progress", data: { repo_settings: (e as Error).message.slice(0, 200) } });
+      }
+      const pause = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
+      if (pause && result === "done") {
+        // The queue asked this run to stop. A green head is not a reason to merge.
+        result = "needs_human";
+        reason = `paused: ${pause}; resume with \`factory resume ${ctx.runId}\``;
+        const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr!, draft: false });
+        draft = held.draft;
+      } else if (
+        result === "done" &&
+        liveSha === head &&
+        mayEnableAutoMerge({
+          policy,
+          approvedSha,
+          headSha: liveSha,
+          reviewedSha,
+          ci: headGreen ? "green" : "pending",
+          draft: draft === true,
+          state: "open",
+          requiredChecks,
+        })
+      ) {
+        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!, head);
+      }
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...skippedField(gates) };
+      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
   if (result !== "done") policy = "human_review";
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
-  return { ...out, result, reason, mergePolicy: policy, pr, draft, ...skippedField(gates) };
+  return {
+    ...out,
+    result,
+    reason,
+    mergePolicy: policy,
+    pr,
+    draft,
+    ...(approvedSha && result === "done" ? { approvedSha } : {}),
+    ...(ciWait && result === "done" ? { ciWait } : {}),
+    ...(reviewedSha ? { reviewedSha } : {}),
+    ...(continuation ? { continuation } : {}),
+    ...skippedField(gates),
+  };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectChecks } from "../../src/gates/select.js";
+import { dedupeChecks, omitRepeatedNames, selectChecks } from "../../src/gates/select.js";
 import type { Check } from "../../src/schemas/repo.js";
 
 const checks: Check[] = [
@@ -43,5 +43,33 @@ describe("check selection", () => {
     expect(names(selectChecks(checks, "full", [], { all: true }))).toEqual(["lint", "unit", "db", "secrets", "dotfiles"]);
     expect(names(selectChecks(checks, "fast", [], { all: true }))).toEqual(["lint", "unit", "dotfiles"]);
     expect(names(selectChecks(checks, "manual", [], { all: true }))).toEqual(["cloud"]);
+  });
+
+  it("a dependency, shared config, fixture or package entrypoint widens the tier", () => {
+    const widened = ["lint", "unit", "dotfiles"];
+    expect(names(selectChecks(checks, "fast", ["package.json"]))).toEqual(widened);
+    expect(names(selectChecks(checks, "fast", ["src/index.ts"]))).toEqual(widened);
+    expect(names(selectChecks(checks, "fast", ["tests/fixtures/a.json"]))).toEqual(widened);
+    expect(names(selectChecks(checks, "fast", [".factory/repo.yaml"]))).toEqual(widened);
+    expect(names(selectChecks(checks, "full", ["pyproject.toml"]))).toEqual(["lint", "unit", "db", "secrets", "dotfiles"]);
+    expect(names(selectChecks(checks, "fast", ["README.md"]))).toEqual(["lint"]);
+    expect(names(selectChecks(checks, "manual", ["package.json"]))).toEqual(["cloud"]);
+    expect(names(selectChecks(checks, "fast", ["src/a.py"]))).toEqual(["lint", "unit"]);
+  });
+});
+
+describe("one command per phase", () => {
+  it("keeps the first check and names later checks with the same run", () => {
+    const picked = dedupeChecks([
+      { name: "unit", run: "node --test", tier: "fast" },
+      { name: "suite", run: " node --test ", tier: "full" },
+      { name: "lint", run: "eslint", tier: "fast" },
+    ]);
+    expect(names(picked.checks)).toEqual(["unit", "lint"]);
+    expect(picked.sameCommand).toEqual([{ name: "suite", sameAs: "unit" }]);
+  });
+
+  it("drops a baseline gate whose name already ran", () => {
+    expect(omitRepeatedNames([{ name: "shellcheck" }, { name: "ruff" }], ["shellcheck"]).map((item) => item.name)).toEqual(["ruff"]);
   });
 });

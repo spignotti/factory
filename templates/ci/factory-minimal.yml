@@ -5,7 +5,12 @@
 # factory and has no select or check job. `draft` runs only on a draft pull request and must
 # succeed before `done`: that check-run name is how ci-status tells a draft hold from a settled
 # red. A ready run skips `draft`, so a failed or cancelled `done` there is red. `done` fails on
-# a draft or a cancelled run and succeeds on a ready pull request, a tag and a manual run. A
+# a draft or a cancelled run and succeeds on a tag and a manual run. A ready pull request also
+# needs the commit status `factory=success` on the branch head. `github.sha` for that event is
+# the merge commit, which the runner does not approve, so the job reads
+# `github.event.pull_request.head.sha`. A tag or workflow_dispatch keeps `github.sha`.
+# A push the runner did not verify has no status, so `done` fails and auto-merge cannot finish.
+# The job retries briefly because the status is posted just after the push. A
 # skipped `done` would count as passed, so it still runs. Draft and ready events share one
 # concurrency group: a ready event cancels the in-flight draft run, whose `done` would otherwise
 # start later (it waited on `draft`) and become the latest failure. Nothing is skipped because of
@@ -20,6 +25,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  statuses: read
 # One group for every event on this ref, so ready_for_review cancels an in-flight draft run.
 # Split groups let that draft `done` finish after the ready `done` and stick as a failure.
 # `done` still runs when this run is cancelled and exits non-zero: a skipped `done` would count
@@ -35,9 +41,9 @@ jobs:
     runs-on: @RUNS_ON@
     steps:
       - run: echo "draft hold, checks wait until the pull request is ready for review"
-  # The single status check, named `done`. It gates nothing beside the repo's own jobs: there
-  # is no matrix. always(): a skipped `done` is a successful required check. Draft and cancelled
-  # runs exit 1 instead. `cancelled()` is legal only in an `if`.
+  # The required status check, named `done`. On a ready pull request it checks the commit
+  # status `factory=success` (there is no matrix). always(): a skipped `done` is a successful
+  # required check. Draft and cancelled runs exit 1 instead. `cancelled()` is legal only in an `if`.
   done:
     needs: [draft]
     if: always()
@@ -49,10 +55,35 @@ jobs:
           exit 1
       - env:
           DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'true' || 'false' }}
+          EVENT: ${{ github.event_name }}
+          # Branch head on a pull request (the commit the runner approves). github.sha otherwise.
+          SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
         run: |
           set -eu
           if [ "$DRAFT" = "true" ]; then
             echo "draft: checks are not run until the pull request is ready for review"
             exit 1
+          fi
+          if [ "${EVENT:-}" = "pull_request" ]; then
+            tries="${FACTORY_APPROVAL_TRIES:-6}"
+            pause="${FACTORY_APPROVAL_SLEEP:-10}"
+            n=0
+            while [ "$n" -lt "$tries" ]; do
+              n=$((n + 1))
+              body="$(curl -sS --header "Authorization: Bearer ${TOKEN}" --header "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/commits/${SHA}/status" || true)"
+              state="$(printf '%s' "$body" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{let data={};try{data=JSON.parse(s||"{}")}catch(e){}const hit=(data.statuses||[]).find(i=>i&&i.context==="factory");process.stdout.write((hit&&hit.state)||"")})')"
+              if [ "$state" = "success" ]; then
+                echo "factory approval on ${SHA}"
+                break
+              fi
+              if [ "$n" -lt "$tries" ]; then
+                sleep "$pause"
+              else
+                echo "factory approval missing on ${SHA}"
+                exit 1
+              fi
+            done
           fi
           echo "no CI checks"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffSize, evidenceCheck, forbiddenPaths, guideUpdate, reproFiles, scopeReport, testPresence } from "../../src/gates/builtin.js";
+import { diffSize, evidenceCheck, forbiddenPaths, guideUpdate, reproFiles, scopeReport, testPresence, type EvidenceInputs } from "../../src/gates/builtin.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
 import { PlanSchema } from "../../src/schemas/plan.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
@@ -29,19 +29,35 @@ describe("built-in gates", () => {
     expect(diffSize(new Map([["a", { lines: 16 }]]), 15).ok).toBe(false);
   });
 
-  it("test presence requires a changed test file as evidence per verify:test criterion", () => {
-    const changed = ["src/a.js", "test/a.test.js"];
-    expect(testPresence(plan, ["P1"], [h([{ acceptance_id: "A1", kind: "test", ref: "test/a.test.js::repro" }])], changed, ["test/**"]).ok).toBe(true);
-    expect(testPresence(plan, ["P1"], [h([])], changed, ["test/**"]).ok).toBe(false);
-    expect(testPresence(plan, ["P1"], [h([{ acceptance_id: "A1", kind: "test", ref: "src/a.js" }])], changed, ["test/**"]).ok).toBe(false);
-    expect(testPresence(plan, ["P2"], [], changed, ["test/**"]).ok).toBe(true);
+  it("test presence accepts an executed test that is not in the diff and rejects a skip or an invented name", () => {
+    const evidence: EvidenceInputs = {
+      files: ["src/a.js", "test/a.test.js"],
+      executed: [
+        { file: "test/a.test.js", name: "repro", result: "pass" },
+        { file: "test/a.test.js", name: "later", result: "skip" },
+      ],
+      knownChecks: ["unit"],
+      ranChecks: [{ name: "unit", status: "pass" }],
+    };
+    expect(testPresence(plan, ["P1"], [h([{ acceptance_id: "A1", kind: "test", ref: "test/a.test.js::repro" }])], evidence).ok).toBe(true);
+    expect(testPresence(plan, ["P1"], [h([])], evidence).ok).toBe(false);
+    expect(testPresence(plan, ["P1"], [h([{ acceptance_id: "A1", kind: "test", ref: "test/a.test.js::later" }])], evidence).detail).toMatch(/skipped test/);
+    expect(testPresence(plan, ["P1"], [h([{ acceptance_id: "A1", kind: "test", ref: "test/missing.test.js::repro" }])], evidence).detail).toMatch(/invented reference/);
+    expect(testPresence(plan, ["P2"], [], evidence).ok).toBe(true);
   });
 
-  it("evidence refs must exist", () => {
+  it("evidence refs must be a passing executed test or a selected passing check", () => {
     const handoffs = [h([{ acceptance_id: "A1", kind: "test", ref: "test/a.test.js" }, { acceptance_id: "A2", kind: "check", ref: "unit" }])];
-    expect(evidenceCheck(handoffs, ["test/a.test.js"], ["unit"]).ok).toBe(true);
-    expect(evidenceCheck(handoffs, [], ["unit"]).ok).toBe(false);
-    expect(evidenceCheck(handoffs, ["test/a.test.js"], []).ok).toBe(false);
+    const base: EvidenceInputs = {
+      files: ["test/a.test.js"],
+      executed: [{ file: "test/a.test.js", name: "", result: "pass" }],
+      knownChecks: ["unit"],
+      ranChecks: [{ name: "unit", status: "pass" }],
+    };
+    expect(evidenceCheck(handoffs, base).ok).toBe(true);
+    expect(evidenceCheck(handoffs, { ...base, files: [], executed: [] }).detail).toMatch(/invented reference/);
+    expect(evidenceCheck(handoffs, { ...base, knownChecks: [], ranChecks: [] }).detail).toMatch(/unknown check/);
+    expect(evidenceCheck(handoffs, { ...base, ranChecks: [] }).detail).toMatch(/check was not executed/);
   });
 
   it("guide update check", () => {

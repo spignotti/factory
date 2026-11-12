@@ -284,8 +284,8 @@ moves these runs if nobody starts another run. Fast checks that failed locally o
 
 After the PR is pushed, check runs on the head are polled up to `limits.pr_ci_wait_minutes` (default
 20, `0` = one sample). `none` (nothing registered yet) is polled like `pending`. Still none or pending does
-not fail the run, does not count as work time, and does not enable auto-merge (an auto policy becomes
-`human_review`). Auto-merge is enabled only when the head is green. Red checks end the run `needs_human`,
+not fail the run, does not count as work time, and does not enable auto-merge. An auto policy stays
+auto. The runner enables auto-merge later, only for that SHA, once the head is green. Red checks end the run `needs_human`,
 convert the PR back to draft, and do not enable auto-merge.
 
 ## needs_input and abandon
@@ -300,8 +300,8 @@ A run whose process is still alive is not abandoned. Resume refuses an abandoned
 Skip this for Cloud-Agent-only repos; use branch + PR + CI there instead.
 
 - [ ] `factory adopt --repo <path>`, merge the adopt PR, branch protection with the required status check `done`
-      when the stub runs checks (GitHub Actions; not `factory / done`, which never reports and blocks every PR).
-      When every check is `local_only` (or there is none), do not require `done`: it gates nothing beside the repo's own jobs.
+      (GitHub Actions; not `factory / done`, which never reports and blocks every PR).
+      Require `done` for the minimal stub too: that job checks the commit status `factory=success`.
       A `tier: manual` check is not local-only: it keeps the full stub so `workflow_dispatch` can run it.
 - [ ] CI toolchains: the adopt PR and `factory doctor --repo <path>` list what the stub installs (node, pnpm,
       python, uv). Wrong or missing → `ci.toolchains` in `.factory/repo.yaml` (config PR), no install steps in `setup`.

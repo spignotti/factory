@@ -71,8 +71,10 @@ describe("factory resume", () => {
     });
     expect(r.result.result).toBe("needs_human");
     expect(r.result.reason).toMatch(/^transient network error after retries: Request timed out\.; factory resume /);
-    expect(r.events.filter((e) => e.event === "model_retry")).toHaveLength(4);
+    // retry.attempts is one run budget. The implement fallback does not get a fresh set.
+    expect(r.events.filter((e) => e.event === "model_retry")).toHaveLength(2);
     const st = readState(r.runDir);
+    expect(st.repair).toMatchObject({ network_retries: 2 });
     expect(st).toMatchObject({ step: "implement", result: "needs_human", transient: true });
     const wt = join(r.runDir, "worktree");
     expect(git(wt, "status", "--porcelain")).toContain("leftover.txt");
@@ -169,9 +171,11 @@ describe("factory resume", () => {
     gitAs(clone, "commit", "-q", "--no-edit");
     git(clone, "push", "-q", "origin", branch);
 
-    const r3 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
+    const r3 = await resumeScenario(r, { script: "clean.json", steps: roles("review_plan", "review_simplicity", "pr_writer") });
     expect(r3.result).toMatchObject({ result: "done", pr: r.result.pr });
-    expect(r3.runner.calls.map((c) => c.role)).toEqual(["pr_writer"]);
+    expect(r3.runner.calls.map((c) => c.role)).toEqual(["review_plan", "review_simplicity", "pr_writer"]);
+    expect(r3.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("incremental_diff");
+    expect(r3.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("divide");
     expect(r3.github.prs).toHaveLength(1); // no second PR
     expect(r3.github.updates.map((u) => u.pr)).toEqual([r.result.pr]);
     expect(r3.github.readied).toEqual([r.result.pr]);
@@ -451,5 +455,37 @@ describe("idempotent PR step", () => {
     expect(r2.github.prs).toHaveLength(1);
     expect(r2.resultFile.result).toBe("done");
     expect(sent.map((p) => p.result)).toEqual(["needs_human", "done"]);
+  });
+
+  it("V04: a crash after the PR exists and before auto-merge resumes the same PR and enables once", async () => {
+    let fail = true;
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        const enable = gh.enableAutoMerge.bind(gh);
+        gh.enableAutoMerge = async (dir, pr, sha) => {
+          if (fail) throw new Error("gh: timeout");
+          await enable(dir, pr, sha);
+        };
+      },
+      patch: (c) => {
+        (c.limits as Record<string, unknown>).pr_ci_wait_minutes = 2;
+        ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
+      },
+    });
+    expect(r.result.result).toBe("needs_human");
+    expect(r.result.reason).toMatch(/PR step failed: gh: timeout/);
+    expect(r.github.prs).toHaveLength(1);
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.result.pr).toBe("https://github.test/pr/1");
+    fail = false;
+    const r2 = await resumeScenario(r, { script: "clean.json" });
+    expect(r2.result).toMatchObject({ result: "done", merge_policy: "auto", pr: "https://github.test/pr/1" });
+    expect(r2.github.prs).toHaveLength(1);
+    expect(r2.github.autoMerged).toEqual(["https://github.test/pr/1"]);
+    expect(r2.github.approvedShas.filter((sha) => sha === r2.github.remoteShas.get(r2.result.branch!)).length).toBeGreaterThan(0);
   });
 });

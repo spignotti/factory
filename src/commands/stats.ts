@@ -9,6 +9,9 @@ import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatsPeriodSchema, StatsReportSchema } from "../schemas/reports.js";
 import { billingOf, type BillingKind, DEFAULT_BILLING } from "../schemas/profile.js";
+import { classifyWait, dedupeRuns, lastEventTime, mergeTimestamp, roundKinds, waitLabels, waitedMinutes, type WaitClass } from "../pipeline/accounting.js";
+import { selfMergePolicy } from "../pipeline/merge-ready.js";
+import { addOutcome, emptyOutcomeCounts, readOutcome } from "../pipeline/outcome.js";
 
 /** One period of `factory stats` (schema `schemas/stats.schema.json`). */
 export type StatsPeriod = z.infer<typeof StatsPeriodSchema>;
@@ -43,6 +46,10 @@ function canonical(path: string): string {
 
 const emptyProvider = () => ({ calls: 0, errors: 0, fallbacks: 0, capacity_errors: 0, limit_errors: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 });
 
+function emptyWaits(): Record<WaitClass, number> {
+  return { dependency: 0, capacity: 0, ci_runner: 0, provider: 0, human_decision: 0, technical_repair: 0, unclassified: 0 };
+}
+
 /** Billing kind recorded with the call; older events fall back to the built-in defaults. */
 function eventBilling(e: FactoryEvent): BillingKind {
   const b = e.data.billing;
@@ -52,17 +59,33 @@ function eventBilling(e: FactoryEvent): BillingKind {
 export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: RunRecord) => FactoryEvent[] = readEvents): StatsPeriod {
   const p: StatsPeriod = {
     from: from.toISOString(), to: to.toISOString(), runs: 0, by_result: {}, by_lane: {}, by_type: {}, by_repo: {}, done_rate: null,
-    rounds: { median: null, p90: null }, minutes: { median: null, p90: null }, gate_failures: {}, flaky_checks: {}, reasons: [],
-    providers: {}, roles: {}, cost_usd: 0, subscription_tokens: { tokens_in: 0, tokens_out: 0 }, lane_escalations: 0, watchdog_aborts: 0, merge_policy: {}, auto_merged: 0, reverted: null,
+    rounds: { median: null, p90: null }, minutes: { median: null, p90: null },
+    time: { active_minutes: { median: null, p90: null }, wait_minutes: { median: null, p90: null }, time_to_merge_minutes: { median: null, p90: null }, summed_run_minutes: 0, wall_clock_minutes: null },
+    waits: emptyWaits(), round_kinds: { replan: 0, retry: 0, review: 0 },
+    gate_failures: {}, flaky_checks: {}, reasons: [],
+    providers: {}, roles: {}, cost_usd: 0, subscription_tokens: { tokens_in: 0, tokens_out: 0 }, lane_escalations: 0, watchdog_aborts: 0, merge_policy: {}, auto_merged: 0, reverted: null, outcomes: emptyOutcomeCounts(),
   };
   const rounds: number[] = [];
   const minutes: number[] = [];
+  const waits: number[] = [];
+  const toMerge: number[] = [];
   const reasons = new Map<string, { result: string; reason: string; count: number }>();
   let finished = 0;
-  for (const r of runs) {
+  let minStart = Number.POSITIVE_INFINITY;
+  let maxEnd = Number.NEGATIVE_INFINITY;
+  let sawEnd = false;
+  // One directory is one row. A second copy of the same run id (restart or resume) is not a second ticket.
+  for (const r of dedupeRuns(runs)) {
     if (r.started_at < from || r.started_at >= to) continue;
     p.runs++;
+    const log = events(r);
     const res = r.result;
+    minStart = Math.min(minStart, r.started_at.getTime());
+    const ended = lastEventTime(log);
+    if (ended !== null) {
+      maxEnd = Math.max(maxEnd, ended);
+      sawEnd = true;
+    }
     const result = r.state?.result ?? res?.result ?? "running";
     inc(p.by_result, result);
     inc(p.by_lane, r.state?.lane ?? res?.lane ?? "standard");
@@ -73,7 +96,29 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
       rounds.push(res.rounds);
       minutes.push(res.minutes);
       if (res.merge_policy) inc(p.merge_policy, res.merge_policy);
-      if (res.merge_policy === "auto" && res.pr) p.auto_merged++;
+      const outcome = readOutcome(res);
+      addOutcome(p.outcomes, outcome);
+      // A delivered PR is not a merge. Only a confirmed merge under a self-merge policy counts.
+      // `bot_review` is that policy for the reviewed head. A matching login is not consulted here.
+      if (outcome.merged === "confirmed" && selfMergePolicy(res.merge_policy)) p.auto_merged++;
+      const waited = waitedMinutes(log);
+      if (waited !== null) waits.push(waited);
+      if (outcome.merged === "confirmed") {
+        const mergedAt = mergeTimestamp(log);
+        if (mergedAt !== null && mergedAt >= r.started_at.getTime()) toMerge.push(Math.round(((mergedAt - r.started_at.getTime()) / 60_000) * 10) / 10);
+      }
+    }
+    const kinds = roundKinds(log);
+    p.round_kinds.replan += kinds.replan;
+    p.round_kinds.retry += kinds.retry;
+    p.round_kinds.review += kinds.review;
+    const seenWait = new Set<string>();
+    for (const label of waitLabels(r, log)) {
+      const cls = classifyWait(label.reason, label.result);
+      const key = `${cls}\n${label.reason}`;
+      if (seenWait.has(key)) continue;
+      seenWait.add(key);
+      p.waits[cls]++;
     }
     if (result === "needs_human" || result === "needs_input" || result === "abandoned") {
       const reason = (r.state?.reason ?? res?.reason ?? "").slice(0, 160);
@@ -82,7 +127,7 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
       e.count++;
       reasons.set(key, e);
     }
-    for (const e of events(r)) {
+    for (const e of log) {
       if (e.event === "gate_result" && !e.data.base) {
         const check = String(e.data.check);
         if (e.data.status === "fail") inc(p.gate_failures, check);
@@ -119,6 +164,11 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
   p.done_rate = finished ? round4((p.by_result.done ?? 0) / finished) : null;
   p.rounds = { median: quantile(rounds, 0.5), p90: quantile(rounds, 0.9) };
   p.minutes = { median: quantile(minutes, 0.5), p90: quantile(minutes, 0.9) };
+  p.time.active_minutes = { median: p.minutes.median, p90: p.minutes.p90 };
+  p.time.wait_minutes = { median: quantile(waits, 0.5), p90: quantile(waits, 0.9) };
+  p.time.time_to_merge_minutes = { median: quantile(toMerge, 0.5), p90: quantile(toMerge, 0.9) };
+  p.time.summed_run_minutes = Math.round(minutes.reduce((sum, n) => sum + n, 0) * 10) / 10;
+  p.time.wall_clock_minutes = sawEnd ? Math.round(((maxEnd - minStart) / 60_000) * 10) / 10 : null;
   p.reasons = [...reasons.values()].sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
   return p;
 }
@@ -160,6 +210,10 @@ function formatCounts(label: string, counts: Record<string, number>, limit = 8):
   return `${label}: ${top.length ? top.map(([k, v]) => `${k} ${v}`).join(", ") : "–"}`;
 }
 
+function formatOutcomes(outcomes: StatsPeriod["outcomes"]): string {
+  return `outcomes: tickets ${outcomes.tickets} (${outcomes.tickets_unknown} unknown), attempts ${outcomes.attempts} (${outcomes.attempts_unknown} unknown), delivered PRs ${outcomes.delivered_prs} (${outcomes.delivered_prs_unknown} unknown), confirmed merges ${outcomes.confirmed_merges} (${outcomes.merges_unknown} unknown), ended without merge ${outcomes.ended_without_merge} (${outcomes.ended_without_merge_unknown} unknown), open decisions ${outcomes.open_decisions} (${outcomes.open_decisions_unknown} unknown)`;
+}
+
 function formatReasons(reasons: StatsPeriod["reasons"], limit = 8): string {
   const top = reasons.slice(0, limit);
   return `reasons: ${top.length ? top.map((r) => `${r.result} (${r.count}) ${r.reason || "–"}`).join("; ") : "–"}`;
@@ -179,9 +233,14 @@ export function statsCommand(opts: { factoryHome: string; since?: string; repo?:
       `results: ${Object.entries(c.by_result).map(([k, v]) => `${k} ${v}`).join(", ") || "–"}`,
       `done rate: ${pct(c.done_rate)} (previous ${pct(s.previous.done_rate)})`,
       `rounds median/p90: ${c.rounds.median ?? "–"}/${c.rounds.p90 ?? "–"}; minutes median/p90: ${c.minutes.median ?? "–"}/${c.minutes.p90 ?? "–"}`,
-      `subscription tokens: ${c.subscription_tokens.tokens_in} in / ${c.subscription_tokens.tokens_out} out (previous ${s.previous.subscription_tokens.tokens_in} / ${s.previous.subscription_tokens.tokens_out})`,
+      `time: active median/p90 ${c.time.active_minutes.median ?? "–"}/${c.time.active_minutes.p90 ?? "–"}; wait median/p90 ${c.time.wait_minutes.median ?? "–"}/${c.time.wait_minutes.p90 ?? "–"}; time to merge median/p90 ${c.time.time_to_merge_minutes.median ?? "–"}/${c.time.time_to_merge_minutes.p90 ?? "–"}; summed run minutes ${c.time.summed_run_minutes} (not wall-clock); wall-clock ${c.time.wall_clock_minutes ?? "unknown"}`,
+      `waits: dependency ${c.waits.dependency}, capacity ${c.waits.capacity}, ci_runner ${c.waits.ci_runner}, provider ${c.waits.provider}, human_decision ${c.waits.human_decision}, technical_repair ${c.waits.technical_repair}, unclassified ${c.waits.unclassified}`,
+      `rounds detail: replan ${c.round_kinds.replan}, retry ${c.round_kinds.retry}, review ${c.round_kinds.review}`,
+      `subscription: ${c.subscription_tokens.tokens_in} in / ${c.subscription_tokens.tokens_out} out tokens (previous ${s.previous.subscription_tokens.tokens_in} / ${s.previous.subscription_tokens.tokens_out}); not priced in dollars (a zero price is not an efficiency proof)`,
       `cost (metered providers): $${c.cost_usd.toFixed(4)} (previous $${s.previous.cost_usd.toFixed(4)})`,
+      `regressions: unknown`,
       `lane escalations ${c.lane_escalations}, watchdog aborts ${c.watchdog_aborts}`,
+      formatOutcomes(c.outcomes),
       formatCounts("gate failures", c.gate_failures),
       formatReasons(c.reasons),
       s.audit_tickets.length

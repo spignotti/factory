@@ -10,7 +10,7 @@ import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny, planReviewNotes } from "../schemas/plan.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema } from "../schemas/review.js";
-import { CHECKLIST_REL, resolveStandards, REVIEW_RULES_REL, STANDARDS_REL, type ResolvedStandards } from "../standards.js";
+import { CHECKLIST_REL, resolveStandards, REVIEW_RULES_REL, rulesForReview, STANDARDS_REL, type ResolvedStandards } from "../standards.js";
 import { skippedSecurityGates, type GateReport, visibleGateDetail } from "./gates.js";
 
 
@@ -54,14 +54,15 @@ export async function planReviewers(ctx: RunContext, round: number): Promise<Rev
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const security = changed.filter((f) => matchesAny(f, ctx.repo.sensitive_paths) || matchesAny(f, DEPENDENCY_GLOBS));
   const standards = await baseStandards(ctx);
+  const visibleStandards = rulesForReview(standards.items);
   const reviewers: Reviewer[] = ["plan", "simplicity"];
   // A reviewer that ran once stays for the rest of the run: its open findings need its verdicts.
   if (security.length || reviewedBefore(ctx, "security", round)) reviewers.push("security");
-  if (standards.unmarked.length || reviewedBefore(ctx, "standards", round)) reviewers.push("standards");
+  if (visibleStandards.length || reviewedBefore(ctx, "standards", round)) reviewers.push("standards");
   return {
     reviewers,
     security,
-    standards: standards.unmarked,
+    standards: visibleStandards,
     standardsFile: standards.source === "checklist.md" ? "checklist.md" : "standards.md",
     reviewRules: standards.reviewRules,
     ...(standards.deprecated ? { deprecated: standards.deprecated } : {}),

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -93,6 +94,71 @@ describe("CI stub", () => {
     expect(run(gate!.run!, { DRAFT: "false", SELECT: "skipped", CHECK: "skipped" })).toBe(1);
   });
 
+  it("V03: a pull request done fails without factory=success and a tag does not ask", () => {
+    const text = renderCiStub("v1.2.3");
+    expect(text).toContain("statuses: read");
+    expect(text).toContain('i.context==="factory"');
+    const minimal = renderCiStubFor("v1.2.3", "minimal");
+    expect(minimal).toContain("statuses: read");
+    expect(minimal).toContain('i.context==="factory"');
+    // approveHead posts on the branch head. github.sha on pull_request is the merge commit.
+    const approvalSha = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
+    for (const rendered of [text, minimal]) {
+      const wf = parse(rendered) as { jobs: Record<string, { steps: { env?: Record<string, string>; run?: string }[] }> };
+      const step = wf.jobs.done!.steps.find((s) => s.env?.SHA);
+      expect(step?.env?.SHA).toBe(approvalSha);
+      expect(step?.run ?? "").not.toContain("${{");
+      expect(rendered).not.toContain("SHA: ${{ github.sha }}");
+    }
+    const bin = mkdtempSync(join(tmpdir(), "factory-curl-"));
+    const log = join(bin, "curl.log");
+    const body = join(bin, "body.json");
+    writeFileSync(join(bin, "curl"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\ncat \"$FAKE_CURL_BODY\"\n");
+    chmodSync(join(bin, "curl"), 0o755);
+    const script = (rendered: string) => {
+      const wf = parse(rendered) as { jobs: Record<string, { steps: { run?: string }[] }> };
+      const run = wf.jobs.done!.steps.map((s) => s.run ?? "").find((s) => s.includes("factory"));
+      if (!run) throw new Error("done script missing");
+      return run;
+    };
+    const exec = (rendered: string, env: Record<string, string>) => {
+      try {
+        execFileSync("bash", ["-c", script(rendered)], {
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, FAKE_CURL_LOG: log, FAKE_CURL_BODY: body, FACTORY_APPROVAL_TRIES: "2", FACTORY_APPROVAL_SLEEP: "0", TOKEN: "test-token", SHA: "abc", REPO: "acme/widgets", ...env },
+          encoding: "utf8",
+        });
+        return 0;
+      } catch (e) {
+        return (e as { status?: number }).status ?? 1;
+      }
+    };
+    writeFileSync(body, JSON.stringify({ statuses: [] }));
+    writeFileSync(log, "");
+    expect(exec(text, { EVENT: "pull_request", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(1);
+    expect(readFileSync(log, "utf8")).toContain("commits/abc/status");
+    expect(readFileSync(log, "utf8")).toContain("Bearer test-token");
+    writeFileSync(body, JSON.stringify({ statuses: [{ context: "other", state: "success" }, { context: "factory", state: "failure" }] }));
+    expect(exec(text, { EVENT: "pull_request", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(1);
+    writeFileSync(log, "");
+    writeFileSync(body, JSON.stringify({ statuses: [{ context: "factory", state: "pending" }] }));
+    const flip = join(bin, "curl");
+    writeFileSync(flip, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\nn=$(wc -l < \"$FAKE_CURL_LOG\")\nif [ \"$n\" -lt 2 ]; then printf '%s\\n' '{\"statuses\":[{\"context\":\"factory\",\"state\":\"pending\"}]}'; else cat \"$FAKE_CURL_BODY\"; fi\n");
+    chmodSync(flip, 0o755);
+    writeFileSync(body, JSON.stringify({ statuses: [{ context: "factory", state: "success" }] }));
+    expect(exec(text, { EVENT: "pull_request", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(0);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(2);
+    writeFileSync(log, "");
+    expect(exec(text, { EVENT: "workflow_dispatch", DRAFT: "false", SELECT: "success", CHECK: "success" })).toBe(0);
+    expect(readFileSync(log, "utf8")).toBe("");
+    expect(exec(minimal, { EVENT: "push", DRAFT: "false" })).toBe(0);
+    expect(exec(minimal, { EVENT: "pull_request", DRAFT: "false" })).toBe(0);
+    writeFileSync(body, JSON.stringify({ statuses: [] }));
+    writeFileSync(flip, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\ncat \"$FAKE_CURL_BODY\"\n");
+    chmodSync(flip, 0o755);
+    expect(exec(minimal, { EVENT: "pull_request", DRAFT: "true" })).toBe(1);
+    expect(exec(minimal, { EVENT: "pull_request", DRAFT: "false" })).toBe(1);
+  });
+
   it("git pin is installed by npm 11.21.1, not by Node 22's npm 10.9.9 npx", () => {
     const sha = "dbc340170bf0ed2bc19c542f718f1e8f81821eab";
     const factory = renderCiStub(sha).match(/^ {2}FACTORY: "(.*)"$/m)?.[1];
@@ -125,14 +191,23 @@ describe("CI stub", () => {
     expect(wf.jobs.select!.steps.at(-1)!.run).toContain('"$ALL" = true');
     const steps = wf.jobs.check!.steps;
     const tc = (k: string) => `fromJson(needs.select.outputs.toolchains).${k}`;
-    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v6", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "actions/cache@v4", "run"]);
+    expect(steps.map((s) => s.uses ?? "run")).toEqual([
+      "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+      "pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115",
+      "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+      "astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e",
+      "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+      "run",
+    ]);
+    expect(steps.every((s) => s.uses === undefined || /@[0-9a-f]{40}$/.test(s.uses))).toBe(true);
     expect(steps[1]).toMatchObject({ if: tc("pnpm"), with: { version: `\${{ ${tc("pnpm_version")} }}` } });
     expect(steps[2]).toMatchObject({ with: { "node-version": `\${{ ${tc("node")} }}` } });
     expect(steps[3]).toMatchObject({ if: `${tc("python")} != ''`, with: { "python-version": `\${{ ${tc("python")} }}` } });
     expect(steps[4]).toMatchObject({ if: tc("uv"), with: { version: `\${{ ${tc("uv_version")} }}` } });
     // the npx install of the pinned factory is cached per ref, in select and in every check
     expect(steps[5]).toMatchObject({ with: { path: "~/.npm/_npx", key: "factory-npx-${{ runner.os }}-${{ env.FACTORY }}" } });
-    expect(wf.jobs.select!.steps.some((s) => s.uses === "actions/cache@v4")).toBe(true);
+    expect(wf.jobs.select!.steps.some((s) => s.uses === "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830")).toBe(true);
     expect(steps[6]!.run).toBe('$FACTORY gates --run "$CHECK"');
     // the required status is the job name GitHub Actions reports
     expect(Object.keys(wf.jobs)).toContain("done");
@@ -252,7 +327,7 @@ describe("CI stub", () => {
     expect(ciChecks(manualCi, loadRepoConfig(manualCi))[0]).toMatchObject({ status: "fail", detail: expect.stringMatching(/differs from the template/) });
   });
 
-  it("doctor and adopt do not suggest requiring done when it gates nothing", async () => {
+  it("doctor and adopt warn when a minimal stub does not require done", async () => {
     const repo = createFixtureRepo((c) => {
       for (const check of c.checks as { local_only?: boolean }[]) check.local_only = true;
     });
@@ -261,18 +336,24 @@ describe("CI stub", () => {
     const gh = new FakeGitHub();
     gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["Lint"] };
     const checks = await githubChecks(gh, repo, loadRepoConfig(repo));
-    expect(checks.map((c) => c.detail).join("\n")).not.toMatch(/require the status check "done"|not a required check yet/);
-    expect(checks.find((c) => c.name === "required checks")).toMatchObject({ status: "ok", detail: expect.stringMatching(/\bLint\b/) });
+    const text = checks.map((c) => c.detail).join("\n");
+    expect(text).not.toMatch(/gates nothing/);
+    expect(checks.find((c) => c.name === "branch protection")).toMatchObject({ detail: expect.stringMatching(/not a required check yet/) });
+    expect(checks.find((c) => c.name === "required checks")).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
     gh.settings = { private: false, auto_merge_allowed: true, branch_protected: true, required_checks: [] };
     const missing = (await githubChecks(gh, repo, loadRepoConfig(repo))).find((c) => c.name === "required checks");
-    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/Lint/) });
-    expect(missing!.detail).not.toMatch(/\bdone\b/);
+    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
+    expect(missing!.detail).toMatch(/Lint/);
+    expect(missing!.detail).not.toMatch(/gates nothing/);
     const gated = (await githubChecks(gh, repo, loadRepoConfig(createFixtureRepo()))).find((c) => c.name === "required checks");
     expect(gated).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
     expect(gated!.detail).toMatch(/Lint/);
     const hints = settingsHints({ private: false, auto_merge_allowed: true, branch_protected: false, required_checks: ["Lint"] }, "main", "minimal");
-    expect(hints.join("\n")).not.toContain('status check "done"');
-    expect(settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main", "minimal")[0]).toMatch(/Remove the required status check "factory \/ done"/);
+    expect(hints.join("\n")).toContain('status check "done"');
+    expect(hints.join("\n")).not.toMatch(/gates nothing/);
+    const legacy = settingsHints({ private: false, auto_merge_allowed: true, branch_protected: true, required_checks: ["factory / done"] }, "main", "minimal");
+    expect(legacy[0]).toMatch(/require the status check "done"/);
+    expect(legacy.join("\n")).not.toMatch(/gates nothing/);
   });
 
   it("factory ci-stub --ref resolves a tag to its commit SHA and keeps the tag as a comment", async () => {

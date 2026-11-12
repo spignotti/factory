@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { GhCli } from "../../src/gh.js";
 import { aggregateCheckRuns, type CheckRunView } from "../../src/pipeline/ci-status.js";
 
 const run = (over: Partial<CheckRunView> & Pick<CheckRunView, "name" | "status">): CheckRunView => ({
@@ -9,7 +13,57 @@ const run = (over: Partial<CheckRunView> & Pick<CheckRunView, "name" | "status">
   ...over,
 });
 
+describe("failed head diagnostics adapter", () => {
+  it("reads only failed Actions checks on the exact head and refuses incomplete diagnostics", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "gh-failures-"));
+    const sha = "a".repeat(40);
+    const check = { name: "unit", head_sha: sha, conclusion: "failure", app: { slug: "github-actions" },
+      details_url: "https://github.com/o/r/actions/runs/1/job/42", output: { summary: "AssertionError" } };
+    const response = { total_count: 4, check_runs: [check,
+      { ...check, name: "old", head_sha: "b".repeat(40) },
+      { ...check, name: "external", app: { slug: "other-app" } },
+      { ...check, name: "passed", conclusion: "success" },
+    ] };
+    const stub = join(dir, "gh");
+    writeFileSync(stub, `#!${process.execPath}\nconst fs = require('node:fs');\nconst args = process.argv.slice(2);\nif (args[0] === 'api') console.log(fs.readFileSync(${JSON.stringify(join(dir, "response.json"))}, 'utf8'));\nelse if (JSON.stringify(args) === JSON.stringify(['run','view','--job','42','--log-failed'])) console.log('AssertionError: synthetic boundary');\nelse process.exit(1);\n`);
+    chmodSync(stub, 0o755);
+    writeFileSync(join(dir, "response.json"), JSON.stringify(response));
+    const path = process.env.PATH;
+    process.env.PATH = `${dir}:${path ?? ""}`;
+    try {
+      expect(await new GhCli().headFailures(dir, sha)).toEqual([{ name: "unit", output_tail: "AssertionError\nAssertionError: synthetic boundary" }]);
+      writeFileSync(join(dir, "response.json"), JSON.stringify({ ...response, total_count: 101 }));
+      await expect(new GhCli().headFailures(dir, sha)).rejects.toThrow(/incomplete/);
+    } finally {
+      if (path === undefined) delete process.env.PATH;
+      else process.env.PATH = path;
+    }
+  });
+});
+
 describe("aggregateCheckRuns", () => {
+  it("V01: a finished suite settles a stuck in_progress success, and a running suite does not", () => {
+    expect(
+      aggregateCheckRuns([
+        run({ name: "select", status: "completed", conclusion: "success", suite_completed: true, id: 1 }),
+        run({ name: "check", status: "completed", conclusion: "success", suite_completed: true, id: 2 }),
+        run({ name: "done", status: "in_progress", conclusion: "success", suite_completed: true, id: 3 }),
+      ]),
+    ).toBe("green");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "check", status: "completed", conclusion: "success", suite_completed: false, id: 1 }),
+        run({ name: "done", status: "in_progress", conclusion: "success", suite_completed: false, id: 2 }),
+      ]),
+    ).toBe("pending");
+    expect(
+      aggregateCheckRuns([
+        run({ name: "done", status: "queued", conclusion: null, suite_completed: false, id: 1 }),
+      ]),
+    ).toBe("pending");
+    expect(aggregateCheckRuns([])).toBe("none");
+  });
+
   it("is none with no runs and green when the full suite succeeded", () => {
     expect(aggregateCheckRuns([])).toBe("none");
     expect(

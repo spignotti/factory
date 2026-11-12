@@ -381,7 +381,7 @@ describe("gc retention integration", () => {
     expect(deploySelfBusy({ FACTORY_RELEASES: rel, PATH: join(rel, "no-such-bin") })).toBe(false);
   });
 
-  it("a deploy flock blocks only while it is held", async () => {
+  it.skipIf(process.platform !== "linux")("a Linux deploy flock blocks only while it is held", async () => {
     const rel = mkdtempSync(join(tmpdir(), "deploy-rel-"));
     dirs.push(rel);
     const lock = join(rel, ".deploy.lock");

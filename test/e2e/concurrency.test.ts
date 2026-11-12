@@ -490,7 +490,7 @@ describe("parallel runs and host steps", () => {
         ),
     });
     release?.();
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result, r.file("state.json")).toBe("needs_human");
     expect(r.result.reason).toMatch(/changed files overlap another factory run/);
     expect(r.github.pushes).toEqual([]);
     expect(r.runner.calls.some((c) => c.role === "implement")).toBe(true);

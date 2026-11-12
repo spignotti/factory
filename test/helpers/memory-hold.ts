@@ -19,5 +19,6 @@ updateMemory(factoryHome, repoId, (mem) => {
     runs: ["holder"],
     status: "open",
     ref: null,
+    disposition: "confirmed",
   });
 });

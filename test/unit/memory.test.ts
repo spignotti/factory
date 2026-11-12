@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { briefing, canonicalRepoId, discardDeadLockFile, flushMemory, loadMemory, memoryKey, memoryPath, observations, releaseOwnedLockFile, repoDirName } from "../../src/memory.js";
+import { briefing, canonicalRepoId, discardDeadLockFile, errorClass, flushMemory, loadMemory, memoryKey, memoryPath, observations, releaseOwnedLockFile, repoDirName } from "../../src/memory.js";
 import type { TrackedFinding } from "../../src/pipeline/merge.js";
 
 const home = () => mkdtempSync(join(tmpdir(), "factory-mem-"));
@@ -39,12 +39,57 @@ describe("findings memory", () => {
     expect(memoryKey(finding({ file: "src/b.ts" }))).not.toBe(memoryKey(finding()));
   });
 
-  it("observations: open non-nit findings plus flaky checks", () => {
+  it("observations: confirmed findings, including fixed ones, stay distinct from rejected and ungrounded", () => {
     const obs = observations(
-      [finding(), finding({ id: "F2", severity: "nit", claim: "naming" }), finding({ id: "F3", status: "resolved", claim: "x" }), finding({ id: "F4", status: "accepted_wontfix", claim: "y" })],
+      [
+        finding(),
+        finding({ id: "F2", severity: "nit", claim: "naming" }),
+        finding({ id: "F3", status: "resolved", claim: "x" }),
+        finding({ id: "F4", status: "accepted_wontfix", claim: "y" }),
+        finding({ id: "F5", claim: "no evidence", evidence: "  " }),
+      ],
       ["test"],
     );
-    expect(obs.map((o) => o.key)).toEqual([memoryKey(finding()), "flaky:test"]);
+    expect(obs.map((o) => [o.disposition, o.key])).toEqual([
+      ["confirmed", memoryKey(finding())],
+      ["confirmed", memoryKey(finding({ claim: "x" }))],
+      ["rejected", `rejected:${memoryKey(finding({ claim: "y" }))}`],
+      ["ungrounded", `ungrounded:${memoryKey(finding({ claim: "no evidence", evidence: "  " }))}`],
+      ["confirmed", "flaky:test"],
+    ]);
+  });
+
+  it("counts one error class across two runs, not across rounds, and reopens it after a merge", () => {
+    const factoryHome = home();
+    const id = "github.com/a/class";
+    const first = finding({ claim: "add throws", evidence: "AssertionError at `add`" });
+    const again = finding({ claim: "add rejects empty", evidence: "saw `add` raise AssertionError" });
+    expect(errorClass(first)).toBe(errorClass(again));
+    expect(errorClass(first)).toBe("bug\nsrc/a.ts\nadd");
+    const t = (n: number) => new Date(Date.UTC(2026, 0, n));
+    flushMemory({ factoryHome, repoId: id, runId: "r1", now: t(1), observations: observations([first, again], []) });
+    flushMemory({ factoryHome, repoId: id, runId: "r1", now: t(2), observations: observations([again], []) });
+    let confirmed = loadMemory(factoryHome, id).entries.filter((e) => e.disposition === "confirmed");
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toMatchObject({ count: 1, runs: ["r1"], status: "open" });
+    expect(loadMemory(factoryHome, id).entries.some((e) => e.disposition === "duplicate")).toBe(true);
+
+    flushMemory({ factoryHome, repoId: id, runId: "r2", now: t(3), observations: observations([again], []) });
+    confirmed = loadMemory(factoryHome, id).entries.filter((e) => e.disposition === "confirmed");
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]!.count).toBe(2);
+
+    const path = memoryPath(factoryHome, id);
+    const stored = JSON.parse(readFileSync(path, "utf8")) as { entries: { key: string; status: string }[] };
+    const row = stored.entries.find((e) => e.key === confirmed[0]!.key)!;
+    row.status = "resolved";
+    writeFileSync(path, JSON.stringify(stored));
+    flushMemory({ factoryHome, repoId: id, runId: "r3", now: t(4), observations: observations([finding({ claim: "add still fails", evidence: "rule:add-empty `add`" })], []) });
+    confirmed = loadMemory(factoryHome, id).entries.filter((e) => e.disposition === "confirmed");
+    expect(confirmed).toHaveLength(1);
+    expect(confirmed[0]).toMatchObject({ count: 3, status: "open" });
+    expect(briefing(loadMemory(factoryHome, id))).toContain("add still fails");
+    expect(briefing({ version: 1, repo: id, entries: [{ ...confirmed[0]!, disposition: "rejected", status: "open" }] })).toBe("");
   });
 
   it("upsert by key: count once per run, last_seen moves, resolved reopens, runs capped", () => {

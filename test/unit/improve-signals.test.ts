@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { attachRunViews, CI_MAX_PAGES, ciRunListArgs, foldRunListPages, paginateRunList, parseRunList, parseRunView, resolveRunWorkflow, type RunListRow } from "../../src/ci-history.js";
 import { collectAspect } from "../../src/improve/aspects.js";
 import { assembleRuns, ciSignals, ciWorth, HIGH_CI_MINUTES_PER_WEEK, readCiWorkflows } from "../../src/improve/ci-signals.js";
-import { collectTestSignals, durationCommand, localSignalTimeoutMs, parseCoverageReport, parsePytestDurations, parseReporterDurations, runnerInvocation, testWorth, uncoveredCritical } from "../../src/improve/test-signals.js";
+import { collectTestSignals, coverageReading, durationCommand, durationReading, localSignalTimeoutMs, parseCoverageReport, parsePytestDurations, parseReporterDurations, runnerInvocation, testWorth, uncoveredCritical } from "../../src/improve/test-signals.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 import { entry } from "../helpers/harden.js";
@@ -80,6 +80,23 @@ describe("ci signals from recorded gh pages", () => {
     expect(signal.push_to_main).toEqual([{ workflow: "Nightly", file: ".github/workflows/nightly.yml", runs: 1, minutes_per_week: 0.1 }]);
     expect(ciWorth(signal)).toBe(true);
     expect(ciWorth(ciSignals({ runs: [], truncated: false, workflows: [], baseBranch: "main" }))).toBe(false);
+  });
+
+  it("reports a shellcheck job with no duration as a gap, not as a never-failed clean bill", () => {
+    const runs = Array.from({ length: 5 }, (_, i) => ({
+      id: i,
+      sha: `s${i}`,
+      workflow: "CI",
+      event: "pull_request",
+      conclusion: "success",
+      created_at: "2026-10-20T00:00:00Z",
+      jobs: [{ name: "shellcheck", conclusion: "success", seconds: null }],
+    }));
+    const signal = ciSignals({ runs, truncated: false, workflows: [], baseBranch: "main" });
+    expect(signal.measurement_gaps.join("\n")).toContain("CI/shellcheck: timing not reported");
+    expect(signal.measurement_gaps.join("\n")).not.toMatch(/0 defects|full coverage/);
+    expect(signal.never_failed).toEqual([]);
+    expect(ciWorth(signal)).toBe(false);
   });
 
   it("identifies a workflow by file path, not by the run name", () => {
@@ -449,7 +466,82 @@ describe("tests signals", () => {
     });
     expect(signal.coverage?.uncovered).toEqual([]);
     expect(signal.coverage?.error).toMatch(/coverage failed/);
+    expect(signal.coverage?.measurement).toBe("gap");
+    expect(coverageReading(signal)).toEqual({ kind: "gap", missed: null });
     expect(testWorth(signal, 0)).toBe(true);
+  });
+
+  it("treats an unparsed coverage report and a shell suite without timings as gaps, not as zero defects", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "improve-cov-gap-"));
+    const repo = parseRepoConfig('tests: { coverage: "coverage" }\n');
+    const gap = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => ({ stdout: "all good", stderr: "" }),
+    });
+    expect(gap.coverage).toMatchObject({ uncovered: [], error: null, measurement: "gap" });
+    expect(coverageReading(gap)).toEqual({ kind: "gap", missed: null });
+    expect(testWorth(gap, 0)).toBe(false);
+    expect(JSON.stringify(gap)).not.toMatch(/full coverage|0 defects/);
+
+    const measured = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => ({ stdout: JSON.stringify({ files: { "src/a.py": { summary: { missing_lines: 0 } } } }), stderr: "" }),
+    });
+    expect(measured.coverage?.uncovered).toEqual([]);
+    expect(measured.coverage?.error).toBeNull();
+    expect(coverageReading(measured)).toEqual({ kind: "measured", missed: 0 });
+
+    const missed = await collectTestSignals({
+      repoDir: dir,
+      repo,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => ({ stdout: JSON.stringify({ files: { "src/a.py": { summary: { missing_lines: 4 } } } }), stderr: "" }),
+    });
+    expect(coverageReading(missed)).toEqual({ kind: "measured", missed: 4 });
+    expect(coverageReading({ coverage: null })).toEqual({ kind: "absent" });
+
+    const shell = parseRepoConfig('tests: { run: "bats tests" }\nchecks:\n  - { name: shell, run: "shellcheck src/a.sh", tier: fast }\n');
+    const timings = await collectTestSignals({
+      repoDir: dir,
+      repo: shell,
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => ({ stdout: "", stderr: "" }),
+    });
+    expect(timings.slowest).toEqual([]);
+    expect(timings.duration_error).toBeNull();
+    expect(durationReading(timings)).toEqual({ kind: "gap", slow: null });
+    expect(testWorth(timings, 0)).toBe(false);
+
+    const quiet = await collectTestSignals({
+      repoDir: dir,
+      repo: parseRepoConfig("checks: []\n"),
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+    });
+    expect(durationReading(quiet)).toEqual({ kind: "absent" });
+
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
+    const slow = await collectTestSignals({
+      repoDir: dir,
+      repo: parseRepoConfig("checks: []\n"),
+      mem: { version: 1, repo: "r", entries: [] },
+      runs: [],
+      isolate: async (_repoDir, _repo, fn) => fn(dir),
+      exec: async () => ({ stdout: JSON.stringify({ testResults: [{ assertionResults: [{ fullName: "slow", duration: 3000 }] }] }), stderr: "" }),
+    });
+    expect(durationReading(slow)).toEqual({ kind: "measured", slow: 1 });
   });
 });
 

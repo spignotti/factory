@@ -455,13 +455,13 @@ ${fixed}` } };
     const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
     expect(prompt("review_security")).toMatch(/security_trigger_files[\s\S]*src\/auth\/session\.js/);
     expect(prompt("review_standards")).toContain("S1 (standards.md:3): Every exported function has a test");
-    expect(prompt("review_standards")).not.toContain("No TODO comments");
+    expect(prompt("review_standards")).toContain("No TODO comments");
     expect(prompt("review_standards")).toContain("custom-severity-token");
     expect(prompt("review_plan")).toContain("custom-severity-token");
     expect(prompt("review_plan")).not.toContain("standards_items");
     expect(prompt("review_plan")).not.toContain("Style is never a `bug`");
     expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
-    expect(prompt("plan_high")).not.toContain("No TODO comments");
+    expect(prompt("plan_high")).toContain("No TODO comments");
   });
 
   it("falls back to checklist.md and review-rules.md when standards.md is missing", async () => {
@@ -483,22 +483,25 @@ ${fixed}` } };
     expect(started?.data.standards_deprecated).toMatch(/factory standards migrate/);
     const prompt = (role: string) => r.runner.calls.find((c) => c.role === role)?.prompt ?? "";
     expect(prompt("review_standards")).toContain("S1 (checklist.md:1): Every exported function has a test");
-    expect(prompt("review_standards")).not.toContain("No TODO comments");
+    expect(prompt("review_standards")).toContain("No TODO comments");
     expect(prompt("review_standards")).toContain("legacy-severity-token");
     expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
   });
 
-  it("no security reviewer for ordinary files; no standards reviewer when review.checklist is off or all items are marked", async () => {
+  it("keeps marked standards in review; only an explicit checklist opt-out disables that reviewer", async () => {
     const off = await runScenario({
       script: "clean.json",
       patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
       setup: (repo) => commitFile(repo, ".factory/standards.md", "- Every exported function has a test\n"),
     });
-    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: unit -->\n") });
-    for (const r of [off, marked]) {
-      expect(r.result.result).toBe("done");
-      expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
-    }
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: suite -->\n"),
+      steps: (steps) => [...steps, { role: "review_standards", output: { reviewer: "standards", prior: [], findings: [] } }],
+    });
+    expect(off.result.result).toBe("done");
+    expect(marked.result.result).toBe("done");
+    expect(eventsOf(off, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
+    expect(eventsOf(marked, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "standards"]);
+    expect(marked.runner.calls.find((c) => c.role === "review_standards")?.prompt).toContain("Tests pass");
   });
 
   it("a dependency file anywhere activates security", async () => {
@@ -552,15 +555,16 @@ ${fixed}` } };
       steps: (steps) => steps.map((st) => (st.role === "implement" ? { ...st, writes: { ...st.writes, "test/multiply.test.js": testFile } } : st)),
     });
     expect(r.result.result).toBe("done");
-    // Production diff fits the gate; the same lines plus tests still raise merge risk.
+    // Production diff fits the gate. Test lines stay visible as a size signal and do not raise risk.
     expect(r.result.counted_lines).toBeGreaterThan(0);
     expect(r.result.counted_lines!).toBeLessThanOrEqual(20);
     expect(r.result.excluded_test_lines).toBeGreaterThan(40);
     const riskLines = r.result.counted_lines! + r.result.excluded_test_lines!;
     expect(riskLines).toBeGreaterThan(30);
-    expect(r.result.risk).toBe("medium");
-    expect(r.result.risk_reasons).toContain(`diff ${riskLines} lines > 30`);
-    expect(r.github.prs[0]?.body).toContain(`diff ${riskLines} lines > 30`);
+    expect(r.result.risk).toBe("low");
+    expect(r.result.risk_reasons ?? []).not.toContain(`diff ${riskLines} lines > 30`);
+    expect(r.github.prs[0]?.body).toContain(`size signal (does not change risk): diff ${riskLines} lines > 30`);
+    expect(r.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("padding 0");
     expect(r.resultFile).toEqual(r.result);
     const gateEvents = eventsOf(r, "gate_result").filter((e) => e.data.check === "max_diff_lines");
     expect(gateEvents.length).toBeGreaterThan(0);
@@ -660,7 +664,7 @@ ${fixed}` } };
     ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
   };
 
-  it("pending CI on the PR head is polled; still pending is human_review and is not auto-merged", async () => {
+  it("pending CI on the PR head is polled; still pending keeps auto and is not auto-merged", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
@@ -670,10 +674,14 @@ ${fixed}` } };
       patch: autoMerge,
       deps: { baseCiPollMs: 30_000 },
     });
-    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
+    const state = JSON.parse(r.file("state.json")) as { ci_wait?: string; approved_sha?: string };
+    expect(state.ci_wait).toBe("pending");
+    expect(state.approved_sha).toBe(r.github.remoteShas.get(r.result.branch!));
+    expect(r.github.approvedShas).toEqual([state.approved_sha]);
     expect(r.events.some((e) => e.event === "progress" && (e.data.pr_ci as { status?: string } | undefined)?.status === "pending")).toBe(true);
   });
 
@@ -683,6 +691,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
       },
       patch: autoMerge,
@@ -690,20 +699,22 @@ ${fixed}` } };
     });
     expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.github.approvedShas).toEqual([r.github.remoteShas.get(r.result.branch!)]);
     expect(r.slept).toEqual([30_000]);
   });
 
-  it("none on the PR head that never registers is human_review and is not auto-merged", async () => {
+  it("none on the PR head that never registers keeps auto and is not auto-merged", async () => {
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => void (gh.status = "none"),
       patch: autoMerge,
       deps: { baseCiPollMs: 30_000 },
     });
-    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.drafted).toEqual([]);
     expect(r.github.readied).toEqual([]);
+    expect(JSON.parse(r.file("state.json")).ci_wait).toBe("none");
     expect(r.slept).toEqual([30_000, 30_000, 30_000, 30_000]);
   });
 
@@ -713,6 +724,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
       },
       patch: autoMerge,
@@ -749,14 +761,32 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
       },
       patch: autoMerge,
     });
     expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([r.result.pr]);
+    expect(r.github.approvedShas).toEqual([r.github.remoteShas.get(r.result.branch!)]);
+    expect(r.github.autoMergeShas).toEqual([{ pr: r.result.pr, sha: r.github.remoteShas.get(r.result.branch!) }]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([]);
+  });
+
+  it("does not enable auto-merge when the open head is no longer the approved SHA", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.findOpenPr = async () => ({ url: "https://github.test/pr/moved", draft: false, headSha: "f".repeat(40) });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(r.github.autoMerged).toEqual([]);
   });
 
   it("pr_ci_wait_minutes 0 does not wait; a pending head still does not fail or auto-merge", async () => {
@@ -771,8 +801,9 @@ ${fixed}` } };
         ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
       },
     });
-    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([]);
+    expect(JSON.parse(r.file("state.json")).ci_wait).toBe("pending");
     expect(r.slept).toEqual([]);
   });
 
@@ -860,6 +891,7 @@ ${fixed}` } };
       const r = await runScenario({
         script: "clean.json",
         github: (gh) => {
+          gh.settings.required_checks = ["done"];
           gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
         },
         patch: (c) => void (c.merge = { auto_merge_max_risk: "low" }),
@@ -868,13 +900,48 @@ ${fixed}` } };
       expect(r.github.autoMerged).toEqual([r.result.pr]);
     });
 
-    it("bot_review (medium risk above auto_merge_max_risk)", async () => {
+    it("bot_review merges the reviewed medium diff when CI is green", async () => {
       const r = await runScenario({
         script: "clean.json",
-        patch: (c) => void (c.merge = { auto_merge_max_risk: "low", low_max_diff_lines: 1, policy: { medium: "bot_review" } }),
+        github: (gh) => {
+          gh.settings.required_checks = ["done"];
+          gh.status = "green";
+        },
+        patch: (c) => void (c.merge = { auto_merge_max_risk: "low", policy: { medium: "bot_review" } }),
+        steps: (steps) => {
+          const plan = steps[0]!.output as {
+            packages: { files: string[] }[];
+            acceptance: { id: string; package: string; text: string; verify: string; kind: string; risk: boolean }[];
+          };
+          plan.packages[0]!.files.push("src/auth/token.js");
+          // A package on sensitive_paths is an invalid plan without a risk criterion.
+          plan.acceptance.push({
+            id: "A2",
+            package: "P1",
+            text: "token stays a constant",
+            verify: "test",
+            kind: "edge_case",
+            risk: true,
+          });
+          const impl = steps.find((s) => s.role === "implement")!;
+          impl.writes = { ...impl.writes, "src/auth/token.js": "export const token = \"t\";\n" };
+          (impl.output as { evidence: { acceptance_id: string; kind: string; ref: string }[] }).evidence.push({
+            acceptance_id: "A2",
+            kind: "test",
+            ref: "test/multiply.test.js::multiply",
+          });
+          const at = steps.findIndex((s) => s.role === "pr_writer");
+          return [
+            ...steps.slice(0, at),
+            { role: "review_security", output: { reviewer: "security", prior: [], findings: [] } },
+            ...steps.slice(at),
+          ];
+        },
       });
       expect(r.result).toMatchObject({ result: "done", risk: "medium", merge_policy: "bot_review" });
-      expect(r.github.autoMerged).toEqual([]);
+      expect(r.result.risk_reasons?.join(" ")).toMatch(/sensitive_paths: src\/auth\/token.js/);
+      expect(r.github.autoMerged).toEqual([r.result.pr]);
+      expect(r.runner.calls.find((c) => c.role === "review_security")?.prompt).toContain("src/auth/token.js");
     });
 
     it("human_review (default config)", async () => {
@@ -926,9 +993,25 @@ describe("base moved before finalize", () => {
     };
   };
 
-  it("clean merge: base merged into the branch as git.author (no rebase), full gates re-run, done", async () => {
-    const r = await runScenario({ script: "clean.json", onCall: moveBaseOnReview("src/other.js", "export const other = 1;\n") });
+  it("clean merge: base merged into the branch as git.author (no rebase), full gates re-run, delta reviewed, done", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      onCall: moveBaseOnReview("src/other.js", "export const other = 1;\n"),
+      steps: (steps) => {
+        const at = steps.findIndex((s) => s.role === "pr_writer");
+        const extra = [
+          { role: "review_plan", output: { reviewer: "plan", prior: [], findings: [] } },
+          { role: "review_simplicity", output: { reviewer: "simplicity", prior: [], findings: [] } },
+        ];
+        return [...steps.slice(0, at), ...extra, ...steps.slice(at)];
+      },
+    });
     expect(r.result).toMatchObject({ result: "done" });
+    const delta = r.runner.calls.filter((c) => c.role === "review_plan");
+    expect(delta).toHaveLength(2);
+    expect(delta[1]!.prompt).toContain("incremental_diff");
+    expect(delta[1]!.prompt).toContain("src/other.js");
+    expect(delta[0]!.prompt).not.toContain("incremental_diff");
     const head = r.github.prs[0]!.head;
     const [subject, parents, author] = git(r.repo, "log", "-1", "--format=%s|%P|%an", head).trim().split("|");
     expect(subject).toBe(`chore: merge main into ${head}`);

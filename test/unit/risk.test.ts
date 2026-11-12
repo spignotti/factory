@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergePolicy, riskClass } from "../../src/pipeline/risk.js";
+import { diffSizeSignal, mergePolicy, riskClass } from "../../src/pipeline/risk.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 
 const repo = parseRepoConfig(`
@@ -14,12 +14,18 @@ describe("risk class", () => {
     expect(risk(["src/a.js", ".github/workflows/ci.yml"])).toMatchObject({ risk: "high" });
     expect(risk(["AGENTS.md", "src/auth/x.js"]).risk).toBe("high");
   });
-  it("medium for sensitive paths, dependencies, migrations and big diffs only", () => {
+  it("medium for sensitive paths, dependencies and migrations", () => {
     expect(risk(["src/auth/login.js"])).toMatchObject({ risk: "medium", reasons: ["sensitive_paths: src/auth/login.js"] });
     expect(risk(["package.json"]).risk).toBe("medium");
     expect(risk(["uv.lock"]).risk).toBe("medium");
     expect(risk(["supabase/migrations/001.sql"]).risk).toBe("medium");
-    expect(risk(["src/a.js"], 101)).toMatchObject({ risk: "medium", reasons: ["diff 101 lines > 100"] });
+  });
+  it("a large or test-only diff stays low; size is a signal, not the class", () => {
+    expect(risk(["src/a.js"], 101)).toEqual({ risk: "low", reasons: [] });
+    expect(risk(["test/a.test.js", "test/fixtures/big.json"], 5000)).toEqual({ risk: "low", reasons: [] });
+    expect(diffSizeSignal(101, 100)).toBe("diff 101 lines > 100");
+    expect(diffSizeSignal(100, 100)).toBeNull();
+    expect(diffSizeSignal(5000, 300)).toBe("diff 5000 lines > 300");
   });
   it("low otherwise", () => {
     expect(risk(["src/a.js"], 100)).toEqual({ risk: "low", reasons: [] });

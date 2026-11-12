@@ -6,14 +6,15 @@ import { FakeRunner, type FakeStep } from "../../src/agents/fake-runner.js";
 import { main } from "../../src/cli.js";
 import { auditAlias, hardenAlias, improve, improveCommand } from "../../src/commands/improve.js";
 import { FakeGitHub, type GitHub } from "../../src/gh.js";
-import { resolveProposals } from "../../src/harden/lifecycle.js";
+import { effectStatus, resolveProposals } from "../../src/harden/lifecycle.js";
 import { canonicalRepoId, loadMemory } from "../../src/memory.js";
 import { listProposals } from "../../src/proposals.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { ImproveReportSchema } from "../../src/schemas/proposal.js";
 import { makeRepo } from "../helpers/adopt-repo.js";
-import { entry, PLAN, seedMemory, seedRun } from "../helpers/harden.js";
+import { ciRun, entry, PLAN, seedMemory, seedRun } from "../helpers/harden.js";
 import { FIXTURES } from "../helpers/repo.js";
+import { runScenario } from "../helpers/scenario.js";
 
 const NOW = new Date("2026-10-29T12:00:00.000Z");
 const CHECKS = "checks:\n  - { name: lint, run: \"true\", tier: fast }\n";
@@ -40,37 +41,57 @@ const selection = (...items: ReturnType<typeof item>[]) => ({ proposals: items }
 const answer = selection(item("Close the auth gap"));
 
 describe("factory improve", () => {
+  it("proves a chore's efficacy with the real red-on-base, green-on-head pipeline", async () => {
+    const r = await runScenario({ script: "bug-fixed.json", task: "max-bug.md", steps: (steps) => steps.map((s) => {
+      if (s.role !== "plan_high") return s;
+      const output = s.output as { acceptance: { text: string }[] };
+      return { ...s, output: { ...output, type: "chore", red_green: "required", acceptance: output.acceptance.map((a) => ({ ...a, text: `${a.text}; effect check: red_green` })) } };
+    }) });
+    expect(r.result.result, r.result.reason).toBe("done");
+    const plan = JSON.parse(r.file("plan.json"));
+    const checks = JSON.parse(r.file(`gates-${JSON.parse(r.file("state.json")).gate_count}.json`)).checks;
+    expect(checks).toContainEqual(expect.objectContaining({ name: "red_green", status: "pass", effect_proven: true }));
+    expect(effectStatus(plan, checks)).toBe("confirmed");
+  });
   it("runs configured aspects, and --aspect runs only that one", async () => {
     const ctx = setup();
-    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    seedMemory(ctx.factoryHome, ctx.repoId, [
+      entry("a", { count: 2 }),
+      entry("sec", { reviewer: "security" }),
+      entry("sim", { reviewer: "simplicity", count: 2 }),
+    ]);
     const steps: FakeStep[] = [
+      { role: "plan_medium", output: { merge: [] } },
       { role: "harden", output: selection(item("Lint rule for a", ["a"])) },
       { role: "audit_security", output: answer },
       { role: "audit_performance", output: answer },
       { role: "audit_refactor", output: answer },
     ];
-    const all = deps(ctx, steps);
+    const gh = new FakeGitHub();
+    gh.runs = Array.from({ length: 5 }, (_, i) => ciRun(`sha${i}`, "2026-10-20T00:00:00.000Z", [["check (syntax)", "success", 3]]));
+    const all = deps(ctx, steps, gh);
     const report = await improve({ repo: ctx.repo }, all.deps);
     expect(report.error).toBeNull();
     expect(all.deps.runner.calls.map((c) => [c.role, c.thinking])).toEqual([
+      ["plan_medium", "medium"],
       ["harden", "medium"],
       ["audit_security", "low"],
       ["audit_performance", "high"],
       ["audit_refactor", "medium"],
     ]);
-    expect(all.deps.runner.calls[0]!.system).toContain("unmarked standards");
-    expect(all.deps.runner.calls[1]!.prompt).toContain("Privacy note for this repo only.");
-    expect(all.deps.runner.calls[1]!.prompt).toContain("Up to 5 security proposals");
-    expect(all.deps.runner.calls[2]!.prompt).not.toContain("Privacy note");
-    expect(all.deps.runner.calls[3]!.system).toContain("dead paths");
-    expect(all.deps.runner.calls.every((c) => c.tools === "read_only")).toBe(true);
+    expect(all.deps.runner.calls[1]!.system).toContain("unmarked standards");
+    expect(all.deps.runner.calls[2]!.prompt).toContain("Privacy note for this repo only.");
+    expect(all.deps.runner.calls[2]!.prompt).toContain("At most 5 security proposals");
+    expect(all.deps.runner.calls[3]!.prompt).not.toContain("Privacy note");
+    expect(all.deps.runner.calls[4]!.system).toContain("dead paths");
+    expect(all.deps.runner.calls.filter((c) => c.role !== "plan_medium").every((c) => c.tools === "read_only")).toBe(true);
     expect(ImproveReportSchema.safeParse(report).success).toBe(true);
 
     const flagged = deps(ctx, [{ role: "audit_security", output: answer }]);
     const only = await improve({ repo: ctx.repo, aspects: ["security"], max: 1 }, flagged.deps);
     expect(only.error).toBeNull();
     expect(flagged.deps.runner.calls.map((c) => c.role)).toEqual(["audit_security"]);
-    expect(flagged.deps.runner.calls[0]!.prompt).toContain("Up to 1 security proposals");
+    expect(flagged.deps.runner.calls[0]!.prompt).toContain("At most 1 security proposals");
   });
 
   it("opens an issue with the plan block and labels, then updates it instead of duplicating", async () => {
@@ -138,7 +159,7 @@ describe("factory improve", () => {
   it("treats harden and audit as aliases, and old config blocks as a fallback with a warning", async () => {
     const ctx = setup(`${CHECKS}harden:\n  max_proposals: 2\naudit:\n  types: [refactor, simplify]
   max_proposals: 4\n  thinking: { simplify: high }\n  focus:\n    refactor: "boundaries"\n    simplify: "dead code"\n`);
-    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 })]);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2 }), entry("sim", { reviewer: "simplicity", count: 2 })]);
     const err: string[] = [];
     const io = { out: () => {}, err: (s: string) => err.push(s) };
     const gh = new FakeGitHub();
@@ -175,7 +196,7 @@ describe("factory improve", () => {
     expect(both.deps.runner.calls.map((c) => c.role)).toEqual(["harden", "audit_refactor"]);
     expect(both.deps.runner.calls[1]!.prompt).toContain("boundaries");
     expect(both.deps.runner.calls[1]!.prompt).toContain("dead code");
-    expect(both.deps.runner.calls[1]!.prompt).toContain("Up to 4 structure proposals");
+    expect(both.deps.runner.calls[1]!.prompt).toContain("At most 4 structure proposals");
     expect(both.deps.runner.calls[1]!.thinking).toBe("high");
     expect(warn.join("")).toMatch(/harden: and audit: are deprecated/);
     expect(out.join("")).toMatch(/aspect findings/);
@@ -243,6 +264,7 @@ describe("factory improve", () => {
 
   it("keeps the first proposal when two share a key, and matches later runs by files not by goal text", async () => {
     const ctx = setup(`${CHECKS}improve:\n  aspects: [security]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("sec", { reviewer: "security" })]);
     const gh = new FakeGitHub();
     const files = ["src/auth.ts", "src/log.ts"];
     const out: string[] = [];
@@ -401,8 +423,25 @@ describe("factory improve", () => {
     expect(resolved.lifecycle).toEqual([expect.objectContaining({ id: proposal.id, status: "resolved", reason: "factory PR merged", pr: "https://github.com/o/r/pull/4" })]);
     expect(resolved.lifecycle.some((c) => c.status === "dropped")).toBe(false);
     expect(listProposals(ctx.factoryHome, ctx.repoId).flatMap((t) => t.proposals).find((p) => p.id === proposal.id)!.status).toBe("resolved");
-    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "resolved", ref: "https://github.com/o/r/pull/4" });
+    expect(loadMemory(ctx.factoryHome, ctx.repoId).entries[0]).toMatchObject({ status: "proposed" });
     expect(resolved.results[0]!.ticket).toBeNull();
+  });
+
+  it("does not call the model for security, performance or structure without evidence", async () => {
+    const ctx = setup(`${CHECKS}improve:\n  aspects: [security, performance, structure]\n`);
+    seedMemory(ctx.factoryHome, ctx.repoId, [entry("a", { count: 2, reviewer: "plan" })]);
+    const gh = new FakeGitHub();
+    const runner = new FakeRunner([
+      { role: "audit_security", output: answer },
+      { role: "audit_performance", output: answer },
+      { role: "audit_refactor", output: answer },
+    ]);
+    const report = await improve({ repo: ctx.repo }, { ...deps(ctx, []).deps, runner, github: gh });
+    expect(report.error).toBeNull();
+    expect(runner.calls).toHaveLength(0);
+    expect(gh.issues.size).toBe(0);
+    expect(report.results.map((r) => r.aspect)).toEqual(["security", "performance", "structure"]);
+    expect(report.results.every((r) => r.ticket === null && r.issues.length === 0)).toBe(true);
   });
 });
 

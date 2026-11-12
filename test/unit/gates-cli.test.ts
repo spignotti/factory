@@ -32,7 +32,8 @@ describe("factory gates CLI on the fixture repo", () => {
     expect(JSON.parse(fast.out)).toEqual(["syntax", "unit"]);
 
     const full = await cli(["gates", "--select", "--tier", "full", "--repo", repo, "--base", "main", "--json"]);
-    expect(JSON.parse(full.out)).toEqual(["syntax", "unit", "suite"]);
+    expect(JSON.parse(full.out)).toEqual(["syntax", "unit"]);
+    expect(full.err).toMatch(/suite not scheduled; same command as unit/);
 
     const manual = await cli(["gates", "--select", "--tier", "manual", "--repo", repo, "--base", "main", "--json"]);
     expect(JSON.parse(manual.out)).toEqual(["cloud"]);
@@ -45,7 +46,8 @@ describe("factory gates CLI on the fixture repo", () => {
     expect(JSON.parse(filtered.out)).toEqual(["syntax", "suite"]);
     const all = await cli(["gates", "--select", "--all", "--tier", "full", "--repo", repo, "--base", "HEAD", "--json"]);
     expect(all.code).toBe(0);
-    expect(JSON.parse(all.out)).toEqual(["syntax", "unit", "docs", "suite"]);
+    expect(JSON.parse(all.out)).toEqual(["syntax", "unit", "docs"]);
+    expect(all.err).toMatch(/suite not scheduled; same command as unit/);
   });
 
   it("in CI (CI set) local_only checks are not selected; locally they are", async () => {
@@ -101,6 +103,21 @@ describe("factory gates CLI on the fixture repo", () => {
     writeFileSync(join(repo, "src/math.js"), "export const sum = (a, b) => a + b;\n");
     const r = await cli(["gates", "--run", "selected", "--repo", repo, "--json"]);
     expect(JSON.parse(r.out).checks.map((c: { name: string }) => c.name)).toEqual(["syntax", "unit"]);
+  });
+
+  it("runs a repeated full-tier command once and keeps the duplicate visible", async () => {
+    const repo = createFixtureRepo();
+    writeFileSync(join(repo, "src/math.js"), "export const sum = (a, b) => a + b;\n");
+    const r = await cli(["gates", "--run", "selected", "--tier", "full", "--repo", repo, "--json"]);
+    const body = JSON.parse(r.out) as { green: boolean; checks: { name: string; status: string; duration_ms: number; output_tail: string }[] };
+    expect(r.code).toBe(0);
+    expect(body.green).toBe(true);
+    const unit = body.checks.find((c) => c.name === "unit");
+    const suite = body.checks.find((c) => c.name === "suite");
+    expect(unit).toMatchObject({ status: "pass" });
+    expect(unit!.duration_ms).toBeGreaterThan(0);
+    expect(suite).toMatchObject({ status: "pass", duration_ms: 0 });
+    expect(suite!.output_tail).toMatch(/same command as unit/);
   });
 
   it("--run starts the check's services (unsandboxed, own port slot) and stops them afterwards", async () => {

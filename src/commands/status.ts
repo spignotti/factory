@@ -1,6 +1,9 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { GitHub, PrStatus } from "../gh.js";
+import { classifyWait, observeMerge, type WaitClass } from "../pipeline/accounting.js";
+import { readOutcome } from "../pipeline/outcome.js";
+import { coverageOfRepo } from "../standards.js";
 import { activeHolders } from "../pipeline/lock.js";
 import { branchesHeldByLiveRuns, daysUnchanged, isStaleDraft, staleDraftDaysAt } from "../pipeline/path-claim.js";
 import { openAuditTickets } from "../proposals.js";
@@ -69,7 +72,7 @@ function blockersOf(result: string, live: PrStatus | undefined, prError: string 
 }
 
 /**
- * Overnight summary. Reads `result.json` (mtime is when the run finished) and live PR state.
+ * Finished-window summary. Reads `result.json` (mtime is when the run finished) and live PR state.
  * Does not read `events.jsonl`: that file is the trace, not this view.
  */
 async function sinceFinished(
@@ -126,8 +129,15 @@ async function sinceFinished(
       else live = got;
     }
     // A thrown prStatus is not proof the PR is still open (it may already be merged).
+    // Closed without merge stays in this list with pr_state closed. A GitHub merge is not autonomous
+    // unless the stored outcome says confirmed. The same login is not consulted.
     if (live && live.state !== "open" && res.pr) {
-      view.merged.push({ ...row, pr: res.pr, pr_state: live.state === "closed" ? "closed" : "merged", result: kind });
+      const observed = observeMerge({ stored: readOutcome(res).merged, github: live.state });
+      if (live.state === "closed" || observed.presentation === "closed_without_merge") {
+        view.merged.push({ ...row, pr: res.pr, pr_state: "closed", result: kind });
+      } else {
+        view.merged.push({ ...row, pr: res.pr, pr_state: "merged", result: kind, origin: observed.autonomous ? "confirmed" : "unknown" });
+      }
       continue;
     }
     const blockers = blockersOf(kind, live, prError);
@@ -160,7 +170,11 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     audit_tickets: openAuditTickets(opts.factoryHome),
     queues: summarizeQueues(opts.factoryHome),
     since: null,
+    brief: { running: [], waiting_on: [], actually_merged: [], closed_without_merge: [], needs_silas: [], artifacts: [] },
+    automation: [],
   };
+  const mergedLive = new Map<string, { run_id: string; pr: string; origin: "confirmed" | "unknown" }>();
+  const closedLive = new Map<string, { run_id: string; pr: string }>();
   const prCache = new Map<string, Promise<PrStatus | Error>>();
   const loadPr = (repo: string, pr: string) => {
     if (!prCache.has(pr)) prCache.set(pr, opts.github.prStatus(repo, pr).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e)))));
@@ -217,6 +231,13 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     let pr: PrStatus | Error | undefined;
     if (st.pr && !st.gc_at) pr = await loadPr(repoOf(r), st.pr);
     const closed = pr && !(pr instanceof Error) && pr.state !== "open";
+    if (st.pr && pr && !(pr instanceof Error) && pr.state !== "open") {
+      const observed = observeMerge({ stored: readOutcome(r.result).merged, github: pr.state });
+      if (observed.presentation === "closed_without_merge") closedLive.set(r.run_id, { run_id: r.run_id, pr: st.pr });
+      else if (observed.presentation === "actually_merged" || observed.presentation === "unknown_origin") {
+        mergedLive.set(r.run_id, { run_id: r.run_id, pr: st.pr, origin: observed.autonomous ? "confirmed" : "unknown" });
+      }
+    }
     if ((st.result === "needs_human" || st.result === "needs_input") && !closed && !st.gc_at) {
       report.waiting.push({
         run_id: r.run_id, repo: st.repo, task: taskOf(r), result: st.result, reason: st.reason,
@@ -253,7 +274,94 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
     }
   }
   report.stale_drafts.sort((a, b) => a.repo.localeCompare(b.repo) || a.pr - b.pr);
+  for (const repo of [...repos].sort()) {
+    try {
+      const coverage = coverageOfRepo(repo);
+      if (coverage) report.automation.push({ repo, ...coverage });
+    } catch {
+      // unreadable standards stay unknown rather than a zero
+    }
+  }
+  report.brief = buildBrief(report, runs, mergedLive, closedLive);
   return report;
+}
+
+function artifactLine(run: RunRecord): string {
+  const parts = [`${run.dir}/result.json`];
+  if (existsSync(join(run.dir, "recovery.json"))) parts.push(`${run.dir}/recovery.json`);
+  const provenance = run.result?.provenance;
+  if (provenance) parts.push(`provenance ${provenance.factory_version} prompt ${provenance.prompt_revision} effort ${provenance.effort}`);
+  return parts.join("; ");
+}
+
+function buildBrief(
+  report: StatusReport,
+  runs: RunRecord[],
+  mergedLive: Map<string, { run_id: string; pr: string; origin: "confirmed" | "unknown" }>,
+  closedLive: Map<string, { run_id: string; pr: string }>,
+): StatusReport["brief"] {
+  const links = new Map(runs.map((run) => [run.run_id, artifactLine(run)]));
+  const link = (id: string) => links.get(id) ?? id;
+  const actually = new Map(mergedLive);
+  const closed = new Map(closedLive);
+  for (const row of report.since?.merged ?? []) {
+    if (row.pr_state === "closed") {
+      closed.set(row.run_id, { run_id: row.run_id, pr: row.pr });
+      actually.delete(row.run_id);
+    } else {
+      actually.set(row.run_id, { run_id: row.run_id, pr: row.pr, origin: row.origin ?? "unknown" });
+    }
+  }
+  const waiting_on: StatusReport["brief"]["waiting_on"] = [];
+  const seen = new Set<string>();
+  const addWait = (cls: WaitClass, detail: string, artifact: string) => {
+    const key = `${cls}\n${detail}\n${artifact}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    waiting_on.push({ class: cls, detail, artifact });
+  };
+  for (const row of report.queued) addWait("capacity", "waiting for lock", link(row.run_id));
+  for (const row of report.stalled) addWait("unclassified", `no event for ${row.silent_minutes} min`, link(row.run_id));
+  for (const row of report.waiting) addWait(classifyWait(row.reason, row.result), row.reason || row.result, link(row.run_id));
+  for (const queue of report.queues) {
+    for (const next of queue.next) {
+      if (!next.reason) continue;
+      addWait(classifyWait(next.reason), next.reason, `queue ${queue.repo} #${next.issue}`);
+    }
+  }
+  for (const row of report.since?.blocked ?? []) {
+    for (const blocker of row.blockers) addWait(classifyWait(blocker, blocker === "needs_human" ? "needs_human" : undefined), blocker, row.pr ?? link(row.run_id));
+  }
+  for (const row of report.since?.base_red ?? []) addWait("ci_runner", row.reason || "base CI", link(row.run_id));
+  const needs = new Map<string, { run_id: string; reason: string; artifact: string }>();
+  const addNeed = (run_id: string, reason: string, artifact: string) => {
+    if (!needs.has(run_id)) needs.set(run_id, { run_id, reason, artifact });
+  };
+  for (const row of report.waiting) addNeed(row.run_id, row.reason || row.result, link(row.run_id));
+  for (const row of report.since?.human_review ?? []) addNeed(row.run_id, row.review_reasons.join(", ") || "human_review", link(row.run_id));
+  for (const row of report.since?.needs_input ?? []) addNeed(row.run_id, row.reason || "needs_input", link(row.run_id));
+  for (const queue of report.queues) {
+    for (const next of queue.next) {
+      if (!next.reason || classifyWait(next.reason) !== "human_decision") continue;
+      addNeed(`queue#${next.issue}`, next.reason, `queue ${queue.repo} #${next.issue}`);
+    }
+  }
+  const artifacts = [
+    ...new Set(
+      [...actually.keys(), ...closed.keys(), ...report.running.map((row) => row.run_id), ...report.waiting.map((row) => row.run_id)]
+        .map((id) => links.get(id))
+        .filter((item): item is string => item !== undefined),
+    ),
+  ];
+  if (!artifacts.length) artifacts.push("result.json, recovery.json and provenance on each run; factory status --since for merges");
+  return {
+    running: report.running.map((row) => `${row.run_id} ${row.step} — ${link(row.run_id)}`),
+    waiting_on,
+    actually_merged: [...actually.values()],
+    closed_without_merge: [...closed.values()],
+    needs_silas: [...needs.values()],
+    artifacts,
+  };
 }
 
 function retryNote(retry: StatusReport["running"][number]["retry"]): string {
@@ -266,8 +374,30 @@ function reviewText(reasons: string[], risk: string | null): string {
   return reasons.map((r) => (r === "risk" && risk ? `risk ${risk}` : r)).join(", ");
 }
 
+function renderBrief(s: StatusReport): string[] {
+  const running = s.brief.running.length ? s.brief.running.join("; ") : "none";
+  const waiting = s.brief.waiting_on.length ? s.brief.waiting_on.map((row) => `${row.class}: ${row.detail} (${row.artifact})`).join("; ") : "none";
+  const merged = s.brief.actually_merged.length
+    ? s.brief.actually_merged.map((row) => `${row.run_id} ${row.pr} (${row.origin === "confirmed" ? "autonomous merge" : "origin unknown"})`).join("; ")
+    : "none";
+  const closed = s.brief.closed_without_merge.length ? s.brief.closed_without_merge.map((row) => `${row.run_id} ${row.pr}`).join("; ") : "none";
+  const silas = s.brief.needs_silas.length ? s.brief.needs_silas.map((row) => `${row.run_id} ${row.reason} — ${row.artifact}`).join("; ") : "none";
+  const automation = s.automation.length
+    ? s.automation.map((row) => `${row.repo} full ${row.full.length}, partial ${row.partial.length}, review scope ${row.review_scope.length}`).join("; ")
+    : "no standards file (coverage is not zero and not a check-count quotient)";
+  return [
+    `running: ${running}`,
+    `waiting on: ${waiting}`,
+    `actually merged: ${merged}`,
+    `closed without merge: ${closed}`,
+    `needs Silas: ${silas}`,
+    `artifacts: ${s.brief.artifacts.join("; ")}`,
+    `automation: ${automation}`,
+  ];
+}
+
 export function renderStatus(s: StatusReport): string {
-  const out: string[] = [];
+  const out: string[] = [...renderBrief(s), ""];
   const section = (title: string, lines: string[]) => out.push(`${title} (${lines.length})${lines.length ? `:\n${lines.map((l) => `  ${l}`).join("\n")}` : ""}`);
   section("running", s.running.map((r) => `${r.run_id} ${r.task} — ${r.step}${r.check ? ` (${r.check})` : ""}${retryNote(r.retry)}, ${r.lane}, ${r.minutes} min (${r.repo})`));
   section("queues", s.queues.map((q) => {

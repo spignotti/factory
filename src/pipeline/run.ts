@@ -23,10 +23,14 @@ import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
-import { acquireRepoLockWithRetry, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
+import { acquireRepoLockWithRetry, claimResources, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
+import { pauseRequested } from "../queue/pause.js";
+import { admissionBlock } from "../queue/admit.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
+import { budgetFrom, budgetTo, MAX_CONTINUATIONS, missingPlanQuotes, openPrProblem } from "./recovery.js";
+import { buildOutcome, buildProvenance, implementModel, nextAttempt, writeRecoveryNote } from "./outcome.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
@@ -97,18 +101,47 @@ export async function takeRepoLock(
   wait: boolean,
   maxRuns = 1,
 ): Promise<{ release?: LockRelease; reason: string }> {
+  // Same resource files the queue claims before start. A manual run cannot pass a busy database.
+  // Waiting here would hold a coding slot; the caller stays out of the repo lock instead.
+  let names: string[];
+  try {
+    names = loadRepoConfig(repoDir).concurrency.resources;
+  } catch {
+    names = [];
+  }
+  const resources = claimResources(deps.factoryHome, names, runId);
+  if (!resources.ok) {
+    const who = resources.held.runId ?? "?";
+    return { reason: `resource ${resources.held.name} is held by run ${who} (pid ${resources.held.pid})` };
+  }
   const raw = await repoLockId(repoDir);
   const id = lockRepoKey(raw);
   const release = await acquireRepoLockWithRetry(deps.factoryHome, raw, runId, { maxRuns, signal: deps.signal });
-  if (release) return { release, reason: "" };
+  const wrap = (drop: LockRelease): LockRelease =>
+    Object.assign(
+      () => {
+        drop();
+        resources.release();
+      },
+      { slot: drop.slot },
+    );
+  if (release) return { release: wrap(release), reason: "" };
   const holder = repoLockHolder(deps.factoryHome, raw);
   const by = holder ? `run ${holder.runId ?? "?"} (pid ${holder.pid})` : "another run";
-  if (!wait) return { reason: `repo ${id} is locked by ${by}` };
+  if (!wait) {
+    resources.release();
+    return { reason: `repo ${id} is locked by ${by}` };
+  }
   events.emit({ step: "intake", event: "queued", data: { repo: id, holder_run_id: holder?.runId ?? null, holder_pid: holder?.pid ?? null, waiter_pid: process.pid } });
   const queuedAt = Date.now();
-  const got = await waitForRepoLock(deps.factoryHome, raw, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal, maxRuns });
-  events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
-  return { release: got, reason: "" };
+  try {
+    const got = await waitForRepoLock(deps.factoryHome, raw, runId, { pollMs: deps.lockPollMs ?? 15_000, signal: deps.signal, maxRuns });
+    events.emit({ step: "intake", event: "progress", data: { lock_acquired: { waited_ms: Date.now() - queuedAt } } });
+    return { release: wrap(got), reason: "" };
+  } catch (e) {
+    resources.release();
+    throw e;
+  }
 }
 
 /**
@@ -246,6 +279,10 @@ class RunFrame {
   memory?: { factoryHome: string; repoId: string };
   /** For the run-end notification. */
   deps?: RunDeps;
+  /** Repo config the attempt was judged with. Provenance fingerprints this, not a secret value. */
+  provenanceRepo?: RepoConfig;
+  /** Base commit once intake resolved it, including when the run stops before `state.base_sha` is kept. */
+  baseSha?: string;
 
   constructor(
     readonly runId: string,
@@ -291,7 +328,7 @@ class RunFrame {
     if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
     let result: RunResult;
     try {
-      result = this.finish();
+      result = await this.finish();
     } finally {
       this.release?.();
     }
@@ -311,8 +348,29 @@ class RunFrame {
     }
   }
 
-  private finish(): RunResult {
+  private async finish(): Promise<RunResult> {
     const { out } = this;
+    const known = this.state;
+    const outcome = known
+      ? buildOutcome({
+          ticket: known.task.issue ?? null,
+          attempts: typeof known.attempts === "number" ? known.attempts : null,
+          pr: out.pr,
+          result: out.result,
+        })
+      : undefined;
+    let head: string | null = null;
+    const worktree = out.worktree ?? known?.worktree ?? null;
+    if (worktree && existsSync(worktree)) head = await headSha(worktree).catch(() => null);
+    const provenance = buildProvenance({
+      model: implementModel(join(this.runDir, "events.jsonl")),
+      effort: known?.plan_effort ?? "unknown",
+      repo: this.provenanceRepo ?? { source: "unavailable" },
+      secrets: this.events.secrets,
+      base: known?.base_sha ?? this.baseSha ?? null,
+      head,
+      checks: this.provenanceRepo?.checks ?? [],
+    });
     const result: RunResult = {
       run_id: this.runId,
       repo: this.repoDir,
@@ -328,6 +386,8 @@ class RunFrame {
       minutes: Math.round(((this.now() - this.startedAt) / 60_000) * 10) / 10,
       cost_usd: Math.round(this.events.totals.cost_usd * 10_000) / 10_000,
       reason: out.reason,
+      ...(outcome ? { outcome } : {}),
+      provenance,
       ...(this.events.diffCount ?? {}),
       ...(out.questions ? { questions: out.questions } : {}),
       ...(out.skipped_gates?.length ? { skipped_gates: out.skipped_gates } : {}),
@@ -442,6 +502,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     f.taskRef = task.ref;
     // Persist the starter's target before the lock, so a locked run still records who to wake.
     const st = (f.state = newState({ runId, repo: repoDir, task, noPr: opts.noPr ?? false, wait: opts.wait ?? false, notifyTarget: opts.notifyTarget }));
+    st.plan_effort = resolvePlanEffort(opts.planEffort, task.labels);
     f.save();
     const lock = await takeRepoLock(deps, repoDir, runId, events, opts.wait ?? false, checkout.concurrency.max_runs);
     if (!lock.release) return f.set({ result: "locked", reason: lock.reason });
@@ -451,9 +512,11 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     // The base is fixed before planning: planner and plan_normalize read a clean detached worktree at
     // it, never the user's checkout (untracked files such as `.env` stay out of agent reach).
     const baseSha = await revParse(repoDir, await baseRef(repoDir, checkout.base_branch));
+    f.baseSha = baseSha;
     // Checks, policies and secrets come from the base commit: a change to repo.yaml on the branch
     // (a protected change) takes effect only after a human merged it.
     const repo = await baseRepoConfig(repoDir, baseSha, checkout, events, "intake");
+    f.provenanceRepo = repo;
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, repoDir, deps, "intake");
     if (!secrets) return;
@@ -461,7 +524,14 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const agentHome = prepareAgentHome(runDir);
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, repoDir);
-    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
+    const budget = budgetFrom(st.repair);
+    const base = {
+      deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets, budget,
+      persist: () => {
+        st.repair = budgetTo(budget);
+        f.save();
+      },
+    };
 
     const planned: PlanOutcome = await withBaseWorktree(repoDir, baseSha, join(runDir, "plan-base"), async (planDir) => {
       const pctx = { ...base, repoDir: planDir };
@@ -509,6 +579,8 @@ async function beginWork(
     deadline: WallBudget;
     briefing: string;
     secrets: ResolvedSecrets;
+    budget: ReturnType<typeof budgetFrom>;
+    persist: () => void;
   },
   plan: Plan,
   baseSha: string,
@@ -656,7 +728,14 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     f.set({ type: plan.type });
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
-    const base = { deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, deadline, briefing: memoryBriefing, secrets };
+    const budget = budgetFrom(st.repair);
+    const base = {
+      deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, deadline, briefing: memoryBriefing, secrets, budget,
+      persist: () => {
+        st.repair = budgetTo(budget);
+        f.save();
+      },
+    };
     await beginWork(f, base, plan, st.base_sha!, ci, { noPr: st.no_pr, startedAt });
   });
 }
@@ -679,11 +758,25 @@ export async function sweepBaseRed(deps: RunDeps, log?: (s: string) => void): Pr
 }
 
 /**
+ * A queue pause marker stops at this step boundary: the worktree and plan stay, the PR is put back
+ * to draft, and auto-merge is not reached. The process is not signalled.
+ */
+async function stopIfPaused(f: RunFrame, ctx: RunContext): Promise<boolean> {
+  const why = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
+  if (!why) return false;
+  const draftError = await keepDraft(f);
+  const reason = `paused: ${why}; resume with \`factory resume ${ctx.runId}\``;
+  f.set({ result: "needs_human", reason: draftError ? `${reason}; ${draftError}` : reason });
+  return true;
+}
+
+/**
  * implement → review loop → finalize, starting at `state.step`, persisting state.json after every
  * package, round and step. Shared by run and resume.
  */
 async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
   const st = f.state!;
+  if (await stopIfPaused(f, ctx)) return;
   const sync = () => {
     st.lane = "standard";
     delete st.lane_escalation;
@@ -723,11 +816,15 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     }
   }
   if (st.step === "review") {
+    if (await stopIfPaused(f, ctx)) return;
     loop = await reviewLoop(ctx, gates!, {
       firstRound: st.rounds + 1,
-      onRound: (round, findings) => {
+      findings: st.findings,
+      reviewedSha: st.reviewed_sha,
+      onRound: (round, findings, reviewedSha) => {
         st.rounds = round;
         st.findings = findings;
+        if (reviewedSha) st.reviewed_sha = reviewedSha;
         sync();
       },
     });
@@ -736,8 +833,9 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
       sync();
     }
   }
-  loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates };
+  loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates, reviewedSha: st.reviewed_sha };
 
+  if (await stopIfPaused(f, ctx)) return;
   const fin = await finalize(ctx, {
     ...loop,
     packages: new Map(Object.entries(st.packages)),
@@ -745,9 +843,17 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     noPr: opts.noPr,
     startedAt: opts.startedAt,
     existingPr: st.pr ? { url: st.pr, draft: st.pr_draft ?? true } : undefined,
+    reviewedSha: loop.reviewedSha ?? st.reviewed_sha,
   });
   st.pr = fin.pr;
   st.pr_draft = fin.draft;
+  if (fin.approvedSha) st.approved_sha = fin.approvedSha;
+  else delete st.approved_sha;
+  if (fin.reviewedSha) st.reviewed_sha = fin.reviewedSha;
+  if (fin.ciWait) st.ci_wait = fin.ciWait;
+  else delete st.ci_wait;
+  if (fin.continuation && (st.continuation_attempts ?? 0) < MAX_CONTINUATIONS) st.continuation = fin.continuation;
+  else delete st.continuation;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
   f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
@@ -815,7 +921,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   if (st.step === "intake" || !st.worktree || !st.branch || !st.base_sha) {
     throw new Error(`run ${runId} stopped before its worktree existed (${st.result ?? "running"}: ${st.reason}); start a new run`);
   }
-  if (st.step === "finished") throw new Error(`run ${runId} is finished (${st.result}); nothing to resume`);
+  if (st.step === "finished" && !st.continuation) throw new Error(`run ${runId} is finished (${st.result}); nothing to resume`);
   const now = deps.now ?? Date.now;
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
@@ -871,10 +977,47 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   // as current while it runs; finish() writes the new one (every exit path, errors included).
   const previous = st.result;
   rmSync(join(runDir, "result.json"), { force: true });
+  const attempt = nextAttempt(st.attempts);
+  if (attempt !== null) st.attempts = attempt;
+  const recovery = writeRecoveryNote(
+    runDir,
+    { previous_result: previous, attempts: attempt, branch: st.branch, checkpoint: st.step },
+    events.secrets,
+  );
+  events.emit({
+    step: "resume",
+    event: "progress",
+    data: { recovery: { previous_result: recovery.previous_result, attempts: recovery.attempts, checkpoint: recovery.checkpoint, plan_kept: recovery.plan_kept } },
+  });
 
   return f.execute(async () => {
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: previous } });
+    const continuation = st.continuation;
+    if (continuation) {
+      if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
+        delete st.continuation;
+        return f.set({ result: "needs_human", reason: `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS})` });
+      }
+      st.continuation_attempts = (st.continuation_attempts ?? 0) + 1;
+      delete st.continuation;
+      if (st.step === "finished") st.step = "review";
+      delete st.approved_sha;
+      f.save();
+      if (st.pr) await deps.github.disableAutoMerge(st.repo, st.pr);
+      if (st.task.issue !== undefined) {
+        const issue = await deps.github.getIssue(st.repo, st.task.issue);
+        const block = admissionBlock(issue);
+        if (block || st.task.text !== `# ${issue.title}\n\n${issue.body}`) {
+          return f.set({ result: "needs_human", reason: `automatic continuation refused: ${block ?? "issue text changed"}` });
+        }
+      }
+      // Automatic recovery must not turn another person's uncommitted work into a bot commit.
+      if ((await git(st.worktree!, ["status", "--porcelain"])).trim()) {
+        return f.set({ result: "needs_human", reason: "automatic continuation refused: worktree has uncommitted changes" });
+      }
+    }
     const repo = st.base_sha ? await baseRepoConfig(st.repo, st.base_sha, loadRepoConfig(st.repo), events, "resume") : loadRepoConfig(st.repo);
+    f.provenanceRepo = repo;
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
     const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
     if (!secrets) return;
@@ -882,12 +1025,18 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     f.set({ type: plan.type });
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
+    const budget = budgetFrom(st.repair);
     const ctx: RunContext = {
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline, secrets,
       lockSlot: f.lockSlot,
       maxRuns: f.maxRuns,
       wait: st.wait ?? false,
+      budget,
+      persist: () => {
+        st.repair = budgetTo(budget);
+        f.save();
+      },
     };
     bindLockWait(f, ctx);
     const services = (ctx.services = runServices(ctx));
@@ -909,6 +1058,24 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       return f.set({ result: "needs_human", reason: draftError ? `${ready.reason}; ${draftError}` : ready.reason });
     }
     let gates = ready.gates;
+    if (continuation?.kind === "ci") {
+      const currentHead = await headSha(ctx.worktree);
+      // A base merge or remote update makes the saved CI diagnosis apply to a different tree.
+      // Do not fall through to a generic product edit.
+      if (currentHead !== continuation.sha) {
+        return f.set({ result: "needs_human", reason: "post-CI repair refused: head moved before diagnosis; no product edit" });
+      }
+      const baseCi = await deps.github.baseStatus(ctx.repoDir, ctx.baseSha);
+      if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit" });
+      const failures = await deps.github.headFailures(ctx.repoDir, continuation.sha);
+      if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit" });
+      const ciGates: GateReport = { n: ctx.gateCount, tier: "full", green: false, changed_files: [], scope_report: [],
+        checks: failures.map((c) => ({ ...c, output_tail: events.redact(c.output_tail), kind: "check", status: "fail", duration_ms: 0 })) };
+      writeJson(ctx, `ci-failure-${st.continuation_attempts}.json`, { sha: continuation.sha, ...ciGates });
+      const fixed = await fixStep(ctx, "post-ci", { open: [], gates: ciGates, tier: "full" }, { gateFailures: 0 });
+      if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}` });
+      gates = fixed.gates;
+    }
     if (gates && !gates.green) {
       const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });
       if (!fixed.ok) {
@@ -918,6 +1085,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       gates = fixed.gates;
     }
     events.emit({ step: "resume", event: "step_finished", data: { continue_at: st.step } });
+    if (continuation && st.step === "finalize") st.step = "review";
     await advance(f, ctx, { noPr: opts.noPr ?? st.no_pr, startedAt, gates });
   });
 }
@@ -931,6 +1099,19 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
   if (!existsSync(wt)) return fail(`worktree ${wt} is missing`);
   const head = (await git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (head !== branch) return fail(`worktree is on ${head}, expected ${branch}`);
+  if (ctx.task.issue !== undefined) {
+    let issue: { body: string };
+    try {
+      issue = await ctx.deps.github.getIssue(ctx.repoDir, ctx.task.issue);
+    } catch (e) {
+      return fail(`issue #${ctx.task.issue} could not be read (${(e as Error).message.slice(0, 160)}); kept the checkpoint plan`);
+    }
+    const missing = missingPlanQuotes(issue.body, ctx.plan);
+    if (missing.length) return fail(`issue #${ctx.task.issue} dropped a planned quote (${missing[0]!.slice(0, 80)}); kept the checkpoint plan, not a new one`);
+  }
+  const openPr = st.pr ? await ctx.deps.github.findOpenPr(ctx.worktree, branch) : null;
+  const prProblem = openPrProblem(st.pr, openPr, branch);
+  if (prProblem) return fail(prProblem);
   for (const [ref, what] of [["MERGE_HEAD", "merge"], ["REBASE_HEAD", "rebase"], ["CHERRY_PICK_HEAD", "cherry-pick"]] as const) {
     if (await gitOk(wt, ["rev-parse", "-q", "--verify", ref])) return fail(`a ${what} is in progress in the worktree; finish or abort it first`);
   }

@@ -142,6 +142,8 @@ export async function runBaselineGates(opts: {
   rulesDir?: string;
   /** Missing binary fails the gate. Default: a pass whose detail starts with `SKIPPED`. */
   requireTools?: boolean;
+  /** Names already executed as repo checks in this phase. Those scanners are not started. */
+  skipNames?: readonly string[];
   run?: (command: string) => Promise<ShResult>;
   binExists?: (bin: string) => Promise<boolean>;
   /** Progress and heartbeat while a scanner command is running. */
@@ -160,7 +162,9 @@ export async function runBaselineGates(opts: {
   const run = opts.run ?? ((command: string) => sh(command, { cwd: opts.cwd, env: scannerEnv(), timeoutMs: opts.timeoutMs }));
   const binExists = opts.binExists ?? defaultBinExists;
   const out: BuiltinResult[] = [];
+  const skip = new Set(opts.skipNames ?? []);
   for (const gate of planned) {
+    if (skip.has(gate.name)) continue;
     if (gate.passDetail) {
       out.push(pass(gate.name, gate.passDetail));
       continue;

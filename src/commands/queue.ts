@@ -2,16 +2,17 @@ import { parseArgs } from "node:util";
 import type { GitHub } from "../gh.js";
 import { Interrupted } from "../interrupt.js";
 import { spawnFactoryRun } from "../queue/spawn.js";
+import { admissionBlock } from "../queue/admit.js";
 import {
-  FACTORY_READY_LABEL,
   loadAllQueues,
   loadQueueByKey,
-  NEEDS_PLAN_LABEL,
   repoQueueKey,
   updateQueue,
   type QueueEntry,
   type QueueFile,
 } from "../queue/store.js";
+import { clearWorkerMode, writeWorkerMode } from "../queue/control.js";
+import { previewQueues, renderPreview } from "../queue/preview.js";
 import { DEFAULT_SLOTS, runQueue, type RunQueueOptions, type StartRun } from "../queue/worker.js";
 import type { Io } from "./gates.js";
 
@@ -36,6 +37,7 @@ export interface QueueListEntry {
   pr: string | null;
   reason: string | null;
   requeues: number;
+  choice: string | null;
 }
 
 export interface QueueListReport {
@@ -82,6 +84,7 @@ function toList(q: QueueFile): QueueListReport["queues"][number] {
       pr: e.pr ?? null,
       reason: e.reason ?? null,
       requeues: e.requeues ?? 0,
+      choice: e.choice ?? null,
     })),
   };
 }
@@ -98,13 +101,14 @@ export function renderQueues(report: QueueListReport): string {
       if (e.status === "done" && e.pr) bits.push(e.pr);
       if (e.status === "parked" && e.reason) bits.push(e.reason);
       if (e.status === "pending" && e.after !== null) bits.push(`after #${e.after}`);
+      if (e.choice) bits.push(e.choice);
       lines.push(bits.join("  "));
     }
   }
   return lines.join("\n") + "\n";
 }
 
-/** Appends issues in order. Refuses the whole add when any issue is closed, unlabelled, or `needs-plan`. */
+/** Appends issues in order. Refuses the whole add when any issue fails admission (closed, label, or empty task). */
 export async function queueAdd(
   opts: { factoryHome: string; repo: string; issues: number[]; after?: number; github: GitHub },
   io: Io,
@@ -132,9 +136,8 @@ export async function queueAdd(
       problems.push(`#${n}: ${(e as Error).message}`);
       continue;
     }
-    if ((issue.state ?? "open") === "closed") problems.push(`#${n} is closed`);
-    else if (!issue.labels.includes(FACTORY_READY_LABEL)) problems.push(`#${n} lacks the ${FACTORY_READY_LABEL} label`);
-    else if (issue.labels.includes(NEEDS_PLAN_LABEL)) problems.push(`#${n} carries ${NEEDS_PLAN_LABEL}`);
+    const block = admissionBlock(issue);
+    if (block) problems.push(`#${n} ${block}`);
   }
   if (problems.length) {
     io.err(`factory: ${problems.join("; ")}\n`);
@@ -208,7 +211,7 @@ function exitFromSignal(signal?: AbortSignal): number {
 }
 
 export async function queueRun(
-  opts: { factoryHome: string; github: GitHub; repo?: string; slots: number; untilMs?: number; signal?: AbortSignal; start?: StartRun; pollMs?: number; now?: () => number; sleep?: RunQueueOptions["sleep"] },
+  opts: { factoryHome: string; github: GitHub; repo?: string; slots: number; untilMs?: number; stay?: boolean; signal?: AbortSignal; start?: StartRun; pollMs?: number; now?: () => number; sleep?: RunQueueOptions["sleep"]; random?: () => number },
   io: Io,
 ): Promise<number> {
   if (opts.repo) {
@@ -225,12 +228,14 @@ export async function queueRun(
       repo: opts.repo,
       slots: opts.slots,
       untilMs: opts.untilMs,
+      stay: opts.stay,
       signal: opts.signal,
       start: opts.start ?? ((req) => spawnFactoryRun(req)),
       io,
       pollMs: opts.pollMs,
       now: opts.now,
       sleep: opts.sleep,
+      random: opts.random,
     });
   } catch (e) {
     io.err(`factory: ${(e as Error).message}\n`);
@@ -263,10 +268,50 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
     });
     return queueList({ factoryHome: deps.factoryHome, repo: values.repo, json: values.json }, deps.io);
   }
+  if (sub === "pause" || sub === "drain" || sub === "stop") {
+    const { positionals } = parseArgs({ args: rest, allowPositionals: true, options: {} });
+    if (positionals.length) {
+      deps.io.err(`factory: usage: factory queue ${sub}\n`);
+      return 2;
+    }
+    writeWorkerMode(deps.factoryHome, sub);
+    deps.io.out(`queue: ${sub}\n`);
+    return 0;
+  }
+  if (sub === "resume") {
+    const { positionals } = parseArgs({ args: rest, allowPositionals: true, options: {} });
+    if (positionals.length) {
+      deps.io.err("factory: usage: factory queue resume\n");
+      return 2;
+    }
+    clearWorkerMode(deps.factoryHome);
+    deps.io.out("queue: resume\n");
+    return 0;
+  }
+  if (sub === "preview") {
+    const { values } = parseArgs({
+      args: rest,
+      options: { repo: { type: "string" }, slots: { type: "string" }, json: { type: "boolean", default: false } },
+    });
+    const slots = values.slots === undefined ? DEFAULT_SLOTS : Number(values.slots);
+    if (!Number.isInteger(slots) || slots < 1 || slots > 32) {
+      deps.io.err(`factory: invalid --slots ${values.slots ?? ""}\n`);
+      return 2;
+    }
+    let report;
+    try {
+      report = previewQueues(deps.factoryHome, { repo: values.repo, slots });
+    } catch (e) {
+      deps.io.err(`factory: ${(e as Error).message}\n`);
+      return 1;
+    }
+    deps.io.out(values.json ? JSON.stringify(report) + "\n" : renderPreview(report));
+    return 0;
+  }
   if (sub === "run") {
     const { values } = parseArgs({
       args: rest,
-      options: { repo: { type: "string" }, slots: { type: "string" }, until: { type: "string" } },
+      options: { repo: { type: "string" }, slots: { type: "string" }, until: { type: "string" }, stay: { type: "boolean", default: false } },
     });
     const slots = values.slots === undefined ? DEFAULT_SLOTS : Number(values.slots);
     if (!Number.isInteger(slots) || slots < 1 || slots > 32) {
@@ -289,6 +334,7 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
         repo: values.repo,
         slots,
         untilMs,
+        stay: values.stay,
         signal: deps.signal,
         start: deps.start,
         pollMs: deps.pollMs,
@@ -298,6 +344,6 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
       deps.io,
     );
   }
-  deps.io.err("factory: usage: factory queue add|list|remove|run\n");
+  deps.io.err("factory: usage: factory queue add|list|remove|preview|pause|drain|resume|stop|run\n");
   return sub === undefined || sub === "--help" ? 0 : 2;
 }

@@ -59,12 +59,25 @@ const USAGE = `usage:
   factory queue list [--repo <path>] [--json]
               (pending, running with run id, done with PR, parked with reason, in queue order)
   factory queue remove --repo <path> <issue...>
-  factory queue run [--repo <path>] [--slots N] [--until HH:MM]
+  factory queue preview [--repo <path>] [--slots N] [--json]
+              (what would start, in order, under the current limits; no queue write, no GitHub call, no run)
+  factory queue pause
+              (no new starts; a running worker keeps polling; live runs continue)
+  factory queue drain
+              (no new starts; live coding runs finish; waiting CI and queued issues stay on disk)
+  factory queue resume
+              (clears pause or drain)
+  factory queue stop
+              (the worker exits at its next tick and does not signal a live run)
+  factory queue run [--repo <path>] [--slots N] [--until HH:MM] [--stay]
               (one worker: min(slots, concurrency.max_runs) runs per repo, default slots 2;
+               a second start against the same factory home is refused;
                factory run --issue N --no-notify --run-id <id>; parks needs_human/needs_input/failed/base_red;
                transient needs_human (state.json transient flag) requeues at most twice;
                updates every behind factory PR (one at a time; a failure is retried, it does not stop the others);
-               --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish)
+               --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish;
+               --stay keeps this worker up when idle and backs off; it does not raise the slot cap.
+               The worker does not run improve.)
   factory status [--since <duration>] [--json]
               (running, waiting for a human, interrupted runs; queues; open factory PRs;
                stale draft factory PRs, with a hint to close or resume them;
@@ -658,6 +671,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
         options: {
           wait: { type: "boolean", default: false },
           "no-pr": { type: "boolean" },
+          "no-notify": { type: "boolean", default: false },
           notify: { type: "string" },
           profile: { type: "string" },
         },
@@ -682,7 +696,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
         const result = await resumeFactory(
           positionals[0]!,
           { wait: values.wait, noPr: values["no-pr"], notifyTarget: values.notify },
-          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env) },
+          { runner, github: new GhCli(), profile, sandbox: sandboxFor(profile, io), factoryHome, signal: controller.signal, docs: Context7Client.fromEnv(process.env), noNotify: values["no-notify"] },
         );
         io.out(JSON.stringify(result) + "\n");
         return exitCode(result.result, controller.signal);

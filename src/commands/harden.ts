@@ -5,7 +5,7 @@ import { extractJson } from "../agents/runner.js";
 import type { GitHub } from "../gh.js";
 import { baseRef, originUrl, revParse } from "../git.js";
 import { applyCompaction, CompactionSchema, validateCompaction } from "../harden/compact.js";
-import { resolveProposals } from "../harden/lifecycle.js";
+import { formatLifecycle, resolveProposals } from "../harden/lifecycle.js";
 import { appendMetrics, computeMetrics } from "../harden/metrics.js";
 import {
   checklistSignals,
@@ -27,6 +27,7 @@ import { listRuns, type RunRecord } from "../runs.js";
 import { type Plan, validatePlan } from "../schemas/plan.js";
 import { type HardenReport, HardenReportSchema } from "../schemas/proposal.js";
 import { loadRepoConfig, type RepoConfig } from "../schemas/repo.js";
+import { coverageOfRepo } from "../standards.js";
 import { PLAN_SHAPE } from "../steps/plan.js";
 import { statsReport } from "./stats.js";
 import type { Io } from "./gates.js";
@@ -244,9 +245,14 @@ export async function hardenCommand(opts: HardenOptions & { json: boolean }, dep
   const r = await harden(opts, deps);
   if (opts.json) io.out(JSON.stringify(r) + "\n");
   else {
-    for (const c of r.lifecycle) io.out(`proposal ${c.id}: ${c.status} (${c.reason})\n`);
+    for (const c of r.lifecycle) io.out(formatLifecycle(c));
     if (r.compaction.merged || r.compaction.error) io.out(`compaction: ${r.compaction.merged} merged${r.compaction.error ? `; ${r.compaction.error}` : ""}\n`);
-    io.out(`metrics: determinism ${r.metrics.determinism_ratio ?? "–"}, open findings ${r.metrics.open_findings}, CI min/week ${r.metrics.ci_minutes_per_week ?? "–"}\n`);
+    const coverage = coverageOfRepo(opts.repo);
+    const coverageText = coverage
+      ? `full ${coverage.full.length}, partial ${coverage.partial.length}, review scope ${coverage.review_scope.length}`
+      : "standards unknown (not zero)";
+    io.out(`automation: ${coverageText}; a check-count quotient is not a quality goal\n`);
+    io.out(`metrics: open findings ${r.metrics.open_findings}, CI min/week ${r.metrics.ci_minutes_per_week ?? "–"}\n`);
     if (r.ticket) {
       io.out(`ticket ${r.path}: ${r.ticket.proposals.length} proposal(s)\n`);
       for (const p of r.ticket.proposals) io.out(`  ${p.rank}. ${p.plan.goal}\n     run: factory run --repo ${opts.repo} --plan ${p.plan_path}\n`);

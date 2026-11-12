@@ -258,17 +258,8 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
     checks.push({ name: "auto-merge", status: "info", detail: `merge.auto_merge_max_risk is ${repo.merge.auto_merge_max_risk} but the repo does not allow auto-merge (Settings → General → Allow auto-merge); auto PRs will wait for a manual merge` });
   }
   const required = s.required_checks ?? [];
-  // A minimal stub's `done` succeeds on every ready PR. Requiring it adds nothing beside the repo's own jobs.
-  const gates = ciStubMode(repo.checks) === "full";
-  if (!gates) {
-    if (required.includes(LEGACY_REQUIRED_CHECK)) {
-      checks.push({
-        name: "branch protection",
-        status: "warn",
-        detail: `${repo.base_branch} requires "${LEGACY_REQUIRED_CHECK}", which no check run reports, so every PR stays blocked; remove it ("${REQUIRED_CHECK}" gates nothing: no check runs in CI)`,
-      });
-    }
-  } else if (s.branch_protected === false) {
+  // Both stubs: `done` reads commit status `factory`. GitHub enforces that only when `done` is required.
+  if (s.branch_protected === false) {
     checks.push({
       name: "branch protection",
       status: "info",
@@ -283,7 +274,7 @@ export async function githubChecks(github: GitHub, repoDir: string, repo: RepoCo
   } else if (s.branch_protected && !required.includes(REQUIRED_CHECK)) {
     checks.push({ name: "branch protection", status: "info", detail: `${repo.base_branch} is protected; "${REQUIRED_CHECK}" is not a required check yet` });
   }
-  checks.push(...baselineGithubChecks(repoDir, s, { factoryDoneGates: gates }));
+  checks.push(...baselineGithubChecks(repoDir, s, { factoryDoneGates: true }));
   return checks;
 }
 
@@ -353,10 +344,12 @@ export function uiAuthChecks(repo: RepoConfig, resolved?: ResolvedSecrets): Doct
 
 /** How many runs this repo allows, and whether fixed host ports make a second run env_missing. */
 export function concurrencyCheck(repo: RepoConfig): DoctorCheck {
-  const { max_runs, exclusive_paths } = repo.concurrency;
+  const { max_runs, exclusive_paths, resources } = repo.concurrency;
   const paths = exclusive_paths.length ? exclusive_paths.join(", ") : "(none)";
   const showPaths = exclusive_paths.length > 0 || max_runs > 1;
-  const base = showPaths ? `max_runs ${max_runs}; exclusive_paths ${paths}` : `max_runs ${max_runs}`;
+  let base = showPaths ? `max_runs ${max_runs}; exclusive_paths ${paths}` : `max_runs ${max_runs}`;
+  // An empty list is the default: doctor output stays the same until a resource is named.
+  if (resources.length) base += `; resources ${resources.join(", ")}`;
   const fixed = repo.services.filter((s) => s.host && (s.ports?.length ?? 0) > 0);
   if (max_runs > 1 && fixed.length) {
     return { name: "concurrency", status: "warn", detail: `${base}; ${fixed.map((s) => s.name).join(", ")} has fixed host ports (one instance per box)` };
@@ -559,7 +552,7 @@ export async function doctorCommand(opts: DoctorOptions, io: Io): Promise<number
       }
       checks.push(concurrencyCheck(repo));
       checks.push(...ciChecks(repoDir, repo));
-      checks.push(...standardsDoctorNotes(repoDir, repo.checks.map((c) => c.name)));
+      checks.push(...standardsDoctorNotes(repoDir, repo.checks));
       checks.push(...baselineConfigChecks(repoDir, repo, await probeBaselineTools()));
       checks.push(...serviceConfigChecks(repo));
       const sec = await secretsChecks(repoDir, repo, opts.factoryHome);

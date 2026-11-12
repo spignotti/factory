@@ -33,6 +33,14 @@
               "string",
               "null"
             ]
+          },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "negative",
+              "unclear"
+            ]
           }
         },
         "required": [
@@ -523,6 +531,14 @@
                             "type": [
                               "string",
                               "null"
+                            ]
+                          },
+                          "effect": {
+                            "type": "string",
+                            "enum": [
+                              "confirmed",
+                              "negative",
+                              "unclear"
                             ]
                           }
                         },

@@ -70,6 +70,31 @@ export function analyzeCommand(argv: string[]): CommandVerdict {
   return { mutates: false };
 }
 
+/**
+ * Write form of a formatter check, or null when the command is not one.
+ * Inverse of the read-only rewrite in `analyzeCommand` for formatters only (`eslint --fix` is not one).
+ * `tools/prettier --check` is prettier because the tool is the basename.
+ */
+export function formatterWriteCommand(cmd: string): string | null {
+  const parts = commandParts(cmd);
+  if (parts.length !== 1) return null;
+  const argv = parts[0]!;
+  const t = toolIndex(argv);
+  if (t < 0) return null;
+  const pre = argv.slice(0, t);
+  const tool = argv[t]!.split("/").pop()!;
+  const args = argv.slice(t + 1);
+  const mk = (rest: string[]) => joinArgv([...pre, argv[t]!, ...rest]);
+  const sub = args[0];
+  if (tool === "ruff" && sub === "format" && has(args, "--check", "--diff")) return mk(["format", ...without(args.slice(1), "--check", "--diff")]);
+  if (tool === "black" && has(args, "--check", "--diff")) return mk(without(args, "--check", "--diff"));
+  if (tool === "isort" && has(args, "--check-only", "--check", "-c", "--diff")) return mk(without(args, "--check-only", "--check", "-c", "--diff"));
+  if (tool === "prettier" && has(args, "--check", "-c") && !has(args, "--write", "-w")) return mk(["--write", ...without(args, "--check", "-c")]);
+  if (tool === "cargo" && sub === "fmt" && has(args, "--check")) return mk(without(args, "--check"));
+  if ((tool === "gofmt" || tool === "goimports") && has(args, "-l") && !has(args, "-w")) return mk(["-w", ...without(args, "-l")]);
+  return null;
+}
+
 /** Shell-ish split of a `package.json` script / command line (quotes respected; no expansion). */
 export function splitCommand(cmd: string): string[] {
   const out: string[] = [];

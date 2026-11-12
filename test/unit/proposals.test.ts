@@ -134,7 +134,7 @@ describe("updateMemory", () => {
   it("applies a change under the lock and writes it", () => {
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));
     updateMemory(home, REPO, (m) => {
-      m.entries.push({ key: "k1", text: "t", reviewer: "plan", checkable: "lint", check_sketch: "", count: 1, first_seen: "a", last_seen: "a", runs: ["r"], status: "open", ref: null });
+      m.entries.push({ key: "k1", text: "t", reviewer: "plan", checkable: "lint", check_sketch: "", count: 1, first_seen: "a", last_seen: "a", runs: ["r"], status: "open", ref: null, disposition: "confirmed" });
     });
     expect(loadMemory(home, REPO).entries.map((e) => e.key)).toEqual(["k1"]);
     expect(existsSync(join(memoryDir(home, REPO), "findings.json"))).toBe(true);

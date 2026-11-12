@@ -50,7 +50,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   reason (test-stabilization, where the repro cannot fail on base). That opt-out is a loosening: the reason is required,
   and the gate result, config guard and PR body name it. The plan reviewer must justify it. Without the field and the
   label, the proof is unchanged.
-- **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, flaky re-run, built-ins
+- **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, one command per phase, an infrastructure retry versus a blocking product flake, built-ins
   (forbidden paths, diff size, test presence, evidence, guide update, scope report, red-green proof, config
   guard). The config guard fails the gates when the change loosens lint/type/format/test-runner config
   (`ruff.toml`, `[tool.ruff|mypy|pyright|…]`, eslint/biome/prettier config, `tsconfig` strictness flags,
@@ -73,14 +73,17 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   the repo sets `pr.host_steps_section`, the body also has that section (copy-paste commands, verify, roll back);
   otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, `none` and pending
   CI on the head are polled up to `limits.pr_ci_wait_minutes` and do not fail the run. Still none or pending
-  leaves an auto policy as `human_review` (no auto-merge). Auto-merge is enabled only when that CI is green.
+  keeps an auto policy and does not enable auto-merge; the runner enables it later when that SHA is green.
   Red CI ends it `needs_human` and converts the PR back to draft.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/stream/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
   (a frozen box/VM is not counted as silence, `progress` event `suspended_ms`). Provider timeouts and dropped
   streams (`Request timed out.`, `Connection error.`, `terminated`, `ECONNRESET`, …) are `network` errors and
-  retried on the same model (`retry.attempts`). A provider that closes the token stream before a finish reason
+  retried on the same model (`retry.attempts`). A `Connection error.` with a TLS appendix (`certificate verify failed`,
+  `unable to verify the first certificate`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `TLS handshake`) is the same class.
+  Auth, quota, missing configuration and invalid output are not. Network retries already spent stay on the run
+  and are not reset by resume. Fallback models share that same budget, so nested retries do not each start over. A provider that closes the token stream before a finish reason
   (`Stream ended without finish_reason`, premature EOF, connection reset while streaming) is a `stream` error:
   the same model is retried up to `limits.stream_retries` (default 2) with the profile backoff, recorded as
   `step_retry` and shown by `factory status` while that call is still in flight. The retry is the current agent
@@ -98,6 +101,18 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   and is not retried as flaky. A red-green timeout on the base worktree is inconclusive: it is not treated as a
   failing repro, and the run result says so. While a check runs, progress and heartbeat events name it so
   `factory status` can show the current check.
+  A red check runs once more. The first attempt decides the kind. An infrastructure failure (dropped
+  connection, DNS, a killed process) that then passes is a pass, and the tail names both attempts. Any other
+  red-then-green is `flaky`: it stays visible and fails the gate, including on the base commit. `flake_allow`
+  on that check is the only exception (a concrete reason); setting or editing it is a loosening. `duration_ms`
+  adds every attempt. Two checks with the same `run` command run once in that phase; the later row names the
+  check it repeated. `factory gates --select` schedules the first name and says so on stderr, so CI does not
+  start the command twice. A change to a dependency, shared config, fixture or package entrypoint selects
+  every check of the tier instead of trusting path filters. The red-green base probe is stored in the run
+  directory (`red-green-base.json`) and reused only when the base commit, the repro and support files, the
+  test command and setup are the same. The HEAD command always runs against the current tree. A changed
+  fixture or base runs the base probe again. An inconclusive or timed-out probe is not stored. This does not
+  add a benchmark harness: a gate timeout still only stops a hang.
   Pi sees only the worktree root `AGENTS.md` as context (no `~/.pi`, ancestor or `AGENTS.override.md` files;
   an override is ignored with a warning).
 - **Events** (`src/events.ts`): `events.jsonl` and a one-line `result.json` per run.
@@ -110,7 +125,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
-| `factory queue add\|list\|remove\|run` | ordered issue queue per repo; overnight worker (`--slots`, `--until`) |
+| `factory queue add\|list\|remove\|run` | ordered issue queue per repo; one worker (`--slots`, `--until`, `--stay`) |
 | `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), queues, PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
@@ -138,6 +153,8 @@ budget; a resume at `finalize` only re-runs the gates (no new review of the huma
 its own outcome at the end. The PR step is idempotent: a push that errors but landed (origin's branch at
 HEAD) counts as pushed, and an open PR on the run's branch at HEAD is adopted and updated instead of a second
 `gh pr create`.
+
+A coding result stores `outcome.merged` as `no`. `done` is not a confirmed merge. The same object counts the ticket, the attempts, the delivered PR, work that ended without a merge, and an open decision separately. `provenance` records the factory version and commit, a hash of the role prompts, the implementer model, the plan effort, a hash of the redacted repo config, base and head, and a hash per check command. The command text and secret values are not stored. Resume writes `recovery.json` (previous result, the attempt count when the checkpoint already had one, the checkpoint step, and that the plan was kept) and does not start a new plan. A result or queue entry written before `outcome` / `delivery` stays unknown when it is read; a stored `pr` is not backfilled into a merge.
 
 ## Notify (bots)
 
@@ -221,8 +238,8 @@ human_only_paths: [".github/**", ".factory/repo.yaml", "AGENTS.md"]   # changed 
 review: { max_rounds: 2, checklist: true, skip_paths: ["uv.lock"], max_nits: 5 }
 merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
-  policy: { low: human_review, medium: human_review }   # bot_review | human_review
-  low_max_diff_lines: 300            # larger diffs are at least medium
+  policy: { low: human_review, medium: human_review }   # bot_review merges the reviewed green head; human_review waits
+  low_max_diff_lines: 300            # size signal only; a larger diff is not medium by itself
 limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true, stream_retries: 2, step_token_warn: 1000000 }
 # limits.stream_retries [2]: same-model retries after a provider stream abort (0–5; 0 = off). The current
 # agent call only. Auth, quota and invalid output are not retried. Exhausted retries end needs_human.
@@ -233,6 +250,10 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # max_wall_minutes). The process tree is killed; the result is `timeout`, not a pass, and is not retried
 # as flaky. A timeout of the repro on the base worktree is inconclusive (not a red repro) and is named in
 # the run result. Progress and heartbeat events name the running check for `factory status`.
+# A product red-then-green is flaky and fails the gate unless the check sets flake_allow (a short reason;
+# setting or editing it is a loosening). An infrastructure retry that then passes is a pass. duration_ms is
+# the sum of the attempts. A later check with the same run is not executed again in that gate.
+# manual: a check with no owner fails closed and does not run. owner is who attests that external proof.
 # Raising a timeout is a loosening (config_guard); lowering is not. `factory adopt` sets timeout_minutes
 # from measured durations (5×, at least 5 min).
 # limits.base_ci_wait_minutes [20]: pending CI on the base is polled this long (0–120; 0 = base_red at
@@ -241,14 +262,14 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # id) once that commit is green or has no checks, if it stopped within this many hours (0–168; 0 = off).
 # `factory gc` and the start of `factory run` do the check. A local fast-check base_red is not resumed.
 # limits.pr_ci_wait_minutes [20]: after the PR is pushed, none and pending CI on the head are polled
-# this long (0–120; 0 = one sample). Still none or pending does not fail the run and does not enable
-# auto-merge (an auto policy becomes human_review). Only green enables auto-merge. Red CI ends it
+# this long (0–120; 0 = one sample). Still none or pending does not fail the run, keeps an auto
+# policy, and does not enable auto-merge until that same SHA is green. Only green enables auto-merge. Red CI ends it
 # needs_human and marks the PR draft again. The wait is not work time.
 # max_wall_minutes [240, 4 h] is active time: time the box was suspended (VM paused, laptop asleep) is credited
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
 # commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
 # factory resume <run-id>"), the worktree keeps the work and resume re-runs the gates over it.
-# Diff line limits (limits.max_diff_lines, merge.low_max_diff_lines) count
+# limits.max_diff_lines is a gate. merge.low_max_diff_lines is a size signal and does not change the risk class. Both count
 # added + removed lines since base (renames detected: a moved file counts only its changed lines; a
 # move into or out of an excluded path counts as delete + add), without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
 # not manifests), binary files and limits.diff_exclude (generated paths; test files under tests.globs
@@ -280,6 +301,7 @@ models: {}                           # per-repo role chains, see Model configura
 concurrency:                     # parallel runs; see Parallel runs [max_runs 1]
   max_runs: 1                    # 1..32 lock slots; raising it is a loosening
   exclusive_paths: []            # globs that run alone (e.g. supabase/migrations/**); removing one is a loosening
+  resources: []                  # shared names (a database, a test fixture); removing one is a loosening
 pr:
   host_steps_section: "Mac install steps"   # omit to leave host steps out of the PR; see Risk & Security
 ```
@@ -623,9 +645,9 @@ before the PR. When every check is `local_only` (or there is none), `factory ci-
 `templates/ci/factory-minimal.yml` instead: no npx, no `select`, no `check`. A `draft` job runs only on a
 draft pull request so a failed `done` there is not a settled red; on a ready pull request a failed or
 cancelled `done` is red. Draft and ready events share one concurrency group, so marking ready cancels
-the in-flight draft run. It fails on a draft or a cancelled run and succeeds on a ready pull request.
-Doctor accepts that file for those repos and does not suggest requiring `done` (it gates nothing beside
-the repo's own jobs). A check that is not `local_only`, including `tier: manual`, keeps the full stub so
+the in-flight draft run. It fails on a draft or a cancelled run. On a ready pull request `done` succeeds
+only when the commit status `factory` is success on the branch head. Doctor and adopt require `done` for
+this stub as well as the full one. A check that is not `local_only`, including `tier: manual`, keeps the full stub so
 `workflow_dispatch` can run it.
 
 **Toolchains:** GitHub runners (`ubuntu-latest`) have node and python3 but no pnpm or uv. Before the
@@ -701,21 +723,30 @@ Aspects:
 - **findings** — recurring or checkable findings, flaky checks, unmarked checklist items, reverted factory
   PRs. Near-duplicate open findings are compacted first (`plan_medium`). A metrics line is appended.
   No signals and no open proposal to refresh: no model call.
-- **security**, **performance**, **structure** — one read-only session each. Structure is refactor and
-  simplify together. Performance also sees the 30-day CI audit (at most 200 runs). The model sees open
-  findings, the latest metrics line, and findings already on an open proposal of that aspect.
+- **security**, **performance**, **structure** — one read-only session each, and only when there is
+  evidence. Security needs an open confirmed finding from the security reviewer. Structure needs an open
+  confirmed simplicity finding seen at least twice. Performance needs a CI audit that shows a check that
+  never failed, a slow check without paths, a flake rate above zero, or at least 60 CI minutes per week.
+  A dry-run or a failed audit is not that evidence. An open proposal of the aspect still refreshes it.
+  Structure is refactor and simplify together. Performance also sees the 30-day CI audit (at most 200 runs).
+  The model sees open confirmed findings, the latest metrics line, and findings already on an open proposal
+  of that aspect. Labels stay `factory-proposal` until a person relabels the issue.
 - **ci** — workflow runs over 30 days, paged (100 per page, at most 1000). A truncated window's per-week
   figures use the days actually covered. Per job: runs, minutes/week, p50/p90, failure rate, never failed.
   Flags slow jobs without path filters, report-only steps (full job minutes only when every step is
-  report-only), an empty factory stub, duplicate commands, push-to-main runs. High minutes alone calls the
-  model. A failed `gh run view` skips that run (`skipped`) and keeps the rest; `ci` and `tests` share one
+  report-only), an empty factory stub, duplicate commands, push-to-main runs. A `shellcheck`, `quality`, or
+  `validate` job that ran but reported no duration is a measurement gap: it is not a never-failed clean bill
+  and does not by itself call the model. High minutes alone calls the model. A failed `gh run view` skips that run (`skipped`) and keeps the rest; `ci` and `tests` share one
   window. Workflow edits only as declared `protected_changes`. Removing or renaming a job fails
   `config_guard` unless that entry names the job.
 - **tests** — slow tests when the repo's runner can report them (pytest `--durations`, vitest/jest JSON).
   `repo.setup` runs first in a temporary base worktree (removed afterwards; not the checkout), with
   `env_command` and the shared package cache, then duration and coverage commands. A failed setup, or a
   non-zero run that produced nothing parsable, is a signal error (the model may propose fixing the
-  measurement). Coverage paths are repo-relative before they are matched or reported.
+  measurement). A coverage command that exits 0 but writes nothing parsable, and a shell suite (`bats`,
+  `shellcheck`, `shunit`, or a `.sh` command) with no duration parser, are measurement gaps. A gap is not
+  zero missed lines, not a slow-test count of zero, and not by itself a reason to call the model. Coverage
+  paths are repo-relative before they are matched or reported.
   Flaky checks from memory, test jobs that never fail, and uncovered critical paths when `tests.coverage`
   (a command that writes a coverage report) is set. Proposals speed up or split slow tests, remove redundant
   ones, add tests for uncovered critical code, and add or raise a coverage threshold. Lowering one fails
@@ -737,8 +768,16 @@ same key in one run: the first is kept, the second is dropped and listed. `--dry
 files only and does not call `gh`, including lifecycle. A `gh` error while reading an issue's state leaves
 that proposal as it is.
 
-Lifecycle, on the next `factory improve`: a merged factory PR resolves the proposal and its findings.
-The PR is matched by plan file, goal or `resolves_findings`, or because the run closes the proposal's issue.
+Lifecycle, on the next `factory improve`: a merged factory PR means the proposal was **implemented**,
+not that its effect was proven. To confirm efficacy, use `red_green: required`, a `kind: repro`,
+`verify: test` criterion and acceptance text `effect check: red_green`. The same behavioral test must
+assert-fail on the base and pass on HEAD; a load error, skip, exemption, or arbitrary green check is
+not proof. This opt-in also works for feature/chore plans. Other measurements remain unverified rather
+than being inferred from a check name. Each proposal states benefit, added cost and its efficacy check.
+With unclear effect, memory stays owned (`proposed`) without creating a bookkeeping issue; a negative
+effect reopens it. Only confirmed efficacy resolves the memory finding. Implemented proposals with
+unclear/negative effects are reconsidered when later evidence arrives. The PR is matched by plan file,
+goal or `resolves_findings`, or because the run closes the proposal's issue.
 That issue match counts even when the run started before the ticket. An issue closed without that PR, a PR
 closed unmerged, or no merged or open PR within 28 days, drops it and reopens its findings. A proposal may change
 `.factory/` or CI files only as declared `protected_changes` (see [Protected config](#protected-config)).
@@ -774,11 +813,11 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Reviewers
 
-`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `standards` joins when `review.checklist` is on (default) and `.factory/standards.md` has unmarked rules (see Standards). Review rules are the `## Severity` section of that file, or `standards/review-rules.md` when the section is absent. Both are read from the base commit.
+`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `standards` joins when `review.checklist` is on (default) and `.factory/standards.md` has rules, including marked rules (see Standards). Review rules are the `## Severity` section of that file, or `standards/review-rules.md` when the section is absent. Both are read from the base commit.
 
 ## Standards
 
-Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations; add `<!-- check: name -->` once that name is a `repo.yaml` check or a pull_request job in `.github/workflows/`. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
+Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations. `<!-- check: name -->` is a reference, never permission to hide the rule: a static name/command/path match cannot establish semantic enforcement. The reviewer inspects whether the check executes, blocks, and detects a representative violation. Coverage reports a plausible configured check as **partial**, not full; all rules remain in review scope. A workflow substring (even a comment) is not proof that CI executes or blocks. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). Removing a `repo.yaml` check is also a loosening, unless the plan lists `.factory/repo.yaml`, names the removed check and a check the diff adds, and acceptance contains both `probe fail: <new>` and `probe pass: <new>`. Weakening without that replacement stays a loosening. `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
 
 ```markdown
 ## Severity
@@ -793,7 +832,7 @@ Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every 
 
 ## Findings memory
 
-Open review findings left at the end of a run (no nits) and flaky checks are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL). The ten most frequent open entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. `factory improve --aspect findings` turns them into checks. Delete the file to forget.
+Confirmed review findings are remembered per repository in `$FACTORY_HOME/memory/<repo>/findings.json` (outside the repo, keyed by the canonical origin URL), including defects that were fixed before the run ended. Rejected (`accepted_wontfix`), duplicate, and ungrounded (no evidence) rows stay in the file and are not counted as repeats. Nits are skipped. A repeat matches an error class built from the file, the severity, and one token in the evidence (a backticked name, an `Error`/`Exception` name, or `rule:<id>`), not the claim sentence. Another round or a resume of the same run does not increment the count. The ten most frequent open confirmed entries are shown to the implementer and the reviewers of the next run; they never appear in PRs. A class that shows up again after an improvement merged is reopened. `factory improve --aspect findings` turns open confirmed entries into checks. Delete the file to forget.
 
 ## Doctor and the Zen guard
 
@@ -814,7 +853,7 @@ API key for OpenCode Go).
 
 An ordered list of issues per repository, in `$FACTORY_HOME/queue/<repo key>.json` (atomic writes). A restarted `queue run` continues that list and does not start an issue that already has a live run.
 
-Evening, queue the night's issues. Closed, missing `factory-ready`, or carrying `needs-plan` is refused:
+`factory queue add` queues issues. Closed, missing `factory-ready`, carrying `needs-plan`, `needs-decision` or `factory-proposal`, or with an empty title or body is refused:
 
 ```
 factory queue add --repo ~/code/app 120 121 122
@@ -823,20 +862,53 @@ factory queue add --repo ~/code/app 130 --after 120
 
 `--after 120` leaves #130 pending until issue 120's factory PR is merged.
 
-Overnight, one worker under `caffeinate` so the machine stays awake. It starts `factory run --issue N --no-notify` up to `min(--slots, concurrency.max_runs)` per repo (default `--slots 2`), in queue order. It starts nothing for a repo while the base branch CI is red, and it skips an issue that is closed or already has an open factory PR. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. Any other `needs_human`, `needs_input`, `failed` or `base_red` is parked with the reason and is not resumed. A `locked` overlap with an open factory PR stays parked until that PR is merged or closed; a draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) does not block, and `factory status` lists it as stale. Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time, so auto-merge can proceed after CI. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until` is local time: no new starts after it; live runs finish.
+The worker takes the queue. On each repo that already has a queue file it also takes open `factory-ready` issues with a title and a body, once. A later poll or a restarted worker does not add them again, and an incomplete issue list adds nothing. `needs-plan`, `needs-decision`, `factory-proposal`, closed issues, and anything already in the file stay out. `queue add` remains the override and can queue a finished issue again.
+
+The worker starts `factory run --issue N --no-notify` up to `--slots` coding runs in total (default 2), and also up to `concurrency.max_runs` in that repo. Priority is `prio:high`, then normal, then `prio:low` (legacy `priority:*` labels remain accepted); equal priority keeps queue order, oldest first. A normal ticket waiting 24 hours starts ahead of a newer higher-priority one. The choice is priority and wait, not a model reordering the queue. Waiting on `--after`, on CI, or on a `concurrency.resources` name does not use a coding slot. A second run, including a manual `factory run`, waits while that name is held.
+
+It starts nothing for a repo while the base branch CI is red. It does not start an issue that is closed, missing `factory-ready`, carrying a blocked label, or already has an open factory PR. Losing `factory-ready` (or gaining `needs-plan`, `needs-decision`, or `factory-proposal`) while a run is in progress pauses at the next step, keeps the worktree, and does not auto-merge; restoring the label lets that same run continue. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. Any other `needs_human`, `needs_input`, `failed` or `base_red` is parked with the reason and is not resumed. A `locked` overlap with an open factory PR stays parked until that PR is merged or closed, then resumes the saved plan when the issue text is unchanged. A predecessor that closed without merging, and an `after` cycle, stay parked with the reason and are not started again. A draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) does not block, and `factory status` lists it as stale.
+
+Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when an acceptance line `fulfills #N` is evidenced. File overlap alone is not a bundle.
+
+For `auto`/`bot_review`, red head CI, a new head or a moved base schedules the **same** run/PR through
+`factory resume`, under normal global/repo/resource limits. Auto-merge is disabled first; new commits
+gain no inherited approval or review SHA. The pipeline synchronizes the branch/base, runs gates and
+reviews the actual delta before approval. Post-push continuations have a persisted two-attempt budget;
+pause, drain, the work window, withdrawn admission or a changed issue prevent automatic starts. Missing
+checkpoints and uncommitted work require a person. Failed-CI diagnostics are read for the exact SHA,
+bounded and redacted; unknown/config/base failures never authorize product edits. A conflict stops and
+asks for a decision. Human-policy PRs may still receive `gh pr update-branch` without any new approval.
+A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked.
+`--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish.
+
+Test evidence accepts existing executed tests without requiring edits. Pytest names/skips are parsed
+both with and without `{files}`; direct pytest commands request verbose names. Matching successful gate
+commands can supply evidence without rerunning it. Same-process evidence is reused only with identical
+staged tree, base, command, environment and citations; failures/skips are not cached. A single-file
+red-green HEAD probe can reuse that evidence, but the negative base control still runs (or uses its
+content-keyed base probe cache). Evidence/probe durations report the work actually executed.
 
 ```
-caffeinate -i factory queue run --slots 2 --until 07:00
-```
-
-Morning:
-
-```
+factory queue run --slots 2
 factory status --since 12h
 factory queue list
 ```
 
 `factory queue remove --repo <path> <issue...>` drops entries. `factory queue list --json` is the same list for scripts.
+
+One worker per factory home. A second `queue run` exits with `a queue worker is already running` and starts nothing. The lock is `queue/worker.lock`; a dead pid is not treated as a live holder.
+
+`queue run --stay` keeps that worker up when the queue is empty. Idle ticks, and ticks whose GitHub or git call failed, wait with backoff and jitter (at most five minutes). Nothing calls a model unless a pending issue is actually started. `--until HH:MM` is still the work window: after it, no new starts, and the worker exits once live runs have finished. `--stay` does not raise `--slots` or `concurrency.max_runs`. A durable runner is continuous responsibility, not unlimited load.
+
+`queue pause` stops new starts. The worker keeps polling, and a run that already started keeps going. `queue drain` stops new starts, lets a live coding run finish, then exits. Waiting CI and queued issues stay on disk; the next `queue run` after `queue resume` can take them up. `queue resume` clears pause or drain. `queue stop` makes the worker exit at its next tick. It does not signal the run, and a laptop suspend (the same gap the run watchdog already ignores) does not kill other processes.
+
+A crash before the run directory exists puts the issue back to pending. A resource claim is released only when this process holds it or the holder pid is dead. A different live pid keeps the claim, so the issue is not started on top of that owner. A crash after `plan.json` and the worktree exist resumes that same run id. A written `result.json` is classified and is not started again.
+
+`queue preview` prints what would start, in order, and the limits (mode, slots, `max_runs`, room). It does not write the queue, claim a lock, call GitHub, or start a run. Labels are not loaded; admission still happens at start.
+
+`queue run` does not call `improve`. Monday (`findings`, `ci`, `security`) and the first Monday (`tests`, `performance`, `structure`) stay the only `improve` triggers.
+
+Do not replace `dist/` while a worker is running, and do not copy a worktree build over the checkout that worker was started from. A later install drains or stops the worker, keeps the previous commit, and starts one worker from the new build only after the old process has exited. Rollback is that previous commit's build, started the same way, after the new process has exited. This tree does not perform that switch.
 
 ## Status, stats, cleanup
 
@@ -847,7 +919,9 @@ factory gc [--dry-run] [--scheduled] [--force] [--retention-days 7] [--json]
 factory abandon <run-id>          # mark abandoned, release a stale lock, remove the worktree; keep result and logs
 ```
 
-`factory status --since 12h` (off unless passed; `24h`, `7d`, `4w` as in `stats`) adds what finished in that window. The window is each `result.json` mtime, not a scan of `events.jsonl`: merged and closed PRs, open green PRs still on `human_review` (reason from `result.json` `risk_reasons`: risk, diff size, protected paths), open PRs blocked by draft, red CI, behind or conflicting, or a `needs_human` reason, plus `failed`, `base_red` and `needs_input` with no PR. Live PR state (merged, draft, checks, behind) still comes from GitHub. Text `factory stats` prints the top gate failures and reasons; `--json` already had both.
+Text `factory status` leads with four answers: what is running, what it is waiting on (dependency, capacity, CI or runner, provider, human decision, technical repair), what actually merged, and what needs a person. Each line links the run directory (`result.json`, `recovery.json` when resume wrote one, and provenance: version, prompt revision, effort). A GitHub merge is `origin unknown` unless the stored outcome is `confirmed`. The same GitHub login is not that confirmation. Closed without merge is its own line. Rule coverage is full markers, partial markers, and the remaining review scope. A check-count quotient is not the quality goal. Replan, retry and review rounds are counted apart from those waits.
+
+`factory status --since 12h` (off unless passed; `24h`, `7d`, `4w` as in `stats`) adds what finished in that window. The window is each `result.json` mtime, not a scan of `events.jsonl`: merged and closed PRs, open green PRs still on `human_review` (reason from `result.json` `risk_reasons`: risk, diff size, protected paths), open PRs blocked by draft, red CI, behind or conflicting, or a `needs_human` reason, plus `failed`, `base_red` and `needs_input` with no PR. Live PR state (merged, draft, checks, behind) still comes from GitHub. Text `factory stats` prints outcomes, active time, wait and time-to-merge separately, and labels the sum of run minutes as not wall-clock. Subscription use is tokens. A zero dollar figure is not an efficiency proof. Unknown regressions stay unknown. The top gate failures and reasons are printed; `--json` has the same counters.
 
 What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults and scheduling):
 - **PR merged or closed:** worktree, local `factory/*` branch, and the remote branch only if nobody pushed to it after the factory.

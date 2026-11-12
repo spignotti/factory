@@ -68,6 +68,20 @@
               "string",
               "null"
             ]
+          },
+          "disposition": {
+            "default": "confirmed",
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "rejected",
+              "duplicate",
+              "ungrounded"
+            ]
+          },
+          "error_class": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
@@ -81,7 +95,8 @@
           "last_seen",
           "runs",
           "status",
-          "ref"
+          "ref",
+          "disposition"
         ],
         "additionalProperties": false
       }

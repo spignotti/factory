@@ -2,13 +2,15 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { type ChecklistItem, parseChecklist, unmarkedItems } from "./checklist.js";
+import { matchesAny } from "./schemas/plan.js";
+import { parseRepoConfig, type Check } from "./schemas/repo.js";
 
 /**
  * `.factory/standards.md`: repo rules are the list items in every section except `## Severity`
- * and the legacy `## Review rules`. A rule with `<!-- check: name -->` is automated; the name
- * must be a repo.yaml check or a pull_request job. Unmarked rules are judged by the standards reviewer.
- * When `standards.md` is missing, readers fall back to `checklist.md` and `review-rules.md`.
- * Once `standards.md` exists those old files are ignored.
+ * and the legacy `## Review rules`. A `<!-- check: name -->` marker hides a rule from review only
+ * when that check exists, blocks, runs on a path the rule names (or has no path filter), and can
+ * fail. A workflow job name does not. When `standards.md` is missing, readers fall back to
+ * `checklist.md` and `review-rules.md`. Once `standards.md` exists those old files are ignored.
  */
 
 export const STANDARDS_REL = ".factory/standards.md";
@@ -121,11 +123,82 @@ export function readRepoStandards(repoDir: string, defaultReviewRules: string): 
  * Unmarked rules for improve's findings aspect and harden: propose making each a check and cleaning
  * up existing violations. `standards.md` wins; `checklist.md` is the deprecated fallback.
  */
+/** Static check metadata: useful for diagnosis, never semantic enforcement proof. */
+export type MarkerCheck = Pick<Check, "name" | "run" | "tier" | "paths" | "local_only">;
+
+const CONSTANT_RUN = /^(?:true|false|:|exit\s+\d+)$/;
+
+function commandCanDetect(run: string): boolean {
+  const text = run.trim();
+  return text.length > 0 && !CONSTANT_RUN.test(text);
+}
+
+function pathsMentioned(text: string): string[] {
+  return [...text.matchAll(/(?:^|[\s`'"(])((?:[\w.@+-]+\/)+[\w.@+-]+)/g)].map((m) => m[1]!);
+}
+
+/**
+ * True when `check:` names a fast or full check that is not local-only, has a command, and is not
+ * scoped away from a path the rule states. A missing check, a manual check, a constant command,
+ * or a pull_request job id does not cover the rule.
+ */
+export function markerHasCheck(item: { text: string; check?: string }, checks: readonly MarkerCheck[]): boolean {
+  if (!item.check) return false;
+  const check = checks.find((c) => c.name === item.check);
+  if (!check || check.tier === "manual" || check.local_only || !commandCanDetect(check.run)) return false;
+  if (check.paths && check.paths.length > 0) {
+    const mentioned = pathsMentioned(item.text);
+    if (mentioned.length === 0 || !mentioned.some((path) => matchesAny(path, check.paths!))) return false;
+  }
+  return true;
+}
+
+/** Rules the standards reviewer still has to judge. */
+export function rulesForReview(items: readonly ChecklistItem[]): ChecklistItem[] {
+  // A static command/path match cannot establish semantic enforcement. Keep the statement and
+  // its marker visible so the reviewer can inspect the check's real behavior, not just its name.
+  return [...items];
+}
+
+/**
+ * Static configuration can establish only a candidate check, not full semantic coverage.
+ * All standards stay in review scope. This is not a check-count quotient.
+ */
+export function automationCoverage(items: readonly ChecklistItem[], checks: readonly MarkerCheck[]): { full: string[]; partial: string[]; review_scope: string[] } {
+  const full: string[] = [];
+  const partial: string[] = [];
+  const review_scope: string[] = [];
+  for (const item of items) {
+    review_scope.push(item.text);
+    if (markerHasCheck(item, checks)) partial.push(item.text);
+  }
+  return { full, partial, review_scope };
+}
+
+/** Null when the repo has no standards file. That is unknown coverage, not zero rules. */
+export function coverageOfRepo(repoDir: string): { full: string[]; partial: string[]; review_scope: string[] } | null {
+  const checks = repoChecks(repoDir);
+  const standards = readOptionalFile(join(repoDir, STANDARDS_REL));
+  const text = standards !== undefined ? splitStandards(standards).rules : readOptionalFile(join(repoDir, CHECKLIST_REL));
+  if (text === undefined) return null;
+  return automationCoverage(parseChecklist(text), checks);
+}
+
+function repoChecks(repoDir: string): MarkerCheck[] {
+  const text = readOptionalFile(join(repoDir, ".factory", "repo.yaml"));
+  if (text === undefined) return [];
+  try {
+    return parseRepoConfig(text).checks;
+  } catch {
+    return [];
+  }
+}
+
 export function unmarkedStandardRules(repoDir: string): string[] {
   const standards = readOptionalFile(join(repoDir, STANDARDS_REL));
-  if (standards !== undefined) return unmarkedItems(parseChecklist(splitStandards(standards).rules)).map((i) => i.text);
+  if (standards !== undefined) return rulesForReview(parseChecklist(splitStandards(standards).rules)).map((i) => i.text);
   const checklist = readOptionalFile(join(repoDir, CHECKLIST_REL));
-  return checklist === undefined ? [] : unmarkedItems(parseChecklist(checklist)).map((i) => i.text);
+  return checklist === undefined ? [] : rulesForReview(parseChecklist(checklist)).map((i) => i.text);
 }
 
 function stripTitle(text: string): string {
@@ -213,7 +286,7 @@ function declarationText(plan: StandardsDeclarationPlan): string {
 }
 
 /** Whole identifier, not `\b`: a hyphen is a `\b` boundary, so `unit` would match inside `unit-test`. */
-function namesCheck(text: string, name: string): boolean {
+export function namesCheck(text: string, name: string): boolean {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?<![A-Za-z0-9_-])${escaped}(?![A-Za-z0-9_-])`, "i").test(text);
 }
@@ -279,10 +352,10 @@ export interface StandardsDoctorNote {
 
 /**
  * Doctor: a migration hint when the old files are still the source, or a warning to delete them
- * when `standards.md` already exists (they are ignored). Then a failure for each dangling
- * `<!-- check: name -->` (not a repo.yaml check and not a pull_request job).
+ * when `standards.md` already exists (they are ignored). Then a failure for each marker that does
+ * not name a blocking check covering that rule. A workflow job id is not enough.
  */
-export function standardsDoctorNotes(repoDir: string, checkNames: readonly string[]): StandardsDoctorNote[] {
+export function standardsDoctorNotes(repoDir: string, checks: readonly MarkerCheck[]): StandardsDoctorNote[] {
   const notes: StandardsDoctorNote[] = [];
   const hasStandards = existsSync(join(repoDir, STANDARDS_REL));
   const old = [existsSync(join(repoDir, CHECKLIST_REL)) ? CHECKLIST_REL : undefined, existsSync(join(repoDir, REVIEW_RULES_REL)) ? REVIEW_RULES_REL : undefined].filter((x): x is string => x !== undefined);
@@ -291,14 +364,13 @@ export function standardsDoctorNotes(repoDir: string, checkNames: readonly strin
   const text = hasStandards ? readFileSync(join(repoDir, STANDARDS_REL), "utf8") : old.includes(CHECKLIST_REL) ? readFileSync(join(repoDir, CHECKLIST_REL), "utf8") : "";
   if (!text) return notes;
   const items = hasStandards ? parseChecklist(splitStandards(text).rules) : parseChecklist(text);
-  const known = new Set<string>([...checkNames, ...pullRequestJobNames(repoDir)]);
-  const dangling = danglingMarkers(items, known);
+  const dangling = items.filter((item) => item.check !== undefined && !markerHasCheck(item, checks));
   if (dangling.length) {
     const where = hasStandards ? "standards.md" : "checklist.md";
     notes.push({
       name: "standards",
       status: "fail",
-      detail: `dangling check marker${dangling.length > 1 ? "s" : ""}: ${dangling.map((i) => `"${i.check}" (${where}:${i.line})`).join(", ")} (not a repo.yaml check or a pull_request job)`,
+      detail: `dangling check marker${dangling.length > 1 ? "s" : ""}: ${dangling.map((i) => `"${i.check}" (${where}:${i.line})`).join(", ")} (not a blocking check on the relevant path)`,
     });
   }
   return notes;

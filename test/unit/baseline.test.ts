@@ -274,16 +274,19 @@ describe("doctor baseline checks", () => {
     expect(baselineGithubChecks(dir, { ...base, branch_protected: false }).some((c) => c.name === "required checks")).toBe(false);
   });
 
-  it("required checks: does not suggest done when the stub gates nothing beside the repo's own jobs", () => {
+  it("required checks: a minimal stub warns when done is not required", () => {
     const dir = tree({
       ".github/workflows/factory.yml": "on: [pull_request]\njobs:\n  done: {}\n",
       ".github/workflows/lint.yml": "on:\n  pull_request:\njobs:\n  lint:\n    name: Lint\n",
     });
     const settings = { private: true, auto_merge_allowed: null, branch_protected: true, required_checks: ["Lint"] };
-    expect(at(baselineGithubChecks(dir, settings, { factoryDoneGates: false }), "required checks")).toMatchObject({ status: "ok", detail: expect.stringMatching(/Lint/) });
-    const missing = at(baselineGithubChecks(dir, { ...settings, required_checks: [] }, { factoryDoneGates: false }), "required checks");
-    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/Lint/) });
-    expect(missing!.detail).not.toMatch(/done/);
+    const missingDone = at(baselineGithubChecks(dir, settings, { factoryDoneGates: true }), "required checks");
+    expect(missingDone).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
+    expect(missingDone!.detail).not.toMatch(/gates nothing/);
+    const missing = at(baselineGithubChecks(dir, { ...settings, required_checks: [] }), "required checks");
+    expect(missing).toMatchObject({ status: "warn", detail: expect.stringMatching(/\bdone\b/) });
+    expect(missing!.detail).toMatch(/Lint/);
+    expect(missing!.detail).not.toMatch(/gates nothing/);
   });
 
   it("required checks: a ruleset covers gating jobs and ignores release, publish and automerge helpers", async () => {
@@ -595,6 +598,29 @@ describe("baseline run gates", () => {
       { name: "semgrep", ok: true, detail: "no scan needed" },
     ]);
     expect(passedRan.some((command) => command.startsWith("semgrep"))).toBe(false);
+  });
+
+  it("does not start a baseline scanner whose name already ran as a repo check", async () => {
+    const seen: string[] = [];
+    const results = await runBaselineGates({
+      cwd: tree({ "src/app.py": "x = 1\n" }),
+      tier: "fast",
+      changed: ["src/app.py"],
+      baseSha: "abc1234",
+      toolchains: none,
+      timeoutMs: 1000,
+      skipNames: ["gitleaks"],
+      binExists: async (bin) => {
+        seen.push(`bin:${bin}`);
+        return true;
+      },
+      run: async (command) => {
+        seen.push(command);
+        return { code: 0, output: "", durationMs: 1 };
+      },
+    });
+    expect(seen.join("\n")).not.toMatch(/gitleaks/);
+    expect(results.map((g) => g.name)).toEqual(["semgrep"]);
   });
 });
 
