@@ -111,8 +111,9 @@ describe("standards.md", () => {
       ].join("\n"),
     );
     const repo = parseRepoConfig("review: { checklist: true }\n");
-    expect(unmarkedStandardRules(dir)).toEqual(["new rule", "automated", "lint job", "manual cloud"]);
-    expect(checklistSignals(dir, repo)).toEqual(["new rule", "automated", "lint job", "manual cloud"]);
+    const reviewScope = ["new rule", "automated", "src/math.js is tested", "the suite passes", "lint job", "manual cloud"];
+    expect(unmarkedStandardRules(dir)).toEqual(reviewScope);
+    expect(checklistSignals(dir, repo)).toEqual(reviewScope);
     expect(checklistSignals(dir, parseRepoConfig("review: { checklist: false }\n"))).toEqual([]);
 
     writeFileSync(join(dir, ".factory", "standards.md"), "# Standards\n\n## Severity\n\n- not a rule\n\n## Rules\n\n- appended later\n");

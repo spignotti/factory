@@ -2,13 +2,15 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { realSleep, type Sleep } from "../agents/fake-runner.js";
-import { ResultSchema, type RunResult } from "../events.js";
+import { EventLog, ResultSchema, type RunResult } from "../events.js";
 import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
-import { mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { saveState } from "../pipeline/state.js";
 import { deliveryForDone } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
+import { MAX_CONTINUATIONS } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
@@ -776,9 +778,21 @@ function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
   });
 }
 
+/** Branch protection contexts, or null when they cannot be read. Null does not enable auto-merge. */
+async function requiredChecksFor(github: GitHub, repo: string, timeoutMs: number): Promise<readonly string[] | null> {
+  let branch = "main";
+  try {
+    branch = loadRepoConfig(repo).base_branch;
+  } catch {
+    // no repo.yaml (unit tests): settings still decide
+  }
+  return (await withTimeout(github.repoSettings(repo, branch), timeoutMs, "repo settings")).required_checks;
+}
+
 /**
- * Done runs whose policy is auto or bot_review: enable auto-merge once the approved SHA is the head and CI is green.
- * bot_review also requires that head to be the reviewed SHA. A newer head, a draft, or CI that is not green does not merge.
+ * Done runs whose policy is auto or bot_review: enable auto-merge once the approved SHA is the head and CI is green,
+ * and `done` is required. bot_review also requires that head to be the reviewed SHA.
+ * A live head that is not the approved SHA disables auto-merge and is not enabled.
  * Pending CI keeps the worker up only while `untilMs` is set; it does not take a coding slot.
  * Returns true when a PR is still waiting on CI.
  */
@@ -793,6 +807,14 @@ export async function enableReadyMerges(
 ): Promise<boolean> {
   const runs = listRuns(factoryHome).filter((run) => sameRepo(run, repo));
   let waiting = false;
+  let requiredChecks: readonly string[] | null;
+  try {
+    requiredChecks = await requiredChecksFor(github, repo, timeoutMs);
+  } catch (e) {
+    onFailure?.();
+    io.err(`factory: repo settings failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
+    requiredChecks = null;
+  }
   for (const run of runs) {
     const policy = run.result?.merge_policy;
     const approved = run.state?.approved_sha;
@@ -820,12 +842,23 @@ export async function enableReadyMerges(
         continue;
       }
     }
+    if (status.state === "open" && head && head !== approved) {
+      for (const key of [...enabled]) if (key.startsWith(`${pr}@`)) enabled.delete(key);
+      try {
+        await withTimeout(github.disableAutoMerge(repo, pr), timeoutMs, `disable auto-merge ${pr}`);
+      } catch (e) {
+        onFailure?.();
+        io.err(`factory: disable auto-merge ${pr} failed: ${(e as Error).message.slice(0, 200)}\n`);
+        waiting = true;
+      }
+      continue;
+    }
     if (waitingOnMergeCi({ policy, ci: status.ci, draft: status.draft, state: status.state })) waiting = true;
-    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, reviewedSha: run.state?.reviewed_sha, ci: status.ci, draft: status.draft, state: status.state })) continue;
+    if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, reviewedSha: run.state?.reviewed_sha, ci: status.ci, draft: status.draft, state: status.state, requiredChecks })) continue;
     const key = `${pr}@${approved}`;
     if (enabled.has(key)) continue;
     try {
-      await withTimeout(github.enableAutoMerge(repo, pr), timeoutMs, `auto-merge ${pr}`);
+      await withTimeout(github.enableAutoMerge(repo, pr, approved), timeoutMs, `auto-merge ${pr}`);
       enabled.add(key);
       io.out(`queue: auto-merge ${pr}\n`);
     } catch (e) {
@@ -837,9 +870,59 @@ export async function enableReadyMerges(
   return waiting;
 }
 
+function selfMergeRuns(runs: RunRecord[], pr: OpenFactoryPr): RunRecord[] {
+  return runs.filter((r) => selfMergePolicy(r.result?.merge_policy) && runEndedDone([r], pr));
+}
+
+/** Revalidate through the existing pipeline. A poller never manufactures a review SHA. */
+async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> {
+  const q = loadQueueByKey(ctx.factoryHome, await repoQueueKey(repo));
+  if (!q) return;
+  for (const run of listRuns(ctx.factoryHome).filter((r) => sameRepo(r, repo))) {
+    const st = run.state;
+    if (!st?.pr || !st.branch || !st.worktree || !run.result || st.gc_at) continue;
+    if (!st.continuation && (run.result.result !== "done" || !selfMergePolicy(run.result.merge_policy))) continue;
+    const entry = q.entries.find((e) => e.run_id === run.run_id);
+    if (!entry || entry.status === "running" || entry.status === "pending" || !entry.issue_rev) continue;
+    if (pauseRequested(ctx.factoryHome, { runId: run.run_id })) continue;
+    if (!existsSync(st.worktree) || !existsSync(join(run.dir, "plan.json"))) continue;
+    try {
+      const status = await withTimeout(ctx.github.prStatus(repo, st.pr), ctx.netTimeoutMs, "continuation PR");
+      if (status.state !== "open") continue;
+      const head = await withTimeout(ctx.github.findOpenPr(repo, st.branch), ctx.netTimeoutMs, "continuation head");
+      if (!head?.headSha || head.url !== st.pr) continue;
+      const kind = st.continuation?.kind ?? (head.headSha !== st.approved_sha ? "head" : status.behind ? "base" : status.ci === "red" ? "ci" : undefined);
+      if (!kind) continue;
+      await withTimeout(ctx.github.disableAutoMerge(repo, st.pr), ctx.netTimeoutMs, "disable stale approval");
+      if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
+        await updateQueue(ctx.factoryHome, repo, (queue) => {
+          const own = queue.entries.find((e) => e.run_id === run.run_id);
+          if (own) park(own, `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS}); factory resume ${run.run_id}`);
+        });
+        continue;
+      }
+      const issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), ctx.netTimeoutMs, "continuation issue");
+      if (admissionBlock(issue) || entry.issue_rev !== issueRevision(issue.title, issue.body)) continue;
+      st.continuation = { kind, sha: head.headSha };
+      if (st.step === "finished") st.step = "review";
+      delete st.approved_sha;
+      saveState({ runDir: run.dir, events: new EventLog(run.dir, run.run_id) }, st);
+      await updateQueue(ctx.factoryHome, repo, (queue) => {
+        const own = queue.entries.find((e) => e.run_id === run.run_id);
+        if (own && own.status !== "running") releaseToPending(own, true);
+      });
+      ctx.io.out(`queue: #${entry.issue} resumes ${run.run_id} (${kind}; same PR)\n`);
+    } catch (e) {
+      ctx.netFailed = true;
+      ctx.io.err(`factory: continuation ${run.run_id}: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
+}
+
 /**
  * Every behind `factory/*` PR whose run ended `done`, one `update-branch` at a time.
  * A failure is logged and left for a later tick; it does not skip the rest of the list.
+ * `auto` and `bot_review` drop the old auto-merge and approve only the head this call just produced.
  */
 const BEHIND_RETRY_MS = 10 * 60_000;
 
@@ -887,6 +970,8 @@ async function updateBehind(
       updated.delete(key);
       continue;
     }
+    // Automatic runs merge locally under their normal slot, then run gates and a delta review.
+    if (selfMergeRuns(runs, pr).length) continue;
     // A semantic conflict is a question for a person. Retrying update-branch would spin.
     if (conflicted.has(`${repo}#${pr.number}`)) continue;
     // A PR still behind 10 minutes after its last update fell behind again (another PR merged): update it again.
@@ -1002,6 +1087,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     localBookkeeping(q, repo, ctx);
     if (!ctx.holdStarts) await discoverReady(q, ctx, repo);
   }, gitOpts);
+  if (!ctx.holdStarts) await scheduleContinuations(ctx, repo);
   const snap = loadQueueByKey(ctx.factoryHome, key);
   if (!snap) return false;
 
@@ -1140,7 +1226,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       }
       if (state === "error") continue;
       const hit = openPrs?.find((p) => factoryIssueOfBranch(p.branch) === entry.issue);
-      if (hit) {
+      if (hit && !canResume(ctx.factoryHome, entry, issueByNumber.get(entry.issue)!)) {
         park(entry, `open factory PR #${hit.number}`);
         ctx.io.out(`queue: #${entry.issue} parked: open factory PR #${hit.number}\n`);
         continue;

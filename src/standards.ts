@@ -123,7 +123,7 @@ export function readRepoStandards(repoDir: string, defaultReviewRules: string): 
  * Unmarked rules for improve's findings aspect and harden: propose making each a check and cleaning
  * up existing violations. `standards.md` wins; `checklist.md` is the deprecated fallback.
  */
-/** A marker hides the rule only when the named check can actually block the statement. */
+/** Static check metadata: useful for diagnosis, never semantic enforcement proof. */
 export type MarkerCheck = Pick<Check, "name" | "run" | "tier" | "paths" | "local_only">;
 
 const CONSTANT_RUN = /^(?:true|false|:|exit\s+\d+)$/;
@@ -138,11 +138,11 @@ function pathsMentioned(text: string): string[] {
 }
 
 /**
- * True when `check:` names a fast or full check that is not local-only, can fail, and is not
+ * True when `check:` names a fast or full check that is not local-only, has a command, and is not
  * scoped away from a path the rule states. A missing check, a manual check, a constant command,
  * or a pull_request job id does not cover the rule.
  */
-export function markerCovers(item: { text: string; check?: string }, checks: readonly MarkerCheck[]): boolean {
+export function markerHasCheck(item: { text: string; check?: string }, checks: readonly MarkerCheck[]): boolean {
   if (!item.check) return false;
   const check = checks.find((c) => c.name === item.check);
   if (!check || check.tier === "manual" || check.local_only || !commandCanDetect(check.run)) return false;
@@ -154,24 +154,23 @@ export function markerCovers(item: { text: string; check?: string }, checks: rea
 }
 
 /** Rules the standards reviewer still has to judge. */
-export function rulesForReview(items: readonly ChecklistItem[], checks: readonly MarkerCheck[]): ChecklistItem[] {
-  return items.filter((item) => !markerCovers(item, checks));
+export function rulesForReview(items: readonly ChecklistItem[]): ChecklistItem[] {
+  // A static command/path match cannot establish semantic enforcement. Keep the statement and
+  // its marker visible so the reviewer can inspect the check's real behavior, not just its name.
+  return [...items];
 }
 
 /**
- * Full coverage is a marker that actually blocks. Partial is a marker that does not.
- * Review scope is every rule that is not fully covered. This is not a check-count quotient.
+ * Static configuration can establish only a candidate check, not full semantic coverage.
+ * All standards stay in review scope. This is not a check-count quotient.
  */
 export function automationCoverage(items: readonly ChecklistItem[], checks: readonly MarkerCheck[]): { full: string[]; partial: string[]; review_scope: string[] } {
   const full: string[] = [];
   const partial: string[] = [];
   const review_scope: string[] = [];
   for (const item of items) {
-    if (markerCovers(item, checks)) full.push(item.text);
-    else {
-      review_scope.push(item.text);
-      if (item.check) partial.push(item.text);
-    }
+    review_scope.push(item.text);
+    if (markerHasCheck(item, checks)) partial.push(item.text);
   }
   return { full, partial, review_scope };
 }
@@ -196,11 +195,10 @@ function repoChecks(repoDir: string): MarkerCheck[] {
 }
 
 export function unmarkedStandardRules(repoDir: string): string[] {
-  const checks = repoChecks(repoDir);
   const standards = readOptionalFile(join(repoDir, STANDARDS_REL));
-  if (standards !== undefined) return rulesForReview(parseChecklist(splitStandards(standards).rules), checks).map((i) => i.text);
+  if (standards !== undefined) return rulesForReview(parseChecklist(splitStandards(standards).rules)).map((i) => i.text);
   const checklist = readOptionalFile(join(repoDir, CHECKLIST_REL));
-  return checklist === undefined ? [] : rulesForReview(parseChecklist(checklist), checks).map((i) => i.text);
+  return checklist === undefined ? [] : rulesForReview(parseChecklist(checklist)).map((i) => i.text);
 }
 
 function stripTitle(text: string): string {
@@ -366,7 +364,7 @@ export function standardsDoctorNotes(repoDir: string, checks: readonly MarkerChe
   const text = hasStandards ? readFileSync(join(repoDir, STANDARDS_REL), "utf8") : old.includes(CHECKLIST_REL) ? readFileSync(join(repoDir, CHECKLIST_REL), "utf8") : "";
   if (!text) return notes;
   const items = hasStandards ? parseChecklist(splitStandards(text).rules) : parseChecklist(text);
-  const dangling = items.filter((item) => item.check !== undefined && !markerCovers(item, checks));
+  const dangling = items.filter((item) => item.check !== undefined && !markerHasCheck(item, checks));
   if (dangling.length) {
     const where = hasStandards ? "standards.md" : "checklist.md";
     notes.push({

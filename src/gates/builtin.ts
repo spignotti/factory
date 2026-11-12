@@ -10,6 +10,7 @@ export interface BuiltinResult {
   detail: string;
   /** Killed for the wall-clock cap. Recorded as `timeout`, not a failing check. */
   timedOut?: boolean;
+  duration_ms?: number;
 }
 
 const ok = (name: string, detail = ""): BuiltinResult => ({ name, ok: true, detail });

@@ -121,6 +121,8 @@ export interface PrRequest {
 export interface GitHub {
   /** `since`: ignore check runs created before this time (PR CI after markReady: the draft-hold run is not the verdict). */
   baseStatus(repoDir: string, sha: string, opts?: { since?: string }): Promise<BaseStatus>;
+  /** Failed Actions checks on exactly this commit, with bounded diagnostic logs where available. */
+  headFailures(repoDir: string, sha: string): Promise<{ name: string; output_tail: string }[]>;
   getIssue(repoDir: string, n: number): Promise<Issue>;
   /** Open (or any state) issues, newest page only (`--limit 100`). Not a full set. */
   listIssues(repoDir: string, query: { label?: string; state?: "open" | "closed" | "all" }): Promise<Issue[]>;
@@ -152,12 +154,20 @@ export interface GitHub {
    * A finished run no longer holds a path claim; these files still block another run on the same paths.
    */
   openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]>;
-  enableAutoMerge(repoDir: string, pr: string): Promise<void>;
+  /** `gh pr merge --auto --squash --match-head-commit <sha>`. A later push does not match that SHA. */
+  enableAutoMerge(repoDir: string, pr: string, sha: string): Promise<void>;
+  /** `gh pr merge --disable-auto`. Not an error when auto-merge was not enabled. */
+  disableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /**
    * Commit status `factory` = success on a SHA the run verified. The required `done` job
    * fails a pull request without it, including while this process is not running.
    */
   approveHead(repoDir: string, sha: string): Promise<void>;
+  /**
+   * Parent SHAs of `sha`, first parent first. Null when the commit cannot be read.
+   * An `update-branch` merge has the previous head as its first parent and the base as the second.
+   */
+  commitParents(repoDir: string, sha: string): Promise<string[] | null>;
   /** Adds a label to a PR, creating it if missing; best effort. */
   addLabel(repoDir: string, pr: string, label: string): Promise<void>;
   /** Resume: refresh title/body of the run's existing PR. */
@@ -170,7 +180,8 @@ export interface GitHub {
   prStatus(repoDir: string, pr: string): Promise<PrStatus>;
   /**
    * Merge the base into an open PR (`gh pr update-branch`, no `--rebase`). Never a force-push.
-   * Queue worker: a `done` factory PR that is `BEHIND`, so auto-merge can proceed after CI.
+   * Queue worker: a `done` factory PR that is `BEHIND`. The new head is a different commit; auto-merge
+   * stays off until that head is approved again and CI passes on it.
    */
   updateBranch(repoDir: string, pr: string): Promise<void>;
   /** `doctor`: is `gh` logged in (no token is read or printed)? */
@@ -691,6 +702,11 @@ export function autoMergeAlreadyEnabled(message: string): boolean {
   return /already enabled/i.test(message);
 }
 
+/** GitHub says this when auto-merge was not on. Disabling it again is a no-op. UNVERIFIED live wording. */
+export function autoMergeNotEnabled(message: string): boolean {
+  return /not enabled/i.test(message);
+}
+
 export class GhCli implements GitHub {
   async authenticated(repoDir: string): Promise<boolean> {
     try {
@@ -766,6 +782,27 @@ export class GhCli implements GitHub {
       });
     }
     return aggregateCheckRuns(checkRunsSince(runs, opts?.since));
+  }
+
+  async headFailures(repoDir: string, sha: string): Promise<{ name: string; output_tail: string }[]> {
+    const raw = JSON.parse(await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`])) as {
+      total_count: number;
+      check_runs: { name: string; head_sha: string; conclusion: string | null; details_url?: string; app?: { slug?: string }; output?: { summary?: string; text?: string } }[];
+    };
+    if (raw.total_count > raw.check_runs.length) throw new Error("CI diagnostics incomplete; refusing a partial diagnosis");
+    const failed = raw.check_runs.filter((c) => c.head_sha === sha && c.app?.slug === "github-actions" && ["failure", "timed_out", "action_required"].includes(c.conclusion ?? ""));
+    const out: { name: string; output_tail: string }[] = [];
+    for (const check of failed.slice(0, 10)) {
+      let detail = [check.output?.summary, check.output?.text].filter(Boolean).join("\n");
+      const job = /\/job\/(\d+)(?:\D|$)/.exec(check.details_url ?? "")?.[1];
+      if (job) {
+        const logs = await gh(repoDir, ["run", "view", "--job", job, "--log-failed"]).catch(() => "");
+        detail += `\n${logs}`;
+      }
+      out.push({ name: check.name, output_tail: detail.trim().slice(-12_000) });
+    }
+    if (failed.length > 10) throw new Error("too many failed checks for bounded automatic repair");
+    return out;
   }
 
   async getIssue(repoDir: string, n: number): Promise<Issue> {
@@ -856,12 +893,22 @@ export class GhCli implements GitHub {
     await gh(repoDir, ["pr", "edit", pr, "--add-label", label]).catch(() => "");
   }
 
-  async enableAutoMerge(repoDir: string, pr: string): Promise<void> {
+  async enableAutoMerge(repoDir: string, pr: string, sha: string): Promise<void> {
     try {
-      await gh(repoDir, ["pr", "merge", pr, "--auto", "--squash"]);
+      // expectedHeadOid: a later push does not match, so this enable cannot merge a head the factory did not approve.
+      await gh(repoDir, ["pr", "merge", pr, "--auto", "--squash", "--match-head-commit", sha]);
     } catch (e) {
       // A later tick asks again after a restart. GitHub keeps the first enable.
       if (autoMergeAlreadyEnabled((e as Error).message)) return;
+      throw e;
+    }
+  }
+
+  async disableAutoMerge(repoDir: string, pr: string): Promise<void> {
+    try {
+      await gh(repoDir, ["pr", "merge", pr, "--disable-auto"]);
+    } catch (e) {
+      if (autoMergeNotEnabled((e as Error).message)) return;
       throw e;
     }
   }
@@ -879,6 +926,18 @@ export class GhCli implements GitHub {
       "-f",
       "description=factory approved this commit",
     ]);
+  }
+
+  async commitParents(repoDir: string, sha: string): Promise<string[] | null> {
+    try {
+      // UNVERIFIED: `parents[].sha` on GET /repos/{owner}/{repo}/commits/{sha}.
+      const out = await gh(repoDir, ["api", `repos/{owner}/{repo}/commits/${sha}`, "--jq", "[.parents[].sha]"]);
+      const parsed = JSON.parse(out) as unknown;
+      if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) return null;
+      return parsed as string[];
+    } catch {
+      return null;
+    }
   }
 
   async updatePr(repoDir: string, pr: string, update: { title: string; body: string }): Promise<void> {
@@ -959,11 +1018,20 @@ export class FakeGitHub implements GitHub {
   readonly pushes: string[] = [];
   readonly prs: (PrRequest & { url: string })[] = [];
   readonly autoMerged: string[] = [];
+  /** SHA passed to each enable. `autoMerged` stays the PR id list existing assertions compare. */
+  readonly autoMergeShas: { pr: string; sha: string }[] = [];
+  /** PRs whose auto-merge was disabled. */
+  readonly autoMergeDisabled: string[] = [];
   /** SHAs the runner approved. The required `done` check is what blocks a later push. */
   readonly approvedShas: string[] = [];
 
   async baseStatus(): Promise<BaseStatus> {
     return this.status;
+  }
+
+  failures: { name: string; output_tail: string }[] = [];
+  async headFailures(): Promise<{ name: string; output_tail: string }[]> {
+    return this.failures;
   }
 
   async getIssue(_repoDir: string, n: number): Promise<Issue> {
@@ -1076,12 +1144,30 @@ export class FakeGitHub implements GitHub {
     this.labels.push({ pr, label });
   }
 
-  async enableAutoMerge(_repoDir: string, pr: string): Promise<void> {
+  async enableAutoMerge(_repoDir: string, pr: string, sha: string): Promise<void> {
     this.autoMerged.push(pr);
+    this.autoMergeShas.push({ pr, sha });
+  }
+
+  /** When set, `disableAutoMerge` throws this instead of recording the call. */
+  disableError: string | null = null;
+
+  async disableAutoMerge(_repoDir: string, pr: string): Promise<void> {
+    if (this.disableError) throw new Error(this.disableError);
+    this.autoMergeDisabled.push(pr);
   }
 
   async approveHead(_repoDir: string, sha: string): Promise<void> {
     this.approvedShas.push(sha);
+  }
+
+  /** Parents recorded by `updateBranch`, or set by a test. Missing means unreadable. */
+  readonly commitParentsBySha = new Map<string, string[]>();
+  /** When set, the next `updateBranch` records these parents instead of [previous head, base]. */
+  updateBranchParents: string[] | null = null;
+
+  async commitParents(_repoDir: string, sha: string): Promise<string[] | null> {
+    return this.commitParentsBySha.get(sha) ?? null;
   }
 
   readonly updates: { pr: string; title: string; body: string }[] = [];
@@ -1152,8 +1238,10 @@ export class FakeGitHub implements GitHub {
     return this.prStates.get(created.url) ?? { state: "open", draft: created.draft };
   }
 
-  /** `gh pr update-branch` stand-in: records the call and clears `behind` so a second tick does not repeat it. */
+  /** `gh pr update-branch` stand-in: records the call, clears `behind`, and moves the branch head so a test can read the new SHA. */
   readonly updatedBranches: string[] = [];
+  /** When set and different from the current head, the next update-branch writes this SHA. */
+  updateBranchHead: string | null = null;
 
   async updateBranch(_repoDir: string, pr: string): Promise<void> {
     this.updatedBranches.push(pr);
@@ -1168,5 +1256,22 @@ export class FakeGitHub implements GitHub {
       this.prStates.set(key, { ...prev, behind: false });
     }
     if (!found) this.prStates.set(pr, { state: "open", draft: false, behind: false });
+    const branch = created?.head ?? this.factoryPrs.find((p) => String(p.number) === pr || p.number === Number(pr))?.branch;
+    if (!branch) return;
+    const prev = this.remoteShas.get(branch);
+    const forced = this.updateBranchHead;
+    this.updateBranchHead = null;
+    const next = forced && forced !== prev ? forced : nextUpdateHead(prev);
+    this.remoteShas.set(branch, next);
+    const parents = this.updateBranchParents ?? (prev ? [prev, "b".repeat(40)] : []);
+    this.commitParentsBySha.set(next, parents);
   }
+}
+
+/** A head that is not `prev`, so a test can see that update-branch produced a commit. */
+function nextUpdateHead(prev: string | undefined): string {
+  const base = prev && /^[0-9a-f]{40,64}$/.test(prev) ? prev : "0".repeat(40);
+  const alphabet = "0123456789abcdef";
+  const i = alphabet.indexOf(base.at(-1) ?? "0");
+  return base.slice(0, -1) + alphabet[(Math.max(0, i) + 1) % alphabet.length];
 }

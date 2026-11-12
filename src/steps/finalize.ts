@@ -20,7 +20,7 @@ import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evalua
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
-import { mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
@@ -88,6 +88,7 @@ export interface FinalizeOutput {
   ciWait?: "pending" | "none";
   /** SHA the review evidence covers after a delta review. */
   reviewedSha?: string;
+  continuation?: { kind: "ci"; sha: string };
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -448,6 +449,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
+  let continuation: FinalizeOutput["continuation"];
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
@@ -547,6 +549,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         ctx.deadline.extend?.(ci.waitedMs);
         headGreen = ci.status === "green";
         if (ci.status === "red") {
+          if (selfMergePolicy(policy)) continuation = { kind: "ci", sha: head };
           result = "needs_human";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
           const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr, draft: false });
@@ -559,6 +562,19 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         }
       }
       // Merge only. Deploy is a separate action and is not called here.
+      // Re-read the open head after the CI poll: a push that landed since approveHead is not this SHA.
+      let liveSha: string | null = null;
+      try {
+        liveSha = (await ctx.deps.github.findOpenPr(ctx.worktree, ctx.branch))?.headSha ?? null;
+      } catch (e) {
+        ctx.events.emit({ step: "finalize", event: "progress", data: { pr_head_unreadable: (e as Error).message.slice(0, 200) } });
+      }
+      let requiredChecks: readonly string[] | null = null;
+      try {
+        requiredChecks = (await ctx.deps.github.repoSettings(ctx.worktree, ctx.repo.base_branch)).required_checks;
+      } catch (e) {
+        ctx.events.emit({ step: "finalize", event: "progress", data: { repo_settings: (e as Error).message.slice(0, 200) } });
+      }
       const pause = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
       if (pause && result === "done") {
         // The queue asked this run to stop. A green head is not a reason to merge.
@@ -568,17 +584,19 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         draft = held.draft;
       } else if (
         result === "done" &&
+        liveSha === head &&
         mayEnableAutoMerge({
           policy,
           approvedSha,
-          headSha: head,
+          headSha: liveSha,
           reviewedSha,
           ci: headGreen ? "green" : "pending",
           draft: draft === true,
           state: "open",
+          requiredChecks,
         })
       ) {
-        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
+        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!, head);
       }
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
@@ -600,6 +618,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ...(approvedSha && result === "done" ? { approvedSha } : {}),
     ...(ciWait && result === "done" ? { ciWait } : {}),
     ...(reviewedSha ? { reviewedSha } : {}),
+    ...(continuation ? { continuation } : {}),
     ...skippedField(gates),
   };
 }

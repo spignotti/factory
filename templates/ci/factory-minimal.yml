@@ -41,9 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "draft hold, checks wait until the pull request is ready for review"
-  # The single status check, named `done`. It gates nothing beside the repo's own jobs: there
-  # is no matrix. always(): a skipped `done` is a successful required check. Draft and cancelled
-  # runs exit 1 instead. `cancelled()` is legal only in an `if`.
+  # The required status check, named `done`. On a ready pull request it checks the commit
+  # status `factory=success` (there is no matrix). always(): a skipped `done` is a successful
+  # required check. Draft and cancelled runs exit 1 instead. `cancelled()` is legal only in an `if`.
   done:
     needs: [draft]
     if: always()

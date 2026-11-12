@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { matchTestEvidence, parseTestReport, runCitedTests } from "../../src/gates/evidence.js";
+import { matchTestEvidence, parseTestReport, reportingTestCommand, runCitedTests } from "../../src/gates/evidence.js";
 import { testPresence, type EvidenceInputs } from "../../src/gates/builtin.js";
 import { rolePrompt } from "../../src/prompts.js";
 import { HandoffSchema } from "../../src/schemas/handoff.js";
@@ -12,6 +12,18 @@ import { sh } from "../../src/exec.js";
 const env = { PATH: process.env.PATH ?? "" };
 
 describe("executed test evidence", () => {
+  it("requests named output from direct pytest runners without altering wrappers or scripts", () => {
+    expect(reportingTestCommand("uv run --locked pytest {files}")).toBe("uv run --locked pytest -v {files}");
+    expect(reportingTestCommand("python3 -m pytest {files}")).toBe("python3 -m pytest -v {files}");
+    expect(reportingTestCommand("bash scripts/test-pytest.sh {files}")).toBe("bash scripts/test-pytest.sh {files}");
+  });
+  it("keeps pytest names and skips with a file-selecting command", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pytest-report-"));
+    const rows = await runCitedTests({ cwd: dir, files: ["test/a.py"], env,
+      testCommand: "printf 'test/a.py::works PASSED\\ntest/a.py::later SKIPPED\\n=== 1 passed, 1 skipped in 0.01s ===\\n'; : {files}" });
+    expect(matchTestEvidence("test/a.py::works", rows, true).ok).toBe(true);
+    expect(matchTestEvidence("test/a.py::later", rows, true).reason).toMatch(/skipped/);
+  });
   it("parses a real node run: a passing test counts and a skipped test does not", async () => {
     const dir = mkdtempSync(join(tmpdir(), "factory-evidence-"));
     mkdirSync(join(dir, "test"));
@@ -60,6 +72,143 @@ describe("executed test evidence", () => {
     };
     expect(testPresence(plan, ["P1"], [handoff], evidence).ok).toBe(true);
     expect(handoff.evidence).toHaveLength(1);
+  });
+
+  it("treats a pytest skip-only summary as a skip, not a pass", () => {
+    const parsed = parseTestReport("test_foo.py", "=== 2 skipped in 0.01s ===\n", 0);
+    expect(parsed).toEqual([{ file: "test_foo.py", name: "", result: "skip" }]);
+    expect(matchTestEvidence("test_foo.py", parsed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("fails a pytest summary that reports a failure", () => {
+    expect(parseTestReport("test_foo.py", "=== 1 failed, 1 skipped in 0.01s ===\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "fail" },
+    ]);
+  });
+
+  it("accepts a pytest summary with passes as a file-level pass", () => {
+    expect(parseTestReport("test_foo.py", "=== 2 passed, 1 skipped in 0.01s ===\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "pass" },
+    ]);
+  });
+
+  it("treats a lowercase TAP skip directive as a skip", () => {
+    const output = "TAP version 13\nok 1 - name # skip reason\n";
+    expect(parseTestReport("test/a.test.js", output, 0)).toEqual([
+      { file: "test/a.test.js", name: "name", result: "skip" },
+    ]);
+  });
+
+  it("treats a quiet pytest skip footer as a skip", () => {
+    const parsed = parseTestReport("test_foo.py", "2 skipped in 0.01s\n", 0);
+    expect(parsed).toEqual([{ file: "test_foo.py", name: "", result: "skip" }]);
+    expect(matchTestEvidence("test_foo.py", parsed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("treats an xfailed-only footer as a skip, not a pass", () => {
+    expect(parseTestReport("test_foo.py", "1 xfailed in 0.01s\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+    expect(parseTestReport("test_foo.py", "=== 1 xpassed in 0.01s ===\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+  });
+
+  it("fails a pytest footer when the command exits non-zero", () => {
+    expect(parseTestReport("test_foo.py", "=== 2 passed in 0.01s ===\n", 1)).toEqual([
+      { file: "test_foo.py", name: "", result: "fail" },
+    ]);
+    expect(parseTestReport("test_foo.py", "1 error in 0.01s\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "fail" },
+    ]);
+  });
+
+  it("treats a TAP # skipped directive as a skip", () => {
+    const output = "TAP version 13\nok 1 - name # skipped reason\n";
+    expect(parseTestReport("test/a.test.js", output, 0)).toEqual([
+      { file: "test/a.test.js", name: "name", result: "skip" },
+    ]);
+  });
+
+  it("treats a TAP skip without a dash description as a skip", () => {
+    const output = "TAP version 13\nok 1 # skip reason\n";
+    const parsed = parseTestReport("test/a.test.js", output, 0);
+    expect(parsed).toEqual([{ file: "test/a.test.js", name: "", result: "skip" }]);
+    expect(matchTestEvidence("test/a.test.js", parsed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("does not record a cited file a command without {files} merely mentions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["a/b.py", "c.py"],
+      testCommand: "printf '%s\\n' 'a/b.py' '=== 1 passed in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([]);
+    expect(matchTestEvidence("a/b.py", executed, true).reason).toMatch(/not executed/);
+  });
+
+  it("does not attribute a path that is only a substring of a pytest result path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-sub-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["a/b.py", "b.py"],
+      testCommand: "printf '%s\\n' 'PASSED a/b.py::test_one' '=== 1 passed in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([{ file: "a/b.py", name: "test_one", result: "pass" }]);
+    expect(matchTestEvidence("b.py", executed, true).reason).toMatch(/not executed/);
+  });
+
+  it("does not let a suite pass footer override a SKIPPED pytest line", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-skip-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["c.py"],
+      testCommand: "printf '%s\\n' 'SKIPPED c.py::test_skip' '=== 1 passed, 1 skipped in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([{ file: "c.py", name: "test_skip", result: "skip" }]);
+    expect(matchTestEvidence("c.py", executed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("attributes pytest's verbose progress line and not a shorter path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-verbose-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["a/b.py", "b.py"],
+      testCommand: "printf '%s\\n' 'a/b.py::test_one PASSED [ 50%]' 'b.py::test_two FAILED'",
+      env,
+    });
+    expect(executed).toEqual([
+      { file: "a/b.py", name: "test_one", result: "pass" },
+      { file: "b.py", name: "test_two", result: "fail" },
+    ]);
+  });
+
+  it("treats an XFAIL result line as a skip even next to a pass footer", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-pytest-xfail-"));
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["c.py"],
+      testCommand: "printf '%s\\n' 'c.py::test_x XFAIL' '=== 1 passed in 0.01s ==='",
+      env,
+    });
+    expect(executed).toEqual([{ file: "c.py", name: "test_x", result: "skip" }]);
+    expect(matchTestEvidence("c.py", executed, true).reason).toMatch(/skipped test/);
+  });
+
+  it("treats a long or colored pytest skip footer as a skip", () => {
+    expect(parseTestReport("test_foo.py", "2 skipped in 62.34s (0:01:02)\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+    expect(parseTestReport("test_foo.py", "1 xfailed in 1m 2.34s\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
+    expect(parseTestReport("test_foo.py", "\u001b[32m2 skipped in 0.01s\u001b[0m\n", 0)).toEqual([
+      { file: "test_foo.py", name: "", result: "skip" },
+    ]);
   });
 });
 

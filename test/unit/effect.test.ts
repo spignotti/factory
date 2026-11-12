@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeGitHub } from "../../src/gh.js";
 import { effectStatus, formatLifecycle, provenImprovement, resolveProposals } from "../../src/harden/lifecycle.js";
-import { writeProposal } from "../../src/proposals.js";
+import { listProposals, writeProposal } from "../../src/proposals.js";
 import { listRuns } from "../../src/runs.js";
 import { PLAN, seedRun } from "../helpers/harden.js";
 
@@ -25,7 +25,7 @@ function open(home: string, acceptance: string) {
   });
 }
 
-async function merge(home: string, acceptance: string, checks: { name: string; status: string }[] | null) {
+async function merge(home: string, acceptance: string, checks: { name: string; status: string; effect_proven?: boolean }[] | null) {
   const ticket = open(home, acceptance);
   const proposal = ticket.proposals[0]!;
   const runId = seedRun(home, "/repo", new Date("2026-10-02T00:00:00.000Z"), {
@@ -51,13 +51,18 @@ async function merge(home: string, acceptance: string, checks: { name: string; s
 }
 
 describe("effect is not the merge", () => {
+  it("does not confirm an effect from an arbitrary green check", () => {
+    expect(effectStatus({ acceptance: [{ text: "effect check: unrelated" }] }, [{ name: "unrelated", status: "pass" }])).toBe("unclear");
+  });
   it("classifies a named effect check without treating a merge as proof", () => {
     const plan = { acceptance: [{ text: "effect check: speed" }] };
     expect(effectStatus(plan, null)).toBe("unclear");
     expect(effectStatus({ acceptance: [{ text: "the suite is faster" }] }, [{ name: "speed", status: "pass" }])).toBe("unclear");
     expect(effectStatus(plan, [{ name: "speed", status: "fail" }])).toBe("negative");
     expect(effectStatus(plan, [{ name: "other", status: "pass" }])).toBe("unclear");
-    expect(effectStatus(plan, [{ name: "speed", status: "pass" }])).toBe("confirmed");
+    expect(effectStatus(plan, [{ name: "speed", status: "pass" }])).toBe("unclear");
+    expect(effectStatus({ acceptance: [{ text: "effect check: red_green" }] }, [{ name: "red_green", status: "pass", effect_proven: true }])).toBe("confirmed");
+    expect(effectStatus({ acceptance: [{ text: "effect check: red_green" }] }, [{ name: "red_green", status: "pass" }])).toBe("unclear");
     expect(provenImprovement("confirmed")).toBe(true);
     expect(provenImprovement("negative")).toBe(false);
     expect(provenImprovement("unclear")).toBe(false);
@@ -86,11 +91,25 @@ describe("effect is not the merge", () => {
     expect(formatLifecycle(changes[0]!)).toContain("not a proven improvement");
   });
 
-  it("stores confirmed only when every named effect check passed", async () => {
+  it("stores confirmed only with an executed negative control, not just a named pass", async () => {
     const home = mkdtempSync(join(tmpdir(), "effect-"));
-    const changes = await merge(home, "keep the suite\neffect check: speed", [{ name: "speed", status: "pass" }]);
+    const changes = await merge(home, "reject the original fault\neffect check: red_green", [{ name: "red_green", status: "pass", effect_proven: true }]);
     expect(changes[0]!.effect).toBe("confirmed");
     expect(provenImprovement(changes[0]!.effect)).toBe(true);
     expect(formatLifecycle(changes[0]!)).toContain("effect confirmed");
+  });
+
+  it("can confirm a previously implemented proposal later, without another issue or repeated events", async () => {
+    const home = mkdtempSync(join(tmpdir(), "effect-later-"));
+    await merge(home, "effect check: red_green", null);
+    const run = listRuns(home)[0]!;
+    writeFileSync(join(run.dir, "gates-3.json"), JSON.stringify({ n: 3, checks: [{ name: "red_green", status: "pass", effect_proven: true }] }));
+    const gh = new FakeGitHub();
+    gh.prStates.set(run.result!.pr!, { state: "merged", draft: false });
+    const opts = { factoryHome: home, repoId, repoDir: "/repo", runs: listRuns(home), github: gh, now: new Date("2026-10-04T00:00:00Z") };
+    expect(await resolveProposals(opts)).toEqual([expect.objectContaining({ effect: "confirmed" })]);
+    expect(await resolveProposals(opts)).toEqual([]);
+    expect(listProposals(home, repoId)).toHaveLength(1);
+    expect(gh.issues.size).toBe(0);
   });
 });

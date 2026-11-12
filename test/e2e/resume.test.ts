@@ -463,11 +463,12 @@ describe("idempotent PR step", () => {
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
         const enable = gh.enableAutoMerge.bind(gh);
-        gh.enableAutoMerge = async (dir, pr) => {
+        gh.enableAutoMerge = async (dir, pr, sha) => {
           if (fail) throw new Error("gh: timeout");
-          await enable(dir, pr);
+          await enable(dir, pr, sha);
         };
       },
       patch: (c) => {

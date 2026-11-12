@@ -25,10 +25,11 @@ import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
 import { acquireRepoLockWithRetry, claimResources, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
 import { pauseRequested } from "../queue/pause.js";
+import { admissionBlock } from "../queue/admit.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
-import { budgetFrom, budgetTo, missingPlanQuotes, openPrProblem } from "./recovery.js";
+import { budgetFrom, budgetTo, MAX_CONTINUATIONS, missingPlanQuotes, openPrProblem } from "./recovery.js";
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, writeRecoveryNote } from "./outcome.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -851,6 +852,8 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   if (fin.reviewedSha) st.reviewed_sha = fin.reviewedSha;
   if (fin.ciWait) st.ci_wait = fin.ciWait;
   else delete st.ci_wait;
+  if (fin.continuation && (st.continuation_attempts ?? 0) < MAX_CONTINUATIONS) st.continuation = fin.continuation;
+  else delete st.continuation;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
   f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
@@ -918,7 +921,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   if (st.step === "intake" || !st.worktree || !st.branch || !st.base_sha) {
     throw new Error(`run ${runId} stopped before its worktree existed (${st.result ?? "running"}: ${st.reason}); start a new run`);
   }
-  if (st.step === "finished") throw new Error(`run ${runId} is finished (${st.result}); nothing to resume`);
+  if (st.step === "finished" && !st.continuation) throw new Error(`run ${runId} is finished (${st.result}); nothing to resume`);
   const now = deps.now ?? Date.now;
   const startedAt = now();
   const events = new EventLog(runDir, runId, now, secretValues(deps.parentEnv ?? process.env));
@@ -989,6 +992,30 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
 
   return f.execute(async () => {
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: previous } });
+    const continuation = st.continuation;
+    if (continuation) {
+      if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
+        delete st.continuation;
+        return f.set({ result: "needs_human", reason: `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS})` });
+      }
+      st.continuation_attempts = (st.continuation_attempts ?? 0) + 1;
+      delete st.continuation;
+      if (st.step === "finished") st.step = "review";
+      delete st.approved_sha;
+      f.save();
+      if (st.pr) await deps.github.disableAutoMerge(st.repo, st.pr);
+      if (st.task.issue !== undefined) {
+        const issue = await deps.github.getIssue(st.repo, st.task.issue);
+        const block = admissionBlock(issue);
+        if (block || st.task.text !== `# ${issue.title}\n\n${issue.body}`) {
+          return f.set({ result: "needs_human", reason: `automatic continuation refused: ${block ?? "issue text changed"}` });
+        }
+      }
+      // Automatic recovery must not turn another person's uncommitted work into a bot commit.
+      if ((await git(st.worktree!, ["status", "--porcelain"])).trim()) {
+        return f.set({ result: "needs_human", reason: "automatic continuation refused: worktree has uncommitted changes" });
+      }
+    }
     const repo = st.base_sha ? await baseRepoConfig(st.repo, st.base_sha, loadRepoConfig(st.repo), events, "resume") : loadRepoConfig(st.repo);
     f.provenanceRepo = repo;
     deps = { ...deps, profile: withRepoModels(deps.profile, repo.models) };
@@ -1031,6 +1058,24 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       return f.set({ result: "needs_human", reason: draftError ? `${ready.reason}; ${draftError}` : ready.reason });
     }
     let gates = ready.gates;
+    if (continuation?.kind === "ci") {
+      const currentHead = await headSha(ctx.worktree);
+      // A base merge or remote update makes the saved CI diagnosis apply to a different tree.
+      // Do not fall through to a generic product edit.
+      if (currentHead !== continuation.sha) {
+        return f.set({ result: "needs_human", reason: "post-CI repair refused: head moved before diagnosis; no product edit" });
+      }
+      const baseCi = await deps.github.baseStatus(ctx.repoDir, ctx.baseSha);
+      if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit" });
+      const failures = await deps.github.headFailures(ctx.repoDir, continuation.sha);
+      if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit" });
+      const ciGates: GateReport = { n: ctx.gateCount, tier: "full", green: false, changed_files: [], scope_report: [],
+        checks: failures.map((c) => ({ ...c, output_tail: events.redact(c.output_tail), kind: "check", status: "fail", duration_ms: 0 })) };
+      writeJson(ctx, `ci-failure-${st.continuation_attempts}.json`, { sha: continuation.sha, ...ciGates });
+      const fixed = await fixStep(ctx, "post-ci", { open: [], gates: ciGates, tier: "full" }, { gateFailures: 0 });
+      if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}` });
+      gates = fixed.gates;
+    }
     if (gates && !gates.green) {
       const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });
       if (!fixed.ok) {
@@ -1040,6 +1085,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       gates = fixed.gates;
     }
     events.emit({ step: "resume", event: "step_finished", data: { continue_at: st.step } });
+    if (continuation && st.step === "finalize") st.step = "review";
     await advance(f, ctx, { noPr: opts.noPr ?? st.no_pr, startedAt, gates });
   });
 }

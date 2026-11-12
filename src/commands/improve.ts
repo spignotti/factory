@@ -340,7 +340,8 @@ async function select(
   let last: { accepted: Selected[]; errors: string[] } = { accepted: [], errors: [] };
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const text = last.errors.length ? `${prompt}\n\nYour previous answer was rejected:\n- ${last.errors.join("\n- ")}` : prompt;
+      const efficacy = "State the observed problem, expected benefit, added runtime/maintenance cost and an efficacy check. A green command or merged PR is not efficacy proof. For a meaningful negative control use red_green: required, a kind:repro verify:test criterion and acceptance text 'effect check: red_green'. The same behavioral test must assert-fail on base and pass on HEAD. Otherwise state that the effect remains unverified; do not add wrapper/prose tests or a bookkeeping issue.";
+      const text = `${prompt}\n\n${efficacy}${last.errors.length ? `\n\nYour previous answer was rejected:\n- ${last.errors.join("\n- ")}` : ""}`;
       const res = await shot.call("improve", { role, cwd: repoDir, tools: "read_only", system: rolePrompt(ASPECTS[aspect].prompt, prompts), prompt: text });
       last = validateSelection(extractJson(res.text), { repo, keys: ctx.keys, ...(ctx.items ? { items: ctx.items } : {}), max: ctx.max });
       if (!last.errors.length) return { accepted: last.accepted, rejected: [] };
@@ -508,5 +509,4 @@ export async function auditAlias(opts: { repo: string; type: AuditType; max?: nu
   io.err(auditDeprecation(aspect));
   return improveCommand({ repo: opts.repo, aspects: [aspect], compact: false, json: opts.json, ...(opts.max ? { max: opts.max } : {}) }, deps, io);
 }
-
 

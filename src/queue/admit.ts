@@ -32,10 +32,10 @@ export function admissionBlock(issue: AdmitIssue): string | undefined {
   return undefined;
 }
 
-/** `priority:high` is 2, `priority:low` is 0, anything else is normal (1). */
+/** Canonical `prio:*` labels, with the original `priority:*` spellings kept for existing repos. */
 export function priorityRank(labels: string[]): number {
-  if (labels.includes("priority:high")) return 2;
-  if (labels.includes("priority:low")) return 0;
+  if (labels.includes("prio:high") || labels.includes("priority:high")) return 2;
+  if (labels.includes("prio:low") || labels.includes("priority:low")) return 0;
   return 1;
 }
 

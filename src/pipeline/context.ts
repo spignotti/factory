@@ -5,6 +5,7 @@ import { buildAgentEnv, ensureSharedCache } from "../agents/env.js";
 import type { Sleep } from "../agents/fake-runner.js";
 import { callModel, type ModelRequest, type ModelResponse } from "../agents/models.js";
 import type { RepairBudget } from "./recovery.js";
+import type { ExecutedTest } from "../gates/evidence.js";
 import { type Context7Client, docsTools } from "../docs/context7.js";
 import type { AgentRunner } from "../agents/runner.js";
 import type { Clock, EventLog } from "../events.js";
@@ -106,6 +107,8 @@ export interface RunContext {
   budget?: RepairBudget;
   /** Writes `budget` onto state.json. Absent outside a run (one-shot calls). */
   persist?: () => void;
+  /** Same-process evidence only. The key includes the complete staged tree, command, env and base. */
+  testEvidence?: { key: string; executed: ExecutedTest[] };
 }
 
 export class WallTimeExceeded extends Error {

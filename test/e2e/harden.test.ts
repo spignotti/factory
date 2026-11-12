@@ -157,7 +157,7 @@ describe("factory harden", () => {
     expect(byId["t-old.3"]!.status).toBe("open");
     expect(byId["t-young.1"]!.status).toBe("open");
     const mem = Object.fromEntries(loadMemory(ctx.factoryHome, ctx.repoId).entries.map((e) => [e.key, [e.status, e.ref]]));
-    expect(mem.m).toEqual(["resolved", "https://github.com/o/r/pull/1"]);
+    expect(mem.m).toEqual(["proposed", "t-old.1"]);
     // c was reopened by the drop and is proposed again by the new ticket; s is open again.
     expect(mem.c).toEqual(["proposed", "2026-10-29.1"]);
     expect(mem.s![0]).toBe("open");

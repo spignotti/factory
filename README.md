@@ -645,9 +645,9 @@ before the PR. When every check is `local_only` (or there is none), `factory ci-
 `templates/ci/factory-minimal.yml` instead: no npx, no `select`, no `check`. A `draft` job runs only on a
 draft pull request so a failed `done` there is not a settled red; on a ready pull request a failed or
 cancelled `done` is red. Draft and ready events share one concurrency group, so marking ready cancels
-the in-flight draft run. It fails on a draft or a cancelled run and succeeds on a ready pull request.
-Doctor accepts that file for those repos and does not suggest requiring `done` (it gates nothing beside
-the repo's own jobs). A check that is not `local_only`, including `tier: manual`, keeps the full stub so
+the in-flight draft run. It fails on a draft or a cancelled run. On a ready pull request `done` succeeds
+only when the commit status `factory` is success on the branch head. Doctor and adopt require `done` for
+this stub as well as the full one. A check that is not `local_only`, including `tier: manual`, keeps the full stub so
 `workflow_dispatch` can run it.
 
 **Toolchains:** GitHub runners (`ubuntu-latest`) have node and python3 but no pnpm or uv. Before the
@@ -768,11 +768,16 @@ same key in one run: the first is kept, the second is dropped and listed. `--dry
 files only and does not call `gh`, including lifecycle. A `gh` error while reading an issue's state leaves
 that proposal as it is.
 
-Lifecycle, on the next `factory improve`: a merged factory PR resolves the proposal and its findings.
-That merge means the proposal was implemented. It is a proven improvement only when every `effect check: <name>`
-named in its acceptance passed on the merged run's latest gates report. No such name, a missing report, or a
-named check that is absent stays an unclear effect. A named check that did not pass is a negative effect.
-Neither is reported as proven. The PR is matched by plan file, goal or `resolves_findings`, or because the run closes the proposal's issue.
+Lifecycle, on the next `factory improve`: a merged factory PR means the proposal was **implemented**,
+not that its effect was proven. To confirm efficacy, use `red_green: required`, a `kind: repro`,
+`verify: test` criterion and acceptance text `effect check: red_green`. The same behavioral test must
+assert-fail on the base and pass on HEAD; a load error, skip, exemption, or arbitrary green check is
+not proof. This opt-in also works for feature/chore plans. Other measurements remain unverified rather
+than being inferred from a check name. Each proposal states benefit, added cost and its efficacy check.
+With unclear effect, memory stays owned (`proposed`) without creating a bookkeeping issue; a negative
+effect reopens it. Only confirmed efficacy resolves the memory finding. Implemented proposals with
+unclear/negative effects are reconsidered when later evidence arrives. The PR is matched by plan file,
+goal or `resolves_findings`, or because the run closes the proposal's issue.
 That issue match counts even when the run started before the ticket. An issue closed without that PR, a PR
 closed unmerged, or no merged or open PR within 28 days, drops it and reopens its findings. A proposal may change
 `.factory/` or CI files only as declared `protected_changes` (see [Protected config](#protected-config)).
@@ -808,11 +813,11 @@ Results go to `evals/results/<date>.jsonl` and `.md`. Every eval run spends real
 
 ## Reviewers
 
-`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `standards` joins when `review.checklist` is on (default) and `.factory/standards.md` has unmarked rules (see Standards). Review rules are the `## Severity` section of that file, or `standards/review-rules.md` when the section is absent. Both are read from the base commit.
+`plan` and `simplicity` review every change. `security` joins when the change touches `sensitive_paths` or any dependency manifest or lockfile. `standards` joins when `review.checklist` is on (default) and `.factory/standards.md` has rules, including marked rules (see Standards). Review rules are the `## Severity` section of that file, or `standards/review-rules.md` when the section is absent. Both are read from the base commit.
 
 ## Standards
 
-Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations. `<!-- check: name -->` hides the rule only when that name is a blocking `repo.yaml` check whose command can fail, and which runs on a path the rule names (a check with no `paths` covers a rule that names none). A workflow job name, a manual or `local_only` check, or a constant command such as `true` does not hide the rule. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). Removing a `repo.yaml` check is also a loosening, unless the plan lists `.factory/repo.yaml`, names the removed check and a check the diff adds, and acceptance contains both `probe fail: <new>` and `probe pass: <new>`. Weakening without that replacement stays a loosening. `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
+Add a line under `## Rules` in `.factory/standards.md`. It is reviewed on every PR from the next one on. The weekly improvement run (`factory improve`, aspect `findings`) proposes making it a check and cleaning up existing violations. `<!-- check: name -->` is a reference, never permission to hide the rule: a static name/command/path match cannot establish semantic enforcement. The reviewer inspects whether the check executes, blocks, and detects a representative violation. Coverage reports a plausible configured check as **partial**, not full; all rules remain in review scope. A workflow substring (even a comment) is not proof that CI executes or blocks. `config_guard` treats removing the rule, or the marker, as a loosening unless a package lists `.factory/standards.md` in `files` and the goal, an acceptance criterion, or `protected_changes` names the rule, or the check as a whole word (not `out_of_scope`). Removing a `repo.yaml` check is also a loosening, unless the plan lists `.factory/repo.yaml`, names the removed check and a check the diff adds, and acceptance contains both `probe fail: <new>` and `probe pass: <new>`. Weakening without that replacement stays a loosening. `factory doctor --repo` fails on a dangling marker and warns when an old file is still next to `standards.md` (the old file is ignored; delete it). `review_checklist` is an alias of the `review_standards` role. `.factory/checklist.md` and `.factory/review-rules.md` load only while `standards.md` is missing, with a deprecation warning. `factory standards migrate --repo <path>` writes `standards.md` with the severity section first and `## Rules` last, and leaves the old files in place.
 
 ```markdown
 ## Severity
@@ -859,13 +864,29 @@ factory queue add --repo ~/code/app 130 --after 120
 
 The worker takes the queue. On each repo that already has a queue file it also takes open `factory-ready` issues with a title and a body, once. A later poll or a restarted worker does not add them again, and an incomplete issue list adds nothing. `needs-plan`, `needs-decision`, `factory-proposal`, closed issues, and anything already in the file stay out. `queue add` remains the override and can queue a finished issue again.
 
-The worker starts `factory run --issue N --no-notify` up to `--slots` coding runs in total (default 2), and also up to `concurrency.max_runs` in that repo. Priority is `priority:high`, then normal, then `priority:low`; equal priority keeps queue order, oldest first. A normal ticket waiting 24 hours starts ahead of a newer higher-priority one. The choice is priority and wait, not a model reordering the queue. Waiting on `--after`, on CI, or on a `concurrency.resources` name does not use a coding slot. A second run, including a manual `factory run`, waits while that name is held.
+The worker starts `factory run --issue N --no-notify` up to `--slots` coding runs in total (default 2), and also up to `concurrency.max_runs` in that repo. Priority is `prio:high`, then normal, then `prio:low` (legacy `priority:*` labels remain accepted); equal priority keeps queue order, oldest first. A normal ticket waiting 24 hours starts ahead of a newer higher-priority one. The choice is priority and wait, not a model reordering the queue. Waiting on `--after`, on CI, or on a `concurrency.resources` name does not use a coding slot. A second run, including a manual `factory run`, waits while that name is held.
 
 It starts nothing for a repo while the base branch CI is red. It does not start an issue that is closed, missing `factory-ready`, carrying a blocked label, or already has an open factory PR. Losing `factory-ready` (or gaining `needs-plan`, `needs-decision`, or `factory-proposal`) while a run is in progress pauses at the next step, keeps the worktree, and does not auto-merge; restoring the label lets that same run continue. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. Any other `needs_human`, `needs_input`, `failed` or `base_red` is parked with the reason and is not resumed. A `locked` overlap with an open factory PR stays parked until that PR is merged or closed, then resumes the saved plan when the issue text is unchanged. A predecessor that closed without merging, and an `after` cycle, stay parked with the reason and are not started again. A draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) does not block, and `factory status` lists it as stale.
 
 Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when an acceptance line `fulfills #N` is evidenced. File overlap alone is not a bundle.
 
-Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time, so auto-merge can proceed after CI. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish. The worker does not assume an overnight stop.
+For `auto`/`bot_review`, red head CI, a new head or a moved base schedules the **same** run/PR through
+`factory resume`, under normal global/repo/resource limits. Auto-merge is disabled first; new commits
+gain no inherited approval or review SHA. The pipeline synchronizes the branch/base, runs gates and
+reviews the actual delta before approval. Post-push continuations have a persisted two-attempt budget;
+pause, drain, the work window, withdrawn admission or a changed issue prevent automatic starts. Missing
+checkpoints and uncommitted work require a person. Failed-CI diagnostics are read for the exact SHA,
+bounded and redacted; unknown/config/base failures never authorize product edits. A conflict stops and
+asks for a decision. Human-policy PRs may still receive `gh pr update-branch` without any new approval.
+A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked.
+`--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish.
+
+Test evidence accepts existing executed tests without requiring edits. Pytest names/skips are parsed
+both with and without `{files}`; direct pytest commands request verbose names. Matching successful gate
+commands can supply evidence without rerunning it. Same-process evidence is reused only with identical
+staged tree, base, command, environment and citations; failures/skips are not cached. A single-file
+red-green HEAD probe can reuse that evidence, but the negative base control still runs (or uses its
+content-keyed base probe cache). Evidence/probe durations report the work actually executed.
 
 ```
 factory queue run --slots 2

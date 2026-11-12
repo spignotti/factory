@@ -488,17 +488,20 @@ ${fixed}` } };
     expect(prompt("plan_high")).toMatch(/standards_items[\s\S]*Every exported function has a test/);
   });
 
-  it("no security reviewer for ordinary files; no standards reviewer when review.checklist is off or all items are marked", async () => {
+  it("keeps marked standards in review; only an explicit checklist opt-out disables that reviewer", async () => {
     const off = await runScenario({
       script: "clean.json",
       patch: (c) => void ((c.review as Record<string, unknown>).checklist = false),
       setup: (repo) => commitFile(repo, ".factory/standards.md", "- Every exported function has a test\n"),
     });
-    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: suite -->\n") });
-    for (const r of [off, marked]) {
-      expect(r.result.result).toBe("done");
-      expect(eventsOf(r, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
-    }
+    const marked = await runScenario({ script: "clean.json", setup: (repo) => commitFile(repo, ".factory/standards.md", "- Tests pass <!-- check: suite -->\n"),
+      steps: (steps) => [...steps, { role: "review_standards", output: { reviewer: "standards", prior: [], findings: [] } }],
+    });
+    expect(off.result.result).toBe("done");
+    expect(marked.result.result).toBe("done");
+    expect(eventsOf(off, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity"]);
+    expect(eventsOf(marked, "step_started").find((e) => e.step === "review")?.data.reviewers).toEqual(["plan", "simplicity", "standards"]);
+    expect(marked.runner.calls.find((c) => c.role === "review_standards")?.prompt).toContain("Tests pass");
   });
 
   it("a dependency file anywhere activates security", async () => {
@@ -688,6 +691,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
       },
       patch: autoMerge,
@@ -720,6 +724,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => seq[Math.min(i++, seq.length - 1)]!;
       },
       patch: autoMerge,
@@ -756,6 +761,7 @@ ${fixed}` } };
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => {
+        gh.settings.required_checks = ["done"];
         gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
       },
       patch: autoMerge,
@@ -763,8 +769,24 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
     expect(r.github.autoMerged).toEqual([r.result.pr]);
     expect(r.github.approvedShas).toEqual([r.github.remoteShas.get(r.result.branch!)]);
+    expect(r.github.autoMergeShas).toEqual([{ pr: r.result.pr, sha: r.github.remoteShas.get(r.result.branch!) }]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([]);
+  });
+
+  it("does not enable auto-merge when the open head is no longer the approved SHA", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.findOpenPr = async () => ({ url: "https://github.test/pr/moved", draft: false, headSha: "f".repeat(40) });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(r.github.autoMerged).toEqual([]);
   });
 
   it("pr_ci_wait_minutes 0 does not wait; a pending head still does not fail or auto-merge", async () => {
@@ -869,6 +891,7 @@ ${fixed}` } };
       const r = await runScenario({
         script: "clean.json",
         github: (gh) => {
+          gh.settings.required_checks = ["done"];
           gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
         },
         patch: (c) => void (c.merge = { auto_merge_max_risk: "low" }),
@@ -881,6 +904,7 @@ ${fixed}` } };
       const r = await runScenario({
         script: "clean.json",
         github: (gh) => {
+          gh.settings.required_checks = ["done"];
           gh.status = "green";
         },
         patch: (c) => void (c.merge = { auto_merge_max_risk: "low", policy: { medium: "bot_review" } }),
