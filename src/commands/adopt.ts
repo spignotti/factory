@@ -214,7 +214,7 @@ export async function adopt(opts: AdoptOptions, deps: AdoptDeps): Promise<AdoptR
     const ciToolchains = describeToolchains(detectToolchains(wt, toolchainNotes));
     const { text: repoYaml, config } = draftRepoYaml({ detection, checks, baseBranch, date, repoName: repoName(repoDir), toolchains: ciToolchains });
     const stubMode = ciStubMode(config.checks);
-    const ciStub = renderCiStubFor(opts.ref, stubMode);
+    const ciStub = renderCiStubFor(opts.ref, stubMode, undefined, config.ci?.runner);
     const agentsPath = join(wt, "AGENTS.md");
     const agentsMd = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : undefined;
     const read = (rel: string) => {

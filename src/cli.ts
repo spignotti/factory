@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { join, resolve } from "node:path";
 import { PiRunner } from "./agents/pi-runner.js";
 import { ciStubModeAt, defaultRef, renderCiStubFor, resolveFactoryRef } from "./ci.js";
+import { loadRepoConfig, REPO_CONFIG_PATH } from "./schemas/repo.js";
 
 export { defaultRef };
 import { doctorCommand } from "./commands/doctor.js";
@@ -108,9 +109,9 @@ const USAGE = `usage:
               (retry pending notifications from $FACTORY_HOME/outbox/; also runs at the start of every run and resume)
   factory ci-stub [--ref <tag>] [--repo <path>]
               (prints .github/workflows/factory.yml for a pinned factory ref, default v<version>; a tag is
-               resolved to its commit SHA and kept as a comment; a repo whose checks are all local_only,
-               or there are none, gets the minimal stub, no npx; a manual check keeps the full stub so
-               workflow_dispatch can run it; doctor accepts a tag pin and a SHA pin)
+               resolved to its commit SHA and kept as a comment; runs-on is repo.yaml ci.runner, or
+               ubuntu-latest; a repo whose checks are all local_only, or there are none, gets the minimal
+               stub, no npx; a manual check keeps the full stub so workflow_dispatch can run it)
 `;
 
 const COMMAND_LINE = /^ {2}factory /;
@@ -433,7 +434,9 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       const { values } = parseArgs({ args: rest, options: { ref: { type: "string" }, repo: { type: "string" } } });
       const requested = values.ref ?? defaultRef();
       const resolved = (deps.resolveRef ?? resolveFactoryRef)(requested);
-      io.out(renderCiStubFor(resolved.pin, ciStubModeAt(resolve(values.repo ?? ".")), resolved.tag));
+      const repoDir = resolve(values.repo ?? ".");
+      const runner = existsSync(join(repoDir, REPO_CONFIG_PATH)) ? loadRepoConfig(repoDir).ci?.runner : undefined;
+      io.out(renderCiStubFor(resolved.pin, ciStubModeAt(repoDir), resolved.tag, runner));
       return 0;
     }
     if (command === "standards") {

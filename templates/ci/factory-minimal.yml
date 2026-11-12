@@ -32,7 +32,7 @@ jobs:
   # draft and is skipped otherwise. `done` needs it so the marker exists before `done` completes.
   draft:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: @RUNS_ON@
     steps:
       - run: echo "draft hold, checks wait until the pull request is ready for review"
   # The single status check, named `done`. It gates nothing beside the repo's own jobs: there
@@ -41,7 +41,7 @@ jobs:
   done:
     needs: [draft]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: @RUNS_ON@
     steps:
       - if: cancelled()
         run: |

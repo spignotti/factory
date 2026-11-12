@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { asset } from "./prompts.js";
-import { loadRepoConfig, REPO_CONFIG_PATH } from "./schemas/repo.js";
+import { DEFAULT_CI_RUNNER, loadRepoConfig, REPO_CONFIG_PATH, CI_RUNNER_LABEL } from "./schemas/repo.js";
 
 /**
  * CI stub: `.github/workflows/factory.yml` is a template with the pinned factory ref filled in.
@@ -27,6 +27,7 @@ export const LEGACY_REQUIRED_CHECK = "factory / done";
 export const CI_TEMPLATE = new URL("../templates/ci/factory.yml", import.meta.url);
 export const CI_MINIMAL_TEMPLATE = new URL("../templates/ci/factory-minimal.yml", import.meta.url);
 const REF_MARK = "@FACTORY_REF@";
+const RUNS_ON_MARK = "@RUNS_ON@";
 const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/;
 const PINNED = /github:spignotti\/factory#([^\s"']+)/g;
 const FULL_SHA = /^[0-9a-f]{40}$/i;
@@ -62,9 +63,10 @@ export function defaultRef(): string {
   return `v${(JSON.parse(asset("package.json")) as { version: string }).version}`;
 }
 
-export function renderCiStub(ref: string, template = readFileSync(CI_TEMPLATE, "utf8")): string {
+export function renderCiStub(ref: string, template = readFileSync(CI_TEMPLATE, "utf8"), runner = DEFAULT_CI_RUNNER): string {
   if (!REF.test(ref) || ref.includes("..")) throw new Error(`invalid factory ref: ${ref}`);
-  return template.replaceAll(REF_MARK, ref);
+  if (!CI_RUNNER_LABEL.test(runner)) throw new Error(`invalid ci.runner: ${runner}`);
+  return template.replaceAll(REF_MARK, ref).replaceAll(RUNS_ON_MARK, runner);
 }
 
 /** Human note for a SHA pin that was resolved from a tag. `doctor` strips it before hashing. */
@@ -89,8 +91,8 @@ export function withTagPinComment(rendered: string, tag: string, sha: string): s
 }
 
 /** The stub `factory ci-stub` prints for this ref and mode. `tag` records the tag a SHA pin came from. */
-export function renderCiStubFor(ref: string, mode: CiStubMode, tag?: string): string {
-  const body = renderCiStub(ref, ciStubTemplate(mode));
+export function renderCiStubFor(ref: string, mode: CiStubMode, tag?: string, runner = DEFAULT_CI_RUNNER): string {
+  const body = renderCiStub(ref, ciStubTemplate(mode), runner);
   return tag ? withTagPinComment(body, tag, ref) : body;
 }
 
@@ -163,7 +165,7 @@ export function pinnedRefs(text: string): string[] {
 }
 
 /** The repo's CI stub equals the rendering for the ref it pins (hash). `mode` is the rendering the repo's checks need. */
-export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8"), currentRef?: string, mode: CiStubMode = "full"): CiStubStatus {
+export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE, "utf8"), currentRef?: string, mode: CiStubMode = "full", runner = DEFAULT_CI_RUNNER): CiStubStatus {
   const path = join(repoDir, CI_STUB_PATH);
   // Not adopted yet (by hand until `adopt`, M5): a warning, not a failure.
   if (!existsSync(path)) return { status: "warn", detail: `${CI_STUB_PATH} is missing; write it with \`factory ci-stub --ref <tag> > ${CI_STUB_PATH}\`` };
@@ -179,7 +181,7 @@ export function ciStubCheck(repoDir: string, template = readFileSync(CI_TEMPLATE
   if (noted && noted.sha !== ref) return { status: "fail", detail: `tag comment records ${noted.sha} but the stub pins ${ref}` };
   let expected: string;
   try {
-    expected = renderCiStub(ref, mode === "minimal" ? ciStubTemplate("minimal") : template);
+    expected = renderCiStub(ref, mode === "minimal" ? ciStubTemplate("minimal") : template, runner);
   } catch (e) {
     return { status: "fail", detail: (e as Error).message };
   }
