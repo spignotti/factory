@@ -72,7 +72,7 @@ function blockersOf(result: string, live: PrStatus | undefined, prError: string 
 }
 
 /**
- * Overnight summary. Reads `result.json` (mtime is when the run finished) and live PR state.
+ * Finished-window summary. Reads `result.json` (mtime is when the run finished) and live PR state.
  * Does not read `events.jsonl`: that file is the trace, not this view.
  */
 async function sinceFinished(

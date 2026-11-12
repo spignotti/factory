@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
 import { autoMergeAlreadyEnabled, FakeGitHub } from "../../src/gh.js";
-import { autoMergeCompletes, mayEnableAutoMerge } from "../../src/pipeline/merge-ready.js";
+import { autoMergeCompletes, mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../../src/pipeline/merge-ready.js";
 import { enableReadyMerges } from "../../src/queue/worker.js";
 
 describe("merge readiness", () => {
@@ -24,6 +24,20 @@ describe("merge readiness", () => {
     expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(true);
     expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", reviewedSha: "bbb", ci: "green", draft: false, state: "open" })).toBe(false);
     expect(mayEnableAutoMerge({ policy: "bot_review", approvedSha: "aaa", headSha: "aaa", ci: "green", draft: false, state: "open" })).toBe(false);
+  });
+
+  it("self-merge and CI wait are one predicate for finalize and the worker", () => {
+    expect(selfMergePolicy("auto")).toBe(true);
+    expect(selfMergePolicy("bot_review")).toBe(true);
+    expect(selfMergePolicy("human_review")).toBe(false);
+    expect(selfMergePolicy(null)).toBe(false);
+    expect(waitingOnMergeCi({ policy: "auto", ci: "pending", draft: false, state: "open" })).toBe(true);
+    expect(waitingOnMergeCi({ policy: "bot_review", ci: "none", draft: false, state: "open" })).toBe(true);
+    expect(waitingOnMergeCi({ policy: "auto", ci: "green", draft: false, state: "open" })).toBe(false);
+    expect(waitingOnMergeCi({ policy: "auto", ci: "red", draft: false, state: "open" })).toBe(false);
+    expect(waitingOnMergeCi({ policy: "auto", ci: "pending", draft: true, state: "open" })).toBe(false);
+    expect(waitingOnMergeCi({ policy: "human_review", ci: "pending", draft: false, state: "open" })).toBe(false);
+    expect(waitingOnMergeCi({ policy: "auto", ci: "pending", draft: false, state: "closed" })).toBe(false);
   });
 
   it("a restarted enable that GitHub already accepted is not a second merge", () => {

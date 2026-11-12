@@ -6,7 +6,7 @@ import { ResultSchema, type RunResult } from "../events.js";
 import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
-import { mayEnableAutoMerge } from "../pipeline/merge-ready.js";
+import { mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { deliveryForDone } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
@@ -820,7 +820,7 @@ export async function enableReadyMerges(
         continue;
       }
     }
-    if (status.state === "open" && !status.draft && (policy === "auto" || policy === "bot_review") && status.ci !== "green" && status.ci !== "red") waiting = true;
+    if (waitingOnMergeCi({ policy, ci: status.ci, draft: status.draft, state: status.state })) waiting = true;
     if (!mayEnableAutoMerge({ policy, approvedSha: approved, headSha: head, reviewedSha: run.state?.reviewed_sha, ci: status.ci, draft: status.draft, state: status.state })) continue;
     const key = `${pr}@${approved}`;
     if (enabled.has(key)) continue;

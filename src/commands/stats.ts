@@ -10,6 +10,7 @@ import type { z } from "zod";
 import type { StatsPeriodSchema, StatsReportSchema } from "../schemas/reports.js";
 import { billingOf, type BillingKind, DEFAULT_BILLING } from "../schemas/profile.js";
 import { classifyWait, dedupeRuns, lastEventTime, mergeTimestamp, roundKinds, waitLabels, waitedMinutes, type WaitClass } from "../pipeline/accounting.js";
+import { selfMergePolicy } from "../pipeline/merge-ready.js";
 import { addOutcome, emptyOutcomeCounts, readOutcome } from "../pipeline/outcome.js";
 
 /** One period of `factory stats` (schema `schemas/stats.schema.json`). */
@@ -97,9 +98,9 @@ export function aggregate(runs: RunRecord[], from: Date, to: Date, events: (r: R
       if (res.merge_policy) inc(p.merge_policy, res.merge_policy);
       const outcome = readOutcome(res);
       addOutcome(p.outcomes, outcome);
-      // A delivered PR is not a merge. Only an explicitly confirmed auto merge counts.
-      // GitHub state and a matching login are not consulted here, so an external merge cannot add a second row.
-      if (outcome.merged === "confirmed" && res.merge_policy === "auto") p.auto_merged++;
+      // A delivered PR is not a merge. Only a confirmed merge under a self-merge policy counts.
+      // `bot_review` is that policy for the reviewed head. A matching login is not consulted here.
+      if (outcome.merged === "confirmed" && selfMergePolicy(res.merge_policy)) p.auto_merged++;
       const waited = waitedMinutes(log);
       if (waited !== null) waits.push(waited);
       if (outcome.merged === "confirmed") {

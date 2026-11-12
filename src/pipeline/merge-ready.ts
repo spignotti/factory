@@ -16,6 +16,27 @@ export function autoMergeCompletes(opts: {
 }
 
 /**
+ * `auto` and `bot_review` enable merge themselves. `human_review` waits for a person.
+ * Finalize, the queue worker, and stats all use this so a self-merge is not a second policy.
+ */
+export function selfMergePolicy(policy: string | null | undefined): boolean {
+  return policy === "auto" || policy === "bot_review";
+}
+
+/**
+ * An open, non-draft pull request on a self-merge policy whose CI is not green and not red.
+ * The short poll can end here. Risk and the merge policy stay. A person is not asked yet.
+ */
+export function waitingOnMergeCi(opts: {
+  policy: string | null | undefined;
+  ci: string | null | undefined;
+  draft: boolean;
+  state: string;
+}): boolean {
+  return opts.state === "open" && !opts.draft && selfMergePolicy(opts.policy) && opts.ci !== "green" && opts.ci !== "red";
+}
+
+/**
  * The runner may ask GitHub to enable auto-merge only for the SHA it approved, once that head is green.
  * `auto` is the risk policy. `bot_review` is the same merge, and only when this head is the reviewed tree.
  * `human_review` waits for a person. A newer commit, a draft, or CI that is not green does not qualify.
@@ -37,7 +58,7 @@ export function mayEnableAutoMerge(opts: {
     opts.ci === "green" &&
     !!opts.approvedSha &&
     opts.approvedSha === opts.headSha;
-  if (!aligned) return false;
-  if (opts.policy === "auto") return true;
-  return opts.policy === "bot_review" && !!opts.reviewedSha && opts.reviewedSha === opts.headSha;
+  if (!aligned || !selfMergePolicy(opts.policy)) return false;
+  if (opts.policy === "bot_review") return !!opts.reviewedSha && opts.reviewedSha === opts.headSha;
+  return true;
 }

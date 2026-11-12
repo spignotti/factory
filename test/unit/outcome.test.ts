@@ -115,6 +115,23 @@ describe("outcome storage", () => {
     expect(aggregate([], new Date(0), new Date(1)).outcomes).toEqual(emptyOutcomeCounts());
   });
 
+  it("a confirmed bot_review merge counts as auto-merged and human_review does not", () => {
+    const bot = stored({
+      run_id: "20261028-120000-cccccc",
+      merge_policy: "bot_review",
+      outcome: { ...buildOutcome({ ticket: 3, attempts: 1, pr: "https://pr/3", result: "done" }), merged: "confirmed" },
+    });
+    const human = stored({
+      run_id: "20261028-120000-dddddd",
+      merge_policy: "human_review",
+      outcome: { ...buildOutcome({ ticket: 4, attempts: 1, pr: "https://pr/4", result: "done" }), merged: "confirmed" },
+    });
+    const period = aggregate([record(bot), record(human)], new Date("2026-10-28T00:00:00Z"), new Date("2026-10-29T00:00:00Z"));
+    expect(period.auto_merged).toBe(1);
+    expect(period.merge_policy).toEqual({ bot_review: 1, human_review: 1 });
+    expect(period.outcomes.confirmed_merges).toBe(2);
+  });
+
   it("V24: a legacy queue done row is unknown, and a new done row is not a confirmed merge", () => {
     const legacy = parseQueue(
       JSON.stringify({

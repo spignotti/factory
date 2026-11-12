@@ -182,14 +182,23 @@ describe("CI stub", () => {
     expect(wf.jobs.select!.steps.at(-1)!.run).toContain('"$ALL" = true');
     const steps = wf.jobs.check!.steps;
     const tc = (k: string) => `fromJson(needs.select.outputs.toolchains).${k}`;
-    expect(steps.map((s) => s.uses ?? "run")).toEqual(["actions/checkout@v4", "pnpm/action-setup@v6", "actions/setup-node@v4", "actions/setup-python@v5", "astral-sh/setup-uv@v6", "actions/cache@v4", "run"]);
+    expect(steps.map((s) => s.uses ?? "run")).toEqual([
+      "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+      "pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115",
+      "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+      "astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e",
+      "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+      "run",
+    ]);
+    expect(steps.every((s) => s.uses === undefined || /@[0-9a-f]{40}$/.test(s.uses))).toBe(true);
     expect(steps[1]).toMatchObject({ if: tc("pnpm"), with: { version: `\${{ ${tc("pnpm_version")} }}` } });
     expect(steps[2]).toMatchObject({ with: { "node-version": `\${{ ${tc("node")} }}` } });
     expect(steps[3]).toMatchObject({ if: `${tc("python")} != ''`, with: { "python-version": `\${{ ${tc("python")} }}` } });
     expect(steps[4]).toMatchObject({ if: tc("uv"), with: { version: `\${{ ${tc("uv_version")} }}` } });
     // the npx install of the pinned factory is cached per ref, in select and in every check
     expect(steps[5]).toMatchObject({ with: { path: "~/.npm/_npx", key: "factory-npx-${{ runner.os }}-${{ env.FACTORY }}" } });
-    expect(wf.jobs.select!.steps.some((s) => s.uses === "actions/cache@v4")).toBe(true);
+    expect(wf.jobs.select!.steps.some((s) => s.uses === "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830")).toBe(true);
     expect(steps[6]!.run).toBe('$FACTORY gates --run "$CHECK"');
     // the required status is the job name GitHub Actions reports
     expect(Object.keys(wf.jobs)).toContain("done");

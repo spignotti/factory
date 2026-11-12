@@ -20,6 +20,7 @@ import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evalua
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
+import { mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
@@ -552,16 +553,12 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           draft = held.draft;
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
           await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
-        } else if (!headGreen && (policy === "auto" || policy === "bot_review")) {
-          // The short poll ends here. Risk and the merge policy stay. The runner enables auto-merge
-          // once this SHA is green. A later commit is a different SHA and is not approved.
-          // bot_review also waits here: it merges this reviewed SHA, it does not wait for a person.
+        } else if (waitingOnMergeCi({ policy, ci: ci.status, draft: draft === true, state: "open" })) {
+          // The same predicate as the worker. A later commit is a different SHA and is not approved.
           ciWait = ci.status === "pending" ? "pending" : "none";
         }
       }
       // Merge only. Deploy is a separate action and is not called here.
-      // bot_review merges when the in-run review covered this head. A reviewer cannot widen that.
-      const reviewBound = policy !== "bot_review" || reviewedSha === head;
       const pause = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
       if (pause && result === "done") {
         // The queue asked this run to stop. A green head is not a reason to merge.
@@ -569,7 +566,18 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         reason = `paused: ${pause}; resume with \`factory resume ${ctx.runId}\``;
         const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr!, draft: false });
         draft = held.draft;
-      } else if ((policy === "auto" || policy === "bot_review") && reviewBound && result === "done" && headGreen) {
+      } else if (
+        result === "done" &&
+        mayEnableAutoMerge({
+          policy,
+          approvedSha,
+          headSha: head,
+          reviewedSha,
+          ci: headGreen ? "green" : "pending",
+          draft: draft === true,
+          state: "open",
+        })
+      ) {
         await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!);
       }
     } catch (e) {

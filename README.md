@@ -125,7 +125,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
-| `factory queue add\|list\|remove\|run` | ordered issue queue per repo; overnight worker (`--slots`, `--until`) |
+| `factory queue add\|list\|remove\|run` | ordered issue queue per repo; one worker (`--slots`, `--until`, `--stay`) |
 | `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), queues, PRs, `--since` finished runs, period stats, cleanup |
 | `factory gates (--select \| --run <check>)` | check selection and execution (local and CI) |
 | `factory adopt --repo <p> [--ref <tag>]` | onboarding PR |
@@ -848,7 +848,7 @@ API key for OpenCode Go).
 
 An ordered list of issues per repository, in `$FACTORY_HOME/queue/<repo key>.json` (atomic writes). A restarted `queue run` continues that list and does not start an issue that already has a live run.
 
-Evening, queue the night's issues. Closed, missing `factory-ready`, carrying `needs-plan`, `needs-decision` or `factory-proposal`, or with an empty title or body is refused:
+`factory queue add` queues issues. Closed, missing `factory-ready`, carrying `needs-plan`, `needs-decision` or `factory-proposal`, or with an empty title or body is refused:
 
 ```
 factory queue add --repo ~/code/app 120 121 122
@@ -857,7 +857,7 @@ factory queue add --repo ~/code/app 130 --after 120
 
 `--after 120` leaves #130 pending until issue 120's factory PR is merged.
 
-Overnight, one worker under `caffeinate` so the machine stays awake. On each repo that already has a queue file it also takes open `factory-ready` issues with a title and a body, once. A later poll or a restarted worker does not add them again, and an incomplete issue list adds nothing. `needs-plan`, `needs-decision`, `factory-proposal`, closed issues, and anything already in the file stay out. `queue add` remains the override and can queue a finished issue again.
+The worker takes the queue. On each repo that already has a queue file it also takes open `factory-ready` issues with a title and a body, once. A later poll or a restarted worker does not add them again, and an incomplete issue list adds nothing. `needs-plan`, `needs-decision`, `factory-proposal`, closed issues, and anything already in the file stay out. `queue add` remains the override and can queue a finished issue again.
 
 The worker starts `factory run --issue N --no-notify` up to `--slots` coding runs in total (default 2), and also up to `concurrency.max_runs` in that repo. Priority is `priority:high`, then normal, then `priority:low`; equal priority keeps queue order, oldest first. A normal ticket waiting 24 hours starts ahead of a newer higher-priority one. The choice is priority and wait, not a model reordering the queue. Waiting on `--after`, on CI, or on a `concurrency.resources` name does not use a coding slot. A second run, including a manual `factory run`, waits while that name is held.
 
@@ -865,15 +865,10 @@ It starts nothing for a repo while the base branch CI is red. It does not start 
 
 Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when an acceptance line `fulfills #N` is evidenced. File overlap alone is not a bundle.
 
-Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time, so auto-merge can proceed after CI. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until` is local time: no new starts after it; live runs finish.
+Open `factory/*` PRs whose run ended `done` and whose merge state is `BEHIND` are updated from the base (`gh pr update-branch`, a merge, never a force-push), one PR per repo at a time, so auto-merge can proceed after CI. A conflict stops that retry and asks for a decision. A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked. `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish. The worker does not assume an overnight stop.
 
 ```
-caffeinate -i factory queue run --slots 2 --until 07:00
-```
-
-Morning:
-
-```
+factory queue run --slots 2
 factory status --since 12h
 factory queue list
 ```

@@ -76,4 +76,9 @@ describe("evidence prompts", () => {
     expect(review).toMatch(/does not need a new test file or a wrapper/);
     expect(review).toMatch(/do not need sentence, screenshot, or test-name tests/);
   });
+
+  it("review-checklist resolves to the standards prompt", () => {
+    expect(rolePrompt("review-checklist")).toBe(rolePrompt("review-standards"));
+    expect(rolePrompt("review-standards")).toMatch(/standards_items/);
+  });
 });
