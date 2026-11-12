@@ -106,7 +106,7 @@ describe("factory resume", () => {
   });
 
   it("is refused while another run holds the repo lock and leaves result.json alone", async () => {
-    const r = await runScenario({ script: "invalid-handoff.json" });
+    const r = await runScenario({ script: "invalid-handoff.json", patch: (c) => void (c.concurrency = { max_runs: 1 }) });
     const before = r.file("result.json");
     const release = acquireRepoLock(r.factoryHome, r.repo, "20261029-000000-cccccc")!;
     try {
@@ -190,6 +190,7 @@ describe("factory resume", () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
       github: (gh) => {
         gh.baseStatus = async () => (n++ === 0 ? "none" : "red");
       },
@@ -291,6 +292,7 @@ describe("notify hook on resume", () => {
     };
     const r = await runScenario({
       script: "invalid-handoff.json",
+      patch: (c) => void (c.concurrency = { max_runs: 1 }),
       setup: (repo) => void git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git"),
       before: (_repo, home) => writeFileSync(join(home, "notify.yaml"), "repos:\n  acme/widgets:\n    url: https://hooks.example.test/x\n    key: k-resume-0123456789\n", { mode: 0o600 }),
       deps,

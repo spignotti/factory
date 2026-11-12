@@ -167,7 +167,8 @@ describe("plan validation", () => {
 describe("repo config: review", () => {
   it("has no per-package review option (review runs once over the whole diff)", () => {
     expect(parseRepoConfig("").review).toEqual({ max_rounds: 2, checklist: true, skip_paths: [], max_nits: 5 });
-    expect(parseRepoConfig("").concurrency).toEqual({ max_runs: 1, exclusive_paths: [], resources: [] });
+    expect(parseRepoConfig("").concurrency).toEqual({ max_runs: 2, exclusive_paths: [], resources: [] });
+    expect(parseRepoConfig("concurrency: { max_runs: 1 }\n").concurrency.max_runs).toBe(1);
     expect(parseRepoConfig("").pr).toBeUndefined();
     expect(parseRepoConfig('pr: { host_steps_section: "Mac install steps" }\n').pr).toEqual({ host_steps_section: "Mac install steps" });
     // An old repo.yaml that still sets it parses; the key is dropped.

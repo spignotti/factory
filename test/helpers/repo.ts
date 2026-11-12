@@ -19,7 +19,8 @@ export function createFixtureRepo(patch?: (cfg: Record<string, unknown>) => void
   mkdirSync(join(dir, ".factory"), { recursive: true });
   writeFileSync(join(dir, ".factory", "repo.yaml"), stringify(cfg));
   gitIn(dir, "init", "-q", "-b", "main");
-  gitIn(dir, "add", "-A");
+  // The operator's global excludes file (a personal `*.sql` rule) must not drop fixture files.
+  gitIn(dir, "-c", "core.excludesFile=", "add", "-A");
   gitIn(dir, "-c", "user.name=fixture", "-c", "user.email=fixture@test", "commit", "-q", "-m", "init");
   return dir;
 }
@@ -27,7 +28,7 @@ export function createFixtureRepo(patch?: (cfg: Record<string, unknown>) => void
 export function commitFile(dir: string, path: string, content: string, message = "change"): void {
   mkdirSync(join(dir, path, ".."), { recursive: true });
   writeFileSync(join(dir, path), content);
-  gitIn(dir, "add", "-A");
+  gitIn(dir, "-c", "core.excludesFile=", "add", "-A");
   gitIn(dir, "-c", "user.name=fixture", "-c", "user.email=fixture@test", "commit", "-q", "-m", message);
 }
 

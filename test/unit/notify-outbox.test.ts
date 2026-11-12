@@ -175,7 +175,7 @@ describe("notify outbox", () => {
   });
 
   it("external repo lock blocks runFactory with locked", async () => {
-    const repo = createFixtureRepo();
+    const repo = createFixtureRepo((c) => void (c.concurrency = { max_runs: 1 }));
     execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/widgets.git"], { cwd: repo });
     const home = mkdtempSync(join(tmpdir(), "factory-lock-block-"));
     const id = await repoLockId(repo);

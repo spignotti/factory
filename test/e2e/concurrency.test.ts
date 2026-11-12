@@ -109,6 +109,45 @@ function withHostSteps(steps: FakeStep[]): FakeStep[] {
 }
 
 describe("parallel runs and host steps", () => {
+  it("a repo without concurrency starts beside one other run and locks when both slots are held", async () => {
+    let one: (() => void) | undefined;
+    const beside = await runScenario({
+      script: "clean.json",
+      before: (repo, home) => {
+        one = acquireRepoLock(home, repo, "slot-a", { maxRuns: 2 })!;
+      },
+    });
+    one?.();
+    expect(beside.result.result).toBe("done");
+    expect(beside.github.prs[0]!.head).toMatch(/-s\d$/);
+
+    let both: Array<() => void> = [];
+    const full = await runScenario({
+      script: "clean.json",
+      before: (repo, home) => {
+        both = [acquireRepoLock(home, repo, "slot-a", { maxRuns: 2 })!, acquireRepoLock(home, repo, "slot-b", { maxRuns: 2 })!];
+      },
+    });
+    both.forEach((release) => release());
+    expect(full.result.result).toBe("locked");
+    expect(full.runner.calls).toEqual([]);
+
+    const waited = await runScenario({
+      script: "clean.json",
+      options: { wait: true },
+      deps: { lockPollMs: 20 },
+      before: (repo, home) => {
+        const a = acquireRepoLock(home, repo, "slot-a", { maxRuns: 2 })!;
+        const b = acquireRepoLock(home, repo, "slot-b", { maxRuns: 2 })!;
+        setTimeout(() => {
+          a();
+          b();
+        }, 80);
+      },
+    });
+    expect(waited.result.result).toBe("done");
+  });
+
   it("a non-overlapping plan proceeds beside another run and suffixes the branch with the slot", async () => {
     let release: (() => void) | undefined;
     const r = await runScenario({

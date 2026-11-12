@@ -114,10 +114,15 @@ export function draftRepoYaml(input: DraftInput): { text: string; config: RepoCo
     sensitive_paths: d.db.present ? MIGRATION_GLOBS : [],
     human_only_paths: DEFAULT_HUMAN_ONLY,
     merge: { auto_merge_max_risk: "none" },
+    concurrency: { max_runs: 2, exclusive_paths: d.migration_globs },
   };
   const secrets = draftSecrets(d, input.repoName);
   if (secrets) doc.secrets = secrets.block;
   let body = stringify(doc, { lineWidth: 0 });
+  body = body.replace(
+    /^concurrency:\n/m,
+    "# concurrency: two runs. exclusive_paths are migration directories found at adopt; a plan that touches one runs alone. max_runs: 1 keeps a single slot.\nconcurrency:\n",
+  );
   if (secrets) body = body.replace(/^secrets:\n/m, `${secrets.comment}\nsecrets:\n`);
   for (const c of input.checks) {
     const line = `  - name: ${stringify(c.name).trim()}\n`;

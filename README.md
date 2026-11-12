@@ -22,7 +22,7 @@ source of truth; this README is the reference for concepts, configuration and co
    their own. If something is missing, the factory reports it or proposes it; it does not silently restructure
    the repo.
 
-All models run through Pi; no Claude/Codex CLI, no production data. One run per repository unless the repo sets `concurrency.max_runs`.
+All models run through Pi; no Claude/Codex CLI, no production data. Two runs per repository by default (`concurrency.max_runs`). Overlapping plans wait, and a plan that touches `exclusive_paths` runs alone.
 
 **Where runs happen.** A `factory run` targets only repositories that have `.factory/repo.yaml` (enrolled
 via `factory adopt`). Today that is **tourenpilot** and **tourenpilot-ops**. This repository ships the CLI
@@ -35,8 +35,8 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 
 - **Intake** (`src/steps/intake.ts`): issue / plan file / text; ```` ```factory-plan ```` blocks are used as
   is; `--plan-effort none` runs `plan_normalize` with a code-level `source_quote` fidelity check; questions
-  → `needs_input`; per-repo lock (`concurrency.max_runs`, default 1; `--wait` queues on a full slot or on overlapping plans); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
-  `factory/<task>-<slug>` (with `-<run id>-s<slot>` when `max_runs` is above 1).
+  → `needs_input`; per-repo lock (`concurrency.max_runs`, default 2; `--wait` queues on a full slot or on overlapping plans); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
+  `factory/<task>-<slug>-<run id>-s<slot>` (no suffix when `max_runs` is 1).
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
   bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity, and a scope check that
   warns the plan reviewer when the plan says "only" a path the task does not). The planner reads the repo's
@@ -298,8 +298,8 @@ agent_env: []                        # extra env var names for agent tools and c
 docs_lookup: { roles: [plan, implement, fix] }   # steps with the Context7 docs tool [profile's list]; [] = off
 ci: { toolchains: { uv: true, python: "3.12" } }  # what the CI stub installs [detected], see CI
 models: {}                           # per-repo role chains, see Model configuration
-concurrency:                     # parallel runs; see Parallel runs [max_runs 1]
-  max_runs: 1                    # 1..32 lock slots; raising it is a loosening
+concurrency:                     # parallel runs; see Parallel runs [max_runs 2]
+  max_runs: 2                    # 1..32 lock slots; raising it is a loosening
   exclusive_paths: []            # globs that run alone (e.g. supabase/migrations/**); removing one is a loosening
   resources: []                  # shared names (a database, a test fixture); removing one is a loosening
 pr:
@@ -336,9 +336,9 @@ config and model choice are changed in this repository via Cloud Agent PRs (not 
 
 ## Parallel runs
 
-`concurrency.max_runs` (default 1) is how many factory runs may hold the repo at once. Each run still has its own worktree, run directory and branch. The lock is N slot files under `$FACTORY_HOME/locks/`, named `<owner>-<repo>-<hash>.lock` (further slots `.<n>.lock`). The hash is of the canonical origin (`host/owner/repo`, credentials and `.git` stripped), so a URL with an embedded token never becomes a filename. A live lock left under the old sanitized-URL name still blocks the repo; a stale one is deleted.
+`concurrency.max_runs` (default 2) is how many factory runs may hold the repo at once. Set it to 1 for a single slot. Each run still has its own worktree, run directory and branch. The lock is N slot files under `$FACTORY_HOME/locks/`, named `<owner>-<repo>-<hash>.lock` (further slots `.<n>.lock`). The hash is of the canonical origin (`host/owner/repo`, credentials and `.git` stripped), so a URL with an embedded token never becomes a filename. A live lock left under the old sanitized-URL name still blocks the repo; a stale one is deleted.
 
-With `max_runs` above 1 the branch is `factory/<task>-<slug>-<run id>-s<slot>`, and port slots prefer lock slot + 1 (`{port_offset}` stays per run). Fixed host ports (`host: true` plus `ports`) are not shifted: the second run that needs them ends `env_missing`. `factory doctor` reports `max_runs`, `exclusive_paths` when set or when `max_runs` is above 1, and warns in that fixed-port case.
+With `max_runs` above 1 the branch is `factory/<task>-<slug>-<run id>-s<slot>`, and port slots prefer lock slot + 1 (`{port_offset}` stays per run). Fixed host ports (`host: true` plus `ports`) are not shifted: the second run that needs them ends `env_missing`. `factory doctor` reports `max_runs`, `exclusive_paths` when set or when `max_runs` is above 1, and warns in that fixed-port case. It also warns when `max_runs` is above 1 and a migration directory in the tree is not covered by `exclusive_paths`.
 
 After the plan names files, the run publishes those paths. Overlap with another live run's paths (a directory covers its children; `src/auth` does not cover `src/authz`; globs match either way) waits with `--wait` or returns `locked`. The same check runs against files changed by open pull requests on `factory/*` branches of this repo: a finished run no longer holds a slot, but its PR still occupies those files. A draft is ignored once the newer of its head commit time and `updatedAt` is at least `limits.stale_draft_days` old (default 3; 0 disables), unless a live run still holds that branch (lock pid alive, same check as a slot, and the run's `state.branch` is the PR head). The open-PR list is one page (`--limit 1000`); if that page is full, the run blocks instead of treating the missing rows as free. Overlap releases the slot and ends `locked`; the reason includes the PR number (`#123`). With `--wait` the run waits without holding a slot, then takes one again. Before push, the files actually changed are checked the same way (live runs and open factory PRs). A path-claim wait at finalize releases the slot first, like the wait after the plan. A plan that touches `exclusive_paths` is exclusive with every other such plan, even when the files differ — use it for database migrations (`supabase/migrations/**`). A run that is still planning has no paths yet and does not block; the later one yields. `factory gc` metadata archive takes every slot first. Worktree cleanup does not: it uses a short git-ops lock so a busy repo still loses merged worktrees (see Cleanup).
 
@@ -541,7 +541,7 @@ checks:
   - { name: test_db, run: "uv run pytest tests/db", tier: full, services: [dbstack], local_only: true }
 ```
 
-Runs of one repo share `concurrency.max_runs` lock slots (default 1). A manual `factory gates` takes no lock (it only meets a run on
+Runs of one repo share `concurrency.max_runs` lock slots (default 2). A manual `factory gates` takes no lock (it only meets a run on
 the fixed-port claim above). With `max_runs` above 1, shifted ports follow the lock slot; fixed host ports stay one instance per box, and `factory doctor` warns. Residual risk as for secrets: checks run agent-written code with these
 values and reach the stack's ports (for a local database usually as its superuser, inside its containers);
 use a dev-only stack with demo data. A `start` that prints keys puts them in the service log, which is

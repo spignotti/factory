@@ -21,3 +21,26 @@ export const LOCK_FILES = [
 ];
 export const LOCK_GLOBS = LOCK_FILES.map((f) => `**/${f}`);
 export const MIGRATION_GLOBS = ["**/migrations/**"];
+
+/** Path markers adopt and doctor treat as a migration directory, most specific first. */
+const MIGRATION_MARKERS = ["supabase/migrations", "prisma/migrations", "alembic/versions", "migrations"];
+
+/**
+ * Exclusive-path globs for migration directories present in `files`.
+ * `supabase/migrations/001.sql` becomes `supabase/migrations/**`, not a broader `migrations/**`.
+ */
+export function migrationDirGlobs(files: readonly string[]): string[] {
+  const found = new Set<string>();
+  for (const raw of files) {
+    const file = raw.replace(/\\/g, "/").replace(/^\.\//, "");
+    for (const marker of MIGRATION_MARKERS) {
+      const body = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const m = new RegExp(`(^|/)${body}(/|$)`).exec(file);
+      if (!m) continue;
+      const dir = file.slice(0, m.index + m[0].length).replace(/\/$/, "");
+      found.add(`${dir}/**`);
+      break;
+    }
+  }
+  return [...found].sort();
+}

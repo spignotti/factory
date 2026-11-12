@@ -101,8 +101,9 @@ describe("admission and schedule", () => {
   });
 
   it("puts a resource on the doctor line only when one is named", () => {
-    expect(concurrencyCheck(parseRepoConfig("")).detail).toBe("max_runs 1");
-    expect(concurrencyCheck(parseRepoConfig('concurrency: { resources: ["db"] }\n')).detail).toBe("max_runs 1; resources db");
+    expect(concurrencyCheck(parseRepoConfig("")).detail).toBe("max_runs 2; exclusive_paths (none)");
+    expect(concurrencyCheck(parseRepoConfig('concurrency: { resources: ["db"] }\n')).detail).toBe("max_runs 2; exclusive_paths (none); resources db");
+    expect(concurrencyCheck(parseRepoConfig("concurrency: { max_runs: 1 }\n")).detail).toBe("max_runs 1");
   });
 });
 

@@ -12,7 +12,7 @@ import { loadRepoConfig, parseRepoConfig, type RepoConfig } from "../../src/sche
 import { defaultSecretsFile, type ResolvedSecrets } from "../../src/secrets.js";
 import { FakeGitHub } from "../../src/gh.js";
 import { createSandbox, hostProbe } from "../../src/sandbox/sandbox.js";
-import { createFixtureRepo } from "../helpers/repo.js";
+import { commitFile, createFixtureRepo } from "../helpers/repo.js";
 
 const probe = { platform: "linux" as const, bwrap: () => true, pasta: () => true };
 
@@ -378,6 +378,18 @@ describe("factory doctor: concurrency", () => {
       name: "concurrency",
       status: "warn",
       detail: "max_runs 2; exclusive_paths supabase/migrations/**; db has fixed host ports (one instance per box)",
+    });
+  });
+
+  it("warns when a tracked migration directory is outside exclusive_paths", async () => {
+    const repo = createFixtureRepo();
+    commitFile(repo, "supabase/migrations/001_init.sql", "select 1;\n", "migration");
+    const c = capture();
+    await doctorCommand({ factoryHome: mkdtempSync(join(tmpdir(), "fh-")), repo, json: true, probe, view, github: new FakeGitHub() }, c.io);
+    const r = JSON.parse(c.text()) as DoctorReport;
+    expect(check(r, "concurrency")).toMatchObject({
+      status: "warn",
+      detail: expect.stringContaining("migrations not covered by exclusive_paths: supabase/migrations/**"),
     });
   });
 });

@@ -517,8 +517,8 @@ export const RepoConfigSchema = z
     // Per-repo model overrides, role → chain; validated again after the merge.
     models: RoleOverridesSchema.optional(),
     /**
-     * How many factory runs may hold this repo at once. Default 1 keeps the single-run lock.
-     * `exclusive_paths`: a plan that touches any of these globs runs alone (database migrations).
+     * How many factory runs may hold this repo at once. Default 2. Overlapping plan paths still
+     * wait, and `exclusive_paths` run alone (database migrations). Set `max_runs: 1` for one slot.
      * `resources`: names of a shared database or test fixture. The queue and `takeRepoLock` claim
      * each name with the repo lock, so a second coding run waits and does not take a coding slot.
      * Read from the checkout's repo.yaml at the start of the run. Raising `max_runs`, or removing
@@ -526,11 +526,11 @@ export const RepoConfigSchema = z
      */
     concurrency: z
       .object({
-        max_runs: z.number().int().min(1).max(32).default(1),
+        max_runs: z.number().int().min(1).max(32).default(2),
         exclusive_paths: z.array(z.string().min(1)).default([]),
         resources: z.array(z.string().min(1)).default([]),
       })
-      .default({ max_runs: 1, exclusive_paths: [], resources: [] }),
+      .default({ max_runs: 2, exclusive_paths: [], resources: [] }),
     /**
      * PR body options. `host_steps_section` is the heading for manual production-host commands
      * (for example "Mac install steps"). Unset: the section is omitted. Read from the base commit.

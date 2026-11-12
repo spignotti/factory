@@ -12,7 +12,8 @@ export function makeRepo(files: Record<string, string>): string {
     writeFileSync(join(dir, path), text);
   }
   execFileSync("git", ["init", "-q", "-b", "main", dir]);
-  gitIn(dir, "add", "-A");
+  // The operator's global excludes file (a personal `*.sql` rule) must not drop fixture files.
+  gitIn(dir, "-c", "core.excludesFile=", "add", "-A");
   gitIn(dir, "-c", "user.name=fixture", "-c", "user.email=fixture@test", "commit", "-q", "-m", "init");
   return dir;
 }

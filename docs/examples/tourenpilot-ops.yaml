@@ -7,7 +7,8 @@
 pr:
   host_steps_section: "Mac install steps"
 
-# Optional: more than one factory run at a time. A plan that touches a migration runs alone.
+# The default is already two runs. Pin exclusive_paths when the tree has migrations,
+# so a plan that touches one runs alone. max_runs: 1 keeps a single slot.
 # concurrency:
 #   max_runs: 2
 #   exclusive_paths:
