@@ -463,7 +463,6 @@ function isWatch(token: string): boolean {
 /** Flags that do not take the next word. A following path is a file selection, not a value. */
 const BOOLEAN_FLAG = new Set([
   "--coverage",
-  "--bail",
   "--silent",
   "--ci",
   "--runInBand",
@@ -471,7 +470,6 @@ const BOOLEAN_FLAG = new Set([
   "--detectOpenHandles",
   "--passWithNoTests",
   "--onlyChanged",
-  "--changed",
   "--updateSnapshot",
   "-u",
   "--colors",
@@ -485,7 +483,10 @@ const BOOLEAN_FLAG = new Set([
 
 function quotedEquals(token: string): string {
   const eq = token.indexOf("=");
-  return `${token.slice(0, eq + 1)}${shellQuote(token.slice(eq + 1))}`;
+  let value = token.slice(eq + 1);
+  const quote = value[0];
+  if ((quote === '"' || quote === "'") && value.endsWith(quote) && value.length >= 2) value = value.slice(1, -1);
+  return `${token.slice(0, eq + 1)}${shellQuote(value)}`;
 }
 
 /** Keeps flags and their values. Drops watch mode and positional files so `{files}` is the selection. */
