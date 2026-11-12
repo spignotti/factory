@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +23,46 @@ describe("git helpers", () => {
     const base = gitIn(dir, "rev-parse", "HEAD").trim();
     gitIn(dir, "mv", "AGENTS.md", "docs-agents.md");
     expect(await changedFiles(dir, base)).toEqual(["AGENTS.md", "docs-agents.md"]);
+  });
+
+  it("sees a migration a global excludes file hides, and still skips a repo-ignored file", async () => {
+    const dir = createFixtureRepo();
+    const home = mkdtempSync(join(tmpdir(), "git-excludes-"));
+    const ignore = join(home, "ignore");
+    writeFileSync(ignore, "*.sql\n");
+    writeFileSync(join(home, ".gitconfig"), `[core]\n\texcludesFile = ${ignore}\n`);
+    const env = { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+    mkdirSync(join(dir, "supabase/migrations"), { recursive: true });
+    const migration = "supabase/migrations/001_add.sql";
+    writeFileSync(join(dir, migration), "alter table t add column c int;\n");
+    writeFileSync(join(dir, ".gitignore"), "*.env\n");
+    writeFileSync(join(dir, ".env"), "SECRET=1\n");
+    writeFileSync(join(dir, ".git/info/exclude"), "*.log\n");
+    writeFileSync(join(dir, "debug.log"), "x\n");
+    expect(execFileSync("git", ["check-ignore", "-q", migration], { cwd: dir, env }).toString()).toBe("");
+    const prev = {
+      HOME: process.env.HOME,
+      GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+      GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
+    };
+    Object.assign(process.env, { HOME: home, GIT_CONFIG_GLOBAL: join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1" });
+    try {
+      const base = gitIn(dir, "rev-parse", "HEAD").trim();
+      const changed = await changedFiles(dir, base);
+      expect(changed).toContain(migration);
+      expect(changed).not.toContain(".env");
+      expect(changed).not.toContain("debug.log");
+      await stageAll(dir);
+      const staged = (await git(dir, ["diff", "--cached", "--name-only"])).split("\n").filter(Boolean);
+      expect(staged).toContain(migration);
+      expect(staged).not.toContain(".env");
+      expect(staged).not.toContain("debug.log");
+    } finally {
+      for (const [key, value] of Object.entries(prev)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 

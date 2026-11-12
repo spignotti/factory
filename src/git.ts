@@ -38,11 +38,27 @@ export interface GitCallOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Drop the operator's global excludes file. A personal `*.sql` rule would hide a migration from
+ * `git add` and from the diff, so an exclusive-path claim would not block the push. The last
+ * `GIT_CONFIG_*` entry wins over an earlier one and over the global config. The repo `.gitignore`
+ * and `.git/info/exclude` still apply.
+ */
+function gitEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = { ...(env ?? process.env) };
+  const parsed = Number(base.GIT_CONFIG_COUNT);
+  const count = Number.isInteger(parsed) && parsed > 0 ? parsed : 0;
+  base.GIT_CONFIG_COUNT = String(count + 1);
+  base[`GIT_CONFIG_KEY_${count}`] = "core.excludesFile";
+  base[`GIT_CONFIG_VALUE_${count}`] = "";
+  return base;
+}
+
 /** Git for the factory process itself (its own env). Agents never get this. */
 export async function git(cwd: string, args: string[], opts?: GitCallOptions): Promise<string> {
   const timeoutMs = opts?.timeoutMs ?? gitTimeoutMs(args);
   try {
-    const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024, env: opts?.env });
+    const { stdout } = await execFileTimed("git", args, { cwd, timeoutMs, maxBuffer: 64 * 1024 * 1024, env: gitEnv(opts?.env) });
     return stdout;
   } catch (e) {
     if (e instanceof CommandTimeoutError) throw new Error(e.message, { cause: e });
