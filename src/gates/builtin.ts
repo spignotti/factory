@@ -1,4 +1,5 @@
 import { type DiffEntry, diffTotals, formatDiffTotals } from "../git.js";
+import { matchCheckEvidence, matchTestEvidence, type ExecutedTest } from "./evidence.js";
 import { isProtected, matchesAny, type Plan } from "../schemas/plan.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { RepoConfig } from "../schemas/repo.js";
@@ -47,32 +48,56 @@ export function diffSize(stat: Map<string, DiffEntry>, max: number, opts?: { cou
   return t.counted > max ? fail("max_diff_lines", `diff has ${detail} > ${max}`) : ok("max_diff_lines", detail);
 }
 
-/** Every verify:test criterion of the given packages has evidence naming a changed test file. */
-export function testPresence(plan: Plan, packages: string[], handoffs: Handoff[], changed: string[], testGlobs: string[]): BuiltinResult {
+export interface EvidenceInputs {
+  /** Paths present in the worktree. The cited file does not have to be in the diff. */
+  files: readonly string[];
+  /** Tests `tests.run` actually executed for the cited files. */
+  executed: readonly ExecutedTest[];
+  /** Check names from repo.yaml. */
+  knownChecks: readonly string[];
+  /** Checks selected for this gate tier and their result. A check that did not run is absent. */
+  ranChecks: readonly { name: string; status: string }[];
+}
+
+/**
+ * Every verify:test criterion has evidence for a test that exists, was selected, and passed.
+ * An unchanged test counts. A review criterion (documentation, a non-goal) does not need one.
+ */
+export function testPresence(plan: Plan, packages: string[], handoffs: Handoff[], evidence: EvidenceInputs): BuiltinResult {
+  const files = new Set(evidence.files);
   const missing: string[] = [];
   for (const a of plan.acceptance) {
     if (a.verify !== "test" || !packages.includes(a.package)) continue;
-    const present = handoffs.some((h) =>
-      h.evidence.some((e) => {
-        const path = refPath(e.ref);
-        return e.acceptance_id === a.id && e.kind === "test" && changed.includes(path) && (testGlobs.length === 0 || matchesAny(path, testGlobs));
-      }),
-    );
-    if (!present) missing.push(a.id);
+    const matches = handoffs.flatMap((h) => h.evidence.filter((e) => e.acceptance_id === a.id && e.kind === "test"));
+    const hit = matches
+      .map((e) => matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref))))
+      .find((m) => m.ok);
+    if (hit) continue;
+    const reason = matches.length
+      ? matchTestEvidence(matches[0]!.ref, evidence.executed, files.has(refPath(matches[0]!.ref))).reason
+      : "no test evidence";
+    missing.push(`${a.id} (${reason})`);
   }
-  return missing.length ? fail("test_presence", `no changed test file as evidence for ${missing.join(", ")}`) : ok("test_presence");
+  return missing.length ? fail("test_presence", `no executed test evidence for ${missing.join("; ")}`) : ok("test_presence");
 }
 
-/** Every evidence ref exists: test refs in the diff, check refs in repo.yaml. */
-export function evidenceCheck(handoffs: Handoff[], changed: string[], checkNames: string[]): BuiltinResult {
+/**
+ * Every evidence ref matches a real run: a test that exists and passed in the cited scope,
+ * or a known check that was selected and passed. Invented refs and skipped tests do not.
+ */
+export function evidenceCheck(handoffs: Handoff[], evidence: EvidenceInputs): BuiltinResult {
+  const files = new Set(evidence.files);
   const bad: string[] = [];
   for (const h of handoffs) {
     for (const e of h.evidence) {
-      const exists = e.kind === "test" ? changed.includes(refPath(e.ref)) : checkNames.includes(e.ref);
-      if (!exists) bad.push(`${e.acceptance_id}:${e.ref}`);
+      const match =
+        e.kind === "test"
+          ? matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref)))
+          : matchCheckEvidence(e.ref, evidence.knownChecks, evidence.ranChecks);
+      if (!match.ok) bad.push(`${e.acceptance_id}:${e.ref} (${match.reason})`);
     }
   }
-  return bad.length ? fail("evidence", `evidence refs not found: ${bad.join(", ")}`) : ok("evidence");
+  return bad.length ? fail("evidence", `evidence refs not accepted: ${bad.join("; ")}`) : ok("evidence");
 }
 
 /** Packages with `changes_flows` must touch the area's guide and/or flows. */

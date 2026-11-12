@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { classifyReproExit, redGreenProof } from "../../src/gates/redgreen.js";
+import { baseProbeFiles, classifyReproRun, redGreenProof } from "../../src/gates/redgreen.js";
 import { createFixtureRepo, gitIn } from "../helpers/repo.js";
 
 const REPRO = `import assert from "node:assert/strict";
@@ -78,7 +78,7 @@ describe("red-green proof", () => {
     expect(signal.detail).toMatch(/killed by SIGKILL/);
     expect(signal.detail).not.toMatch(/repro fails on base/);
 
-    // Exit 1 whose text mentions a missing file is still the repro, not an inconclusive harness error.
+    // A file that fails to parse never ran a test. That is not a proven reproduction.
     const syntax = setup();
     writeFileSync(join(syntax.dir, "test/bad.test.js"), "import { test } from \"node:test\";\ntest(\"x\", () => {\n");
     const broken = await redGreenProof({
@@ -89,22 +89,92 @@ describe("red-green proof", () => {
       gateTimeoutMinutes: 20,
       env,
     });
-    expect(broken).toMatchObject({ ok: false, inconclusive: false, redOnBase: true, greenOnHead: false });
-    expect(broken.detail).toMatch(/repro fails on base/);
-    expect(broken.detail).toMatch(/repro fails on HEAD/);
+    expect(broken).toMatchObject({ ok: false, inconclusive: true, redOnBase: false, greenOnHead: false });
+    expect(broken.detail).toMatch(/not a proven reproduction/);
+    expect(broken.detail).toMatch(/import/);
+    expect(broken.detail).not.toMatch(/repro fails on base/);
+  });
+
+  it("an assertion whose message mentions SyntaxError is still a failing test", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(
+      join(dir, "test/msg.test.js"),
+      "import assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\ntest(\"msg\", () => { assert.equal(1, 2, \"SyntaxError: No such file\"); });\n",
+    );
+    const r = await redGreenProof({
+      worktree: dir,
+      baseSha,
+      files: ["test/msg.test.js"],
+      testCommand: "node --test {files}",
+      gateTimeoutMinutes: 20,
+      env,
+    });
+    expect(r).toMatchObject({ ok: false, inconclusive: false, redOnBase: true, greenOnHead: false });
+    expect(r.detail).toMatch(/repro fails on base \(test: msg\)/);
+    expect(r.detail).not.toMatch(/not a proven reproduction/);
+  });
+
+  it("an import error on base is not a proven reproduction even when HEAD is green", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "src/added.js"), "export const added = 1;\n");
+    writeFileSync(
+      join(dir, "test/added.test.js"),
+      "import assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { added } from \"../src/added.js\";\ntest(\"loads\", () => { assert.equal(added, 1); });\n",
+    );
+    const r = await redGreenProof({
+      worktree: dir,
+      baseSha,
+      files: ["test/added.test.js"],
+      testCommand: "node --test {files}",
+      gateTimeoutMinutes: 20,
+      env,
+    });
+    expect(r).toMatchObject({ ok: false, inconclusive: true, redOnBase: false, greenOnHead: false });
+    expect(r.detail).toMatch(/import/);
+    expect(r.detail).toMatch(/not a proven reproduction/);
+    expect(r.detail).not.toMatch(/repro fails on base/);
+  });
+
+  it("copies a new test helper onto the base probe and does not copy the product file", async () => {
+    const { dir, baseSha } = setup();
+    writeFileSync(join(dir, "test/helper.js"), "export const extra = 1;\n");
+    writeFileSync(
+      join(dir, "test/with-helper.test.js"),
+      "import assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { extra } from \"./helper.js\";\nimport { max } from \"../src/math.js\";\ntest(\"max returns the larger\", () => { assert.equal(extra, 1); assert.equal(max(1, 2), 2); });\n",
+    );
+    writeFileSync(join(dir, "src/math.js"), "export const sum = (a, b) => a + b;\nexport const max = (a, b) => (a > b ? a : b);\n");
+    const r = await redGreenProof({
+      worktree: dir,
+      baseSha,
+      files: ["test/with-helper.test.js"],
+      supportFiles: ["test/helper.js"],
+      testCommand: "node --test {files}",
+      gateTimeoutMinutes: 20,
+      env,
+    });
+    expect(r).toMatchObject({ ok: true, redOnBase: true, greenOnHead: true, inconclusive: false });
+    expect(r.detail).toMatch(/base probe support: test\/helper\.js/);
+    expect(baseProbeFiles(["test/with-helper.test.js"], ["src/math.js", "test/helper.js", "test/with-helper.test.js"], ["test/**"])).toEqual({
+      tests: ["test/with-helper.test.js"],
+      support: ["test/helper.js"],
+    });
   });
 });
 
-describe("repro exit classification", () => {
-  it("classifies by exit status only: 0 pass, other non-zero fail, 126/127 or a signal inconclusive", () => {
-    expect(classifyReproExit(0)).toBe("pass");
-    expect(classifyReproExit(1)).toBe("fail");
-    expect(classifyReproExit(2)).toBe("fail");
-    expect(classifyReproExit(101)).toBe("fail");
-    expect(classifyReproExit(126)).toBe("other");
-    expect(classifyReproExit(127)).toBe("other");
-    expect(classifyReproExit(137)).toBe("other");
-    expect(classifyReproExit(1, "SIGKILL")).toBe("other");
+describe("repro classification", () => {
+  it("does not treat a bare non-zero exit as an assertion, and does not treat import or collection as one", () => {
+    expect(classifyReproRun(0, "")).toBe("pass");
+    expect(classifyReproRun(1, "")).toBe("unclear");
+    expect(classifyReproRun(2, "")).toBe("unclear");
+    expect(classifyReproRun(101, "")).toBe("unclear");
+    expect(classifyReproRun(126, "")).toBe("command");
+    expect(classifyReproRun(127, "")).toBe("command");
+    expect(classifyReproRun(137, "")).toBe("command");
+    expect(classifyReproRun(1, "", "SIGKILL")).toBe("command");
+    expect(classifyReproRun(1, "✖ msg (1ms)\nAssertionError [ERR_ASSERTION]: SyntaxError: No such file\n")).toBe("assertion");
+    expect(classifyReproRun(1, "Error [ERR_MODULE_NOT_FOUND]: Cannot find module './nope.js'\n✖ /tmp/t.test.js (1ms)\n")).toBe("import");
+    expect(classifyReproRun(2, "ERROR collecting test_a.py\nE   ModuleNotFoundError: No module named 'a'\ncollected 0 items\n")).toBe("collection");
+    expect(classifyReproRun(0, "ℹ pass 0\nℹ fail 0\nℹ skipped 1\n")).toBe("unclear");
   });
 });
 

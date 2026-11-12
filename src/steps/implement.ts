@@ -13,8 +13,9 @@ export const MAX_GATE_ATTEMPTS = 3;
 
 const HANDOFF_SHAPE = `When done, reply with handoff.json as a single \`\`\`json block (in your reply; never write it to a file):
 {"package":"<id>","done":[],"decisions":[],"deviations_from_plan":[],"skipped":[],"uncertain":[],
- "evidence":[{"acceptance_id":"A1","kind":"test|check","ref":"<test file>[::<test name>] or <check name>"}],
- "responses":[{"finding_id":"R1-plan-1","status":"fixed|wontfix","response":"reason"}]}`;
+ "evidence":[{"acceptance_id":"A1","kind":"test|check","ref":"<existing or new test path>[::<test name>] or <check name>"}],
+ "responses":[{"finding_id":"R1-plan-1","status":"fixed|wontfix","response":"reason"}]}
+Cite a test this run executes. An unchanged test is valid evidence. Do not add a wrapper around a test that already runs, and do not cite a skipped test. A SQL or integration file is cited directly.`;
 
 /**
  * The handoff shape plus the check names a `kind:check` ref may use: the gates resolve refs against

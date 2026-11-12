@@ -1,3 +1,4 @@
+An acceptance criterion covered by a test that already runs does not need a new test file or a wrapper. Documentation wording and organizational non-goals do not need sentence, screenshot, or test-name tests. A SQL or integration suite is cited directly; do not require a test that inspects that suite's source.
 Check only: every package and criterion implemented; each test actually asserts its criterion and would fail without the change;
 nothing extra (see scope report); deviations justified; callers and dependents still correct;
 exact text, values and paths the original task spells out are used as given.

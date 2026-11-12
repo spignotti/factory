@@ -1,7 +1,8 @@
 import { sh, tail } from "../exec.js";
-import { changedFiles, diffCountFields, diffTotals, repoDiffStat, stageAll } from "../git.js";
+import { changedFiles, diffCountFields, diffTotals, git, repoDiffStat, stageAll } from "../git.js";
 import {
   type BuiltinResult,
+  type EvidenceInputs,
   diffSize,
   evidenceCheck,
   forbiddenPaths,
@@ -11,9 +12,10 @@ import {
   scopeReport,
   testPresence,
 } from "../gates/builtin.js";
+import { citedTestFiles, runCitedTests } from "../gates/evidence.js";
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { runBaselineGates } from "../baseline/gates.js";
-import { redGreenProof } from "../gates/redgreen.js";
+import { baseProbeFiles, redGreenProof } from "../gates/redgreen.js";
 import { RED_GREEN_NEEDS_REASON, redGreenDecision, redGreenExemptDetail } from "../schemas/plan.js";
 import { selectChecks } from "../gates/select.js";
 import { gateCheckTimeoutMs, shTimedOut, watchCheck, type CheckPulse } from "../gates/timeout.js";
@@ -182,12 +184,33 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const stat = await repoDiffStat(worktree, ctx.baseSha, repo, { countTests });
   const diffReport = diffCountFields(diffTotals(stat), countTests);
   if (diffReport) ctx.events.diffCount = diffReport;
+  const tree = (await git(worktree, ["ls-files"])).split("\n").filter(Boolean);
+  const cited = citedTestFiles(handoffs).filter((f) => tree.includes(f));
+  const executed = await runCitedTests({
+    cwd: worktree,
+    files: cited,
+    testCommand: repo.tests.run,
+    env,
+    timeoutMs: gateCheckTimeoutMs({
+      check: repo.tests.timeout_s !== undefined ? { timeout_s: repo.tests.timeout_s } : undefined,
+      gateTimeoutMinutes: repo.limits.gate_timeout_minutes,
+      deadline: ctx.deadline,
+    }),
+    jail: jailFor(ctx, worktree),
+    onCheck,
+  });
+  const evidence: EvidenceInputs = {
+    files: tree,
+    executed,
+    knownChecks: repo.checks.map((c) => c.name),
+    ranChecks: checks.map((c) => ({ name: c.name, status: c.status })),
+  };
   const builtins: BuiltinResult[] = [
     forbiddenPaths(changed, repo.limits.forbidden_paths),
     protectedPaths(plan, changed, repo.human_only_paths),
     diffSize(stat, repo.limits.max_diff_lines, { countTests }),
-    testPresence(plan, packages, handoffs, changed, repo.tests.globs),
-    evidenceCheck(handoffs, changed, repo.checks.map((c) => c.name)),
+    testPresence(plan, packages, handoffs, evidence),
+    evidenceCheck(handoffs, evidence),
     guideUpdate(plan, packages, changed, repo),
     configGuard({ plan, packages, labels: ctx.task.labels, ...(await configGuardInputs(worktree, ctx.baseSha, changed)) }),
     ...(await runBaselineGates({
@@ -211,10 +234,12 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     } else if (decision.kind === "missing_reason") {
       builtins.push({ name: "red_green", ok: false, detail: `loosening: ${RED_GREEN_NEEDS_REASON}` });
     } else {
+      const probe = baseProbeFiles(reproFiles(plan, handoffs), changed, repo.tests.globs);
       const proof = await redGreenProof({
         worktree,
         baseSha: ctx.baseSha,
-        files: reproFiles(plan, handoffs),
+        files: probe.tests,
+        supportFiles: probe.support,
         testCommand: repo.tests.run,
         setup: repo.setup,
         env,

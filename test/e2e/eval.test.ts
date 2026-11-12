@@ -253,7 +253,8 @@ describe("factory eval (fake runner)", () => {
         hidden: { from_commit: t.fix, paths: ["test/hidden/multiply.test.js"], check: ".venv/bin/python --test test/hidden/multiply.test.js" },
         plan_effort: "high",
         timeout_min: 5,
-        repo_config: { setup },
+        // repo_config replaces the whole repo.yaml. tests.run must stay, or the cited test is never executed.
+        repo_config: { setup, tests: { globs: ["test/**"], run: "node --test {files}" } },
         license: "MIT",
         source: "test fixture",
       }),

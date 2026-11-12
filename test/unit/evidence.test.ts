@@ -1,105 +1,79 @@
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { EVIDENCE_BRANCH, evidenceUrl, githubSlug, MAX_EVIDENCE_FILE_BYTES, publishEvidence, pruneEvidence } from "../../src/evaluate/evidence.js";
-import { addOrigin, commitFile, createFixtureRepo, gitIn } from "../helpers/repo.js";
+import { matchTestEvidence, parseTestReport, runCitedTests } from "../../src/gates/evidence.js";
+import { testPresence, type EvidenceInputs } from "../../src/gates/builtin.js";
+import { rolePrompt } from "../../src/prompts.js";
+import { HandoffSchema } from "../../src/schemas/handoff.js";
+import { PlanSchema } from "../../src/schemas/plan.js";
+import { sh } from "../../src/exec.js";
 
-const author = { name: "factory-bot", email: "factory-bot@users.noreply.github.com" };
+const env = { PATH: process.env.PATH ?? "" };
 
-function evidence(files: Record<string, string | Buffer>): string {
-  const dir = mkdtempSync(join(tmpdir(), "evidence-"));
-  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
-  return dir;
-}
-
-describe("evidence branch", () => {
-  it("parses GitHub remotes and builds pinned raw links", () => {
-    expect(githubSlug("https://github.com/acme/app.git")).toBe("acme/app");
-    expect(githubSlug("git@github.com:acme/app.git")).toBe("acme/app");
-    expect(githubSlug("ssh://git@github.com/acme/app")).toBe("acme/app");
-    expect(githubSlug("/tmp/origin.git")).toBeNull();
-    expect(evidenceUrl("acme/app", "abc", "run 1/r1-A1.png")).toBe("https://github.com/acme/app/blob/abc/run%201/r1-A1.png?raw=true");
+describe("executed test evidence", () => {
+  it("parses a real node run: a passing test counts and a skipped test does not", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-evidence-"));
+    mkdirSync(join(dir, "test"));
+    writeFileSync(
+      join(dir, "test/sum.test.js"),
+      "import { test } from \"node:test\";\ntest(\"sum adds\", () => {});\ntest(\"later\", { skip: true }, () => {});\n",
+    );
+    const ran = await sh("node --test test/sum.test.js", { cwd: dir, env });
+    expect(ran.code).toBe(0);
+    const parsed = parseTestReport("test/sum.test.js", ran.output, ran.code);
+    expect(parsed).toEqual([
+      { file: "test/sum.test.js", name: "sum adds", result: "pass" },
+      { file: "test/sum.test.js", name: "later", result: "skip" },
+    ]);
+    expect(matchTestEvidence("test/sum.test.js::sum adds", parsed, true)).toEqual({ ok: true, reason: "" });
+    expect(matchTestEvidence("test/sum.test.js::later", parsed, true).reason).toMatch(/skipped test/);
+    expect(matchTestEvidence("test/sum.test.js::nope", parsed, true).reason).toMatch(/invented reference/);
+    expect(matchTestEvidence("test/missing.test.js::sum adds", parsed, false).reason).toMatch(/file not in the tree/);
   });
 
-  it("commits run folders on an orphan branch with plain pushes, never touching the user's index; gc retention drops old folders", async () => {
-    const repo = createFixtureRepo();
-    const bare = addOrigin(repo);
-    commitFile(repo, "README.md", "x");
-    writeFileSync(join(repo, "untracked.txt"), "keep me");
-    gitIn(repo, "add", "untracked.txt");
-    const headBefore = gitIn(repo, "rev-parse", "HEAD");
-
-    const a = await publishEvidence(repo, { runId: "run-a", dir: evidence({ "r1-A1.png": "png-a", "r1-session.gif": "gif" }), files: ["r1-A1.png", "r1-session.gif"], author });
-    expect(a.slug).toBeNull();
-    expect([...a.paths.values()]).toEqual(["run-a/r1-A1.png", "run-a/r1-session.gif"]);
-    // Orphan: no parent, only evidence in the tree.
-    expect(gitIn(bare, "rev-list", "--parents", "-n", "1", EVIDENCE_BRANCH).trim().split(" ")).toHaveLength(1);
-
-    const big = Buffer.alloc(MAX_EVIDENCE_FILE_BYTES + 1);
-    const b = await publishEvidence(repo, { runId: "run-b", dir: evidence({ "r1-x.png": "png-b", "r1-session.webm": big }), files: ["r1-x.png", "r1-session.webm"], author });
-    expect(b.skipped).toEqual([expect.stringMatching(/^r1-session\.webm/)]);
-    expect(gitIn(bare, "rev-parse", EVIDENCE_BRANCH).trim()).toBe(b.sha);
-    expect(gitIn(bare, "rev-parse", `${b.sha}^`).trim()).toBe(a.sha);
-    expect(gitIn(bare, "ls-tree", "-r", "--name-only", EVIDENCE_BRANCH).trim().split("\n")).toEqual(["run-a/r1-A1.png", "run-a/r1-session.gif", "run-b/r1-x.png"]);
-    expect(gitIn(bare, "show", `${EVIDENCE_BRANCH}:run-a/r1-A1.png`)).toBe("png-a");
-
-    // The user's branch, index and files are untouched.
-    expect(gitIn(repo, "rev-parse", "HEAD")).toBe(headBefore);
-    expect(gitIn(repo, "diff", "--cached", "--name-only").trim()).toBe("untracked.txt");
-
-    // A concurrent push from elsewhere: the next publish builds on the new tip (plain push, no force).
-    const other = createFixtureRepo();
-    gitIn(other, "remote", "add", "origin", bare);
-    const c = await publishEvidence(other, { runId: "run-c", dir: evidence({ "c.png": "c" }), files: ["c.png"], author });
-    expect(gitIn(bare, "rev-parse", `${c.sha}^`).trim()).toBe(b.sha);
-
-    // Retention: nothing is old yet; 31 days later everything is.
-    expect(await pruneEvidence(repo, { now: Date.now(), author })).toEqual([]);
-    const later = Date.now() + 31 * 86_400_000;
-    expect(await pruneEvidence(repo, { now: later, author, dryRun: true })).toEqual(["run-a", "run-b", "run-c"]);
-    expect(gitIn(bare, "rev-parse", EVIDENCE_BRANCH).trim()).toBe(c.sha);
-    expect(await pruneEvidence(repo, { now: later, days: 30, author })).toEqual(["run-a", "run-b", "run-c"]);
-    expect(gitIn(bare, "ls-tree", "-r", "--name-only", EVIDENCE_BRANCH).trim()).toBe("");
-    expect(gitIn(bare, "rev-parse", `${EVIDENCE_BRANCH}^`).trim()).toBe(c.sha);
-  }, 30_000);
-
-  it("a hanging evidence fetch is killed and reported as a timeout", async () => {
-    const repo = createFixtureRepo();
-    const bin = mkdtempSync(join(tmpdir(), "evidence-git-"));
-    const pidFile = join(bin, "pid");
-    const script = join(bin, "git");
-    writeFileSync(script, `#!/bin/sh\necho $$ > ${JSON.stringify(pidFile)}\nsleep 30\n`);
-    chmodSync(script, 0o755);
-    const prev = process.env.PATH;
-    process.env.PATH = `${bin}:${prev ?? ""}`;
-    const run = publishEvidence(repo, { runId: "r", dir: evidence({ "a.png": "a" }), files: ["a.png"], author, timeoutMs: 10_000 });
-    try {
-      const start = Date.now();
-      while (!existsSync(pidFile)) {
-        if (Date.now() - start > 4_000) throw new Error("evidence git never started");
-        run.catch(() => {});
-        await new Promise((r) => setTimeout(r, 20));
-      }
-      await expect(run).rejects.toThrow(/git ls-remote timed out after 10s \(process killed\)/);
-      const alive = (() => {
-        try {
-          process.kill(Number(readFileSync(pidFile, "utf8")), 0);
-          return true;
-        } catch (e) {
-          return (e as NodeJS.ErrnoException).code === "EPERM";
-        }
-      })();
-      expect(alive).toBe(false);
-    } finally {
-      process.env.PATH = prev;
-    }
+  it("cites a SQL file that the command ran, without a second test that reads its source", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-sql-"));
+    mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+    writeFileSync(join(dir, "supabase/tests/rls.sql"), "select 1;\n");
+    const executed = await runCitedTests({
+      cwd: dir,
+      files: ["supabase/tests/rls.sql"],
+      testCommand: "test -s {files}",
+      env,
+    });
+    expect(executed).toEqual([{ file: "supabase/tests/rls.sql", name: "", result: "pass" }]);
+    const plan = PlanSchema.parse({
+      version: 1, type: "feature", goal: "rls",
+      packages: [{ id: "P1", title: "rls", files: ["supabase/tests/rls.sql"] }],
+      acceptance: [{ id: "A1", package: "P1", text: "tenant isolation holds", verify: "test" }],
+    });
+    const handoff = HandoffSchema.parse({
+      package: "P1",
+      evidence: [{ acceptance_id: "A1", kind: "test", ref: "supabase/tests/rls.sql" }],
+    });
+    const evidence: EvidenceInputs = {
+      files: ["supabase/tests/rls.sql"],
+      executed,
+      knownChecks: [],
+      ranChecks: [],
+    };
+    expect(testPresence(plan, ["P1"], [handoff], evidence).ok).toBe(true);
+    expect(handoff.evidence).toHaveLength(1);
   });
+});
 
-  it("publishing without an origin fails with a git error", async () => {
-    const repo = createFixtureRepo();
-    await expect(publishEvidence(repo, { runId: "r", dir: evidence({ "a.png": "a" }), files: ["a.png"], author })).rejects.toThrow(/git ls-remote failed/);
-    expect(() => execFileSync("git", ["rev-parse", "--verify", "-q", "refs/factory/evidence"], { cwd: repo })).toThrow();
+describe("evidence prompts", () => {
+  it("planner, implementer and reviewer do not demand a wrapper or a wording test", () => {
+    const plan = rolePrompt("plan");
+    const implement = rolePrompt("implement");
+    const review = `${rolePrompt("review-plan")}\n${rolePrompt("review-common")}`;
+    expect(plan).toMatch(/Documentation wording and organizational non-goals are verify:review, not verify:test/);
+    expect(plan).toMatch(/do not add a test whose only job is to read another test's source/);
+    expect(plan).not.toMatch(/prefer verify:test or verify:check over review/);
+    expect(implement).toMatch(/do not add a wrapper/);
+    expect(implement).not.toMatch(/write a test for each verify:test criterion/);
+    expect(review).toMatch(/does not need a new test file or a wrapper/);
+    expect(review).toMatch(/do not need sentence, screenshot, or test-name tests/);
   });
 });
