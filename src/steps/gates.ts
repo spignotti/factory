@@ -321,7 +321,10 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   }));
   const evidenceDuration = Date.now() - evidenceStarted;
   await stageAll(worktree);
-  if (reusable && key === await fingerprint() && executed.every((e) => e.result === "pass")) ctx.testEvidence = { key, executed };
+  // A test that writes files is not evidence for the tree those results were collected from.
+  const evidenceTreeUnchanged = key === await fingerprint();
+  if (!evidenceTreeUnchanged) executed = [];
+  if (reusable && evidenceTreeUnchanged && executed.every((e) => e.result === "pass")) ctx.testEvidence = { key, executed };
   else delete ctx.testEvidence;
   const evidence: EvidenceInputs = {
     files: tree,
@@ -377,7 +380,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         jail: (cwd) => jailFor(ctx, cwd),
         onCheck,
         cacheFile: join(ctx.runDir, "red-green-base.json"),
-        headPassed: reusable && probe.tests.length === 1 && executed.some((e) => e.file === probe.tests[0] && e.result === "pass") && executed.filter((e) => e.file === probe.tests[0]).every((e) => e.result === "pass"),
+        headPassed: evidenceTreeUnchanged && reusable && probe.tests.length === 1 && executed.some((e) => e.file === probe.tests[0] && e.result === "pass") && executed.filter((e) => e.file === probe.tests[0]).every((e) => e.result === "pass"),
       });
       checkDeadline(ctx);
       reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;

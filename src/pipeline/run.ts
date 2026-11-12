@@ -1060,18 +1060,21 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     let gates = ready.gates;
     if (continuation?.kind === "ci") {
       const currentHead = await headSha(ctx.worktree);
-      if (currentHead === continuation.sha) {
-        const baseCi = await deps.github.baseStatus(ctx.repoDir, ctx.baseSha);
-        if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit" });
-        const failures = await deps.github.headFailures(ctx.repoDir, continuation.sha);
-        if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit" });
-        const ciGates: GateReport = { n: ctx.gateCount, tier: "full", green: false, changed_files: [], scope_report: [],
-          checks: failures.map((c) => ({ ...c, output_tail: events.redact(c.output_tail), kind: "check", status: "fail", duration_ms: 0 })) };
-        writeJson(ctx, `ci-failure-${st.continuation_attempts}.json`, { sha: continuation.sha, ...ciGates });
-        const fixed = await fixStep(ctx, "post-ci", { open: [], gates: ciGates, tier: "full" }, { gateFailures: 0 });
-        if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}` });
-        gates = fixed.gates;
+      // A base merge or remote update makes the saved CI diagnosis apply to a different tree.
+      // Do not fall through to a generic product edit.
+      if (currentHead !== continuation.sha) {
+        return f.set({ result: "needs_human", reason: "post-CI repair refused: head moved before diagnosis; no product edit" });
       }
+      const baseCi = await deps.github.baseStatus(ctx.repoDir, ctx.baseSha);
+      if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit" });
+      const failures = await deps.github.headFailures(ctx.repoDir, continuation.sha);
+      if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit" });
+      const ciGates: GateReport = { n: ctx.gateCount, tier: "full", green: false, changed_files: [], scope_report: [],
+        checks: failures.map((c) => ({ ...c, output_tail: events.redact(c.output_tail), kind: "check", status: "fail", duration_ms: 0 })) };
+      writeJson(ctx, `ci-failure-${st.continuation_attempts}.json`, { sha: continuation.sha, ...ciGates });
+      const fixed = await fixStep(ctx, "post-ci", { open: [], gates: ciGates, tier: "full" }, { gateFailures: 0 });
+      if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}` });
+      gates = fixed.gates;
     }
     if (gates && !gates.green) {
       const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });

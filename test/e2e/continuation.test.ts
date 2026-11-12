@@ -69,6 +69,18 @@ describe("bounded post-push continuation", () => {
     expect(st.reviewed_sha).not.toBe((JSON.parse(r.file("ci-failure-1.json")) as { sha: string }).sha);
   });
 
+  it("does not edit product code when the diagnosed CI head is no longer current", async () => {
+    const r = await redPr();
+    const st = readState(r.runDir);
+    st.continuation = { kind: "ci", sha: "f".repeat(40) };
+    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(st));
+    r.github.baseStatus = async () => "green";
+    r.github.failures = [{ name: "unit", output_tail: "AssertionError: CI-only boundary is wrong" }];
+    const next = await resumeScenario(r, { script: "clean.json" });
+    expect(next.result.reason).toMatch(/head moved before diagnosis/);
+    expect(next.runner.calls).toEqual([]);
+  });
+
   it("does not reset the persisted attempt budget or edit code for an unknown CI failure", async () => {
     const r = await redPr();
     r.github.baseStatus = async () => "green";
