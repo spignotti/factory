@@ -27,6 +27,7 @@ import { acquireRepoLockWithRetry, decidePathClaim, lockRepoKey, repoLockHolder,
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
+import { budgetFrom, budgetTo, missingPlanQuotes, openPrProblem } from "./recovery.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
@@ -461,7 +462,14 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     const agentHome = prepareAgentHome(runDir);
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, repoDir);
-    const base = { deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets };
+    const budget = budgetFrom(st.repair);
+    const base = {
+      deps, runId, runDir, repoDir, repo, events, agentHome, task, deadline, briefing: memoryBriefing, secrets, budget,
+      persist: () => {
+        st.repair = budgetTo(budget);
+        f.save();
+      },
+    };
 
     const planned: PlanOutcome = await withBaseWorktree(repoDir, baseSha, join(runDir, "plan-base"), async (planDir) => {
       const pctx = { ...base, repoDir: planDir };
@@ -509,6 +517,8 @@ async function beginWork(
     deadline: WallBudget;
     briefing: string;
     secrets: ResolvedSecrets;
+    budget: ReturnType<typeof budgetFrom>;
+    persist: () => void;
   },
   plan: Plan,
   baseSha: string,
@@ -656,7 +666,14 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     f.set({ type: plan.type });
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
-    const base = { deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, deadline, briefing: memoryBriefing, secrets };
+    const budget = budgetFrom(st.repair);
+    const base = {
+      deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, deadline, briefing: memoryBriefing, secrets, budget,
+      persist: () => {
+        st.repair = budgetTo(budget);
+        f.save();
+      },
+    };
     await beginWork(f, base, plan, st.base_sha!, ci, { noPr: st.no_pr, startedAt });
   });
 }
@@ -886,12 +903,18 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     f.set({ type: plan.type });
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
+    const budget = budgetFrom(st.repair);
     const ctx: RunContext = {
       deps, runId, runDir, repoDir: st.repo, repo, events, agentHome: prepareAgentHome(runDir), task: st.task, briefing: memoryBriefing,
       worktree: st.worktree!, branch: st.branch!, baseSha: st.base_sha!, plan, handoffs: st.handoffs, gateCount: st.gate_count, deadline, secrets,
       lockSlot: f.lockSlot,
       maxRuns: f.maxRuns,
       wait: st.wait ?? false,
+      budget,
+      persist: () => {
+        st.repair = budgetTo(budget);
+        f.save();
+      },
     };
     bindLockWait(f, ctx);
     const services = (ctx.services = runServices(ctx));
@@ -935,6 +958,19 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
   if (!existsSync(wt)) return fail(`worktree ${wt} is missing`);
   const head = (await git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (head !== branch) return fail(`worktree is on ${head}, expected ${branch}`);
+  if (ctx.task.issue !== undefined) {
+    let issue: { body: string };
+    try {
+      issue = await ctx.deps.github.getIssue(ctx.repoDir, ctx.task.issue);
+    } catch (e) {
+      return fail(`issue #${ctx.task.issue} could not be read (${(e as Error).message.slice(0, 160)}); kept the checkpoint plan`);
+    }
+    const missing = missingPlanQuotes(issue.body, ctx.plan);
+    if (missing.length) return fail(`issue #${ctx.task.issue} dropped a planned quote (${missing[0]!.slice(0, 80)}); kept the checkpoint plan, not a new one`);
+  }
+  const openPr = st.pr ? await ctx.deps.github.findOpenPr(ctx.worktree, branch) : null;
+  const prProblem = openPrProblem(st.pr, openPr, branch);
+  if (prProblem) return fail(prProblem);
   for (const [ref, what] of [["MERGE_HEAD", "merge"], ["REBASE_HEAD", "rebase"], ["CHERRY_PICK_HEAD", "cherry-pick"]] as const) {
     if (await gitOk(wt, ["rev-parse", "-q", "--verify", ref])) return fail(`a ${what} is in progress in the worktree; finish or abort it first`);
   }

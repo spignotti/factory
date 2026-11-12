@@ -69,6 +69,12 @@ describe("error classification", () => {
     [new AgentError("Request timed out."), "network"],
     [new AgentError("request timed out"), "network"],
     [new AgentError("Connection error."), "network"],
+    [new AgentError("Connection error.\nTLS: certificate verify failed: unable to verify the first certificate"), "network"],
+    [new Error("TLS handshake timeout"), "network"],
+    [new Error("UNABLE_TO_VERIFY_LEAF_SIGNATURE"), "network"],
+    [new Error("certificate"), "other"],
+    [new Error("missing configuration for the provider"), "other"],
+    [new AgentError("Connection error.", undefined, 401), "auth"],
     [new AgentError("APIConnectionTimeoutError: Request timed out."), "network"],
     [new AgentError("Command timed out after 600 seconds"), "other"],
     [new AgentError("fetch failed", undefined, 502), "other"],
@@ -133,6 +139,68 @@ describe("fallback", () => {
   it("throws the last error when the chain is exhausted", async () => {
     const { deps } = setup([{ role: "plan_medium", error: { message: "boom" } }]);
     await expect(callModel(deps, "plan", req("plan_medium"))).rejects.toThrow("boom");
+  });
+
+  it("V06: a TLS appendix uses the same network retries, and auth does not", async () => {
+    const tls = "Connection error.\nTLS: certificate verify failed: unable to verify the first certificate";
+    const bare = setup([
+      { role: "plan_medium", error: { message: "Connection error." } },
+      { role: "plan_medium", error: { message: "Connection error." } },
+      { role: "plan_medium", raw: "ok" },
+    ]);
+    await callModel(bare.deps, "plan", req("plan_medium"));
+    const withTls = setup([
+      { role: "plan_medium", error: { message: tls } },
+      { role: "plan_medium", error: { message: tls } },
+      { role: "plan_medium", raw: "ok" },
+    ]);
+    await callModel(withTls.deps, "plan", req("plan_medium"));
+    expect(withTls.runner.calls).toHaveLength(bare.runner.calls.length);
+    expect(withTls.slept).toEqual(bare.slept);
+    expect(withTls.slept).toEqual([100, 200]);
+
+    const box = { n: 0 };
+    const auth = setup([{ role: "plan_medium", error: { message: "invalid api key" } }]);
+    await expect(callModel({ ...auth.deps, networkRetries: box }, "plan", req("plan_medium"))).rejects.toThrow(/invalid api key/);
+    expect(auth.slept).toEqual([]);
+    expect(auth.runner.calls).toHaveLength(1);
+    expect(box.n).toBe(0);
+
+    const quota = setup([{ role: "plan_medium", error: { message: "You exceeded your current quota" } }]);
+    await expect(callModel({ ...quota.deps, networkRetries: box }, "plan", req("plan_medium"))).rejects.toThrow(/quota/);
+    expect(quota.slept).toEqual([]);
+    expect(box.n).toBe(0);
+
+    const config = setup([{ role: "plan_medium", error: { message: "missing configuration for the provider" } }]);
+    await expect(callModel({ ...config.deps, networkRetries: box }, "plan", req("plan_medium"))).rejects.toThrow(/configuration/);
+    expect(config.slept).toEqual([]);
+    expect(box.n).toBe(0);
+  });
+
+  it("V07: a later call keeps the network retries already spent", async () => {
+    const box = { n: 0 };
+    const tls = "Connection error.\nUNABLE_TO_VERIFY_LEAF_SIGNATURE";
+    const first = setup([
+      { role: "plan_medium", error: { message: "Connection error." } },
+      { role: "plan_medium", raw: "ok" },
+    ]);
+    await callModel({ ...first.deps, networkRetries: box }, "plan", req("plan_medium"));
+    expect(box.n).toBe(1);
+    expect(first.slept).toEqual([100]);
+    expect(first.runner.calls).toHaveLength(2);
+
+    const second = setup([
+      { role: "plan_medium", error: { message: tls } },
+      { role: "plan_medium", error: { message: tls } },
+      { role: "plan_medium", error: { message: tls } },
+    ]);
+    const err = await callModel({ ...second.deps, networkRetries: box }, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransientAgentError);
+    expect(err).toMatchObject({ errorClass: "network" });
+    // One retry was already spent, so this call gets one retry (two attempts), not a fresh three.
+    expect(second.runner.calls).toHaveLength(2);
+    expect(second.slept).toEqual([100]);
+    expect(box.n).toBe(2);
   });
 
   it("retries a provider request timeout on the same model (20261030-125347-5b7ada)", async () => {

@@ -9,8 +9,10 @@ export type ErrorClass = "capacity" | "network" | "stream" | "limit" | "auth" | 
  * A dropped, failed or timed-out connection: worth retrying the same model. undici reports a cut stream as
  * `terminated`; the OpenAI-compatible SDK reports a request timeout as `Request timed out.` and a failed
  * connection as `Connection error.` (20261030-125347-5b7ada: a request in flight across a 19 min box freeze).
+ * A TLS appendix on that message (`certificate verify failed`, `unable to verify the first certificate`,
+ * `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `TLS handshake`) is the same class. The word "certificate" alone is not.
  */
-const NETWORK = /^terminated$|^request timed out\.?$|^connection error\.?$|\bAPIConnectionTimeoutError\b|\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|socket hang up|fetch failed|other side closed|premature close/i;
+const NETWORK = /^terminated$|^request timed out\.?$|^connection error\b|\bAPIConnectionTimeoutError\b|\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|socket hang up|fetch failed|other side closed|premature close|\bTLS handshake\b|unable to verify the first certificate|\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b|certificate verify failed/i;
 
 /**
  * The provider closed the token stream before a finish reason (20261104-150805-15d527:
@@ -126,6 +128,13 @@ export interface CallDeps {
   streamRetries?: number;
   /** Emit a `progress` warning when one call's `tokens_in` reaches this (`limits.step_token_warn`). `0`/absent disables. */
   tokenWarn?: number;
+  /**
+   * Same-model network retries already spent in this run. When set, resume continues from `n`
+   * instead of granting `retry.attempts` again. Absent: the per-call budget only (unchanged).
+   */
+  networkRetries?: { n: number };
+  /** Called after `networkRetries.n` advances, so the run can persist it. */
+  onNetworkRetry?: (n: number) => void;
 }
 
 /** Extra same-model retries per call for attempts that spanned a box freeze. */
@@ -288,7 +297,13 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
           await sleep(delay, req.signal);
           continue;
         }
-        if ((cls === "capacity" || cls === "network") && attempt + 1 < profile.retry.attempts) {
+        let retrySame = (cls === "capacity" || cls === "network") && attempt + 1 < profile.retry.attempts;
+        if (retrySame && cls === "network" && deps.networkRetries && deps.networkRetries.n + 1 >= profile.retry.attempts) retrySame = false;
+        if (retrySame) {
+          if (cls === "network" && deps.networkRetries) {
+            deps.networkRetries.n += 1;
+            deps.onNetworkRetry?.(deps.networkRetries.n);
+          }
           const delay = backoffMs(attempt, profile.retry, providerRetryAfterMs(err));
           events.emit({ step, event: "model_retry", role: req.role, model: entry.model, data: { attempt: attempt + 1, delay_ms: delay } });
           await sleep(delay, req.signal);

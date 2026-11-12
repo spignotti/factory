@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { buildAgentEnv, ensureSharedCache } from "../agents/env.js";
 import type { Sleep } from "../agents/fake-runner.js";
 import { callModel, type ModelRequest, type ModelResponse } from "../agents/models.js";
+import type { RepairBudget } from "./recovery.js";
 import { type Context7Client, docsTools } from "../docs/context7.js";
 import type { AgentRunner } from "../agents/runner.js";
 import type { Clock, EventLog } from "../events.js";
@@ -101,6 +102,10 @@ export interface RunContext {
   releaseLock?: () => void;
   /** Takes a slot again after that wait and updates `lockSlot`. Undefined when none could be taken. */
   reacquireLock?: () => Promise<number | undefined>;
+  /** Gate and network budgets for this run. Resume loads the saved numbers into the same object. */
+  budget?: RepairBudget;
+  /** Writes `budget` onto state.json. Absent outside a run (one-shot calls). */
+  persist?: () => void;
 }
 
 export class WallTimeExceeded extends Error {
@@ -196,7 +201,7 @@ function redactedTools(tools: FactoryTools | undefined, redact: (s: string) => s
 }
 
 export async function callAgent(
-  ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "deadline" | "secrets">,
+  ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "events" | "deadline" | "secrets"> & Partial<Pick<RunContext, "budget" | "persist">>,
   step: string,
   req: AgentCall,
 ): Promise<ModelResponse> {
@@ -228,6 +233,7 @@ export async function callAgent(
           suspends: () => suspends,
           streamRetries: ctx.repo.limits.stream_retries,
           tokenWarn: ctx.repo.limits.step_token_warn,
+          ...(ctx.budget ? { networkRetries: ctx.budget.network, onNetworkRetry: () => ctx.persist?.() } : {}),
         }, step, {
           ...req,
           // Prompts carry gate output and app text: exact-match redaction of every secret value.

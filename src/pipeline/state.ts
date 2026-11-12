@@ -44,6 +44,17 @@ export interface RunState {
   approved_sha?: string;
   /** Head CI was still pending or unregistered when the coding run ended. Policy stays auto. */
   ci_wait?: "pending" | "none";
+  /**
+   * Repair budget already spent. Resume continues it. A blocking `class` is not given another
+   * product-code edit. Network retries are the same-model connection budget for the whole run.
+   */
+  repair?: {
+    gate_attempts: number;
+    network_retries: number;
+    format_used: boolean;
+    infra_reruns: number;
+    class?: "format" | "code" | "infra" | "base" | "config" | "unknown";
+  };
   /** Always `standard`. Older states may say `fast` (the removed fast lane). */
   lane?: "standard" | "fast";
   /** Fast-lane escalation reasons. No longer written. */

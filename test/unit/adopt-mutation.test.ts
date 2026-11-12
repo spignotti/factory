@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { detect } from "../../src/adopt/detect.js";
 import { draftChecks, dropMutating } from "../../src/adopt/draft.js";
 import { measureChecks } from "../../src/adopt/measure.js";
-import { analyzeCommand, mutatingName, noxSessionBodies, readOnlyCommand } from "../../src/adopt/mutation.js";
+import { analyzeCommand, formatterWriteCommand, mutatingName, noxSessionBodies, readOnlyCommand } from "../../src/adopt/mutation.js";
 import { gitIn } from "../helpers/repo.js";
 import { makeRepo } from "../helpers/adopt-repo.js";
 
@@ -78,6 +78,16 @@ describe("adopt: mutating commands", () => {
     expect(analyzeCommand(argv("pre-commit run --all-files"))).toMatchObject({ mutates: true, check: null });
     expect(analyzeCommand(argv("uv run pytest -q"))).toEqual({ mutates: false });
     expect(analyzeCommand(argv("pnpm exec vitest run"))).toEqual({ mutates: false });
+    expect(formatterWriteCommand("ruff format --check .")).toBe("ruff format .");
+    expect(formatterWriteCommand("black --check src")).toBe("black src");
+    expect(formatterWriteCommand("isort --check-only .")).toBe("isort .");
+    expect(formatterWriteCommand("tools/prettier --check src/math.js")).toBe("tools/prettier --write src/math.js");
+    expect(formatterWriteCommand("prettier -c src")).toBe("prettier --write src");
+    expect(formatterWriteCommand("cargo fmt --check")).toBe("cargo fmt");
+    expect(formatterWriteCommand("gofmt -l .")).toBe("gofmt -w .");
+    expect(formatterWriteCommand("eslint . --fix")).toBeNull();
+    expect(formatterWriteCommand("eslint .")).toBeNull();
+    expect(formatterWriteCommand("node --check src/math.js")).toBeNull();
   });
 
   it("rewrites a whole command line only when every mutating part has a variant", () => {

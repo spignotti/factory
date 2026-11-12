@@ -2,8 +2,9 @@ import { commitAll, diffText, headSha, stageAll } from "../git.js";
 import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { ReviewOutput } from "../schemas/review.js";
+import { blockedRepairReason, clearRepair, ensureBudget, recoverRedGates } from "./recovery.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
-import { dropStrayHandoff, gitAuthor, handoffShape, implementerTurn, MAX_GATE_ATTEMPTS } from "../steps/implement.js";
+import { dropStrayHandoff, gitAuthor, handoffShape, implementerTurn } from "../steps/implement.js";
 import { evaluateRound } from "../steps/evaluate.js";
 import { reviewRound } from "../steps/review.js";
 import { checkDeadline, type RunContext, writeJson } from "./context.js";
@@ -43,9 +44,22 @@ export async function fixStep(
   input: { open: TrackedFinding[]; gates?: GateReport; tier?: "fast" | "full" },
   state: FixState,
 ): Promise<{ ok: true; gates: GateReport } | { ok: false; reason: string }> {
+  const blocked = await blockedRepairReason(ctx);
+  if (blocked) return { ok: false, reason: blocked };
+  if (ctx.budget) state.gateFailures = ctx.budget.gateAttempts;
   await stageAll(ctx.worktree);
   const diff = await diffText(ctx.worktree, ctx.baseSha);
   const findings = input.open.map(({ id, severity, file, line, claim, evidence, fix }) => ({ id, severity, file, line, claim, evidence, fix }));
+  const tier = input.tier ?? "fast";
+  const packages = ctx.plan.packages.map((p) => p.id);
+  const commitFix = async (gates: GateReport): Promise<{ ok: true; gates: GateReport }> => {
+    clearRepair(ensureBudget(ctx));
+    state.gateFailures = 0;
+    ctx.persist?.();
+    await dropStrayHandoff(ctx, "fix");
+    await commitAll(ctx.worktree, `fix: ${label === "finalize" ? "finalize gates" : `address review round ${label}`}`, gitAuthor(ctx));
+    return { ok: true, gates };
+  };
   let prompt = [
     "Fix round. Fix the class, not the instance: search for the same pattern and fix all occurrences.",
     findings.length ? "Answer every finding id with fixed or wontfix + reason in `responses`." : "",
@@ -57,6 +71,15 @@ export async function fixStep(
     input.gates && !input.gates.green ? asData("gate_failures", failureSummary(input.gates)) : "",
     handoffShape(ctx, "fix"),
   ].filter(Boolean).join("\n\n");
+  if (input.gates && !input.gates.green) {
+    const prepared = await recoverRedGates(ctx, input.gates, { tier, packages, spend: false });
+    if (prepared.action === "stop") return { ok: false, reason: prepared.reason };
+    if (prepared.action === "green") return commitFix(prepared.gates);
+    const timeoutNote = prepared.gates.checks.some((c) => c.status === "timeout")
+      ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
+      : "";
+    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(prepared.gates)}`;
+  }
   const sessionKey = `${ctx.runId}-fix-${label}`;
   for (;;) {
     checkDeadline(ctx);
@@ -75,23 +98,16 @@ export async function fixStep(
       const r = handoff.responses.find((x) => x.finding_id === f.id);
       if (r) f.response = r;
     }
-    const gates = await runGates(ctx, input.tier ?? "fast", ctx.plan.packages.map((p) => p.id));
-    if (gates.green) {
-      await dropStrayHandoff(ctx, "fix");
-      await commitAll(ctx.worktree, `fix: ${label === "finalize" ? "finalize gates" : `address review round ${label}`}`, gitAuthor(ctx));
-      return { ok: true, gates };
-    }
-    if (++state.gateFailures >= MAX_GATE_ATTEMPTS) {
-      const timed = gates.checks.filter((c) => c.status === "timeout").map((c) => c.name);
-      const reason = timed.length
-        ? `gates timed out after ${MAX_GATE_ATTEMPTS} fix attempts (inconclusive): ${timed.join(", ")}`
-        : `gates still red after ${MAX_GATE_ATTEMPTS} fix attempts`;
-      return { ok: false, reason };
-    }
-    const timeoutNote = gates.checks.some((c) => c.status === "timeout")
+    const gates = await runGates(ctx, tier, packages);
+    if (gates.green) return commitFix(gates);
+    const recovered = await recoverRedGates(ctx, gates, { tier, packages, spend: true });
+    state.gateFailures = ensureBudget(ctx).gateAttempts;
+    if (recovered.action === "green") return commitFix(recovered.gates);
+    if (recovered.action === "stop") return { ok: false, reason: recovered.reason };
+    const timeoutNote = recovered.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
       : "";
-    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(gates)}`;
+    prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(recovered.gates)}`;
   }
 }
 
