@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.0](https://github.com/spignotti/factory/compare/v0.5.1...v0.6.0) (2026-11-12)
+
+
+### Features
+
+* **ci:** keep auto-merge on the approved head ([56dc3d1](https://github.com/spignotti/factory/commit/56dc3d1256f6143ae25259bf4c18f793529e1223))
+* **ci:** render the stub runner from repo.yaml ([#166](https://github.com/spignotti/factory/issues/166)) ([f90fce1](https://github.com/spignotti/factory/commit/f90fce1bdadc6c811fe4cf0c146700ab1159ee1c))
+* **concurrency:** default to two runs per repository ([#174](https://github.com/spignotti/factory/issues/174)) ([c7bb240](https://github.com/spignotti/factory/commit/c7bb240d775eac87eccbdbe7739a483d6857faa7))
+* **gates:** accept an executed test as evidence ([cfc8dea](https://github.com/spignotti/factory/commit/cfc8dead096e7bd5e36be61c9caf0a1ec938977d))
+* **gates:** widen selection, dedupe a phase, and keep flakes visible ([0146475](https://github.com/spignotti/factory/commit/0146475cdc5bc2c5b35d627e51a7b65a353df307))
+* land the factory target state ([d2d27a7](https://github.com/spignotti/factory/commit/d2d27a75cae798a73714ae98a60812684780e2f5))
+* **outcome:** record unmerged results and run provenance ([265af82](https://github.com/spignotti/factory/commit/265af82cd14dfe3df17ca1c0e199f005b908bce7))
+* **queue:** discover ready issues and schedule without a model ([0081917](https://github.com/spignotti/factory/commit/0081917a02b1ead58f9515f8b87614eec94f5676))
+* **queue:** keep one worker with pause, drain and a preview ([205af5f](https://github.com/spignotti/factory/commit/205af5febf1c5749055d10348a7a789bd08ed025))
+* **recovery:** bound format, gate and network repair ([7373802](https://github.com/spignotti/factory/commit/73738022dee7eda3fcdaca5ca807a7bd90ad2bfc))
+* **review:** bind review to the tree and merge bot_review ([65b57b4](https://github.com/spignotti/factory/commit/65b57b48b817f44af34467a404977f6a33a1c22d))
+* **standards:** remember confirmed findings and require a covering check ([990e88d](https://github.com/spignotti/factory/commit/990e88d9377de8c5c4a1d7a2d1a6ea6573f3b2fd))
+* **stats:** report merges, time and coverage honestly ([ed612c7](https://github.com/spignotti/factory/commit/ed612c767fab3afc5dc3bf5c9dec655a5b9f6bc3))
+
+
+### Bug Fixes
+
+* **ci:** approve the pull request head, not the merge commit ([62e0c56](https://github.com/spignotti/factory/commit/62e0c5639b3c4b916f3b7204e7ad2442312bd330))
+* **gates:** read a TAP failing test name ([caad201](https://github.com/spignotti/factory/commit/caad20109dee6c597d0b5b285e5b9ce35a56fc08))
+* **git:** do not apply the operator excludes file ([#173](https://github.com/spignotti/factory/issues/173)) ([6386b80](https://github.com/spignotti/factory/commit/6386b80575a5eae71dbd4ba74a43c3f301381ef0))
+* **pipeline:** revalidate changed heads instead of inheriting review ([#165](https://github.com/spignotti/factory/issues/165)) ([e45f66a](https://github.com/spignotti/factory/commit/e45f66a9d3cdc419c94c38f732456a68119c5079))
+* ready PR before the final push; Docker socket for checks ([#149](https://github.com/spignotti/factory/issues/149)) ([5b2366e](https://github.com/spignotti/factory/commit/5b2366ea723e8eb33f06841aac55dbd3c5b4180a))
+
 ## [0.5.1](https://github.com/spignotti/factory/compare/v0.5.0...v0.5.1) (2026-11-11)
 
 
