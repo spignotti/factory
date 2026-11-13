@@ -72,6 +72,10 @@ export interface RunState {
     network_retries: number;
     format_used: boolean;
     infra_reruns: number;
+    /** Completed out-of-scope removals (#180). A green commit does not re-grant them. */
+    scope_repairs?: number;
+    /** Fingerprint of the deviation set the last scope repair removed; the same set again stops instead of looping. */
+    scope_last?: string;
     class?: "format" | "code" | "infra" | "base" | "config" | "unknown";
     failure?: FailureIdentity;
   };
