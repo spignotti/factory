@@ -892,8 +892,9 @@ Test evidence accepts existing executed tests without requiring edits. Pytest na
 both with and without `{files}`; direct pytest commands request verbose names. Matching successful gate
 commands can supply evidence without rerunning it. Same-process evidence is reused only with identical
 staged tree, base, command, environment and citations; failures/skips are not cached. A single-file
-red-green HEAD probe can reuse that evidence, but the negative base control still runs (or uses its
-content-keyed base probe cache). Evidence/probe durations report the work actually executed.
+red-green HEAD probe can reuse that evidence only when it is the configured `tests.run`, not a narrower
+named rerun. The negative base control still runs (or uses its content-keyed base probe cache). Evidence/probe
+durations report the work actually executed.
 
 ```
 factory queue run --slots 2

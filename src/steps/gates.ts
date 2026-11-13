@@ -14,7 +14,7 @@ import {
   scopeReport,
   testPresence,
 } from "../gates/builtin.js";
-import { citedTestFiles, parseTestReport, pytestResultLines, runCitedTests, shellQuote, splitEvidenceRef, type ExecutedTest } from "../gates/evidence.js";
+import { citedTestFiles, configuredProbeCommand, evidenceProvesFullCommand, executedFromOutput, pytestResultLines, runCitedTests, shellQuote, splitEvidenceRef, type ExecutedTest } from "../gates/evidence.js";
 import { configGuard, configGuardInputs } from "../gates/config-guard.js";
 import { runBaselineGates } from "../baseline/gates.js";
 import { baseProbeFiles, redGreenProof } from "../gates/redgreen.js";
@@ -251,10 +251,13 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const cited = citedTestFiles(handoffs).filter((f) => tree.includes(f));
   const namedFiles = new Set(handoffs.flatMap((h) => h.evidence.filter((e) => e.kind === "test").map((e) => splitEvidenceRef(e.ref))).filter((r) => r.name !== undefined).map((r) => r.file));
   const command = repo.tests.run ? withEnvCommand(repo.tests.run, repo.env_command) : undefined;
-  const fingerprint = async () => createHash("sha256").update(JSON.stringify({
-    tree: await git(worktree, ["write-tree"]), base: ctx.baseSha, command, env, cited,
+  const readTree = async () => (await git(worktree, ["write-tree"])).trim();
+  const fingerprintOf = (tree: string) => createHash("sha256").update(JSON.stringify({
+    tree, base: ctx.baseSha, command, env, cited,
   })).digest("hex");
-  const before = await fingerprint();
+  // Evidence is bound to the staged tree that was tested, not to a later commit of the same files.
+  let checkpoint = await readTree();
+  const before = fingerprintOf(checkpoint);
   const reusable = !repo.env_command && repo.services.length === 0;
   let executed: ExecutedTest[] = [];
   const checks = await runChecks(selected.checks, {
@@ -270,11 +273,16 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       if (!command || check.services?.length) return;
       const ranCommand = withEnvCommand(check.run, repo.env_command);
       if (!command.includes("{files}") && ranCommand === command) {
-        executed.push(...cited.flatMap((file) => pytestResultLines(file, result.output)));
+        for (const file of cited) {
+          const rows = pytestResultLines(file, result.output, checkpoint).map((r) => ({ ...r, command: ranCommand }));
+          if (!rows.length) continue;
+          executed.push(...rows);
+          if (result.code !== 0) executed.push({ file, name: "", result: "fail", checkpoint, command: ranCommand });
+        }
       } else {
         for (const file of cited) {
           if (ranCommand === command.replaceAll("{files}", shellQuote(file)) || ranCommand === command.replaceAll("{files}", file)) {
-            executed.push(...parseTestReport(file, result.output, result.code));
+            executed.push(...executedFromOutput(file, result.output, result.code, checkpoint, ranCommand));
           }
         }
       }
@@ -300,15 +308,20 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const diffReport = diffCountFields(diffTotals(stat), countTests);
   if (diffReport) ctx.events.diffCount = diffReport;
   await stageAll(worktree);
-  const key = await fingerprint();
+  checkpoint = await readTree();
+  const key = fingerprintOf(checkpoint);
   if (before !== key) executed = [];
-  if (reusable && ctx.testEvidence?.key === key) executed.push(...ctx.testEvidence.executed.filter((row) => !executed.some((e) => e.file === row.file)));
-  const missing = cited.filter((file) => !executed.some((row) => row.file === file && (!namedFiles.has(file) || row.name !== "")));
+  if (reusable && ctx.testEvidence?.key === key) {
+    executed.push(...ctx.testEvidence.executed.filter((row) => row.checkpoint === checkpoint && !executed.some((e) => e.file === row.file)));
+  }
+  const missing = cited.filter((file) => !executed.some((row) => row.file === file && row.checkpoint === checkpoint && (!namedFiles.has(file) || row.name !== "")));
   executed = executed.filter((row) => !missing.includes(row.file));
   const evidenceStarted = Date.now();
   executed.push(...await runCitedTests({
     cwd: worktree,
     files: missing,
+    named: [...namedFiles],
+    checkpoint,
     testCommand: command,
     env,
     timeoutMs: gateCheckTimeoutMs({
@@ -322,13 +335,15 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   const evidenceDuration = Date.now() - evidenceStarted;
   await stageAll(worktree);
   // A test that writes files is not evidence for the tree those results were collected from.
-  const evidenceTreeUnchanged = key === await fingerprint();
+  const after = await readTree();
+  const evidenceTreeUnchanged = key === fingerprintOf(after);
   if (!evidenceTreeUnchanged) executed = [];
   if (reusable && evidenceTreeUnchanged && executed.every((e) => e.result === "pass")) ctx.testEvidence = { key, executed };
   else delete ctx.testEvidence;
   const evidence: EvidenceInputs = {
     files: tree,
     executed,
+    checkpoint: evidenceTreeUnchanged ? checkpoint : after,
     knownChecks: repo.checks.map((c) => c.name),
     ranChecks: checks.map((c) => ({ name: c.name, status: c.status })),
   };
@@ -380,7 +395,12 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         jail: (cwd) => jailFor(ctx, cwd),
         onCheck,
         cacheFile: join(ctx.runDir, "red-green-base.json"),
-        headPassed: evidenceTreeUnchanged && reusable && probe.tests.length === 1 && executed.some((e) => e.file === probe.tests[0] && e.result === "pass") && executed.filter((e) => e.file === probe.tests[0]).every((e) => e.result === "pass"),
+        headPassed:
+          evidenceTreeUnchanged &&
+          reusable &&
+          !!command &&
+          probe.tests.length === 1 &&
+          evidenceProvesFullCommand(executed, probe.tests[0]!, checkpoint, configuredProbeCommand(command, probe.tests)),
       });
       checkDeadline(ctx);
       reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
