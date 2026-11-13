@@ -57,7 +57,7 @@ export interface RunState {
   /** Head CI was still pending or unregistered when the coding run ended. Policy stays auto. */
   ci_wait?: "pending" | "none";
   /** Pending bounded continuation on this same run/PR; no approval is carried to a new head. */
-  continuation?: { kind: "ci" | "head" | "base"; sha: string };
+  continuation?: { kind: "ci" | "head" | "base" | "blocker"; sha: string };
   /** Persisted before each automatic continuation; restart never resets the two-attempt budget. */
   continuation_attempts?: number;
   /**

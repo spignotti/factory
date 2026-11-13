@@ -1051,6 +1051,17 @@ function selfMergeRuns(runs: RunRecord[], pr: OpenFactoryPr): RunRecord[] {
   return runs.filter((r) => selfMergePolicy(r.result?.merge_policy) && runEndedDone([r], pr));
 }
 
+/** Distinct parked tickets whose `blocked_by` names this open PR. #178 repair priority. */
+function blockerImpact(q: QueueFile, pr: number): number {
+  if (pr <= 0) return 0;
+  const tickets = new Set<number>();
+  for (const e of q.entries) {
+    if (e.status !== "parked" || !e.blocked_by?.length) continue;
+    if (e.blocked_by.includes(pr)) tickets.add(e.issue);
+  }
+  return tickets.size;
+}
+
 /** Revalidate through the existing pipeline. A poller never manufactures a review SHA. */
 async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> {
   const q = loadQueueByKey(ctx.factoryHome, await repoQueueKey(repo));
@@ -1063,7 +1074,10 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
     // budget-exhausted stops do not inherit a stale continuation. Done self-merge revalidation
     // stays as it was. None of this grants merge permission.
     if (run.result.result !== "done") {
-      if (!st.continuation || !repairContinuationAllowed(st, run.result)) continue;
+      if (!repairContinuationAllowed(st, run.result)) continue;
+      // #178: a repairable stop is resumed automatically only when a prior continuation exists or
+      // its open PR blocks queued tickets; otherwise it stays parked for the operator.
+      if (!st.continuation && blockerImpact(q, prNumberOf(st.pr) ?? 0) === 0) continue;
     } else if (!st.continuation && !selfMergePolicy(run.result.merge_policy)) {
       continue;
     }
@@ -1076,7 +1090,17 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
       if (status.state !== "open") continue;
       const head = await withTimeout(ctx.github.findOpenPr(repo, st.branch), ctx.netTimeoutMs, "continuation head");
       if (!head?.headSha || head.url !== st.pr) continue;
-      const kind = st.continuation?.kind ?? (head.headSha !== st.approved_sha ? "head" : status.behind ? "base" : status.ci === "red" ? "ci" : undefined);
+      const kind: "ci" | "head" | "base" | "blocker" | undefined = st.continuation
+        ? st.continuation.kind
+        : run.result.result !== "done"
+          ? "blocker"
+          : head.headSha !== st.approved_sha
+            ? "head"
+            : status.behind
+              ? "base"
+              : status.ci === "red"
+                ? "ci"
+                : undefined;
       if (!kind) continue;
       await withTimeout(ctx.github.disableAutoMerge(repo, st.pr), ctx.netTimeoutMs, "disable stale approval");
       if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
@@ -1456,12 +1480,16 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       candidates.push(entry);
     }
     const ranked = rankPending(
-      candidates.map((entry) => ({
-        issue: entry.issue,
-        addedAt: entry.added_at,
-        index: q.entries.indexOf(entry),
-        priority: priorityRank(issueByNumber.get(entry.issue)?.labels ?? []),
-      })),
+      candidates.map((entry) => {
+        const pr = entry.pr ? prNumberOf(entry.pr) : undefined;
+        return {
+          issue: entry.issue,
+          addedAt: entry.added_at,
+          index: q.entries.indexOf(entry),
+          priority: priorityRank(issueByNumber.get(entry.issue)?.labels ?? []),
+          ...(pr !== undefined ? { blockerImpact: blockerImpact(q, pr) } : {}),
+        };
+      }),
       ctx.nowMs,
     );
     const skip = new Set<number>();
