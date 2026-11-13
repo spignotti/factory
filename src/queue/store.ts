@@ -22,6 +22,18 @@ export interface QueueEntry {
   reason?: string;
   /** Times a transient `needs_human` sent this entry to the back. At most 2. */
   requeues?: number;
+  /**
+   * Epoch ms (issue #177): a parked provider-window entry becomes pending again at this time,
+   * without holding a coding slot. Cleared when the entry is released or parked for another reason.
+   */
+  wait_until?: number;
+  /**
+   * Epoch ms the provider announced its usage window resets. `wait_until` may be earlier (bounded
+   * periodic recheck); the release only happens after this time. Cleared with `wait_until`.
+   */
+  window_resets_at?: number;
+  /** Times this entry waited for a provider usage window. Bounded; a window reset does not give it back. */
+  window_waits?: number;
   /** Open factory PR numbers that overlap this run. Pending again once each is merged or closed. */
   blocked_by?: number[];
   /** Live factory runs whose claimed paths overlap this one. Pending again once each has finished. */
@@ -63,6 +75,9 @@ const EntrySchema = z.object({
   pr: z.string().optional(),
   reason: z.string().optional(),
   requeues: z.number().int().min(0).optional(),
+  wait_until: z.number().int().positive().optional(),
+  window_resets_at: z.number().int().positive().optional(),
+  window_waits: z.number().int().min(0).optional(),
   blocked_by: z.array(z.number().int().positive()).optional(),
   blocked_runs: z.array(z.string()).optional(),
   pid: z.number().int().optional(),

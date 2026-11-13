@@ -32,6 +32,20 @@ export function admissionBlock(issue: AdmitIssue): string | undefined {
   return undefined;
 }
 
+/**
+ * Pause text the worker writes when a live run loses admission. An operator pause is never this.
+ * Compared exactly so a later revalidation can clear a stale label pause without clearing a human one.
+ */
+export function isAdmissionPauseReason(reason: string): boolean {
+  return (
+    reason === `lacks the ${FACTORY_READY_LABEL} label` ||
+    reason === `carries ${NEEDS_PLAN_LABEL}` ||
+    reason === `carries ${NEEDS_DECISION_LABEL}` ||
+    reason === `carries ${FACTORY_PROPOSAL_LABEL}` ||
+    reason === "task is not sufficient"
+  );
+}
+
 /** Canonical `prio:*` labels, with the original `priority:*` spellings kept for existing repos. */
 export function priorityRank(labels: string[]): number {
   if (labels.includes("prio:high") || labels.includes("priority:high")) return 2;

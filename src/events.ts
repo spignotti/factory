@@ -193,8 +193,8 @@ export type RunResultKind = (typeof RESULTS)[number];
  * Readers (worker, status) decide recovery from this cause, never from the reason text.
  * - `technical_repair`: a classified, mechanical failure; the checkpoint and bounded repair state stay usable
  * - `transient_retry`: provider/network/capacity drop after retries; retry the same run without a product edit
- * - `provider_window_wait`: an explicit usage-window reset is required before another attempt. Generic 429/capacity
- *   is `transient_retry`. #179 does not schedule a reset; #177 supplies the window metadata
+ * - `provider_window_wait`: an explicit usage-window reset is required before another attempt; the queue waits
+ *   for that window without a coding slot (#177). Generic 429/capacity is `transient_retry`
  * - `explicit_decision`: only an answer from a person moves this run on (questions, changed issue text, a real merge conflict)
  * - `human_approval`: a human authority action is required (pause, protected config, env setup). Not granted by recovery
  * - `budget_exhausted`: a bounded retry/repair budget is spent. Budgets are not reset. The action is a human decision
@@ -291,6 +291,11 @@ export const ResultSchema = z.object({
    * canonical pair is malformed: readers fail closed and must not guess from the reason text.
    */
   stop: StopSchema.optional(),
+  /**
+   * Epoch ms when the provider usage window resets (`provider_window_wait` only, issue #177).
+   * Set only from explicit window metadata on the stop, never inferred from generic 429/capacity text.
+   */
+  window_resets_at: z.number().int().positive().optional(),
   /** Separate counters. Omitted on results written before this field. A `done` run is not a merge. */
   outcome: OutcomeSchema.optional(),
   /** Factory version, prompts, model, effort, sanitized config, base/head, check versions. No secrets. */

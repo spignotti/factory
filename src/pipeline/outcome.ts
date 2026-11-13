@@ -29,8 +29,8 @@ export function stopFor(cause: StopCause): RunStop {
 }
 
 /**
- * Provider stops the worker may requeue now. A usage-window wait is not one of them: #179 does not
- * schedule a reset, and generic 429/capacity is `transient_retry`.
+ * Provider stops the worker may requeue now. A usage-window wait is not one of them: it parks on its
+ * reset window (#177), and generic 429/capacity is `transient_retry`.
  */
 export function isProviderRetryCause(cause: unknown): boolean {
   return cause === "transient_retry";

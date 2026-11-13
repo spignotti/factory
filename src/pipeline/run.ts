@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { IncompletePrListError, type BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
 import { realSleep } from "../agents/fake-runner.js";
-import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
+import { InvalidOutputError, ProviderWindowError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, type RunStop, type StopCause, secretValues, writeResult } from "../events.js";
 import { isCommandTimeout, sh, tail } from "../exec.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse, withRepoGitOps } from "../git.js";
@@ -259,6 +259,11 @@ interface Outcome {
    * revision, model-family separation, reviewed SHA and required checks stay authoritative.
    */
   stop?: RunStop;
+  /**
+   * Epoch ms when the provider usage window resets. Set only with a `provider_window_wait` stop (#177);
+   * the queue parks the entry until then without holding a coding slot.
+   */
+  window_resets_at?: number;
   type: RunResult["type"];
   risk: RunResult["risk"];
   /** `riskClass` reasons. Absent until finalize classifies the diff. */
@@ -322,9 +327,15 @@ class RunFrame {
         // the uncommitted leftovers are the agent's (not a human fix), so resume discards them.
         if (this.state) this.state.transient = true;
         // Capacity, network and stream drops are the same bounded retry. A usage-window reset is
-        // `provider_window_wait` and is not inferred from 429; #177 supplies that metadata.
-        // The run, checkpoint and spent budgets stay. #179 does not schedule a window reset.
+        // `provider_window_wait` (the branch below) and is not inferred from 429.
+        // The run, checkpoint and spent budgets stay.
         this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("transient_retry") });
+      } else if (e instanceof ProviderWindowError) {
+        // Every usable model hit a usage limit with an explicitly resetting window (#177). The reset time is
+        // result metadata, not reason text: the queue waits for that window without a coding slot. The run,
+        // checkpoint and spent budgets stay; generic 429/capacity stays on the transient_retry path above.
+        if (this.state) this.state.transient = true;
+        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("provider_window_wait"), window_resets_at: e.resetsAtMs });
       } else if (e instanceof WallTimeExceeded) {
         // The work so far stays in the worktree; resume re-runs the gates over it and continues.
         this.set({ result: "needs_human", reason: this.state?.worktree ? `${reason}; factory resume ${this.runId}` : reason, stop: stopFor("budget_exhausted") });
@@ -399,6 +410,7 @@ class RunFrame {
       cost_usd: Math.round(this.events.totals.cost_usd * 10_000) / 10_000,
       reason: out.reason,
       ...(out.stop ? { stop: out.stop } : {}),
+      ...(out.window_resets_at !== undefined ? { window_resets_at: out.window_resets_at } : {}),
       ...(outcome ? { outcome } : {}),
       provenance,
       ...(this.events.diffCount ?? {}),

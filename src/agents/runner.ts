@@ -79,6 +79,8 @@ export class AgentError extends Error {
     readonly usage: AgentUsage = ZERO_USAGE,
     readonly status?: number,
     readonly retryAfterMs?: number,
+    /** Epoch ms when an explicitly resetting usage window opens (#177). Set only from real window metadata, never guessed. */
+    readonly windowResetsAtMs?: number,
   ) {
     super(message);
     this.name = "AgentError";

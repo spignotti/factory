@@ -15,13 +15,20 @@ import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import type { Io } from "../commands/gates.js";
-import { admissionBlock, cycleReasons, fulfilledIssues, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
+import { admissionBlock, cycleReasons, fulfilledIssues, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
 import { clearWorkerMode, readWorkerMode } from "./control.js";
-import { clearPause, pauseRequested, requestPause } from "./pause.js";
+import { clearPause, pausePaths, pauseRequested, requestPause, type PauseKey } from "./pause.js";
 import { loadAllQueues, loadQueueByKey, queueDir, repoQueueKey, type QueueEntry, type QueueFile, updateQueue } from "./store.js";
 
 /** Transient `needs_human` goes to the back at most this many times, then parks. */
 export const MAX_REQUEUES = 2;
+/**
+ * How many times an entry may wait for a provider usage window (#177) before it parks permanently.
+ * A separate budget from `requeues`; a window reset never gives it back.
+ */
+export const MAX_WINDOW_WAITS = 2;
+/** One wait step is capped to this: a far window wakes for a bounded periodic recheck, not only at the reset. */
+export const MAX_WINDOW_WAIT_MS = 6 * 60 * 60_000;
 /** A run whose `events.jsonl` has not grown for `stall_minutes` times this is killed. */
 const STALL_FACTOR = 2;
 /** After SIGTERM, SIGKILL the process group if it is still alive. Slot stays taken until then. */
@@ -247,7 +254,7 @@ export function isRepoLockHeld(reason: string): boolean {
  * `transient_retry` pair requeues. Present but malformed stop metadata fails closed and does not
  * fall through to a stale `transient` flag. The flag remains only for results written before #179
  * that carry no stop metadata. Unclassified legacy stops never gain recovery from reason text.
- * `provider_window_wait` is not a retry: #179 does not schedule a usage-window reset.
+ * `provider_window_wait` is not a requeue: #177 parks the entry on its wait window instead.
  * Two valid stops that disagree also fail closed: a transient_retry result must not outrank a
  * human_approval, budget_exhausted or unknown state.
  */
@@ -276,6 +283,9 @@ function park(entry: QueueEntry, reason: string, runId?: string, blocked?: numbe
   if (blockedRuns?.length) entry.blocked_runs = blockedRuns;
   else delete entry.blocked_runs;
   delete entry.pid;
+  // A park for another reason is no longer a window wait; the spent `window_waits` budget stays.
+  delete entry.wait_until;
+  delete entry.window_resets_at;
 }
 
 function moveToEnd(q: QueueFile, entry: QueueEntry): void {
@@ -297,10 +307,27 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
   delete entry.pid;
   delete entry.paused;
   delete entry.choice;
+  delete entry.wait_until;
+  delete entry.window_resets_at;
 }
 
-/** `done` records the PR. Transient `needs_human` requeues. Overlap `locked` parks on the PR numbers. A repo-lock `locked` goes back to pending. Everything else parks. */
-export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown }): "done" | "requeue" | "parked" {
+/**
+ * True when the result's stop canonically says `provider_window_wait` (#177) and a stored state stop
+ * does not contradict it. Never read from the reason text; a missing or malformed pair fails closed.
+ */
+function isWindowWaitStop(result: RunResult, stateStop?: unknown): boolean {
+  if (result.stop === undefined || result.stop === null) return false;
+  const rs = readStop(result.stop);
+  if (rs?.cause !== "provider_window_wait") return false;
+  if (stateStop !== undefined && stateStop !== null) {
+    const ss = readStop(stateStop);
+    if (!ss || ss.cause !== "provider_window_wait") return false;
+  }
+  return true;
+}
+
+/** `done` records the PR. Transient `needs_human` requeues. An explicit usage window parks until the reset. Overlap `locked` parks on the PR numbers. A repo-lock `locked` goes back to pending. Everything else parks. */
+export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown; now?: number }): "done" | "requeue" | "parked" {
   entry.run_id = result.run_id;
   if (result.pr) entry.pr = result.pr;
   delete entry.pid;
@@ -310,6 +337,32 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     delete entry.reason;
     delete entry.blocked_by;
     return "done";
+  }
+  if (result.result === "needs_human" && isWindowWaitStop(result, opts?.stateStop)) {
+    // Model fallback already had its chance in the run. The wait holds no coding slot; the persisted
+    // wake-up survives a restart and the entry resumes with its original run, checkpoint and PR.
+    const waits = (entry.window_waits ?? 0) + 1;
+    entry.window_waits = waits;
+    const now = opts?.now ?? Date.now();
+    const resetsAt = result.window_resets_at;
+    if (waits <= MAX_WINDOW_WAITS && resetsAt !== undefined && Number.isFinite(resetsAt) && resetsAt > 0) {
+      // A window that has already opened is due on the next tick. applyOutcome does not resume: the
+      // worker revalidates issue revision, pause and stop authorization first.
+      park(entry, `provider usage window resets ${new Date(resetsAt).toISOString()} (wait ${waits}/${MAX_WINDOW_WAITS}); factory resume ${result.run_id}`, result.run_id);
+      entry.wait_until = resetsAt > now ? Math.min(resetsAt, now + MAX_WINDOW_WAIT_MS) : now;
+      entry.window_resets_at = resetsAt;
+      return "parked";
+    }
+    // No usable window metadata, or the bounded wait budget is spent: a permanent stop, never a requeue
+    // and never a reset of the spent code-repair budgets (`requeues`, run `repair`, continuations).
+    park(
+      entry,
+      waits > MAX_WINDOW_WAITS
+        ? `provider usage window waits exhausted (${waits - 1}/${MAX_WINDOW_WAITS}); ${result.reason}`.slice(0, 400)
+        : result.reason || result.result,
+      result.run_id,
+    );
+    return "parked";
   }
   if (isTransientNeedsHuman(result, opts?.transient === true, opts?.stateStop)) {
     const n = (entry.requeues ?? 0) + 1;
@@ -444,10 +497,10 @@ function releaseBundle(q: QueueFile, issue: number): void {
   }
 }
 
-function finishEntry(q: QueueFile, entry: QueueEntry, factoryHome: string, result: RunResult, io: Io): ReturnType<typeof applyOutcome> {
+function finishEntry(q: QueueFile, entry: QueueEntry, factoryHome: string, result: RunResult, io: Io, nowMs: number): ReturnType<typeof applyOutcome> {
   releaseEntryResources(factoryHome, q.repo, entry);
   const state = listRuns(factoryHome).find((r) => r.run_id === result.run_id)?.state;
-  const action = applyOutcome(q, entry, result, { transient: state?.transient === true, stateStop: state?.stop });
+  const action = applyOutcome(q, entry, result, { transient: state?.transient === true, stateStop: state?.stop, now: nowMs });
   if (action === "done") settleBundle(q, entry, factoryHome, io);
   else releaseBundle(q, entry.issue);
   return action;
@@ -479,7 +532,7 @@ function checkpointResumable(factoryHome: string, runId: string): boolean {
   }
 }
 
-function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>): void {
+function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>, nowMs: number): void {
   const runs = listRuns(factoryHome).filter((r) => sameRepo(r, q.repo));
   const holders = holderIds(factoryHome);
   for (const entry of q.entries) {
@@ -492,7 +545,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
     if (entry.status === "running" && own?.result) {
       const finished = asResult(own.result);
       if (finished) {
-        finishEntry(q, entry, factoryHome, finished, { out: () => {}, err: () => {} });
+        finishEntry(q, entry, factoryHome, finished, { out: () => {}, err: () => {} }, nowMs);
         continue;
       }
     }
@@ -506,7 +559,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
     if (entry.status !== "running") continue;
     const finished = asResult(entry.run_id ? undefined : related.filter((r) => r.result).at(-1)?.result);
     if (finished) {
-      finishEntry(q, entry, factoryHome, finished, { out: () => {}, err: () => {} });
+      finishEntry(q, entry, factoryHome, finished, { out: () => {}, err: () => {} }, nowMs);
       continue;
     }
     if (!entry.run_id && !pidLive) {
@@ -542,7 +595,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
   }
 }
 
-function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, factoryHome: string): void {
+function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, factoryHome: string, nowMs: number): void {
   for (const entry of [...q.entries]) {
     const key = handleKey(q.repo, entry.issue);
     const tracked = handles.get(key);
@@ -561,7 +614,7 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
       continue;
     }
     if (!tracked.settled) continue;
-    const action = finishEntry(q, entry, factoryHome, tracked.settled, io);
+    const action = finishEntry(q, entry, factoryHome, tracked.settled, io, nowMs);
     if (action === "done") io.out(`queue: #${entry.issue} done${entry.pr ? ` ${entry.pr}` : ""}\n`);
     else if (action === "requeue" && tracked.settled.result === "locked") io.out(`queue: #${entry.issue} pending (repo lock held)\n`);
     else if (action === "requeue") io.out(`queue: #${entry.issue} requeued (${entry.requeues}/${MAX_REQUEUES})\n`);
@@ -678,8 +731,8 @@ function considerStall(entry: QueueEntry, repo: string, ctx: TickCtx, tracked: T
 }
 
 function localBookkeeping(q: QueueFile, repo: string, ctx: TickCtx): void {
-  absorbHandles(q, ctx.handles, ctx.io, ctx.factoryHome);
-  adopt(q, ctx.factoryHome, ctx.handles);
+  absorbHandles(q, ctx.handles, ctx.io, ctx.factoryHome, ctx.nowMs);
+  adopt(q, ctx.factoryHome, ctx.handles, ctx.nowMs);
   for (const entry of q.entries) {
     if (entry.status !== "running") continue;
     const tracked = ctx.handles.get(handleKey(repo, entry.issue));
@@ -758,6 +811,104 @@ function applyUnpark(q: QueueFile, ready: Set<number>, io: Io): void {
     releaseToPending(entry, true);
     io.out(`queue: #${entry.issue} pending (${byRun ? "overlapping run finished" : "blocking PR closed"})\n`);
   }
+}
+
+interface WindowDecision {
+  /** issue -> keep the run/checkpoint (true) or start fresh (false). */
+  release: Map<number, boolean>;
+  /** issue -> next bounded recheck for a window that has not opened yet. */
+  extend: Map<number, number>;
+  /** Due waits whose stored stop no longer authorizes a resume. Wake-up dropped; budgets kept. */
+  refuse: Set<number>;
+  /** Admission pause no longer applies. Clear `paused` and the marker; a human pause is never in here. */
+  clearAdmissionPause: Set<number>;
+}
+
+function pauseMarkerTexts(factoryHome: string, key: PauseKey): string[] {
+  const out: string[] = [];
+  for (const path of pausePaths(factoryHome, key)) {
+    try {
+      const text = readFileSync(path, "utf8").trim();
+      if (text) out.push(text);
+    } catch {
+      // missing marker
+    }
+  }
+  return out;
+}
+
+/** An operator or other non-admission marker. Revalidation must not clear or skip past it. */
+function hasRealPause(factoryHome: string, key: PauseKey): boolean {
+  return pauseMarkerTexts(factoryHome, key).some((text) => !isAdmissionPauseReason(text));
+}
+
+/**
+ * A window resume is authorized only while every stored stop still says `provider_window_wait`.
+ * A missing stop (the queue already accepted the wait) does not block. A present contradictory or
+ * malformed stop fails closed: no resume, and no fresh implementation of the same checkpoint.
+ */
+function windowResumeAuthorized(factoryHome: string, runId: string | undefined): boolean {
+  if (!runId) return true;
+  const run = listRuns(factoryHome).find((r) => r.run_id === runId);
+  if (!run) return true;
+  const stored = (obj: object | undefined): boolean => {
+    if (!obj || !Object.prototype.hasOwnProperty.call(obj, "stop")) return true;
+    return readStop((obj as { stop?: unknown }).stop)?.cause === "provider_window_wait";
+  };
+  return stored(run.state) && stored(run.result);
+}
+
+/**
+ * Provider window waits (#177). A parked entry with `wait_until` is examined once that time passes:
+ * a window that has not opened yet only moves the next bounded recheck (no budget is spent, no run
+ * starts); an opened window is revalidated — pause (run or issue), the stored stop's authorization,
+ * the issue revision and the checkpoint decide whether the original run and PR are reused — and the
+ * entry becomes pending again. A stop that no longer authorizes the wait drops the wake-up and does
+ * not reset spent repair budgets or start a second implementation.
+ * A ready-label pause left on the entry when the run hit the window is revalidated here: if admission
+ * is back, the marker is cleared and the same checkpoint resumes. An operator pause is not cleared.
+ * A temporary admission block does not drop `run_id` / `issue_rev`; a later start must not be a second
+ * implementation with reset repair budgets.
+ * Holds no coding slot: while it waits, the worker keeps its normal poll cadence (no busy-poll).
+ */
+async function windowWaits(snap: QueueFile, repo: string, ctx: TickCtx, noteFailure: () => void): Promise<WindowDecision> {
+  const release = new Map<number, boolean>();
+  const extend = new Map<number, number>();
+  const refuse = new Set<number>();
+  const clearAdmissionPause = new Set<number>();
+  for (const entry of snap.entries) {
+    if (entry.status !== "parked" || entry.wait_until === undefined || ctx.nowMs < entry.wait_until) continue;
+    const pauseKey = { runId: entry.run_id, repo, issue: entry.issue };
+    // A human pause stays until that human clears it. Do not resume and do not clear the marker.
+    if (hasRealPause(ctx.factoryHome, pauseKey)) continue;
+    const admissionPaused = entry.paused === true || pauseMarkerTexts(ctx.factoryHome, pauseKey).some((text) => isAdmissionPauseReason(text));
+    if (entry.window_resets_at !== undefined && ctx.nowMs < entry.window_resets_at) {
+      extend.set(entry.issue, Math.min(entry.window_resets_at, ctx.nowMs + MAX_WINDOW_WAIT_MS));
+      continue;
+    }
+    if (!windowResumeAuthorized(ctx.factoryHome, entry.run_id)) {
+      refuse.add(entry.issue);
+      continue;
+    }
+    let issue: Issue;
+    try {
+      issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), ctx.netTimeoutMs, `window issue #${entry.issue}`);
+    } catch (e) {
+      noteFailure();
+      ctx.io.err(`factory: window revalidation #${entry.issue} failed: ${(e as Error).message.slice(0, 200)}\n`);
+      continue;
+    }
+    if (admissionBlock(issue)) {
+      // Temporarily not admissible. Dropping the run id here starts a duplicate implementation and
+      // resets repair budgets once authorization returns. An admission pause stays parked so the
+      // marker is rechecked; otherwise pending again, identity kept, and the candidate rules wait.
+      if (!admissionPaused) release.set(entry.issue, true);
+      continue;
+    }
+    if (admissionPaused) clearAdmissionPause.add(entry.issue);
+    release.set(entry.issue, canResume(ctx.factoryHome, entry, issue));
+  }
+  return { release, extend, refuse, clearAdmissionPause };
 }
 
 /** Red base CI, or a check we could not read: start nothing for this repo this tick. */
@@ -1114,6 +1265,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   if (!snap) return false;
 
   const unpark = await unparkReady(snap, ctx.github, repo, ctx.io, timeoutMs, ctx.factoryHome, noteFailure);
+  const win = await windowWaits(snap, repo, ctx, noteFailure);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
   const evaluatedAfter = new Set<number>();
@@ -1202,6 +1354,30 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       clearPause(ctx.factoryHome, { runId: entry.run_id, repo, issue });
     }
     applyUnpark(q, unpark, ctx.io);
+    // Window waits (#177): a far window only moves the next recheck; an opened one becomes pending again.
+    for (const issue of win.clearAdmissionPause) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.wait_until !== undefined && ctx.nowMs >= e.wait_until);
+      if (!entry || hasRealPause(ctx.factoryHome, { runId: entry.run_id, repo, issue })) continue;
+      delete entry.paused;
+      clearPause(ctx.factoryHome, { runId: entry.run_id, repo, issue });
+    }
+    for (const [issue, nextWait] of win.extend) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.wait_until !== undefined && ctx.nowMs >= e.wait_until);
+      if (entry) entry.wait_until = nextWait;
+    }
+    for (const [issue, keepRun] of win.release) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.wait_until !== undefined && ctx.nowMs >= e.wait_until);
+      if (!entry) continue;
+      releaseToPending(entry, keepRun);
+      ctx.io.out(`queue: #${issue} pending (provider usage window ${keepRun ? `resumes ${entry.run_id}` : "reset"})\n`);
+    }
+    for (const issue of win.refuse) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.wait_until !== undefined && ctx.nowMs >= e.wait_until);
+      if (!entry) continue;
+      // The wake-up is dropped. The checkpoint, PR and spent repair budgets stay; no second implementation.
+      park(entry, `provider window resume refused: stop does not authorize it`, entry.run_id);
+      ctx.io.out(`queue: #${issue} parked: ${entry.reason}\n`);
+    }
     for (const [issue, reason] of parkAfter) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "pending");
       if (!entry) continue;
@@ -1284,7 +1460,12 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       const resume = canResume(ctx.factoryHome, entry, issue);
       // Pause is not only a scheduling filter. An already pending continuation must not take a slot
       // or edit product. The marker stays until a human clears it. Other runs are not signalled.
-      if (resume && entry.run_id && pauseRequested(ctx.factoryHome, { runId: entry.run_id })) continue;
+      if (resume && pauseRequested(ctx.factoryHome, { runId: entry.run_id, repo, issue: entry.issue })) continue;
+      if (resume && (entry.window_waits ?? 0) > 0 && !windowResumeAuthorized(ctx.factoryHome, entry.run_id)) {
+        park(entry, `provider window resume refused: stop does not authorize it`, entry.run_id);
+        ctx.io.out(`queue: #${entry.issue} parked: ${entry.reason}\n`);
+        continue;
+      }
       const plannedId = resume && entry.run_id ? entry.run_id : newRunId(ctx.nowMs);
       if (!resume) {
         delete entry.run_id;
@@ -1372,10 +1553,13 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const pending = q.entries.some((e) => e.status === "pending");
   const running = q.entries.some((e) => e.status === "running");
   const overlap = q.entries.some((e) => e.status === "parked" && ((e.blocked_by?.length ?? 0) > 0 || (e.blocked_runs?.length ?? 0) > 0));
+  // A window wait keeps the worker on its poll cadence until the wake-up is released or dropped.
+  // A due wait (window already open, or paused past it) still waits for the next tick — not a busy poll.
+  const windowWait = q.entries.some((e) => e.status === "parked" && e.wait_until !== undefined);
   const live = [...ctx.handles.values()].some((h) => resolve(h.repo) === resolve(repo) && h.settled === undefined && !h.failed && !h.ignoreResult);
   if (ctx.pastUntil) return running || live;
   const behind = watch.needsUpdate || (ctx.untilMs !== undefined && (watch.openDone || waitingMerge));
-  return pending || running || overlap || live || behind;
+  return pending || running || overlap || live || behind || windowWait;
 }
 
 async function reposFor(opts: RunQueueOptions): Promise<string[]> {

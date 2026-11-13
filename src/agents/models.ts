@@ -158,6 +158,82 @@ export class TransientAgentError extends Error {
   }
 }
 
+/**
+ * The epoch ms when an explicitly resetting provider usage window opens (#177). Only the
+ * `limit` class can carry a window. `AgentError.windowResetsAtMs` is set when a caller already
+ * parsed the time; production reads the explicit wording (`resets at <date>`, `resets in <duration>`).
+ * Generic capacity and `rate limit … try again in N` are never a window: this parser only accepts
+ * the verb `reset(s)`/`resetting` with a concrete time, so a 429 stays the existing transient retry.
+ * Duration units are the explicit tokens below. A prefix match is not a unit: `m` is a minute, `month` is not.
+ */
+const WINDOW_DURATION_UNIT = "ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?";
+const WINDOW_DURATION_MS: Readonly<Record<string, number>> = {
+  ms: 1,
+  millisecond: 1,
+  milliseconds: 1,
+  s: 1_000,
+  sec: 1_000,
+  secs: 1_000,
+  second: 1_000,
+  seconds: 1_000,
+  m: 60_000,
+  min: 60_000,
+  mins: 60_000,
+  minute: 60_000,
+  minutes: 60_000,
+  h: 3_600_000,
+  hr: 3_600_000,
+  hrs: 3_600_000,
+  hour: 3_600_000,
+  hours: 3_600_000,
+  d: 86_400_000,
+  day: 86_400_000,
+  days: 86_400_000,
+  w: 604_800_000,
+  week: 604_800_000,
+  weeks: 604_800_000,
+};
+
+export function providerWindowResetsAtMs(err: unknown, now = Date.now()): number | undefined {
+  const fromField = err instanceof AgentError ? err.windowResetsAtMs : undefined;
+  if (fromField !== undefined && Number.isFinite(fromField) && fromField > now) return fromField;
+  const message = err instanceof Error ? err.message : String(err);
+  const at = /\bresets?\s+at\s+([^\n.;]+)/i.exec(message);
+  if (at) {
+    const parsed = Date.parse(at[1]!.trim());
+    if (Number.isFinite(parsed) && parsed > now) return parsed;
+  }
+  const inMatch = new RegExp(String.raw`\bresets?\s+in\s+((?:\d+(?:\.\d+)?\s*(?:${WINDOW_DURATION_UNIT})\b\.?\s*){1,4})`, "i").exec(message);
+  if (inMatch) {
+    const units = new RegExp(String.raw`(\d+(?:\.\d+)?)\s*(${WINDOW_DURATION_UNIT})\b`, "gi");
+    let total = 0;
+    for (const token of inMatch[1]!.matchAll(units)) {
+      const n = Number(token[1]);
+      const ms = WINDOW_DURATION_MS[token[2]!.toLowerCase()];
+      if (ms === undefined || !Number.isFinite(n)) return undefined;
+      total += n * ms;
+    }
+    if (total > 0 && now + total > now) return now + total;
+  }
+  return undefined;
+}
+
+/**
+ * Every usable (non `capacity_only`) entry of the chain ended on a `limit` error with an explicitly
+ * resetting usage window (#177). The fallback chain was exhausted first. Not transient: an immediate
+ * retry would hit the same window, so the queue parks the entry without a coding slot until the
+ * latest window resets. A provider stop without an explicit window is never this error.
+ */
+export class ProviderWindowError extends Error {
+  constructor(
+    readonly resetsAtMs: number,
+    cause: unknown,
+  ) {
+    super(`every usable model is at its usage limit until ${new Date(resetsAtMs).toISOString()}`, { cause });
+    this.name = "ProviderWindowError";
+  }
+}
+
 export type ModelRequest = Omit<AgentRequest, "model" | "thinking"> & {
   /** Implement package this call belongs to; copied onto `step_retry` for `factory status`. */
   packageId?: string;
@@ -227,11 +303,12 @@ function warnStepTokens(events: EventLog, step: string, role: string, model: str
 /**
  * Runs one agent call with the role's model chain: capacity and network errors retry the same model with
  * exponential backoff, then fall back (network like other: never to `capacity_only`); a provider stream abort
- * retries the same model up to `streamRetries` (the current call only) and then falls back the same way;
- * limit/auth/other fall back directly, skipping `capacity_only` entries; invalid output never falls back.
+ * retries the same model up to `streamRetries` (the current call only) and then falls back the same way; limit/auth/other
+ * fall back directly, skipping `capacity_only` entries; invalid output never falls back.
  * An attempt that spanned a box freeze and failed with a network, stream or unclassified error is retried
  * without counting (`SUSPEND_RETRIES`). When the chain gives up on a transient class it throws
- * `TransientAgentError`. Usage is recorded from successful and failed calls.
+ * `TransientAgentError`; when every usable model's last error was a `limit` with an explicit resetting
+ * window it throws `ProviderWindowError` (#177). Usage is recorded from successful and failed calls.
  */
 export async function callModel(deps: CallDeps, step: string, req: ModelRequest): Promise<ModelResponse> {
   const { profile, events } = deps;
@@ -243,6 +320,8 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
   let streamRetriesUsed = 0;
   let lastError: unknown;
   let lastClass: ErrorClass = "other";
+  /** Chain index -> explicit reset window of that entry's final `limit` error. */
+  const windows = new Map<number, number>();
   const { packageId, ...agentReq } = req;
   for (let i = 0; i >= 0 && i < chain.length; ) {
     const entry = chain[i]!;
@@ -310,6 +389,10 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
           continue;
         }
         next = nextEntry(chain, i, cls);
+        if (cls === "limit") {
+          const resetsAt = providerWindowResetsAtMs(err);
+          if (resetsAt !== undefined) windows.set(i, resetsAt);
+        }
         if (next >= 0) {
           events.emit({
             step,
@@ -323,6 +406,13 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
       }
     }
     i = next;
+  }
+  if (!req.signal?.aborted) {
+    // Fallback had its chance: only when every usable model waited on an explicit window the entry waits (#177).
+    const usable = chain.map((e, idx) => (e.capacity_only ? -1 : idx)).filter((idx) => idx >= 0);
+    if (usable.length > 0 && usable.every((idx) => windows.has(idx))) {
+      throw new ProviderWindowError(Math.max(...usable.map((idx) => windows.get(idx)!)), lastError);
+    }
   }
   if (TRANSIENT_CLASSES.includes(lastClass) && !req.signal?.aborted) {
     const causeText = lastError instanceof Error ? lastError.message : String(lastError);
