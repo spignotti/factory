@@ -13,7 +13,9 @@ import { runScenario } from "../helpers/scenario.js";
 function planWithFiles(output: unknown, files: string[]): unknown {
   if (!output || typeof output !== "object") return output;
   const plan = structuredClone(output) as { packages?: { files: string[] }[] };
-  for (const pkg of plan.packages ?? []) pkg.files = files;
+  // The plan keeps the task's real files and adds the path-claim file, so scope repair does not see
+  // the implementation itself as out of scope.
+  for (const pkg of plan.packages ?? []) pkg.files = [...(pkg.files ?? []), ...files];
   return plan;
 }
 
@@ -23,6 +25,34 @@ function growInto(steps: FakeStep[], planFile: string, extra: string): FakeStep[
     if (s.role === "implement") return { ...s, writes: { ...(s.writes ?? {}), [planFile]: "planned\n", [extra]: "shared\n" } };
     return s;
   });
+}
+
+/** A run whose plan owns one unique file and whose diff grows into `extra`, with no shared task files. */
+function growScript(planFile: string, extra: string): FakeStep[] {
+  return [
+    {
+      role: "plan_high",
+      output: {
+        version: 1,
+        type: "feature",
+        goal: `add ${planFile}`,
+        context: "",
+        packages: [{ id: "P1", title: planFile, description: `add ${planFile}`, files: [planFile], depends_on: [], changes_flows: [], source_quote: "" }],
+        acceptance: [{ id: "A1", package: "P1", text: `${planFile} is present`, verify: "review", kind: "behavior", risk: false, source_quote: "" }],
+        out_of_scope: [],
+      },
+      usage: { tokens_in: 1, tokens_out: 1, cost_usd: 0 },
+    },
+    {
+      role: "implement",
+      writes: { [planFile]: "planned\n", [extra]: "shared\n" },
+      output: { package: "P1", done: [`added ${planFile}`], decisions: [], deviations_from_plan: [], skipped: [], uncertain: [], evidence: [], responses: [] },
+      usage: { tokens_in: 1, tokens_out: 1, cost_usd: 0 },
+    },
+    { role: "review_plan", output: { reviewer: "plan", prior: [], findings: [] } },
+    { role: "review_simplicity", output: { reviewer: "simplicity", prior: [], findings: [] } },
+    { role: "pr_writer", raw: `adds ${planFile}` },
+  ];
 }
 
 class BlockingGitHub extends FakeGitHub {
@@ -468,13 +498,12 @@ describe("parallel runs and host steps", () => {
     const repo = createFixtureRepo((c) => void (c.concurrency = { max_runs: 2 }));
     const factoryHome = mkdtempSync(join(tmpdir(), "factory-home-"));
     const github = new BlockingGitHub();
-    const scripted = FakeScriptSchema.parse(JSON.parse(readFileSync(join(FIXTURES, "scripts", "clean.json"), "utf8"))).steps;
     const profile = loadProfile(join(FIXTURES, "profile.yaml"));
     const start = (planFile: string) =>
       runFactory(
         { repo, textFile: join(FIXTURES, "tasks", "multiply.md"), wait: true },
         {
-          runner: new FakeRunner(growInto(scripted, planFile, "shared.py")),
+          runner: new FakeRunner(growScript(planFile, "shared.py")),
           github,
           profile,
           factoryHome,

@@ -54,6 +54,10 @@ export interface RepairBudget {
   network: { n: number };
   formatUsed: boolean;
   infraReruns: number;
+  /** Completed out-of-scope removals in this run. Never reset by a green commit: it bounds the run. */
+  scopeRepairs: number;
+  /** Fingerprint of the deviation set the last repair removed. The same set again is an unchanged failure. */
+  scopeLast?: string;
   /** Last diagnosed class. A blocking class is not handed to the implementer again. */
   lastClass?: RepairClass;
   /** Failure identity of the last observed red gate; the basis for strategy escalation (#181). */
@@ -65,12 +69,14 @@ export interface StoredRepair {
   network_retries: number;
   format_used: boolean;
   infra_reruns: number;
+  scope_repairs?: number;
+  scope_last?: string;
   class?: RepairClass;
   failure?: FailureIdentity;
 }
 
 export function emptyBudget(): RepairBudget {
-  return { gateAttempts: 0, network: { n: 0 }, formatUsed: false, infraReruns: 0 };
+  return { gateAttempts: 0, network: { n: 0 }, formatUsed: false, infraReruns: 0, scopeRepairs: 0 };
 }
 
 export function budgetFrom(raw: StoredRepair | undefined): RepairBudget {
@@ -79,6 +85,8 @@ export function budgetFrom(raw: StoredRepair | undefined): RepairBudget {
     network: { n: raw?.network_retries ?? 0 },
     formatUsed: raw?.format_used ?? false,
     infraReruns: raw?.infra_reruns ?? 0,
+    scopeRepairs: raw?.scope_repairs ?? 0,
+    ...(raw?.scope_last !== undefined ? { scopeLast: raw.scope_last } : {}),
     ...(raw?.class ? { lastClass: raw.class } : {}),
     ...(raw?.failure ? { failure: { ...raw.failure, roots: raw.failure.roots ?? [] } } : {}),
   };
@@ -90,6 +98,8 @@ export function budgetTo(b: RepairBudget): StoredRepair {
     network_retries: b.network.n,
     format_used: b.formatUsed,
     infra_reruns: b.infraReruns,
+    ...(b.scopeRepairs ? { scope_repairs: b.scopeRepairs } : {}),
+    ...(b.scopeLast !== undefined ? { scope_last: b.scopeLast } : {}),
     ...(b.lastClass ? { class: b.lastClass } : {}),
     ...(b.failure ? { failure: { ...b.failure } } : {}),
   };
@@ -101,6 +111,7 @@ export function clearRepair(budget: RepairBudget): void {
   budget.infraReruns = 0;
   delete budget.lastClass;
   delete budget.failure;
+  // scopeRepairs and scopeLast stay: a green commit elsewhere does not re-grant out-of-scope removals.
 }
 
 /** A class the implementer must not "fix" by editing product code. */

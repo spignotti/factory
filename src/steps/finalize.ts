@@ -8,6 +8,7 @@ import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, write
 import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep, reviewDelta } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
+import { repairScope } from "../pipeline/scope-repair.js";
 import { protectedFiles } from "../gates/builtin.js";
 import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
 import type { HostSteps } from "../schemas/plan.js";
@@ -503,20 +504,14 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     }
   }
 
-  const changed = await changedFiles(ctx.worktree, ctx.baseSha);
+  // The overlap claim and its risk signal must see the full diff, including out-of-scope changes that
+  // scope repair may remove afterwards.
+  let changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const countTests = ctx.repo.limits.diff_count_tests;
-  const totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
-  // Final tree, after a base merge. Test lines stay in the size signal and do not raise the risk class.
-  const diffLines = linesCountingTests(totals);
-  const sizeSignal = diffSizeSignal(diffLines, ctx.repo.merge.low_max_diff_lines);
-  if (sizeSignal) ctx.events.emit({ step: "finalize", event: "progress", data: { diff_signal: sizeSignal } });
-  const diffReport = diffCountFields(totals, countTests);
-  if (diffReport) {
-    ctx.events.diffCount = diffReport;
-    ctx.events.emit({ step: "finalize", event: "progress", data: { ...diffReport } });
-  }
-  const risk = riskClass({ changed, diffLines, repo: ctx.repo });
-  const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
+  let totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
+  let diffLines = linesCountingTests(totals);
+  let risk = riskClass({ changed, diffLines, repo: ctx.repo });
+  let guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
@@ -554,6 +549,45 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       policy = "human_review";
       blockPush = true;
     }
+  }
+
+  // A fix round in finalize can add unplanned files too: the bounded scope repair runs on the head
+  // about to be pushed, AFTER the overlap claim, so a concurrency conflict is never silently removed.
+  // A new commit invalidates the review, and the diff-derived signals are recomputed for the final head.
+  if (result === "done" && gates && !blockPush) {
+    const scope = await repairScope(ctx, gates);
+    if (scope.action === "stop") {
+      result = "needs_human";
+      reason = scope.reason;
+      cause = scope.cause;
+    } else if (scope.action === "repaired") {
+      gates = scope.gates;
+      if (reviewedSha) {
+        const delta = await reviewDelta(ctx, { round: input.rounds + 1, gates, findings: input.findings, reviewedSha });
+        input.findings = delta.findings;
+        if (!delta.ok) {
+          result = "needs_human";
+          reason = delta.reason;
+          cause = delta.cause;
+        } else reviewedSha = delta.reviewedSha;
+      }
+      changed = await changedFiles(ctx.worktree, ctx.baseSha);
+      totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
+      diffLines = linesCountingTests(totals);
+      risk = riskClass({ changed, diffLines, repo: ctx.repo });
+      guarded = protectedFiles(changed, ctx.repo.human_only_paths);
+      policy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
+    }
+  }
+
+  // Final tree, after a base merge and any scope repair. Test lines stay in the size signal and do not
+  // raise the risk class.
+  const sizeSignal = diffSizeSignal(diffLines, ctx.repo.merge.low_max_diff_lines);
+  if (sizeSignal) ctx.events.emit({ step: "finalize", event: "progress", data: { diff_signal: sizeSignal } });
+  const diffReport = diffCountFields(totals, countTests);
+  if (diffReport) {
+    ctx.events.diffCount = diffReport;
+    ctx.events.emit({ step: "finalize", event: "progress", data: { ...diffReport } });
   }
   const out = { result, reason, risk, mergePolicy: policy };
   const evaluation = await publishRunEvidence(ctx, !input.noPr && hasCommits && !blockPush);
