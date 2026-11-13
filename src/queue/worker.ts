@@ -8,7 +8,7 @@ import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { saveState } from "../pipeline/state.js";
-import { deliveryForDone } from "../pipeline/outcome.js";
+import { deliveryForDone, isProviderRetryCause, readStop, repairContinuationAllowed, stopCauseOf } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
 import { MAX_CONTINUATIONS } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
@@ -242,17 +242,29 @@ export function isRepoLockHeld(reason: string): boolean {
   return /\bis locked by\b/i.test(reason);
 }
 
-/** Transient stop is the run's flag, not the reason text (a stream abort does not start with `transient`). */
-export function isTransientNeedsHuman(result: RunResult, stateTransient = false): boolean {
+/**
+ * A provider stop the worker may retry within its bounded requeues. Only a canonical
+ * `transient_retry` pair requeues. Present but malformed stop metadata fails closed and does not
+ * fall through to a stale `transient` flag. The flag remains only for results written before #179
+ * that carry no stop metadata. Unclassified legacy stops never gain recovery from reason text.
+ * `provider_window_wait` is not a retry: #179 does not schedule a usage-window reset.
+ * Two valid stops that disagree also fail closed: a transient_retry result must not outrank a
+ * human_approval, budget_exhausted or unknown state.
+ */
+export function isTransientNeedsHuman(result: RunResult, stateTransient = false, stateStop?: unknown): boolean {
   if (result.result !== "needs_human") return false;
+  const resultPresent = result.stop !== undefined && result.stop !== null;
+  const statePresent = stateStop !== undefined && stateStop !== null;
+  if (resultPresent || statePresent) {
+    const resultStop = resultPresent ? readStop(result.stop) : undefined;
+    const stored = statePresent ? readStop(stateStop) : undefined;
+    if (resultPresent && !resultStop) return false;
+    if (statePresent && !stored) return false;
+    if (resultStop && stored && (resultStop.cause !== stored.cause || resultStop.action !== stored.action)) return false;
+    const chosen = resultStop ?? stored;
+    return chosen !== undefined && isProviderRetryCause(chosen.cause);
+  }
   return stateTransient || (result as { transient?: boolean }).transient === true;
-}
-
-function transientStop(factoryHome: string, result: RunResult): boolean {
-  if (isTransientNeedsHuman(result)) return true;
-  const run = listRuns(factoryHome).find((r) => r.run_id === result.run_id);
-  if (!run) return false;
-  return run.state?.transient === true || (run.result as { transient?: boolean } | undefined)?.transient === true;
 }
 
 function park(entry: QueueEntry, reason: string, runId?: string, blocked?: number[], blockedRuns?: string[]): void {
@@ -288,7 +300,7 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
 }
 
 /** `done` records the PR. Transient `needs_human` requeues. Overlap `locked` parks on the PR numbers. A repo-lock `locked` goes back to pending. Everything else parks. */
-export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean }): "done" | "requeue" | "parked" {
+export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown }): "done" | "requeue" | "parked" {
   entry.run_id = result.run_id;
   if (result.pr) entry.pr = result.pr;
   delete entry.pid;
@@ -299,11 +311,12 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     delete entry.blocked_by;
     return "done";
   }
-  if (isTransientNeedsHuman(result, opts?.transient === true)) {
+  if (isTransientNeedsHuman(result, opts?.transient === true, opts?.stateStop)) {
     const n = (entry.requeues ?? 0) + 1;
     entry.requeues = n;
     if (n <= MAX_REQUEUES) {
-      releaseToPending(entry);
+      // A canonical retry keeps the original run and checkpoint. Legacy results (no stop) start fresh.
+      releaseToPending(entry, stopCauseOf(result.stop) === "transient_retry");
       moveToEnd(q, entry);
       return "requeue";
     }
@@ -431,9 +444,10 @@ function releaseBundle(q: QueueFile, issue: number): void {
   }
 }
 
-function finishEntry(q: QueueFile, entry: QueueEntry, factoryHome: string, result: RunResult, transient: boolean, io: Io): ReturnType<typeof applyOutcome> {
+function finishEntry(q: QueueFile, entry: QueueEntry, factoryHome: string, result: RunResult, io: Io): ReturnType<typeof applyOutcome> {
   releaseEntryResources(factoryHome, q.repo, entry);
-  const action = applyOutcome(q, entry, result, { transient });
+  const state = listRuns(factoryHome).find((r) => r.run_id === result.run_id)?.state;
+  const action = applyOutcome(q, entry, result, { transient: state?.transient === true, stateStop: state?.stop });
   if (action === "done") settleBundle(q, entry, factoryHome, io);
   else releaseBundle(q, entry.issue);
   return action;
@@ -478,7 +492,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
     if (entry.status === "running" && own?.result) {
       const finished = asResult(own.result);
       if (finished) {
-        finishEntry(q, entry, factoryHome, finished, own.state?.transient === true || transientStop(factoryHome, finished), { out: () => {}, err: () => {} });
+        finishEntry(q, entry, factoryHome, finished, { out: () => {}, err: () => {} });
         continue;
       }
     }
@@ -492,7 +506,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>)
     if (entry.status !== "running") continue;
     const finished = asResult(entry.run_id ? undefined : related.filter((r) => r.result).at(-1)?.result);
     if (finished) {
-      finishEntry(q, entry, factoryHome, finished, transientStop(factoryHome, finished), { out: () => {}, err: () => {} });
+      finishEntry(q, entry, factoryHome, finished, { out: () => {}, err: () => {} });
       continue;
     }
     if (!entry.run_id && !pidLive) {
@@ -547,7 +561,7 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
       continue;
     }
     if (!tracked.settled) continue;
-    const action = finishEntry(q, entry, factoryHome, tracked.settled, transientStop(factoryHome, tracked.settled), io);
+    const action = finishEntry(q, entry, factoryHome, tracked.settled, io);
     if (action === "done") io.out(`queue: #${entry.issue} done${entry.pr ? ` ${entry.pr}` : ""}\n`);
     else if (action === "requeue" && tracked.settled.result === "locked") io.out(`queue: #${entry.issue} pending (repo lock held)\n`);
     else if (action === "requeue") io.out(`queue: #${entry.issue} requeued (${entry.requeues}/${MAX_REQUEUES})\n`);
@@ -881,7 +895,15 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
   for (const run of listRuns(ctx.factoryHome).filter((r) => sameRepo(r, repo))) {
     const st = run.state;
     if (!st?.pr || !st.branch || !st.worktree || !run.result || st.gc_at) continue;
-    if (!st.continuation && (run.result.result !== "done" || !selfMergePolicy(run.result.merge_policy))) continue;
+    // A stopped run needs a canonical repair pair on the original state and result, naming the
+    // same branch, worktree and PR. Missing, malformed, decision, protected, unknown and
+    // budget-exhausted stops do not inherit a stale continuation. Done self-merge revalidation
+    // stays as it was. None of this grants merge permission.
+    if (run.result.result !== "done") {
+      if (!st.continuation || !repairContinuationAllowed(st, run.result)) continue;
+    } else if (!st.continuation && !selfMergePolicy(run.result.merge_policy)) {
+      continue;
+    }
     const entry = q.entries.find((e) => e.run_id === run.run_id);
     if (!entry || entry.status === "running" || entry.status === "pending" || !entry.issue_rev) continue;
     if (pauseRequested(ctx.factoryHome, { runId: run.run_id })) continue;
@@ -1260,6 +1282,9 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       const issue = entry ? issueByNumber.get(entry.issue) : undefined;
       if (!entry || !issue) continue;
       const resume = canResume(ctx.factoryHome, entry, issue);
+      // Pause is not only a scheduling filter. An already pending continuation must not take a slot
+      // or edit product. The marker stays until a human clears it. Other runs are not signalled.
+      if (resume && entry.run_id && pauseRequested(ctx.factoryHome, { runId: entry.run_id })) continue;
       const plannedId = resume && entry.run_id ? entry.run_id : newRunId(ctx.nowMs);
       if (!resume) {
         delete entry.run_id;

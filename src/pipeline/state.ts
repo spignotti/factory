@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RunResultKind } from "../events.js";
+import type { RunResultKind, RunStop } from "../events.js";
 import type { Handoff } from "../schemas/handoff.js";
 import { type RunContext, type Task, writeJson } from "./context.js";
 import type { PackageStatus } from "./dag.js";
@@ -29,6 +29,15 @@ export interface RunState {
   step: RunStep;
   result: RunResultKind | null;
   reason: string;
+  /**
+   * Machine-readable cause of this stop and the one permitted recovery action (`factory resume`,
+   * the worker and `factory status` read this, never the reason text). Absent on a running or
+   * finished attempt and on stops written before #179: readers fail closed for those.
+   * Checkpoint, branch, worktree, PR and spent budgets stay on this state (and on result.json).
+   * `stop` does not copy them. A stored cause never grants merge permission — risk, protected
+   * paths, pause, issue revision, model-family separation, reviewed SHA and required checks stay authoritative.
+   */
+  stop?: RunStop;
   branch: string | null;
   worktree: string | null;
   base_sha: string | null;

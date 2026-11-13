@@ -1,4 +1,4 @@
-import type { FactoryEvent } from "../events.js";
+import type { FactoryEvent, StopCause } from "../events.js";
 import type { RunRecord } from "../runs.js";
 
 /**
@@ -16,8 +16,22 @@ const HUMAN = /needs_human|needs_input|needs-decision|needs a decision|human_rev
 const REPAIR = /\bformat\b|\blint\b|\btypecheck\b|\brepair\b|gate fail|formatter/i;
 const ROUND_NOTE = /^(replan|retry|review round|review)\b/i;
 
+/** Wait class of a machine-readable stop cause. `unknown` has no class: the text fallback stays honest. */
+const CLASS_BY_CAUSE: Partial<Record<StopCause, WaitClass>> = {
+  technical_repair: "technical_repair",
+  // Spent budgets are not a mechanical retry. A person must decide; #179 does not grant a reset.
+  budget_exhausted: "human_decision",
+  transient_retry: "provider",
+  // Explicit usage-window reset, not a generic 429. No reset is scheduled in #179.
+  provider_window_wait: "provider",
+  explicit_decision: "human_decision",
+  human_approval: "human_decision",
+};
+
 /** Classify one stored reason. An empty reason is unclassified and is not a zero wait. */
-export function classifyWait(reason: string, result?: string): WaitClass {
+export function classifyWait(reason: string, result?: string, cause?: StopCause): WaitClass {
+  // A stored cause is machine-readable and wins; `unknown` and legacy stops fall back to the text.
+  if (cause && CLASS_BY_CAUSE[cause]) return CLASS_BY_CAUSE[cause]!;
   const text = reason.trim();
   if (ROUND_NOTE.test(text)) return "unclassified";
   if (DEPENDENCY.test(text)) return "dependency";

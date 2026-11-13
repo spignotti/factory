@@ -11,6 +11,7 @@ import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { protectedFiles } from "../gates/builtin.js";
 import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
 import type { HostSteps } from "../schemas/plan.js";
+import type { StopCause } from "../events.js";
 import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { closesFooter, fulfilledIssues } from "../queue/admit.js";
@@ -26,6 +27,8 @@ import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 export interface FinalizeInput {
   result: "done" | "needs_human";
   reason: string;
+  /** Cause of the loop stop; finalize overrides it where it stops the run itself. */
+  cause?: StopCause;
   rounds: number;
   findings: TrackedFinding[];
   packages: Map<string, PackageStatus>;
@@ -75,6 +78,8 @@ export function protectedSection(ctx: Pick<RunContext, "plan">, files: string[],
 export interface FinalizeOutput {
   result: "done" | "needs_human" | "locked";
   reason: string;
+  /** Machine-readable cause when this run stops; absent on `done` and `locked`. Never a merge permission. */
+  cause?: StopCause;
   risk: RiskAssessment;
   mergePolicy: MergePolicy;
   pr: string | null;
@@ -96,12 +101,38 @@ function skippedField(gates: GateReport | undefined): { skipped_gates?: string[]
   return skipped_gates.length ? { skipped_gates } : {};
 }
 
+/** Why `syncBase` did not land a green tree. Callers map this; they do not parse `reason`. */
+export type SyncFailureKind = "conflict" | "ambiguous" | "gates";
+
+export type SyncBaseResult =
+  | { ok: true; reason: ""; gates?: GateReport }
+  | { ok: false; reason: string; failure: SyncFailureKind; gates?: GateReport };
+
+/**
+ * A non-empty unmerged-path list is a real conflict with foreign changes: a person must decide.
+ * A merge that failed without that list is ambiguous and fails closed. Not a text match.
+ */
+export function stopCauseForMergeFailure(conflicts: readonly string[]): StopCause {
+  return conflicts.length > 0 ? "explicit_decision" : "unknown";
+}
+
+/**
+ * Map a structured sync failure. A timeout is inconclusive, not a repair permission.
+ * Red gates after a clean merge stay a mechanical repair. Conflicts are an explicit decision.
+ */
+export function stopCauseForSyncFailure(kind: SyncFailureKind, gates?: { checks: { status: string }[] }): StopCause {
+  if (kind === "conflict") return "explicit_decision";
+  if (kind === "ambiguous") return "unknown";
+  if (gates?.checks.some((c) => c.status === "timeout")) return "unknown";
+  return "technical_repair";
+}
+
 /**
  * Base moved since intake → merge the base into the branch (as git.author; never a rebase, so the
- * branch never needs a force-push) and re-run the full gates. Conflict (merge aborted) or red gates
- * → needs_human.
+ * branch never needs a force-push) and re-run the full gates. A conflict with those foreign commits,
+ * an ambiguous merge failure, or red gates → needs_human. The failure kind is structured.
  */
-export async function syncBase(ctx: RunContext, step = "finalize"): Promise<{ ok: boolean; reason: string; gates?: GateReport }> {
+export async function syncBase(ctx: RunContext, step = "finalize"): Promise<SyncBaseResult> {
   const ref = await baseRef(ctx.repoDir, ctx.repo.base_branch);
   const current = await revParse(ctx.repoDir, ref);
   if (current === ctx.baseSha || (await isAncestor(ctx.worktree, current))) {
@@ -113,13 +144,17 @@ export async function syncBase(ctx: RunContext, step = "finalize"): Promise<{ ok
   if (!merged.ok) {
     ctx.events.emit({ step, event: "progress", data: { merge_conflict: merged.conflicts } });
     const where = merged.conflicts.length ? `merge conflict in ${merged.conflicts.join(", ")}` : `merge failed: ${merged.error.slice(0, 200)}`;
-    return { ok: false, reason: `base ${ctx.repo.base_branch} moved (${current.slice(0, 8)}): ${where}` };
+    return {
+      ok: false,
+      failure: merged.conflicts.length > 0 ? "conflict" : "ambiguous",
+      reason: `base ${ctx.repo.base_branch} moved (${current.slice(0, 8)}): ${where}`,
+    };
   }
   ctx.baseSha = current;
   const gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
   return gates.green
     ? { ok: true, reason: "", gates }
-    : { ok: false, reason: baseSyncFailureReason(ctx.repo.base_branch, gates), gates };
+    : { ok: false, failure: "gates", reason: baseSyncFailureReason(ctx.repo.base_branch, gates), gates };
 }
 
 /** Why a post-merge gate run did not go green. A timeout is named as inconclusive, not as a red base. */
@@ -335,6 +370,8 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   let result = input.result;
   let reason = input.reason;
   let gates = input.gates;
+  // The cause travels with the stop; every site that flips the run to needs_human names why.
+  let cause: StopCause | undefined = result === "needs_human" ? input.cause : undefined;
   if (result === "done") {
     gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
     if (!gates.green) {
@@ -343,6 +380,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       else {
         result = "needs_human";
         reason = fixed.reason;
+        cause = fixed.cause;
       }
     }
   }
@@ -352,6 +390,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     if (!synced.ok) {
       result = "needs_human";
       reason = synced.reason;
+      cause = stopCauseForSyncFailure(synced.failure, synced.gates);
     }
   }
 
@@ -364,6 +403,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       if (!delta.ok) {
         result = "needs_human";
         reason = delta.reason;
+        cause = delta.cause;
       } else reviewedSha = delta.reviewedSha;
     }
   }
@@ -400,7 +440,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         } catch (e) {
           const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
           ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-          return { result: "needs_human", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
+          return { result: "needs_human", cause: "unknown", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
         }
       }
       return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft, ...(reviewedSha ? { reviewedSha } : {}) };
@@ -409,11 +449,13 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       githubClaimError = `PR step failed: ${claim.reason.slice(0, 300)}`;
       reason = result === "done" ? githubClaimError : `${reason}; ${githubClaimError}`;
       result = "needs_human";
+      cause = "unknown";
       policy = "human_review";
       blockPush = true;
     } else if (!claim.ok) {
       result = "needs_human";
       reason = claim.reason;
+      cause = "unknown";
       policy = "human_review";
       blockPush = true;
     }
@@ -440,12 +482,12 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
+      return { result: "needs_human", cause: "unknown", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
   }
   if (githubClaimError) {
     ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: githubClaimError } });
-    return { result: "needs_human", reason, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
+    return { result: "needs_human", cause: "unknown", reason, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
@@ -552,6 +594,10 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           if (selfMergePolicy(policy)) continuation = { kind: "ci", sha: head };
           result = "needs_human";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
+          // A self-merge policy may repair this head. A protected or other human_review stop is an
+          // approval: continuation stays unset, and the cause is not a technical recovery.
+          // Neither cause grants merge permission.
+          cause = selfMergePolicy(policy) ? "technical_repair" : "human_approval";
           const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr, draft: false });
           draft = held.draft;
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
@@ -579,6 +625,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       if (pause && result === "done") {
         // The queue asked this run to stop. A green head is not a reason to merge.
         result = "needs_human";
+        cause = "human_approval";
         reason = `paused: ${pause}; resume with \`factory resume ${ctx.runId}\``;
         const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr!, draft: false });
         draft = held.draft;
@@ -601,7 +648,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
+      return { result: "needs_human", cause: "unknown", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
@@ -612,6 +659,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ...out,
     result,
     reason,
+    ...(result === "done" ? {} : { cause: cause ?? "unknown" }),
     mergePolicy: policy,
     pr,
     draft,

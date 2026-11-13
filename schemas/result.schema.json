@@ -105,6 +105,136 @@
     "reason": {
       "type": "string"
     },
+    "stop": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "technical_repair"
+            },
+            "action": {
+              "type": "string",
+              "const": "repair"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "transient_retry"
+            },
+            "action": {
+              "type": "string",
+              "const": "retry"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "provider_window_wait"
+            },
+            "action": {
+              "type": "string",
+              "const": "wait"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "explicit_decision"
+            },
+            "action": {
+              "type": "string",
+              "const": "decide"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "human_approval"
+            },
+            "action": {
+              "type": "string",
+              "const": "approve"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "budget_exhausted"
+            },
+            "action": {
+              "type": "string",
+              "const": "decide"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "unknown"
+            },
+            "action": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "cause",
+            "action"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "outcome": {
       "type": "object",
       "properties": {

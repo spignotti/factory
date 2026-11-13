@@ -5,6 +5,7 @@ import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { ReviewOutput } from "../schemas/review.js";
 import { blockedRepairReason, clearRepair, ensureBudget, recoverRedGates } from "./recovery.js";
+import type { StopCause } from "../events.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
 import { dropStrayHandoff, gitAuthor, handoffShape, implementerTurn } from "../steps/implement.js";
 import { evaluateRound } from "../steps/evaluate.js";
@@ -17,6 +18,8 @@ import { invalidateAffected, reviewCoversHead } from "./review-bind.js";
 export interface LoopOutcome {
   result: "done" | "needs_human";
   reason: string;
+  /** Machine-readable cause when this outcome stops the run; absent on `done`. */
+  cause?: StopCause;
   rounds: number;
   findings: TrackedFinding[];
   gates?: GateReport;
@@ -49,9 +52,9 @@ export async function fixStep(
   label: string,
   input: { open: TrackedFinding[]; gates?: GateReport; tier?: "fast" | "full" },
   state: FixState,
-): Promise<{ ok: true; gates: GateReport } | { ok: false; reason: string }> {
+): Promise<{ ok: true; gates: GateReport } | { ok: false; reason: string; cause: StopCause }> {
   const blocked = await blockedRepairReason(ctx);
-  if (blocked) return { ok: false, reason: blocked };
+  if (blocked) return { ok: false, reason: blocked.reason, cause: blocked.cause };
   if (ctx.budget) state.gateFailures = ctx.budget.gateAttempts;
   await stageAll(ctx.worktree);
   const diff = await diffText(ctx.worktree, ctx.baseSha);
@@ -79,7 +82,7 @@ export async function fixStep(
   ].filter(Boolean).join("\n\n");
   if (input.gates && !input.gates.green) {
     const prepared = await recoverRedGates(ctx, input.gates, { tier, packages, spend: false });
-    if (prepared.action === "stop") return { ok: false, reason: prepared.reason };
+    if (prepared.action === "stop") return { ok: false, reason: prepared.reason, cause: prepared.cause };
     if (prepared.action === "green") return commitFix(prepared.gates);
     const timeoutNote = prepared.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
@@ -95,7 +98,7 @@ export async function fixStep(
       prompt,
       validate: (h) => validateResponses(h, input.open),
     });
-    if (!turn.handoff) return { ok: false, reason: `invalid fix handoff: ${turn.errors.join("; ")}` };
+    if (!turn.handoff) return { ok: false, reason: `invalid fix handoff: ${turn.errors.join("; ")}`, cause: "technical_repair" };
     const handoff = turn.handoff;
     writeJson(ctx, `handoff-fix-${label}.json`, handoff);
     const pkg = `fix-${label}`;
@@ -109,7 +112,7 @@ export async function fixStep(
     const recovered = await recoverRedGates(ctx, gates, { tier, packages, spend: true });
     state.gateFailures = ensureBudget(ctx).gateAttempts;
     if (recovered.action === "green") return commitFix(recovered.gates);
-    if (recovered.action === "stop") return { ok: false, reason: recovered.reason };
+    if (recovered.action === "stop") return { ok: false, reason: recovered.reason, cause: recovered.cause };
     const timeoutNote = recovered.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
       : "";
@@ -163,16 +166,16 @@ function applyPlanSettlement(ctx: RunContext, findings: TrackedFinding[]): strin
 export async function reviewDelta(
   ctx: RunContext,
   input: { round: number; gates: GateReport; findings: TrackedFinding[]; reviewedSha: string },
-): Promise<{ ok: true; findings: TrackedFinding[]; reviewedSha: string } | { ok: false; reason: string; findings: TrackedFinding[] }> {
+): Promise<{ ok: true; findings: TrackedFinding[]; reviewedSha: string } | { ok: false; reason: string; cause: StopCause; findings: TrackedFinding[] }> {
   const delta = await changedFiles(ctx.worktree, input.reviewedSha);
   const prior = invalidateAffected(input.findings, delta);
   const reviews = await reviewRound(ctx, { round: input.round, gates: input.gates, findings: prior, lastReviewedSha: input.reviewedSha });
   const merged = mergeRound(prior, input.round, reviews, ctx.repo.review.max_nits);
   const dispute = applyPlanSettlement(ctx, merged.findings);
-  if (dispute) return { ok: false, reason: dispute, findings: merged.findings };
+  if (dispute) return { ok: false, reason: dispute, cause: "explicit_decision", findings: merged.findings };
   const openBugs = openFindings(merged.findings).filter((f) => f.severity === "bug");
   if (openBugs.length) {
-    return { ok: false, reason: `open bug on the final tree: ${openBugs.map((b) => b.claim).join("; ")}`, findings: merged.findings };
+    return { ok: false, reason: `open bug on the final tree: ${openBugs.map((b) => b.claim).join("; ")}`, cause: "technical_repair", findings: merged.findings };
   }
   return { ok: true, findings: merged.findings, reviewedSha: await headSha(ctx.worktree) };
 }
@@ -201,6 +204,7 @@ export async function reviewLoop(
       return {
         result: "needs_human",
         reason: `open bug on the reviewed commit: ${openBugs.map((b) => `${b.id}: ${b.claim}`).join("; ")}`,
+        cause: "technical_repair",
         rounds: heldRounds,
         findings,
         gates,
@@ -224,7 +228,7 @@ export async function reviewLoop(
     const open = openFindings(findings);
     opts.onRound?.(round, findings, lastReviewedSha);
     if (dispute) {
-      return { result: "needs_human", reason: dispute, rounds: round, findings, gates, reviewedSha: lastReviewedSha };
+      return { result: "needs_human", reason: dispute, cause: "explicit_decision", rounds: round, findings, gates, reviewedSha: lastReviewedSha };
     }
     const decision = decideExit({ round: round - firstRound + 1, maxRounds, stalemate: isStalemate(merged), open });
     ctx.events.emit({
@@ -232,10 +236,15 @@ export async function reviewLoop(
       event: "round_finished",
       data: { round, head: lastReviewedSha, review_skipped: skipReview, open: open.length, open_bugs: open.filter((f) => f.severity === "bug").length, added: merged.added.length, dropped: merged.dropped, decision },
     });
-    if (decision.action !== "fix") return { result: decision.action, reason: decision.reason, rounds: round, findings, gates, reviewedSha: lastReviewedSha };
+    if (decision.action !== "fix") {
+      // The exit rule is machine-readable: a stalemate is a human decision, open bugs past the
+      // round budget are a spent budget; both keep the checkpoint, neither grants merge permission.
+      const cause: StopCause | undefined = decision.action === "needs_human" ? (decision.rule === 1 ? "explicit_decision" : "budget_exhausted") : undefined;
+      return { result: decision.action, reason: decision.reason, ...(cause ? { cause } : {}), rounds: round, findings, gates, reviewedSha: lastReviewedSha };
+    }
 
     const fixed = await fixStep(ctx, String(round), { open }, state);
-    if (!fixed.ok) return { result: "needs_human", reason: fixed.reason, rounds: round, findings, gates, reviewedSha: lastReviewedSha };
+    if (!fixed.ok) return { result: "needs_human", reason: fixed.reason, cause: fixed.cause, rounds: round, findings, gates, reviewedSha: lastReviewedSha };
     gates = fixed.gates;
   }
 }

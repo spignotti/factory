@@ -5,7 +5,7 @@ import { IncompletePrListError, type BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
 import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, TransientAgentError } from "../agents/models.js";
-import { type Clock, EventLog, type RunResult, type RunResultKind, secretValues, writeResult } from "../events.js";
+import { type Clock, EventLog, type RunResult, type RunResultKind, type RunStop, type StopCause, secretValues, writeResult } from "../events.js";
 import { isCommandTimeout, sh, tail } from "../exec.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse, withRepoGitOps } from "../git.js";
 import { Interrupted } from "../interrupt.js";
@@ -13,7 +13,7 @@ import { PlanSchema, type Plan } from "../schemas/plan.js";
 import { loadRepoConfig, parseRepoConfig, REPO_CONFIG_PATH, type RepoConfig } from "../schemas/repo.js";
 import { withRepoModels } from "../config.js";
 import { briefing, canonicalRepoId, flushMemory, loadMemory, observations } from "../memory.js";
-import { finalize, syncBase } from "../steps/finalize.js";
+import { finalize, stopCauseForMergeFailure, stopCauseForSyncFailure, syncBase } from "../steps/finalize.js";
 import { ensurePrDraft } from "../steps/pr-draft.js";
 import { baseCheckOutcome, type GateReport, runChecks, runGates } from "../steps/gates.js";
 import { gitAuthor, implementPackages } from "../steps/implement.js";
@@ -29,8 +29,8 @@ import { admissionBlock } from "../queue/admit.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
-import { budgetFrom, budgetTo, MAX_CONTINUATIONS, missingPlanQuotes, openPrProblem } from "./recovery.js";
-import { buildOutcome, buildProvenance, implementModel, nextAttempt, writeRecoveryNote } from "./outcome.js";
+import { budgetFrom, budgetTo, MAX_CONTINUATIONS, missingPlanQuotes, openPrProblem, stopCauseForBudget } from "./recovery.js";
+import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
@@ -212,7 +212,7 @@ async function ensurePathClaim(
       }
       f.release?.();
       f.release = undefined;
-      f.set({ result: "needs_human", reason: `PR step failed: ${(e as Error).message.slice(0, 300)}` });
+      f.set({ result: "needs_human", reason: `PR step failed: ${(e as Error).message.slice(0, 300)}`, stop: stopFor("unknown") });
       return false;
     }
     if (hits.length) {
@@ -253,6 +253,12 @@ function bindLockWait(f: RunFrame, ctx: RunContext): void {
 interface Outcome {
   result: RunResultKind;
   reason: string;
+  /**
+   * Machine-readable stop cause and permitted recovery action (issue #179). Set wherever the stop
+   * site knows its real cause. Never carries merge permission: risk, protected paths, pause, issue
+   * revision, model-family separation, reviewed SHA and required checks stay authoritative.
+   */
+  stop?: RunStop;
   type: RunResult["type"];
   risk: RunResult["risk"];
   /** `riskClass` reasons. Absent until finalize classifies the diff. */
@@ -315,12 +321,18 @@ class RunFrame {
         // Provider timeout/drop/capacity, retries used up: the run is fine, the provider was not. Resumable;
         // the uncommitted leftovers are the agent's (not a human fix), so resume discards them.
         if (this.state) this.state.transient = true;
-        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}` });
+        // Capacity, network and stream drops are the same bounded retry. A usage-window reset is
+        // `provider_window_wait` and is not inferred from 429; #177 supplies that metadata.
+        // The run, checkpoint and spent budgets stay. #179 does not schedule a window reset.
+        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("transient_retry") });
       } else if (e instanceof WallTimeExceeded) {
         // The work so far stays in the worktree; resume re-runs the gates over it and continues.
-        this.set({ result: "needs_human", reason: this.state?.worktree ? `${reason}; factory resume ${this.runId}` : reason });
-      } else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError || e instanceof EnvMissing) {
-        this.set({ result: "needs_human", reason });
+        this.set({ result: "needs_human", reason: this.state?.worktree ? `${reason}; factory resume ${this.runId}` : reason, stop: stopFor("budget_exhausted") });
+      } else if (e instanceof EnvMissing) {
+        this.set({ result: "needs_human", reason, stop: stopFor("human_approval") });
+      } else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError) {
+        // Not classifiable without a diagnosis: fail closed, no automatic recovery is implied.
+        this.set({ result: "needs_human", reason, stop: stopFor("unknown") });
       } else this.set({ result: "failed", reason });
     }
     for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
@@ -386,6 +398,7 @@ class RunFrame {
       minutes: Math.round(((this.now() - this.startedAt) / 60_000) * 10) / 10,
       cost_usd: Math.round(this.events.totals.cost_usd * 10_000) / 10_000,
       reason: out.reason,
+      ...(out.stop ? { stop: out.stop } : {}),
       ...(outcome ? { outcome } : {}),
       provenance,
       ...(this.events.diffCount ?? {}),
@@ -400,6 +413,9 @@ class RunFrame {
     if (this.state) {
       this.state.result = result.result;
       this.state.reason = result.reason;
+      // One attempt's cause describes only that attempt: a finished or unclassified end clears it.
+      if (out.stop) this.state.stop = out.stop;
+      else delete this.state.stop;
       this.save();
     }
     return writeResult(join(this.runDir, "result.json"), result, this.events.secrets);
@@ -465,13 +481,13 @@ async function openSecrets(f: RunFrame, repo: RepoConfig, repoDir: string, deps:
     s = await resolveSecrets(repo.secrets, { repoDir, factoryHome: deps.factoryHome, parentEnv: deps.parentEnv });
   } catch (e) {
     if (!(e instanceof SecretsError)) throw e;
-    f.set({ result: "needs_human", reason: `secrets: ${e.message}` });
+    f.set({ result: "needs_human", reason: `secrets: ${e.message}`, stop: stopFor("human_approval") });
     return undefined;
   }
   f.events.addSecrets(s.redact);
   f.events.emit({ step, event: "progress", data: { secrets: { provider: repo.secrets.provider, resolved: Object.keys(s.env).length, missing: s.missing } } });
   if (s.missing.length) {
-    f.set({ result: "needs_human", reason: `secrets not resolved: ${s.missing.join(", ")} (see factory doctor --repo)` });
+    f.set({ result: "needs_human", reason: `secrets not resolved: ${s.missing.join(", ")} (see factory doctor --repo)`, stop: stopFor("human_approval") });
     return undefined;
   }
   return s;
@@ -537,7 +553,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
       const pctx = { ...base, repoDir: planDir };
       return obtainPlan(pctx, resolvePlanEffort(opts.planEffort, task.labels));
     });
-    if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions });
+    if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions, stop: stopFor("explicit_decision") });
     if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
     const plan = planned.plan;
     f.set({ type: plan.type });
@@ -590,7 +606,7 @@ async function beginWork(
   const { deps, events, repo, deadline, repoDir, runDir, runId, task } = base;
   const st = f.state!;
   if (plan.type === "bug" && !repo.tests.run) {
-    return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR, then re-runs after the merge" });
+    return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR, then re-runs after the merge", stop: stopFor("human_approval") });
   }
   const stem = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
   const slot = f.lockSlot;
@@ -620,7 +636,7 @@ async function beginWork(
   if (repo.setup) {
     const setup = await sh(repo.setup, { cwd: worktree, env, timeoutMs: Math.max(1000, deadline.at - Date.now()), jail: jailFor(ctx, worktree) });
     checkDeadline(ctx);
-    if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}` });
+    if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}`, stop: stopFor("unknown") });
   }
   if (ciStatus === "none") {
     const fast = repo.checks.filter((c) => c.tier === "fast");
@@ -637,7 +653,7 @@ async function beginWork(
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
     const stop = baseCheckOutcome(results);
-    if (stop) return f.set(stop);
+    if (stop) return f.set(stop.result === "needs_human" ? { result: stop.result, reason: stop.reason, stop: stopFor("unknown") } : stop);
   }
   await advance(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
 }
@@ -758,15 +774,18 @@ export async function sweepBaseRed(deps: RunDeps, log?: (s: string) => void): Pr
 }
 
 /**
- * A queue pause marker stops at this step boundary: the worktree and plan stay, the PR is put back
- * to draft, and auto-merge is not reached. The process is not signalled.
+ * A queue pause marker stops before the next product edit: the worktree and plan stay, the PR is put
+ * back to draft, and auto-merge is not reached. The process is not signalled. The marker stays until
+ * a human clears it.
  */
-async function stopIfPaused(f: RunFrame, ctx: RunContext): Promise<boolean> {
-  const why = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
+async function stopIfPaused(f: RunFrame): Promise<boolean> {
+  if (!f.deps) return false;
+  const why = pauseRequested(f.deps.factoryHome, { runId: f.runId });
   if (!why) return false;
   const draftError = await keepDraft(f);
-  const reason = `paused: ${why}; resume with \`factory resume ${ctx.runId}\``;
-  f.set({ result: "needs_human", reason: draftError ? `${reason}; ${draftError}` : reason });
+  const reason = `paused: ${why}; resume with \`factory resume ${f.runId}\``;
+  // A pause is an operator order: only clearing it (a human action) may resume this run.
+  f.set({ result: "needs_human", reason: draftError ? `${reason}; ${draftError}` : reason, stop: stopFor("human_approval") });
   return true;
 }
 
@@ -776,7 +795,7 @@ async function stopIfPaused(f: RunFrame, ctx: RunContext): Promise<boolean> {
  */
 async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
   const st = f.state!;
-  if (await stopIfPaused(f, ctx)) return;
+  if (await stopIfPaused(f)) return;
   const sync = () => {
     st.lane = "standard";
     delete st.lane_escalation;
@@ -804,19 +823,21 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     sync();
     if (impl.needsInput) {
       const draftError = await keepDraft(f);
-      return f.set({ result: "needs_input", reason: draftError ? `bug without failing repro; ${draftError}` : "bug without failing repro", questions: impl.needsInput });
+      return f.set({ result: "needs_input", reason: draftError ? `bug without failing repro; ${draftError}` : "bug without failing repro", questions: impl.needsInput, stop: stopFor("explicit_decision") });
     }
     gates = impl.lastGates ?? gates;
     const failed = [...impl.status].filter(([, s]) => s !== "done").map(([id, s]) => `${id} ${s}${impl.failures[id] ? `: ${impl.failures[id]}` : ""}`);
     if (failed.length || !gates) {
-      loop = { result: "needs_human", reason: `packages not done: ${failed.join("; ")}`, rounds: st.rounds, findings: [], gates };
+      // The persisted repair state says what this stop means: a blocking class stays a human
+      // question, a spent gate budget is exhausted, otherwise the same checkpoint can be repaired.
+      loop = { result: "needs_human", reason: `packages not done: ${failed.join("; ")}`, cause: ctx.budget ? stopCauseForBudget(ctx.budget) : "technical_repair", rounds: st.rounds, findings: [], gates };
     } else {
       st.step = "review";
       sync();
     }
   }
   if (st.step === "review") {
-    if (await stopIfPaused(f, ctx)) return;
+    if (await stopIfPaused(f)) return;
     loop = await reviewLoop(ctx, gates!, {
       firstRound: st.rounds + 1,
       findings: st.findings,
@@ -835,7 +856,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   }
   loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates, reviewedSha: st.reviewed_sha };
 
-  if (await stopIfPaused(f, ctx)) return;
+  if (await stopIfPaused(f)) return;
   const fin = await finalize(ctx, {
     ...loop,
     packages: new Map(Object.entries(st.packages)),
@@ -856,7 +877,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   else delete st.continuation;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
-  f.set({ result: fin.result, reason: fin.reason, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
+  f.set({ result: fin.result, reason: fin.reason, ...(fin.cause && fin.result !== "done" ? { stop: stopFor(fin.cause) } : {}), risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
 }
 
 /**
@@ -991,12 +1012,15 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   });
 
   return f.execute(async () => {
+    // Before continuation bookkeeping and post-CI fixStep. A queued resume must not edit product
+    // while the pause marker exists; only a human clearing it may continue.
+    if (await stopIfPaused(f)) return;
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: previous } });
     const continuation = st.continuation;
     if (continuation) {
       if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
         delete st.continuation;
-        return f.set({ result: "needs_human", reason: `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS})` });
+        return f.set({ result: "needs_human", reason: `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS})`, stop: stopFor("budget_exhausted") });
       }
       st.continuation_attempts = (st.continuation_attempts ?? 0) + 1;
       delete st.continuation;
@@ -1008,12 +1032,12 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
         const issue = await deps.github.getIssue(st.repo, st.task.issue);
         const block = admissionBlock(issue);
         if (block || st.task.text !== `# ${issue.title}\n\n${issue.body}`) {
-          return f.set({ result: "needs_human", reason: `automatic continuation refused: ${block ?? "issue text changed"}` });
+          return f.set({ result: "needs_human", reason: `automatic continuation refused: ${block ?? "issue text changed"}`, stop: stopFor("explicit_decision") });
         }
       }
       // Automatic recovery must not turn another person's uncommitted work into a bot commit.
       if ((await git(st.worktree!, ["status", "--porcelain"])).trim()) {
-        return f.set({ result: "needs_human", reason: "automatic continuation refused: worktree has uncommitted changes" });
+        return f.set({ result: "needs_human", reason: "automatic continuation refused: worktree has uncommitted changes", stop: stopFor("explicit_decision") });
       }
     }
     const repo = st.base_sha ? await baseRepoConfig(st.repo, st.base_sha, loadRepoConfig(st.repo), events, "resume") : loadRepoConfig(st.repo);
@@ -1055,7 +1079,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     f.save();
     if (!ready.ok) {
       const draftError = await keepDraft(f);
-      return f.set({ result: "needs_human", reason: draftError ? `${ready.reason}; ${draftError}` : ready.reason });
+      return f.set({ result: "needs_human", reason: draftError ? `${ready.reason}; ${draftError}` : ready.reason, ...(ready.cause ? { stop: stopFor(ready.cause) } : {}) });
     }
     let gates = ready.gates;
     if (continuation?.kind === "ci") {
@@ -1063,24 +1087,24 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
       // A base merge or remote update makes the saved CI diagnosis apply to a different tree.
       // Do not fall through to a generic product edit.
       if (currentHead !== continuation.sha) {
-        return f.set({ result: "needs_human", reason: "post-CI repair refused: head moved before diagnosis; no product edit" });
+        return f.set({ result: "needs_human", reason: "post-CI repair refused: head moved before diagnosis; no product edit", stop: stopFor("unknown") });
       }
       const baseCi = await deps.github.baseStatus(ctx.repoDir, ctx.baseSha);
-      if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit" });
+      if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit", stop: stopFor("unknown") });
       const failures = await deps.github.headFailures(ctx.repoDir, continuation.sha);
-      if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit" });
+      if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit", stop: stopFor("unknown") });
       const ciGates: GateReport = { n: ctx.gateCount, tier: "full", green: false, changed_files: [], scope_report: [],
         checks: failures.map((c) => ({ ...c, output_tail: events.redact(c.output_tail), kind: "check", status: "fail", duration_ms: 0 })) };
       writeJson(ctx, `ci-failure-${st.continuation_attempts}.json`, { sha: continuation.sha, ...ciGates });
       const fixed = await fixStep(ctx, "post-ci", { open: [], gates: ciGates, tier: "full" }, { gateFailures: 0 });
-      if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}` });
+      if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}`, stop: stopFor(fixed.cause) });
       gates = fixed.gates;
     }
     if (gates && !gates.green) {
       const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });
       if (!fixed.ok) {
         const draftError = await keepDraft(f);
-        return f.set({ result: "needs_human", reason: draftError ? `resume: ${fixed.reason}; ${draftError}` : `resume: ${fixed.reason}` });
+        return f.set({ result: "needs_human", reason: draftError ? `resume: ${fixed.reason}; ${draftError}` : `resume: ${fixed.reason}`, stop: stopFor(fixed.cause) });
       }
       gates = fixed.gates;
     }
@@ -1090,12 +1114,13 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
   });
 }
 
-type Ready = { ok: true; gates?: GateReport } | { ok: false; reason: string };
+type Ready = { ok: true; gates?: GateReport } | { ok: false; reason: string; cause: StopCause };
 
 /** Re-validation before a resumed run continues. */
 async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["result"]): Promise<Ready> {
   const { worktree: wt, branch } = ctx;
-  const fail = (reason: string): Ready => ({ ok: false, reason: `resume: ${reason}` });
+  // Without a diagnosis the re-validation stop fails closed: unknown, no automatic recovery.
+  const fail = (reason: string, cause: StopCause = "unknown"): Ready => ({ ok: false, reason: `resume: ${reason}`, cause });
   if (!existsSync(wt)) return fail(`worktree ${wt} is missing`);
   const head = (await git(wt, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (head !== branch) return fail(`worktree is on ${head}, expected ${branch}`);
@@ -1107,7 +1132,7 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
       return fail(`issue #${ctx.task.issue} could not be read (${(e as Error).message.slice(0, 160)}); kept the checkpoint plan`);
     }
     const missing = missingPlanQuotes(issue.body, ctx.plan);
-    if (missing.length) return fail(`issue #${ctx.task.issue} dropped a planned quote (${missing[0]!.slice(0, 80)}); kept the checkpoint plan, not a new one`);
+    if (missing.length) return fail(`issue #${ctx.task.issue} dropped a planned quote (${missing[0]!.slice(0, 80)}); kept the checkpoint plan, not a new one`, "explicit_decision");
   }
   const openPr = st.pr ? await ctx.deps.github.findOpenPr(ctx.worktree, branch) : null;
   const prProblem = openPrProblem(st.pr, openPr, branch);
@@ -1135,12 +1160,18 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
     });
     if (fetched && !(await isAncestor(wt, remote))) {
       const merged = await mergeRef(wt, remote, `chore: merge origin/${branch}`, gitAuthor(ctx));
-      if (!merged.ok) return fail(`commits on origin/${branch} conflict with the worktree in ${merged.conflicts.join(", ") || merged.error.slice(0, 200)}`);
+      if (!merged.ok) return fail(`commits on origin/${branch} conflict with the worktree in ${merged.conflicts.join(", ") || merged.error.slice(0, 200)}`, stopCauseForMergeFailure(merged.conflicts));
       ctx.events.emit({ step: "resume", event: "progress", data: { remote_branch_merged: await headSha(wt) } });
     }
   }
   const synced = await syncBase(ctx, "resume");
-  if (!synced.ok && !synced.gates) return fail(synced.reason);
+  if (!synced.ok) {
+    const cause = stopCauseForSyncFailure(synced.failure, synced.gates);
+    // A clean merge whose gates are actually red can be repaired. A conflict, an ambiguous
+    // merge failure and an inconclusive timeout cannot, and they do not widen merge permission.
+    if (synced.failure === "gates" && cause === "technical_repair" && synced.gates) return { ok: true, gates: synced.gates };
+    return fail(synced.reason, cause);
+  }
   if (synced.gates) return { ok: true, gates: synced.gates };
   const done = st.step === "implement" ? Object.keys(st.packages).filter((id) => st.packages[id] === "done") : ctx.plan.packages.map((p) => p.id);
   if (done.length === 0) return { ok: true };

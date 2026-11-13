@@ -2,6 +2,7 @@ import { formatterWriteCommand } from "../adopt/mutation.js";
 import { sh } from "../exec.js";
 import { headSha } from "../git.js";
 import type { Check } from "../schemas/repo.js";
+import type { StopCause } from "../events.js";
 import { commandEnv, jailFor, type RunContext } from "./context.js";
 import { failureSummary, type GateReport, runGates, withEnvCommand } from "../steps/gates.js";
 
@@ -64,6 +65,26 @@ export function clearRepair(budget: RepairBudget): void {
 /** A class the implementer must not "fix" by editing product code. */
 export function blocksProductEdit(cls: RepairClass | undefined): boolean {
   return cls === "unknown" || cls === "config" || cls === "infra" || cls === "base";
+}
+
+/**
+ * What the stored stop cause says about a diagnosed failure class: config and base need a human
+ * decision or approval, infra is retried without a product edit, unknown fails closed, format and
+ * code are mechanical repair. Spent fix-class budgets are `budget_exhausted`, not `technical_repair`.
+ */
+export function stopCauseForClass(cls: RepairClass): StopCause {
+  switch (cls) {
+    case "config":
+    case "base":
+      return "human_approval";
+    case "infra":
+      return "transient_retry";
+    case "unknown":
+      return "unknown";
+    case "format":
+    case "code":
+      return "technical_repair";
+  }
 }
 
 const CODE = /\bSyntaxError\b|\bAssertionError\b|\bTypeError\b|\bReferenceError\b|not ok \d|✖|ERR_ASSERT|Assertion failed|\bExpected\b|^FAILED\s+\S+::/im;
@@ -212,7 +233,7 @@ async function explain(ctx: RunContext, cls: RepairClass, budget: RepairBudget, 
   });
 }
 
-export type Recovery = { action: "green"; gates: GateReport } | { action: "retry"; gates: GateReport } | { action: "stop"; gates: GateReport; reason: string };
+export type Recovery = { action: "green"; gates: GateReport } | { action: "retry"; gates: GateReport } | { action: "stop"; gates: GateReport; reason: string; cause: StopCause };
 
 /**
  * One mechanical format attempt, then at most one infrastructure rerun, then either a counted
@@ -251,19 +272,19 @@ export async function recoverRedGates(
   if (blocksProductEdit(cls)) {
     budget.gateAttempts += 1;
     ctx.persist?.();
-    return { action: "stop", gates: current, reason: await explain(ctx, cls, budget, current) };
+    return { action: "stop", gates: current, cause: stopCauseForClass(cls), reason: await explain(ctx, cls, budget, current) };
   }
   if (!opts.spend) {
     ctx.persist?.();
     if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) {
-      return { action: "stop", gates: current, reason: await explain(ctx, cls, budget, current) };
+      return { action: "stop", gates: current, cause: "budget_exhausted", reason: await explain(ctx, cls, budget, current) };
     }
     return { action: "retry", gates: current };
   }
   budget.gateAttempts += 1;
   ctx.persist?.();
   if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) {
-    return { action: "stop", gates: current, reason: await explain(ctx, cls, budget, current) };
+    return { action: "stop", gates: current, cause: "budget_exhausted", reason: await explain(ctx, cls, budget, current) };
   }
   return { action: "retry", gates: current };
 }
@@ -273,11 +294,22 @@ export function ensureBudget(ctx: { budget?: RepairBudget }): RepairBudget {
   return ctx.budget;
 }
 
+/**
+ * Cause for a stop that comes out of the implement/fix machinery without its own diagnosis:
+ * a blocking persisted class keeps its human/infra/unknown meaning, a spent gate budget is
+ * exhausted, anything else stays a mechanical repair with the checkpoint kept.
+ */
+export function stopCauseForBudget(budget: Pick<RepairBudget, "gateAttempts" | "lastClass">): StopCause {
+  if (budget.lastClass && blocksProductEdit(budget.lastClass)) return stopCauseForClass(budget.lastClass);
+  if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) return "budget_exhausted";
+  return "technical_repair";
+}
+
 /** Resume of a blocking class must not call the implementer. Undefined when a fix turn is allowed. */
-export async function blockedRepairReason(ctx: RunContext): Promise<string | undefined> {
+export async function blockedRepairReason(ctx: RunContext): Promise<{ reason: string; cause: StopCause } | undefined> {
   const budget = ctx.budget;
   if (!budget?.lastClass || !blocksProductEdit(budget.lastClass)) return undefined;
-  return repairHandover({
+  const reason = repairHandover({
     cls: budget.lastClass,
     attempts: budget.gateAttempts,
     max: MAX_GATE_ATTEMPTS,
@@ -285,4 +317,5 @@ export async function blockedRepairReason(ctx: RunContext): Promise<string | und
     checkpoint: await checkpoint(ctx),
     next: nextStep(budget.lastClass),
   });
+  return { reason, cause: stopCauseForClass(budget.lastClass) };
 }

@@ -2,12 +2,14 @@ import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { GitHub, PrStatus } from "../gh.js";
 import { classifyWait, observeMerge, type WaitClass } from "../pipeline/accounting.js";
-import { readOutcome } from "../pipeline/outcome.js";
+import { readOutcome, stopCauseOf } from "../pipeline/outcome.js";
+import { MAX_CONTINUATIONS, MAX_GATE_ATTEMPTS } from "../pipeline/recovery.js";
 import { coverageOfRepo } from "../standards.js";
 import { activeHolders } from "../pipeline/lock.js";
 import { branchesHeldByLiveRuns, daysUnchanged, isStaleDraft, staleDraftDaysAt } from "../pipeline/path-claim.js";
 import { openAuditTickets } from "../proposals.js";
 import { loadRepoConfig } from "../schemas/repo.js";
+import type { StopCause } from "../events.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
@@ -46,6 +48,26 @@ function humanReviewReasons(input: { risk_reasons?: string[]; risk?: string | nu
   if (causes.has("protected paths")) out.push("protected paths");
   if (!out.length) out.push("human_review");
   return [...out, ...reasons];
+}
+
+/**
+ * Machine-readable recovery explanation for a stopped run: which bounded budgets are already
+ * spent, so `status` says when recovery is exhausted instead of leaving the reason text alone.
+ * Only the persisted stop cause and the persisted budget numbers are read, never free-text matching.
+ */
+function recoveryNote(st: { stop?: unknown; repair?: { gate_attempts?: number } | null; continuation_attempts?: number | null }): string {
+  const cause = stopCauseOf(st.stop);
+  if (!cause) return "";
+  const spent: string[] = [];
+  const cont = st.continuation_attempts ?? 0;
+  if (cont >= MAX_CONTINUATIONS) spent.push(`post-push repair ${cont}/${MAX_CONTINUATIONS}`);
+  const gates = st.repair?.gate_attempts ?? 0;
+  if (gates >= MAX_GATE_ATTEMPTS) spent.push(`gate repair ${gates}/${MAX_GATE_ATTEMPTS}`);
+  if (cause === "budget_exhausted") {
+    if (!spent.length) spent.push("wall-time or attempt budget");
+    return `; budgets spent (${spent.join(", ")}); not reset, explicit grant required`;
+  }
+  return spent.length ? `; recovery exhausted: ${spent.join(", ")}` : "";
 }
 
 function resultFinishedMs(run: RunRecord): number | undefined {
@@ -175,6 +197,8 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
   };
   const mergedLive = new Map<string, { run_id: string; pr: string; origin: "confirmed" | "unknown" }>();
   const closedLive = new Map<string, { run_id: string; pr: string }>();
+  // Stored causes of the current attempts, for brief classification (never the reason text).
+  const stopCauses = new Map<string, StopCause>();
   const prCache = new Map<string, Promise<PrStatus | Error>>();
   const loadPr = (repo: string, pr: string) => {
     if (!prCache.has(pr)) prCache.set(pr, opts.github.prStatus(repo, pr).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e)))));
@@ -239,8 +263,10 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
       }
     }
     if ((st.result === "needs_human" || st.result === "needs_input") && !closed && !st.gc_at) {
+      const cause = stopCauseOf(st.stop);
+      if (cause) stopCauses.set(r.run_id, cause);
       report.waiting.push({
-        run_id: r.run_id, repo: st.repo, task: taskOf(r), result: st.result, reason: st.reason,
+        run_id: r.run_id, repo: st.repo, task: taskOf(r), result: st.result, reason: st.reason + recoveryNote(st),
         questions: r.result?.questions ?? [], pr: st.pr, branch: st.branch, worktree: st.worktree,
       });
     }
@@ -282,7 +308,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
       // unreadable standards stay unknown rather than a zero
     }
   }
-  report.brief = buildBrief(report, runs, mergedLive, closedLive);
+  report.brief = buildBrief(report, runs, mergedLive, closedLive, stopCauses);
   return report;
 }
 
@@ -299,6 +325,7 @@ function buildBrief(
   runs: RunRecord[],
   mergedLive: Map<string, { run_id: string; pr: string; origin: "confirmed" | "unknown" }>,
   closedLive: Map<string, { run_id: string; pr: string }>,
+  stopCauses: Map<string, StopCause>,
 ): StatusReport["brief"] {
   const links = new Map(runs.map((run) => [run.run_id, artifactLine(run)]));
   const link = (id: string) => links.get(id) ?? id;
@@ -322,7 +349,7 @@ function buildBrief(
   };
   for (const row of report.queued) addWait("capacity", "waiting for lock", link(row.run_id));
   for (const row of report.stalled) addWait("unclassified", `no event for ${row.silent_minutes} min`, link(row.run_id));
-  for (const row of report.waiting) addWait(classifyWait(row.reason, row.result), row.reason || row.result, link(row.run_id));
+  for (const row of report.waiting) addWait(classifyWait(row.reason, row.result, stopCauses.get(row.run_id)), row.reason || row.result, link(row.run_id));
   for (const queue of report.queues) {
     for (const next of queue.next) {
       if (!next.reason) continue;

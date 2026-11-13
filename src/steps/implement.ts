@@ -158,7 +158,7 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "done", attempts } });
     };
     const blocked = await blockedRepairReason(ctx);
-    if (blocked) reason = blocked;
+    if (blocked) reason = blocked.reason;
     for (let guard = 0; !reason && guard < MAX_GATE_ATTEMPTS + 1; guard++) {
       const spent = ensureBudget(ctx).gateAttempts;
       if (spent >= MAX_GATE_ATTEMPTS) {
