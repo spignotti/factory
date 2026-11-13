@@ -152,6 +152,51 @@ export const StatusReportSchema = z.strictObject({
           questions: z.array(z.string()),
         }),
       ),
+      /**
+       * Interval-based ticket funnel and blocker breakdown (#185). The interval is the `--since`
+       * window ending at the read (`from`/`to` in UTC) plus the named timezone. A stored `confirmed`
+       * merge and a GitHub merge are counted apart; neither proves factory provenance
+       * (`factory_provenance` stays null). Open, queued, CI-pending and a bare `done` are not merges.
+       * Unreadable data stays in `unknowns`. `idle_slot_minutes` is null unless an event recorded it.
+       * An unreadable queue file leaves `offered_tickets` and `backlog_parked_before` null and increments
+       * `unknowns.queues`; a partial queue is not reported as a complete total.
+       */
+      funnel: z.strictObject({
+        interval: z.strictObject({ from: z.string(), to: z.string(), timezone: z.string() }),
+        offered_tickets: z.number().int().min(0).nullable(),
+        admitted_tickets: z.number().int().min(0),
+        attempts: z.number().int().min(0),
+        first_attempted_in_interval: z.number().int().min(0),
+        work_first_attempted_before: z.number().int().min(0),
+        backlog_parked_before: z.number().int().min(0).nullable(),
+        unknowns: z.strictObject({
+          tickets: z.number().int().min(0),
+          first_attempts: z.number().int().min(0),
+          merge_status: z.number().int().min(0),
+          outcomes: z.number().int().min(0),
+          queues: z.number().int().min(0),
+        }),
+        merges: z.strictObject({
+          confirmed: z.number().int().min(0),
+          github_only: z.number().int().min(0),
+          closed_without_merge: z.number().int().min(0),
+        }),
+        factory_provenance: z.null(),
+        ready_awaiting_approval: z.strictObject({ prs: z.number().int().min(0), tickets: z.number().int().min(0) }),
+        blocker_prs: z.number().int().min(0),
+        blockers: z.array(
+          z.strictObject({
+            reason: z.string(),
+            cls: z.enum(["dependency", "capacity", "ci_runner", "provider", "human_decision", "technical_repair", "unclassified"]),
+            prs: z.number().int().min(0),
+            tickets: z.number().int().min(0),
+          }),
+        ),
+        recovered_without_human: z.number().int().min(0),
+        idle_slot_minutes: z.number().nullable(),
+      })
+        /** Filled by `statusReport` after `sinceFinished`; null only if the funnel could not be built. */
+        .nullable(),
     })
     .nullable(),
   /**

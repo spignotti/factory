@@ -22,6 +22,18 @@ export interface QueueEntry {
   reason?: string;
   /** Times a transient `needs_human` sent this entry to the back. At most 2. */
   requeues?: number;
+  /**
+   * Epoch ms (issue #177): a parked provider-window entry becomes pending again at this time,
+   * without holding a coding slot. Cleared when the entry is released or parked for another reason.
+   */
+  wait_until?: number;
+  /**
+   * Epoch ms the provider announced its usage window resets. `wait_until` may be earlier (bounded
+   * periodic recheck); the release only happens after this time. Cleared with `wait_until`.
+   */
+  window_resets_at?: number;
+  /** Times this entry waited for a provider usage window. Bounded; a window reset does not give it back. */
+  window_waits?: number;
   /** Open factory PR numbers that overlap this run. Pending again once each is merged or closed. */
   blocked_by?: number[];
   /** Live factory runs whose claimed paths overlap this one. Pending again once each has finished. */
@@ -37,7 +49,7 @@ export interface QueueEntry {
   /** Hash of the issue title and body at the last start. A mismatch drops the saved plan. */
   issue_rev?: string;
   /**
-   * Written when a coding run reaches `done`. Absent on older entries: those stay unknown,
+   * Set when a coding run reaches `done`. Absent on older entries: those stay unknown,
    * even when `status` is `done` and `pr` is set. `merged: "no"` is not a confirmed merge.
    */
   delivery?: {
@@ -45,6 +57,11 @@ export interface QueueEntry {
     pr: string | null;
     attempts: number | null;
   };
+  /**
+   * Release the worker that started this run was running. A handoff can switch the worker while this
+   * run continues, so the version of live work is reported per entry, not per worker.
+   */
+  release_id?: string;
 }
 
 export interface QueueFile {
@@ -63,6 +80,9 @@ const EntrySchema = z.object({
   pr: z.string().optional(),
   reason: z.string().optional(),
   requeues: z.number().int().min(0).optional(),
+  wait_until: z.number().int().positive().optional(),
+  window_resets_at: z.number().int().positive().optional(),
+  window_waits: z.number().int().min(0).optional(),
   blocked_by: z.array(z.number().int().positive()).optional(),
   blocked_runs: z.array(z.string()).optional(),
   pid: z.number().int().optional(),
@@ -78,6 +98,7 @@ const EntrySchema = z.object({
       attempts: z.number().int().min(0).nullable(),
     })
     .optional(),
+  release_id: z.string().optional(),
 });
 
 const FileSchema = z.object({
@@ -200,6 +221,26 @@ export function summarizeQueue(q: QueueFile): QueueSummary {
       reason: e.reason ?? (e.after !== undefined && e.status === "pending" ? `after #${e.after}` : null),
     })),
   };
+}
+
+/**
+ * Queues a report can read. A corrupt file is skipped, as in `summarizeQueues`, and counted so a
+ * partial queue is not presented as a complete offered or parked-before total.
+ */
+export function loadReadableQueues(factoryHome: string): { queues: QueueFile[]; unreadable: number } {
+  const dir = queueDir(factoryHome);
+  if (!existsSync(dir)) return { queues: [], unreadable: 0 };
+  const queues: QueueFile[] = [];
+  let unreadable = 0;
+  for (const name of readdirSync(dir).sort()) {
+    if (!name.endsWith(".json") || name.startsWith(".")) continue;
+    try {
+      queues.push(parseQueue(readFileSync(join(dir, name), "utf8"), join(dir, name)));
+    } catch {
+      unreadable++;
+    }
+  }
+  return { queues, unreadable };
 }
 
 /** Unreadable files are skipped so `factory status` still prints. */

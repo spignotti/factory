@@ -8,6 +8,7 @@ import type { RunDeps } from "../../src/pipeline/context.js";
 import { acquireRepoLock } from "../../src/pipeline/lock.js";
 import { continueBaseRed } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
+import { requestPause } from "../../src/queue/pause.js";
 import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
 import type { AgentRequest } from "../../src/agents/runner.js";
 import { realSleep } from "../../src/agents/fake-runner.js";
@@ -777,6 +778,178 @@ ${fixed}` } };
     expect(r.github.autoMergeShas).toEqual([{ pr: r.result.pr, sha: r.github.remoteShas.get(r.result.branch!) }]);
     expect(r.github.drafted).toEqual([]);
     expect(r.slept).toEqual([]);
+  });
+
+  // Issue #183: GitHub refuses enablePullRequestAutoMerge when the PR is in clean status. That is not
+  // a failure: finalize must re-read live state and reconcile instead of stopping needs_human.
+  const CLEAN_STATUS = "gh pr merge failed: GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)";
+
+  it("clean-status refusal merges the approved green head with the repository's allowed method", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: false };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.enableAutoMerge = async () => {
+          throw new Error(CLEAN_STATUS);
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "green" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    const head = r.github.remoteShas.get(r.result.branch!)!;
+    expect(r.github.mergedNow).toEqual([{ pr: r.result.pr, sha: head, method: "squash" }]);
+    expect(r.github.drafted).toEqual([]);
+    expect(r.github.autoMergeDisabled).toEqual([]);
+  });
+
+  it("clean-status refusal on an already merged PR reconciles without a second merge or side effects", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: true };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.enableAutoMerge = async () => {
+          throw new Error(CLEAN_STATUS);
+        };
+        gh.prStatus = async () => ({ state: "merged", draft: false, ci: "green" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(r.github.mergedNow).toEqual([]);
+    expect(r.github.drafted).toEqual([]);
+    expect(r.github.readied).toEqual([]);
+    expect(r.github.autoMergeDisabled).toEqual([]);
+  });
+
+  it("clean-status refusal with a changed head never merges and stops for a human", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: true };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        // A push lands between the refusal and the re-read: the fallback must see a different head.
+        let refused = false;
+        gh.enableAutoMerge = async () => {
+          refused = true;
+          throw new Error(CLEAN_STATUS);
+        };
+        const real = gh.findOpenPr.bind(gh);
+        gh.findOpenPr = async (dir, branch) => {
+          const pr = await real(dir, branch);
+          return refused && pr ? { ...pr, headSha: "f".repeat(40) } : pr;
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "green" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
+    expect(r.resultFile.stop).toEqual({ cause: "human_approval", action: "approve" });
+    expect(r.github.mergedNow).toEqual([]);
+  });
+
+  it("clean-status refusal with pending checks waits instead of merging", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: true };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.enableAutoMerge = async () => {
+          throw new Error(CLEAN_STATUS);
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "pending" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "auto" });
+    expect(JSON.parse(r.file("state.json")).ci_wait).toBe("pending");
+    expect(r.github.mergedNow).toEqual([]);
+  });
+
+  it("any other auto-merge API error stays a stop and is not permission to merge", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: true };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.enableAutoMerge = async () => {
+          throw new Error("gh pr merge failed: HTTP 403: Resource not accessible by integration");
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "green" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
+    expect(r.resultFile.stop).toEqual({ cause: "unknown", action: "none" });
+    expect(r.github.mergedNow).toEqual([]);
+  });
+
+  it("clean-status refusal with no allowed merge method stops instead of guessing one", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: false, merge: false, rebase: false };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.enableAutoMerge = async () => {
+          throw new Error(CLEAN_STATUS);
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "green" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
+    expect(r.resultFile.stop).toEqual({ cause: "human_approval", action: "approve" });
+    expect(r.github.mergedNow).toEqual([]);
+  });
+
+  // Review finding on #183: a pause stop inside the clean-status reconciliation must put the PR back
+  // to draft, like the outer pause path in finalize does. The marker appears after the outer check,
+  // so only the fallback sees it.
+  it("clean-status refusal with a pause marks the PR draft and stops for a human", async () => {
+    let n = 0;
+    const runId = "20261112-150000-f08a0e";
+    let factoryHome = "";
+    const r = await runScenario({
+      script: "clean.json",
+      options: { runId },
+      before: (_repo, home) => {
+        factoryHome = home;
+      },
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: true };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        gh.enableAutoMerge = async () => {
+          requestPause(factoryHome, { runId }, "operator pause");
+          throw new Error(CLEAN_STATUS);
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "green" as const });
+      },
+      patch: autoMerge,
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
+    expect(r.result.reason).toMatch(/paused: operator pause/);
+    expect(r.resultFile.stop).toEqual({ cause: "human_approval", action: "approve" });
+    expect(r.github.mergedNow).toEqual([]);
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.drafted).toEqual([r.result.pr]);
+    expect(r.github.prStates.get(r.result.pr!)?.draft).toBe(true);
+    expect(JSON.parse(r.file("state.json"))).toMatchObject({ pr_draft: true });
+    expect(r.events.some((e) => e.data.pr_marked_draft === r.result.pr)).toBe(true);
   });
 
   it("does not enable auto-merge when the open head is no longer the approved SHA", async () => {

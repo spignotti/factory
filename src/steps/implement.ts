@@ -8,7 +8,7 @@ import { asData, taskBlock, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
 import type { Package } from "../schemas/plan.js";
 import { failureSummary, type GateReport, runGates } from "./gates.js";
-import { blockedRepairReason, clearRepair, ensureBudget, MAX_GATE_ATTEMPTS, recoverRedGates, repairHandover } from "../pipeline/recovery.js";
+import { blockedRepairReason, clearRepair, ensureBudget, holdUnfixed, MAX_GATE_ATTEMPTS, recoverRedGates, repairHandover, withDiagnosticStrategy } from "../pipeline/recovery.js";
 
 export { MAX_GATE_ATTEMPTS };
 
@@ -158,21 +158,24 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "done", attempts } });
     };
     const blocked = await blockedRepairReason(ctx);
-    if (blocked) reason = blocked;
+    if (blocked) reason = blocked.reason;
     for (let guard = 0; !reason && guard < MAX_GATE_ATTEMPTS + 1; guard++) {
       const spent = ensureBudget(ctx).gateAttempts;
       if (spent >= MAX_GATE_ATTEMPTS) {
+        const b = ensureBudget(ctx);
         reason = repairHandover({
-          cls: ensureBudget(ctx).lastClass === "format" ? "format" : "code",
+          cls: b.lastClass === "format" ? "format" : "code",
           attempts: spent,
           max: MAX_GATE_ATTEMPTS,
           diagnosis: report ? failureSummary(report) : "repair budget already spent",
           checkpoint: (await headSha(ctx.worktree).catch(() => "unknown")).slice(0, 12),
           next: "Fix the failing checks on this branch, then factory resume. Do not open a new plan or a second pull request.",
+          ...(b.failure ? { failure: { signature: b.failure.signature, unchanged: b.failure.unchanged } } : {}),
         });
         break;
       }
       checkDeadline(ctx);
+      prompt = await withDiagnosticStrategy(ctx, prompt);
       const turn = await implementerTurn(ctx, "implement", { sessionKey, packageId: pkg.id, prompt });
       if (!turn.handoff) {
         reason = `invalid handoff: ${turn.errors.join("; ")}`;
@@ -180,18 +183,34 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       }
       setHandoff(ctx, turn.handoff);
       writeJson(ctx, `handoff-${pkg.id}.json`, turn.handoff);
-      report = await runGates(ctx, "fast", packages);
+      report = await holdUnfixed(ctx, await runGates(ctx, "fast", packages));
       lastGates = report;
       if (report.green) {
         await succeed(spent + 1);
         return true;
       }
-      const recovered = await recoverRedGates(ctx, report, { tier: "fast", packages, spend: true });
+      let recovered = await recoverRedGates(ctx, report, { tier: "fast", packages, spend: true });
+      if (recovered.action === "green") {
+        const held = await holdUnfixed(ctx, recovered.gates);
+        if (held.green) {
+          lastGates = held;
+          await succeed(ensureBudget(ctx).gateAttempts + 1);
+          return true;
+        }
+        recovered = await recoverRedGates(ctx, held, { tier: "fast", packages, spend: true });
+      }
       lastGates = recovered.gates;
       report = recovered.gates;
       if (recovered.action === "green") {
-        await succeed(ensureBudget(ctx).gateAttempts + 1);
-        return true;
+        const held = await holdUnfixed(ctx, recovered.gates);
+        lastGates = held;
+        report = held;
+        if (held.green) {
+          await succeed(ensureBudget(ctx).gateAttempts + 1);
+          return true;
+        }
+        reason = failureSummary(held);
+        break;
       }
       if (recovered.action === "stop") {
         reason = recovered.reason;
@@ -203,13 +222,15 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(report)}\n\n${handoffShape(ctx, pkg.id)}`;
     }
     if (!reason) {
+      const b = ensureBudget(ctx);
       reason = repairHandover({
         cls: "code",
-        attempts: ensureBudget(ctx).gateAttempts,
+        attempts: b.gateAttempts,
         max: MAX_GATE_ATTEMPTS,
         diagnosis: report ? failureSummary(report) : "repair budget already spent",
         checkpoint: "unknown",
         next: "Fix the failing checks on this branch, then factory resume. Do not open a new plan or a second pull request.",
+        ...(b.failure ? { failure: { signature: b.failure.signature, unchanged: b.failure.unchanged } } : {}),
       });
     }
     failures[pkg.id] = reason;

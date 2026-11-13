@@ -4,6 +4,10 @@ import { HandoffSchema } from "../../src/schemas/handoff.js";
 import { PlanSchema } from "../../src/schemas/plan.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 
+/** The tested code checkpoint the executed records and the gate agree on. */
+const AT = "1111111111111111111111111111111111111111";
+const OTHER = "2222222222222222222222222222222222222222";
+
 const plan = PlanSchema.parse({
   version: 1, type: "bug", goal: "g",
   packages: [
@@ -33,9 +37,10 @@ describe("built-in gates", () => {
     const evidence: EvidenceInputs = {
       files: ["src/a.js", "test/a.test.js"],
       executed: [
-        { file: "test/a.test.js", name: "repro", result: "pass" },
-        { file: "test/a.test.js", name: "later", result: "skip" },
+        { file: "test/a.test.js", name: "repro", result: "pass", checkpoint: AT },
+        { file: "test/a.test.js", name: "later", result: "skip", checkpoint: AT },
       ],
+      checkpoint: AT,
       knownChecks: ["unit"],
       ranChecks: [{ name: "unit", status: "pass" }],
     };
@@ -50,7 +55,8 @@ describe("built-in gates", () => {
     const handoffs = [h([{ acceptance_id: "A1", kind: "test", ref: "test/a.test.js" }, { acceptance_id: "A2", kind: "check", ref: "unit" }])];
     const base: EvidenceInputs = {
       files: ["test/a.test.js"],
-      executed: [{ file: "test/a.test.js", name: "", result: "pass" }],
+      executed: [{ file: "test/a.test.js", name: "", result: "pass", checkpoint: AT }],
+      checkpoint: AT,
       knownChecks: ["unit"],
       ranChecks: [{ name: "unit", status: "pass" }],
     };
@@ -58,6 +64,41 @@ describe("built-in gates", () => {
     expect(evidenceCheck(handoffs, { ...base, files: [], executed: [] }).detail).toMatch(/invented reference/);
     expect(evidenceCheck(handoffs, { ...base, knownChecks: [], ranChecks: [] }).detail).toMatch(/unknown check/);
     expect(evidenceCheck(handoffs, { ...base, ranChecks: [] }).detail).toMatch(/check was not executed/);
+  });
+
+  it("evidence recorded at another checkpoint is stale, not a pass", () => {
+    const handoffs = [h([{ acceptance_id: "A1", kind: "test", ref: "test/a.test.js::one" }])];
+    const stale: EvidenceInputs = {
+      files: ["test/a.test.js"],
+      executed: [{ file: "test/a.test.js", name: "one", result: "pass", checkpoint: AT }],
+      checkpoint: OTHER,
+      knownChecks: [],
+      ranChecks: [],
+    };
+    expect(evidenceCheck(handoffs, stale).detail).toMatch(/stale evidence/);
+    expect(testPresence(plan, ["P1"], handoffs, stale).detail).toMatch(/stale evidence/);
+  });
+
+  it("names eligible executed evidence when a ref is rejected", () => {
+    const handoffs = [h([{ acceptance_id: "A1", kind: "test", ref: "test/missing.test.js::nope" }])];
+    const evidence: EvidenceInputs = {
+      files: ["test/a.test.js"],
+      executed: [
+        { file: "test/a.test.js", name: "one", result: "pass", checkpoint: AT },
+        { file: "test/a.test.js", name: "later", result: "skip", checkpoint: AT },
+        { file: "test/a.test.js", name: "old", result: "pass", checkpoint: OTHER },
+        { file: "test/b.test.js", name: "", result: "unparsed", checkpoint: AT },
+      ],
+      checkpoint: AT,
+      knownChecks: [],
+      ranChecks: [],
+    };
+    const detail = evidenceCheck(handoffs, evidence).detail;
+    expect(detail).toMatch(/invented reference/);
+    expect(detail).toMatch(/eligible executed evidence: test\/a\.test\.js::one$/);
+    expect(detail).not.toMatch(/later|\bold\b|test\/b\.test\.js/);
+    expect(testPresence(plan, ["P1"], handoffs, evidence).detail).toMatch(/eligible executed evidence: test\/a\.test\.js::one/);
+    expect(evidenceCheck(handoffs, { ...evidence, executed: [] }).detail).toMatch(/eligible executed evidence: \(none\)/);
   });
 
   it("guide update check", () => {

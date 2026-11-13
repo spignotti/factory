@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RunResultKind } from "../events.js";
+import type { RunResultKind, RunStop } from "../events.js";
 import type { Handoff } from "../schemas/handoff.js";
 import { type RunContext, type Task, writeJson } from "./context.js";
 import type { PackageStatus } from "./dag.js";
+import type { FailureIdentity } from "./recovery.js";
 import type { TrackedFinding } from "./merge.js";
 
 /**
@@ -29,6 +30,15 @@ export interface RunState {
   step: RunStep;
   result: RunResultKind | null;
   reason: string;
+  /**
+   * Machine-readable cause of this stop and the one permitted recovery action (`factory resume`,
+   * the worker and `factory status` read this, never the reason text). Absent on a running or
+   * finished attempt and on stops written before #179: readers fail closed for those.
+   * Checkpoint, branch, worktree, PR and spent budgets stay on this state (and on result.json).
+   * `stop` does not copy them. A stored cause never grants merge permission — risk, protected
+   * paths, pause, issue revision, model-family separation, reviewed SHA and required checks stay authoritative.
+   */
+  stop?: RunStop;
   branch: string | null;
   worktree: string | null;
   base_sha: string | null;
@@ -53,6 +63,9 @@ export interface RunState {
   /**
    * Repair budget already spent. Resume continues it. A blocking `class` is not given another
    * product-code edit. Network retries are the same-model connection budget for the whole run.
+   * `failure` is the last observed failure identity (#181): repeated identical fingerprints
+   * escalate the repair strategy; resume applies that strategy before the next implement turn
+   * and keeps the count. Roots name the checks a later green report may not drop.
    */
   repair?: {
     gate_attempts: number;
@@ -60,6 +73,7 @@ export interface RunState {
     format_used: boolean;
     infra_reruns: number;
     class?: "format" | "code" | "infra" | "base" | "config" | "unknown";
+    failure?: FailureIdentity;
   };
   /**
    * Coding attempts on this checkpoint. Absent on runs stored before attempt counts existed;

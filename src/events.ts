@@ -189,6 +189,52 @@ export const RESULTS = ["done", "needs_human", "needs_input", "failed", "base_re
 export type RunResultKind = (typeof RESULTS)[number];
 
 /**
+ * Machine-readable cause of a stopped run, persisted next to the free-text diagnostics.
+ * Readers (worker, status) decide recovery from this cause, never from the reason text.
+ * - `technical_repair`: a classified, mechanical failure; the checkpoint and bounded repair state stay usable
+ * - `transient_retry`: provider/network/capacity drop after retries; retry the same run without a product edit
+ * - `provider_window_wait`: an explicit usage-window reset is required before another attempt; the queue waits
+ *   for that window without a coding slot (#177). Generic 429/capacity is `transient_retry`
+ * - `explicit_decision`: only an answer from a person moves this run on (questions, changed issue text, a real merge conflict)
+ * - `human_approval`: a human authority action is required (pause, protected config, env setup). Not granted by recovery
+ * - `budget_exhausted`: a bounded retry/repair budget is spent. Budgets are not reset. The action is a human decision
+ *   (an explicit grant is #188, not an automatic restart)
+ * - `unknown`: not classified (legacy or ambiguous); readers fail closed — no automatic recovery, no merge permission
+ */
+export const STOP_CAUSES = ["technical_repair", "transient_retry", "provider_window_wait", "explicit_decision", "human_approval", "budget_exhausted", "unknown"] as const;
+export type StopCause = (typeof STOP_CAUSES)[number];
+
+/** The one recovery action permitted for a stop cause. Never a merge permission, never a silent budget reset. */
+export const RECOVERY_ACTIONS = ["repair", "retry", "wait", "decide", "approve", "none"] as const;
+export type RecoveryAction = (typeof RECOVERY_ACTIONS)[number];
+
+/** Canonical cause/action pairs. A stored pair outside this list is malformed and must fail closed. */
+export const STOP_ACTION: Record<StopCause, RecoveryAction> = {
+  technical_repair: "repair",
+  transient_retry: "retry",
+  provider_window_wait: "wait",
+  explicit_decision: "decide",
+  human_approval: "approve",
+  budget_exhausted: "decide",
+  unknown: "none",
+};
+
+/**
+ * Stored per finished attempt on `state.json` and `result.json`. Optional: absent on stops written before #179.
+ * Present metadata must be one canonical pair. Identity, checkpoint and budgets stay on the run, not on this object.
+ */
+export const StopSchema = z.discriminatedUnion("cause", [
+  z.object({ cause: z.literal("technical_repair"), action: z.literal("repair") }).strict(),
+  z.object({ cause: z.literal("transient_retry"), action: z.literal("retry") }).strict(),
+  z.object({ cause: z.literal("provider_window_wait"), action: z.literal("wait") }).strict(),
+  z.object({ cause: z.literal("explicit_decision"), action: z.literal("decide") }).strict(),
+  z.object({ cause: z.literal("human_approval"), action: z.literal("approve") }).strict(),
+  z.object({ cause: z.literal("budget_exhausted"), action: z.literal("decide") }).strict(),
+  z.object({ cause: z.literal("unknown"), action: z.literal("none") }).strict(),
+]);
+export type RunStop = z.infer<typeof StopSchema>;
+
+/**
  * Stored per finished attempt. `merged: "no"` is a coding result, not a confirmed merge.
  * Absent on results written before outcomes existed; readers leave those unknown.
  */
@@ -239,6 +285,17 @@ export const ResultSchema = z.object({
   /** USD of metered providers only; subscription usage (see profile `billing`) is reported in tokens. */
   cost_usd: z.number().min(0),
   reason: z.string(),
+  /**
+   * Machine-readable stop cause and the one canonical recovery action for a stopped attempt.
+   * Omitted on a `done` run and on results written before this field. A present value that is not a
+   * canonical pair is malformed: readers fail closed and must not guess from the reason text.
+   */
+  stop: StopSchema.optional(),
+  /**
+   * Epoch ms when the provider usage window resets (`provider_window_wait` only, issue #177).
+   * Set only from explicit window metadata on the stop, never inferred from generic 429/capacity text.
+   */
+  window_resets_at: z.number().int().positive().optional(),
   /** Separate counters. Omitted on results written before this field. A `done` run is not a merge. */
   outcome: OutcomeSchema.optional(),
   /** Factory version, prompts, model, effort, sanitized config, base/head, check versions. No secrets. */

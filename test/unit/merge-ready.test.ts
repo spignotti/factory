@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderStatus, statusReport } from "../../src/commands/status.js";
-import { autoMergeAlreadyEnabled, autoMergeNotEnabled, FakeGitHub } from "../../src/gh.js";
-import { autoMergeCompletes, mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../../src/pipeline/merge-ready.js";
+import { autoMergeAlreadyEnabled, autoMergeCleanStatus, autoMergeNotEnabled, FakeGitHub } from "../../src/gh.js";
+import { autoMergeCompletes, fallbackMergeMethod, mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../../src/pipeline/merge-ready.js";
 import { enableReadyMerges } from "../../src/queue/worker.js";
 
 describe("merge readiness", () => {
@@ -49,6 +49,25 @@ describe("merge readiness", () => {
     expect(autoMergeAlreadyEnabled("pull request is not mergeable")).toBe(false);
     expect(autoMergeNotEnabled("auto merge is not enabled")).toBe(true);
     expect(autoMergeNotEnabled("pull request is not mergeable")).toBe(false);
+  });
+
+  it("#183: only the exact clean-status response is recognized", () => {
+    expect(autoMergeCleanStatus("gh pr merge failed: GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)")).toBe(true);
+    expect(autoMergeCleanStatus("Pull request is in CLEAN STATUS (ENABLEPULLREQUESTAUTOMERGE)")).toBe(true);
+    // Not the enablePullRequestAutoMerge field, or not the clean-status wording: not recognized.
+    expect(autoMergeCleanStatus("pull request is in clean status")).toBe(false);
+    expect(autoMergeCleanStatus("GraphQL: Auto merge is already enabled (enablePullRequestAutoMerge)")).toBe(false);
+    expect(autoMergeCleanStatus("GraphQL: Pull request is not mergeable (enablePullRequestAutoMerge)")).toBe(false);
+    expect(autoMergeCleanStatus("HTTP 403: Resource not accessible by integration")).toBe(false);
+  });
+
+  it("#183: the fallback merge method needs an explicit allow", () => {
+    expect(fallbackMergeMethod({ squash: true, merge: true, rebase: true })).toBe("squash");
+    expect(fallbackMergeMethod({ squash: false, merge: true, rebase: true })).toBe("merge");
+    expect(fallbackMergeMethod({ squash: false, merge: false, rebase: true })).toBe("rebase");
+    expect(fallbackMergeMethod({ squash: false, merge: false, rebase: false })).toBeNull();
+    expect(fallbackMergeMethod(null)).toBeNull();
+    expect(fallbackMergeMethod(undefined)).toBeNull();
   });
 
   it("V02/V03: the runner enables auto-merge once for the approved green SHA and not for a newer head", async () => {

@@ -1,5 +1,5 @@
 import { type DiffEntry, diffTotals, formatDiffTotals } from "../git.js";
-import { matchCheckEvidence, matchTestEvidence, type ExecutedTest } from "./evidence.js";
+import { eligibleEvidenceRefs, matchCheckEvidence, matchTestEvidence, type ExecutedTest } from "./evidence.js";
 import { isProtected, matchesAny, type Plan } from "../schemas/plan.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { RepoConfig } from "../schemas/repo.js";
@@ -58,6 +58,8 @@ export interface EvidenceInputs {
   knownChecks: readonly string[];
   /** Checks selected for this gate tier and their result. A check that did not run is absent. */
   ranChecks: readonly { name: string; status: string }[];
+  /** Staged tree the executed records must have been collected from. Another SHA is stale. */
+  checkpoint: string;
 }
 
 /**
@@ -71,15 +73,15 @@ export function testPresence(plan: Plan, packages: string[], handoffs: Handoff[]
     if (a.verify !== "test" || !packages.includes(a.package)) continue;
     const matches = handoffs.flatMap((h) => h.evidence.filter((e) => e.acceptance_id === a.id && e.kind === "test"));
     const hit = matches
-      .map((e) => matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref))))
+      .map((e) => matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref)), evidence.checkpoint))
       .find((m) => m.ok);
     if (hit) continue;
     const reason = matches.length
-      ? matchTestEvidence(matches[0]!.ref, evidence.executed, files.has(refPath(matches[0]!.ref))).reason
+      ? matchTestEvidence(matches[0]!.ref, evidence.executed, files.has(refPath(matches[0]!.ref)), evidence.checkpoint).reason
       : "no test evidence";
     missing.push(`${a.id} (${reason})`);
   }
-  return missing.length ? fail("test_presence", `no executed test evidence for ${missing.join("; ")}`) : ok("test_presence");
+  return missing.length ? fail("test_presence", withEligible(`no executed test evidence for ${missing.join("; ")}`, evidence)) : ok("test_presence");
 }
 
 /**
@@ -93,12 +95,23 @@ export function evidenceCheck(handoffs: Handoff[], evidence: EvidenceInputs): Bu
     for (const e of h.evidence) {
       const match =
         e.kind === "test"
-          ? matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref)))
+          ? matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref)), evidence.checkpoint)
           : matchCheckEvidence(e.ref, evidence.knownChecks, evidence.ranChecks);
       if (!match.ok) bad.push(`${e.acceptance_id}:${e.ref} (${match.reason})`);
     }
   }
-  return bad.length ? fail("evidence", `evidence refs not accepted: ${bad.join("; ")}`) : ok("evidence");
+  return bad.length ? fail("evidence", withEligible(`evidence refs not accepted: ${bad.join("; ")}`, evidence)) : ok("evidence");
+}
+
+const ELIGIBLE_SHOWN = 12;
+
+/** Rejection text plus the refs a handoff could have cited from this checkpoint. */
+function withEligible(detail: string, evidence: EvidenceInputs): string {
+  const refs = eligibleEvidenceRefs(evidence.executed, evidence.checkpoint);
+  const shown = refs.slice(0, ELIGIBLE_SHOWN);
+  const more = refs.length - shown.length;
+  const list = shown.length ? `${shown.join(", ")}${more ? ` (+${more} more)` : ""}` : "(none)";
+  return `${detail}; eligible executed evidence: ${list}`;
 }
 
 /** Packages with `changes_flows` must touch the area's guide and/or flows. */

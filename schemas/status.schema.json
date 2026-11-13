@@ -842,6 +842,243 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "funnel": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "interval": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "string"
+                        },
+                        "to": {
+                          "type": "string"
+                        },
+                        "timezone": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to",
+                        "timezone"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "offered_tickets": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "admitted_tickets": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "attempts": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "first_attempted_in_interval": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "work_first_attempted_before": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "backlog_parked_before": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "unknowns": {
+                      "type": "object",
+                      "properties": {
+                        "tickets": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "first_attempts": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "merge_status": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "outcomes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "queues": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "tickets",
+                        "first_attempts",
+                        "merge_status",
+                        "outcomes",
+                        "queues"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "merges": {
+                      "type": "object",
+                      "properties": {
+                        "confirmed": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "github_only": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "closed_without_merge": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "confirmed",
+                        "github_only",
+                        "closed_without_merge"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "factory_provenance": {
+                      "type": "null"
+                    },
+                    "ready_awaiting_approval": {
+                      "type": "object",
+                      "properties": {
+                        "prs": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "tickets": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "prs",
+                        "tickets"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "blocker_prs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "reason": {
+                            "type": "string"
+                          },
+                          "cls": {
+                            "type": "string",
+                            "enum": [
+                              "dependency",
+                              "capacity",
+                              "ci_runner",
+                              "provider",
+                              "human_decision",
+                              "technical_repair",
+                              "unclassified"
+                            ]
+                          },
+                          "prs": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "tickets": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "reason",
+                          "cls",
+                          "prs",
+                          "tickets"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "recovered_without_human": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "idle_slot_minutes": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "interval",
+                    "offered_tickets",
+                    "admitted_tickets",
+                    "attempts",
+                    "first_attempted_in_interval",
+                    "work_first_attempted_before",
+                    "backlog_parked_before",
+                    "unknowns",
+                    "merges",
+                    "factory_provenance",
+                    "ready_awaiting_approval",
+                    "blocker_prs",
+                    "blockers",
+                    "recovered_without_human",
+                    "idle_slot_minutes"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -852,7 +1089,8 @@
             "blocked",
             "failed",
             "base_red",
-            "needs_input"
+            "needs_input",
+            "funnel"
           ],
           "additionalProperties": false
         },

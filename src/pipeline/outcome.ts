@@ -3,7 +3,63 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { redact, type RunOutcome, type RunProvenance, type RunResultKind } from "../events.js";
+import { redact, StopSchema, type RunOutcome, type RunProvenance, type RunResultKind, type RunStop, type StopCause } from "../events.js";
+
+/**
+ * The one action permitted per stop cause. This mapping is the whole contract of #179: it never
+ * grants merge permission — risk, protected paths, pause, issue revision, model-family separation,
+ * reviewed SHA and required checks stay authoritative wherever they are enforced.
+ */
+export function stopFor(cause: StopCause): RunStop {
+  switch (cause) {
+    case "technical_repair":
+      return { cause, action: "repair" };
+    case "transient_retry":
+      return { cause, action: "retry" };
+    case "provider_window_wait":
+      return { cause, action: "wait" };
+    case "explicit_decision":
+    case "budget_exhausted":
+      return { cause, action: "decide" };
+    case "human_approval":
+      return { cause, action: "approve" };
+    case "unknown":
+      return { cause, action: "none" };
+  }
+}
+
+/**
+ * Provider stops the worker may requeue now. A usage-window wait is not one of them: it parks on its
+ * reset window (#177), and generic 429/capacity is `transient_retry`.
+ */
+export function isProviderRetryCause(cause: unknown): boolean {
+  return cause === "transient_retry";
+}
+
+/** Canonical stop, or undefined when the stop is absent (legacy) or not a canonical pair. */
+export function readStop(stop: unknown): RunStop | undefined {
+  const parsed = StopSchema.safeParse(stop);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** Cause of a stored stop, or undefined when the stop is absent (legacy) or malformed. */
+export function stopCauseOf(stop: unknown): StopCause | undefined {
+  return readStop(stop)?.cause;
+}
+
+/**
+ * A stopped run may be re-driven only when both stored stops grant repair and the result names the
+ * same run, branch, worktree and PR as state. Done self-merge revalidation does not use this.
+ */
+export function repairContinuationAllowed(
+  state: { run_id: string; branch: string | null; worktree: string | null; pr: string | null; stop?: unknown },
+  result: { result: string; run_id: string; branch: string | null; worktree: string | null; pr: string | null; stop?: unknown },
+): boolean {
+  if (result.result === "done") return false;
+  if (!state.branch || !state.worktree || !state.pr) return false;
+  if (result.run_id !== state.run_id || result.branch !== state.branch || result.worktree !== state.worktree || result.pr !== state.pr) return false;
+  return readStop(state.stop)?.cause === "technical_repair" && readStop(result.stop)?.cause === "technical_repair";
+}
 
 /**
  * A coding run never stores a confirmed merge. `ticket: null` means the task has no ticket.

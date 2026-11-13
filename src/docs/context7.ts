@@ -250,8 +250,13 @@ export function docsTools(client: Context7Client, onCall: (call: DocsCall) => vo
   };
 }
 
-/** `doctor`: reachability of Context7 and, when configured, whether the key is accepted. */
+/**
+ * `doctor`: reachability of Context7 and, when configured, whether the key is accepted.
+ * Reports only whether `CONTEXT7_API_KEY` is present, never its value, and keeps an accepted key that
+ * is out of quota (429) apart from a missing one (anonymous limit) and a rejected one (401/403).
+ */
 export async function context7Probe(client: Context7Client, now = Date.now()): Promise<{ status: "ok" | "warn" | "fail"; detail: string }> {
+  const keyState = client.hasKey ? `${CONTEXT7_KEY_ENV} is set (value not shown)` : `no ${CONTEXT7_KEY_ENV} in the environment`;
   try {
     const r = await client.get("/api/v2/libs/search", { libraryName: "react", query: "hooks" });
     const left = r.remaining !== undefined ? `; ${r.remaining} requests left in the window` : "";
@@ -260,10 +265,12 @@ export async function context7Probe(client: Context7Client, now = Date.now()): P
     if (r.status === 429) {
       const parsed = parseRetryAfter(r.retryAfter, now);
       const until = parsed ? ` until ${new Date(parsed.retryAt).toISOString()}` : "";
-      return { status: "warn", detail: `rate limit reached; docs lookup unavailable${until}` };
+      // UNVERIFIED live: a refused key answers 401/403, so a 429 on a request that carried one means the credential held and the quota is spent (docs/VERIFY.md).
+      const why = client.hasKey ? `${CONTEXT7_KEY_ENV} accepted, quota exhausted` : `anonymous rate limit reached (no ${CONTEXT7_KEY_ENV} set)`;
+      return { status: "warn", detail: `${why}; docs lookup unavailable${until}` };
     }
     return { status: "warn", detail: `unexpected HTTP ${r.status}; docs_lookup returns errors to agents` };
   } catch (e) {
-    return { status: "warn", detail: `unreachable (${(e as Error).message.slice(0, 120)}); docs_lookup returns errors to agents` };
+    return { status: "warn", detail: `unreachable (${(e as Error).message.slice(0, 120)}); ${keyState}; docs_lookup returns errors to agents` };
   }
 }

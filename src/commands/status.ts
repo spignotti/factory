@@ -1,17 +1,20 @@
 import { existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { GitHub, PrStatus } from "../gh.js";
-import { classifyWait, observeMerge, type WaitClass } from "../pipeline/accounting.js";
-import { readOutcome } from "../pipeline/outcome.js";
+import { assertTimezone, attemptFinishMs, classifyWait, dedupeRuns, idleSlotMinutes, observeMerge, resolveInterval, successfulRecoveries, ticketFunnel, type DeliveryFunnel, type FunnelPrState, type FunnelSource, type WaitClass } from "../pipeline/accounting.js";
+import { readOutcome, stopCauseOf } from "../pipeline/outcome.js";
+import { MAX_CONTINUATIONS, MAX_GATE_ATTEMPTS } from "../pipeline/recovery.js";
 import { coverageOfRepo } from "../standards.js";
 import { activeHolders } from "../pipeline/lock.js";
 import { branchesHeldByLiveRuns, daysUnchanged, isStaleDraft, staleDraftDaysAt } from "../pipeline/path-claim.js";
 import { openAuditTickets } from "../proposals.js";
 import { loadRepoConfig } from "../schemas/repo.js";
-import { listRuns, type RunRecord } from "../runs.js";
+import type { FactoryEvent, StopCause } from "../events.js";
+import { listRuns, runStartedAt, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
 import type { StatusReportSchema } from "../schemas/reports.js";
+import { loadReadableQueues } from "../queue/store.js";
 import { currentCheckName, currentStepRetry, eventsForRun, isQueuedWaiter, lastEventMs, orphanedRunIds, queuedFromEvents } from "../run-health.js";
 import { summarizeQueues } from "../queue/store.js";
 import { parseSince } from "./stats.js";
@@ -46,6 +49,26 @@ function humanReviewReasons(input: { risk_reasons?: string[]; risk?: string | nu
   if (causes.has("protected paths")) out.push("protected paths");
   if (!out.length) out.push("human_review");
   return [...out, ...reasons];
+}
+
+/**
+ * Machine-readable recovery explanation for a stopped run: which bounded budgets are already
+ * spent, so `status` says when recovery is exhausted instead of leaving the reason text alone.
+ * Only the persisted stop cause and the persisted budget numbers are read, never free-text matching.
+ */
+function recoveryNote(st: { stop?: unknown; repair?: { gate_attempts?: number } | null; continuation_attempts?: number | null }): string {
+  const cause = stopCauseOf(st.stop);
+  if (!cause) return "";
+  const spent: string[] = [];
+  const cont = st.continuation_attempts ?? 0;
+  if (cont >= MAX_CONTINUATIONS) spent.push(`post-push repair ${cont}/${MAX_CONTINUATIONS}`);
+  const gates = st.repair?.gate_attempts ?? 0;
+  if (gates >= MAX_GATE_ATTEMPTS) spent.push(`gate repair ${gates}/${MAX_GATE_ATTEMPTS}`);
+  if (cause === "budget_exhausted") {
+    if (!spent.length) spent.push("wall-time or attempt budget");
+    return `; budgets spent (${spent.join(", ")}); not reset, explicit grant required`;
+  }
+  return spent.length ? `; recovery exhausted: ${spent.join(", ")}` : "";
 }
 
 function resultFinishedMs(run: RunRecord): number | undefined {
@@ -95,6 +118,7 @@ async function sinceFinished(
     failed: [],
     base_red: [],
     needs_input: [],
+    funnel: null,
   };
   const recent = runs.filter((r) => {
     if (opts.skip.has(r.run_id)) return false;
@@ -153,8 +177,95 @@ async function sinceFinished(
   return view;
 }
 
-export async function statusReport(opts: { factoryHome: string; github: GitHub; since?: string; now?: () => number }): Promise<StatusReport> {
+/**
+ * Queued before `waiter_pid` was stored, and the lock was never recorded as acquired.
+ * `isQueuedWaiter` ignores that shape once state or result exists. The funnel must not then
+ * treat a GitHub merge as this run's merge. A later agent call or finish means the run left
+ * the queue. Status's queued list is unchanged.
+ */
+function legacyQueuedRun(events: FactoryEvent[]): boolean {
+  const q = events.findLastIndex((e) => e.event === "queued");
+  if (q < 0) return false;
+  if (typeof events[q]!.data.waiter_pid === "number") return false;
+  const later = events.slice(q + 1);
+  if (later.some((e) => e.event === "progress" && e.data.lock_acquired !== undefined)) return false;
+  // A later agent call, retry or finish means the run left the queue, even when lock_acquired was not logged.
+  const left = new Set(["agent_finished", "agent_error", "step_started", "run_finished", "gate_result", "step_retry", "model_retry", "model_fallback"]);
+  return !later.some((e) => left.has(e.event));
+}
+
+/**
+ * The interval funnel for `status --since`: distinct offered/admitted tickets, deduplicated
+ * attempts, merges reconciled with GitHub, ready PRs, remaining blockers and idle-slot time.
+ * Everything the records cannot prove stays unknown (#185). No scheduling or merge behavior changes.
+ */
+async function buildFunnel(
+  runs: RunRecord[],
+  opts: { since: string; now: number; timezone: string; factoryHome: string; loadPr: (repo: string, pr: string) => Promise<PrStatus | Error> },
+): Promise<DeliveryFunnel> {
+  const span = parseSince(opts.since);
+  const interval = resolveInterval(opts.now, span, opts.timezone);
+  const sources: FunnelSource[] = [];
+  for (const r of dedupeRuns(runs)) {
+    const res = r.result;
+    const st = r.state;
+    if (!res && !st) continue;
+    const outcome = readOutcome(res);
+    const events = eventsForRun(r);
+    const pr = res?.pr ?? st?.pr ?? null;
+    let prState: FunnelPrState | null = null;
+    let prUnknown = false;
+    if (pr) {
+      const got = await opts.loadPr(res?.repo ?? st?.repo ?? "", pr);
+      if (got instanceof Error) prUnknown = true;
+      else prState = { state: got.state, draft: got.draft, ci: got.ci, behind: got.behind, conflicting: got.conflicting };
+    }
+    const resultKind = res?.result ?? st?.result ?? null;
+    const queued = isQueuedWaiter(r, events) || legacyQueuedRun(events);
+    const idle = idleSlotMinutes(events.filter((e) => {
+      const t = Date.parse(e.ts);
+      return Number.isFinite(t) && t >= interval.from && t <= interval.to;
+    }));
+    // Finish and merge instants belong to the attempt that owns the run. A historical
+    // run_finished is not the finish of a later resume whose result.json is still absent.
+    // An unfinished attempt has no finish time: its last event must not pull it into the interval.
+    const finished = attemptFinishMs(events, res !== undefined);
+    sources.push({
+      run_id: r.run_id,
+      repo: res?.repo ?? st?.repo ?? null,
+      ticket: outcome.ticket,
+      first_attempt: runStartedAt(r.run_id)?.getTime() ?? null,
+      finished,
+      merged_stored: outcome.merged,
+      has_outcome: res?.outcome !== undefined,
+      pr,
+      pr_state: prState,
+      merge_status_unknown: prUnknown,
+      merge_policy: res?.merge_policy ?? null,
+      unresolved_decision: resultKind === "needs_human" || resultKind === "needs_input",
+      queued,
+      result: resultKind,
+      reason: res?.reason || st?.reason || null,
+      recoveries: successfulRecoveries(events, interval),
+      ...(idle !== null ? { idle_slot_minutes: idle } : {}),
+    });
+  }
+  const queue: { repo: string; ticket: number; added: number; unfinished: boolean }[] = [];
+  const readable = loadReadableQueues(opts.factoryHome);
+  for (const q of readable.queues) {
+    for (const entry of q.entries) {
+      const added = Date.parse(entry.added_at);
+      if (!Number.isFinite(added)) continue;
+      queue.push({ repo: q.repo, ticket: entry.issue, added, unfinished: entry.status !== "done" });
+    }
+  }
+  return ticketFunnel({ interval, sources, queue, queue_unreadable: readable.unreadable });
+}
+
+export async function statusReport(opts: { factoryHome: string; github: GitHub; since?: string; timezone?: string; now?: () => number }): Promise<StatusReport> {
   const now = opts.now?.() ?? Date.now();
+  const timezone = opts.timezone ?? "UTC";
+  assertTimezone(timezone);
   const holders = new Map(activeHolders(opts.factoryHome).filter((h) => h.runId).map((h) => [h.runId!, h.pid]));
   const orphanedIds = orphanedRunIds(opts.factoryHome);
   const report: StatusReport = {
@@ -175,6 +286,8 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
   };
   const mergedLive = new Map<string, { run_id: string; pr: string; origin: "confirmed" | "unknown" }>();
   const closedLive = new Map<string, { run_id: string; pr: string }>();
+  // Stored causes of the current attempts, for brief classification (never the reason text).
+  const stopCauses = new Map<string, StopCause>();
   const prCache = new Map<string, Promise<PrStatus | Error>>();
   const loadPr = (repo: string, pr: string) => {
     if (!prCache.has(pr)) prCache.set(pr, opts.github.prStatus(repo, pr).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e)))));
@@ -239,8 +352,10 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
       }
     }
     if ((st.result === "needs_human" || st.result === "needs_input") && !closed && !st.gc_at) {
+      const cause = stopCauseOf(st.stop);
+      if (cause) stopCauses.set(r.run_id, cause);
       report.waiting.push({
-        run_id: r.run_id, repo: st.repo, task: taskOf(r), result: st.result, reason: st.reason,
+        run_id: r.run_id, repo: st.repo, task: taskOf(r), result: st.result, reason: st.reason + recoveryNote(st),
         questions: r.result?.questions ?? [], pr: st.pr, branch: st.branch, worktree: st.worktree,
       });
     }
@@ -256,6 +371,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
   if (opts.since) {
     const skip = new Set([...report.running, ...report.queued, ...report.interrupted, ...report.orphaned, ...report.stalled].map((r) => r.run_id));
     report.since = await sinceFinished(runs, { since: opts.since, now, skip, loadPr });
+    report.since.funnel = await buildFunnel(runs, { since: opts.since, now, timezone, factoryHome: opts.factoryHome, loadPr });
   }
   const repos = new Set<string>([...runs.map(repoOf), ...report.queues.map((q) => q.repo)].filter((r) => r.length > 0));
   const heldByRepo = branchesHeldByLiveRuns(opts.factoryHome);
@@ -282,7 +398,7 @@ export async function statusReport(opts: { factoryHome: string; github: GitHub; 
       // unreadable standards stay unknown rather than a zero
     }
   }
-  report.brief = buildBrief(report, runs, mergedLive, closedLive);
+  report.brief = buildBrief(report, runs, mergedLive, closedLive, stopCauses);
   return report;
 }
 
@@ -299,6 +415,7 @@ function buildBrief(
   runs: RunRecord[],
   mergedLive: Map<string, { run_id: string; pr: string; origin: "confirmed" | "unknown" }>,
   closedLive: Map<string, { run_id: string; pr: string }>,
+  stopCauses: Map<string, StopCause>,
 ): StatusReport["brief"] {
   const links = new Map(runs.map((run) => [run.run_id, artifactLine(run)]));
   const link = (id: string) => links.get(id) ?? id;
@@ -322,7 +439,7 @@ function buildBrief(
   };
   for (const row of report.queued) addWait("capacity", "waiting for lock", link(row.run_id));
   for (const row of report.stalled) addWait("unclassified", `no event for ${row.silent_minutes} min`, link(row.run_id));
-  for (const row of report.waiting) addWait(classifyWait(row.reason, row.result), row.reason || row.result, link(row.run_id));
+  for (const row of report.waiting) addWait(classifyWait(row.reason, row.result, stopCauses.get(row.run_id)), row.reason || row.result, link(row.run_id));
   for (const queue of report.queues) {
     for (const next of queue.next) {
       if (!next.reason) continue;
@@ -436,11 +553,22 @@ export function renderStatus(s: StatusReport): string {
     section("failed", fin.failed.map((r) => `${r.run_id} ${r.task} — ${r.reason}`));
     section("base_red", fin.base_red.map((r) => `${r.run_id} ${r.task} — ${r.reason}`));
     section("needs_input", fin.needs_input.map((r) => `${r.run_id} ${r.task} — ${r.reason}${r.questions.length ? ` (${r.questions.join("; ")})` : ""}`));
+    const fn = fin.funnel;
+    if (fn) {
+      out.push(`funnel ${fn.interval.from} .. ${fn.interval.to} (${fn.interval.timezone}):`);
+      const shown = (n: number | null) => (n === null ? "unknown" : String(n));
+      out.push(
+        `  offered ${shown(fn.offered_tickets)}, admitted ${fn.admitted_tickets}, attempts ${fn.attempts}, first attempted in interval ${fn.first_attempted_in_interval}, started before ${fn.work_first_attempted_before}, parked backlog before interval ${shown(fn.backlog_parked_before)}`,
+      );
+      out.push(`  merged ${fn.merges.confirmed} confirmed (provenance unknown; GitHub merged without stored confirmation ${fn.merges.github_only}; closed without merge ${fn.merges.closed_without_merge})`);
+      out.push(`  ready awaiting approval ${fn.ready_awaiting_approval.prs} PR (${fn.ready_awaiting_approval.tickets} tickets); blocking PR ${fn.blocker_prs}: ${fn.blockers.length ? fn.blockers.map((b) => `${b.reason} (${b.cls}, ${b.tickets} tickets, ${b.prs} PR)`).join("; ") : "none"}`);
+      out.push(`  recovered without human ${fn.recovered_without_human}; idle slot ${fn.idle_slot_minutes === null ? "unknown" : `${fn.idle_slot_minutes} min`}; unknown: ticket ${fn.unknowns.tickets}, first attempt ${fn.unknowns.first_attempts}, merge status ${fn.unknowns.merge_status}, outcome ${fn.unknowns.outcomes}, queue ${fn.unknowns.queues}`);
+    }
   }
   return out.join("\n") + "\n";
 }
 
-export async function statusCommand(opts: { factoryHome: string; github: GitHub; since?: string; json: boolean; now?: () => number }, io: Io): Promise<number> {
+export async function statusCommand(opts: { factoryHome: string; github: GitHub; since?: string; timezone?: string; json: boolean; now?: () => number }, io: Io): Promise<number> {
   const report = await statusReport(opts);
   io.out(opts.json ? JSON.stringify(report) + "\n" : renderStatus(report));
   return 0;

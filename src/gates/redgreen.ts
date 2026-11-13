@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { sh, tail } from "../exec.js";
 import { git, withRepoGitOps } from "../git.js";
+import { configuredProbeCommand } from "./evidence.js";
 import { matchesAny } from "../schemas/plan.js";
 import { gateCheckTimeoutMs, type CheckPulse, shTimedOut, watchCheck } from "./timeout.js";
 import type { Deadline } from "../pipeline/budget.js";
@@ -22,10 +23,6 @@ export interface RedGreenResult {
   /** The base probe was read from this run's cache. The HEAD command still ran. */
   base_reused: boolean;
   detail: string;
-}
-
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -217,7 +214,7 @@ export async function redGreenProof(opts: {
   heartbeatMs?: number;
   /** Run artifact. Conclusive base probes are reused from here; inconclusive ones are not written. */
   cacheFile?: string;
-  /** Same-tree evidence command already passed this single-file HEAD probe in this gate phase. */
+  /** The configured tests.run already passed this single-file HEAD probe. A narrower named rerun does not. */
   headPassed?: boolean;
 }): Promise<RedGreenResult> {
   const { worktree, baseSha, files, testCommand, env } = opts;
@@ -243,7 +240,7 @@ export async function redGreenProof(opts: {
       gateTimeoutMinutes: opts.gateTimeoutMinutes,
       deadline: opts.deadline,
     });
-  const cmd = testCommand.replace("{files}", files.map(shellQuote).join(" "));
+  const cmd = configuredProbeCommand(testCommand, files);
   const supportNote = support.length ? `\nbase probe support: ${support.join(", ")}` : "";
   const run = async (where: "setup" | "base" | "head", cwd: string, command: string) => {
     const result = await watchCheck("red_green", () => sh(command, { cwd, env, timeoutMs: timeoutMs(), jail: opts.jail?.(cwd) }), {
