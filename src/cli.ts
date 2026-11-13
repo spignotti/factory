@@ -79,10 +79,13 @@ const USAGE = `usage:
                --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish;
                --stay keeps this worker up when idle and backs off; it does not raise the slot cap.
                The worker does not run improve.)
-  factory status [--since <duration>] [--json]
+  factory status [--since <duration>] [--timezone <IANA>] [--json]
               (running, waiting for a human, interrupted runs; queues; open factory PRs;
                stale draft factory PRs, with a hint to close or resume them;
-               --since 12h adds finished runs from result.json: merged, human_review, blocked, failed, base_red, needs_input)
+               --since 12h adds finished runs from result.json: merged, human_review, blocked, failed, base_red, needs_input;
+               with --since also the ticket funnel over that window (--timezone names it, e.g. Europe/Berlin):
+               offered/admitted, attempts, merges reconciled with GitHub, ready PRs, blockers, recoveries;
+               a confirmed merge is not factory provenance; idle-slot time stays unknown without an idle-slot event)
   factory stats [--since 7d] [--repo <path>] [--json]
               (results, rounds, gates, providers, cost; this period vs the previous one;
                text includes top gate failures and reasons)
@@ -526,8 +529,8 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       }
     }
     if (command === "status") {
-      const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, json: { type: "boolean", default: false } } });
-      return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), since: values.since, json: values.json }, io);
+      const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, timezone: { type: "string" }, json: { type: "boolean", default: false } } });
+      return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), since: values.since, timezone: values.timezone, json: values.json }, io);
     }
     if (command === "stats") {
       const { values } = parseArgs({

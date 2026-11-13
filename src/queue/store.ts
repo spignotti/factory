@@ -217,6 +217,26 @@ export function summarizeQueue(q: QueueFile): QueueSummary {
   };
 }
 
+/**
+ * Queues a report can read. A corrupt file is skipped, as in `summarizeQueues`, and counted so a
+ * partial queue is not presented as a complete offered or parked-before total.
+ */
+export function loadReadableQueues(factoryHome: string): { queues: QueueFile[]; unreadable: number } {
+  const dir = queueDir(factoryHome);
+  if (!existsSync(dir)) return { queues: [], unreadable: 0 };
+  const queues: QueueFile[] = [];
+  let unreadable = 0;
+  for (const name of readdirSync(dir).sort()) {
+    if (!name.endsWith(".json") || name.startsWith(".")) continue;
+    try {
+      queues.push(parseQueue(readFileSync(join(dir, name), "utf8"), join(dir, name)));
+    } catch {
+      unreadable++;
+    }
+  }
+  return { queues, unreadable };
+}
+
 /** Unreadable files are skipped so `factory status` still prints. */
 export function summarizeQueues(factoryHome: string): QueueSummary[] {
   const dir = queueDir(factoryHome);
