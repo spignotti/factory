@@ -70,6 +70,19 @@ describe("admission and schedule", () => {
     ).map((row) => row.issue)).toEqual([1, 2]);
   });
 
+  it("ranks a ticket that unblocks more parked work ahead of unrelated equal-priority work", () => {
+    const at = "2026-11-12T12:00:00.000Z";
+    const ranked = rankPending(
+      [
+        { issue: 2, addedAt: at, index: 1, priority: 1, blockerImpact: 0 },
+        { issue: 1, addedAt: at, index: 0, priority: 1, blockerImpact: 3 },
+      ],
+      Date.parse(at),
+    );
+    expect(ranked.map((row) => row.issue)).toEqual([1, 2]);
+    expect(ranked[0]?.choice).toContain("unblocks 3");
+  });
+
   it("names an after-cycle once", () => {
     const reasons = cycleReasons([
       { issue: 1, after: 2, status: "pending" },

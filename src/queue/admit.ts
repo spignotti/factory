@@ -76,15 +76,16 @@ function priorityName(priority: number): string {
  * Start order without a model call. A ticket waiting {@link FAIR_WAIT_MS} goes first (oldest first).
  * Otherwise higher priority, then older `addedAt`, then the queue-file index.
  */
-export function rankPending(items: RankItem[], nowMs: number): { issue: number; choice: string }[] {
+export function rankPending(items: Array<RankItem & { blockerImpact?: number }>, nowMs: number): { issue: number; choice: string }[] {
   const ageMs = (item: RankItem) => nowMs - Date.parse(item.addedAt);
   const starved = (item: RankItem) => Number.isFinite(ageMs(item)) && ageMs(item) >= FAIR_WAIT_MS;
   const byAge = (a: RankItem, b: RankItem) => a.addedAt.localeCompare(b.addedAt) || a.index - b.index;
   const fair = items.filter(starved).sort(byAge);
-  const rest = items.filter((item) => !starved(item)).sort((a, b) => b.priority - a.priority || byAge(a, b));
+  const rest = items.filter((item) => !starved(item)).sort((a, b) => b.priority - a.priority || (b.blockerImpact ?? 0) - (a.blockerImpact ?? 0) || byAge(a, b));
   return [...fair, ...rest].map((item) => {
     const hours = Number.isFinite(ageMs(item)) ? Math.max(0, Math.floor(ageMs(item) / 3_600_000)) : 0;
-    const note = starved(item) ? ", fair wait" : "";
+    const blocker = (item.blockerImpact ?? 0) > 0 ? `, unblocks ${item.blockerImpact}` : "";
+    const note = starved(item) ? ", fair wait" : blocker;
     return { issue: item.issue, choice: `priority ${priorityName(item.priority)}, waiting ${hours}h${note}` };
   });
 }

@@ -7,7 +7,7 @@ import { readState } from "../../src/pipeline/state.js";
 import { issueRevision } from "../../src/queue/admit.js";
 import { clearPause, pauseRequested, requestPause } from "../../src/queue/pause.js";
 import { loadQueueByKey, repoQueueKey, updateQueue } from "../../src/queue/store.js";
-import { runQueue } from "../../src/queue/worker.js";
+import { prNumberOf, runQueue } from "../../src/queue/worker.js";
 import { FIXTURES, commitFile } from "../helpers/repo.js";
 import { resumeScenario, runScenario } from "../helpers/scenario.js";
 
@@ -231,6 +231,46 @@ describe("worker continuation follows the stored stop, not a stale field", () =>
 
   it("does not continue a stopped run whose repair action does not match", async () => {
     await denied({ cause: "technical_repair", action: "none" }, "mismatch");
+  }, 120_000);
+
+  it("repairs a repairable PR that blocks several parked tickets ahead of unrelated work (#178)", async () => {
+    const r = await redPr();
+    writeStop(r.runDir, { cause: "technical_repair", action: "repair" });
+    r.github.baseStatus = async () => "green";
+    const pr = prNumberOf(r.result.pr!)!;
+    expect(pr).toBeGreaterThan(0);
+    r.github.issues.set(11, { number: 11, title: "Unrelated", body: "Independent work.", labels: ["factory-ready"], state: "open" });
+    await updateQueue(r.factoryHome, r.repo, (q) => {
+      q.entries.push({
+        issue: 7, status: "parked", added_at: "2026-01-01T00:00:00Z", run_id: r.runId,
+        issue_rev: issueRevision(issue.title, issue.body), pr: r.result.pr!,
+      });
+      for (const n of [8, 9, 10]) {
+        q.entries.push({ issue: n, status: "parked", added_at: "2026-01-02T00:00:00Z", blocked_by: [pr], reason: "planned paths overlap open factory PR" });
+      }
+      q.entries.push({ issue: 11, status: "pending", added_at: "2026-01-03T00:00:00Z" });
+    });
+    const starts: { issue: number; resume?: string }[] = [];
+    const ctl = new AbortController();
+    const worker = runQueue({
+      factoryHome: r.factoryHome, github: r.github, repo: r.repo, slots: 1, pollMs: 10, signal: ctl.signal,
+      start: (req) => {
+        starts.push({ issue: req.issue, resume: req.resumeRunId });
+        const done: RunResult = {
+          run_id: req.resumeRunId ?? `20261029-130000-${req.issue.toString(16).padStart(6, "0")}`,
+          repo: r.repo, task: `#${req.issue}`, type: "feature", lane: "standard", result: "done",
+          risk: "low", merge_policy: "human_review", pr: req.resumeRunId ? r.result.pr : "https://github.test/pr/11",
+          rounds: 0, minutes: 0, cost_usd: 0, reason: "", branch: null, worktree: null, run_dir: "",
+        };
+        return { done: Promise.resolve(done), pid: 0, runId: () => done.run_id, kill: () => undefined, unref: () => undefined };
+      },
+    });
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline && starts.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    ctl.abort();
+    await worker.catch(() => undefined);
+    expect(starts[0]).toEqual({ issue: 7, resume: r.runId });
+    expect(starts.find((s) => s.issue === 11)).toBeUndefined();
   }, 120_000);
 
   it("does not start an already queued continuation while paused; independent work uses the slot", async () => {
