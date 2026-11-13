@@ -401,9 +401,121 @@ The API key is optional: without one Context7 serves an anonymous, lower rate li
 `CONTEXT7_API_KEY` in the factory's environment for your plan's limit. The key is sent only as the bearer
 header to Context7, never to agent processes (`NEVER_PASSED`), and redacted from logs. Choose the steps
 with `docs_lookup: { roles: [...] }` (`plan`, `implement`, `fix`, `review`, `evaluate`) in a profile
-layer or in repo.yaml; `roles: []` turns it off. `factory doctor` checks that Context7 is reachable and
-that a configured key is accepted. Evals use the profile's setting, so `factory experiment` can compare
-with and without it.
+layer or in repo.yaml; `roles: []` turns it off. Evals use the profile's setting, so `factory experiment`
+can compare with and without it.
+
+### Getting the key into the worker
+
+`Context7Client.fromEnv(process.env)` reads the key when the CLI starts, and `factory queue run` hands its
+own environment to the `factory run` children it spawns: the key has to be in the environment of the
+**long-lived worker process** (a manual `factory run` or `factory doctor` needs it in that process's env).
+Do not export the machine identity into that environment, and do not start the worker as the child of
+`infisical run`. Checked against the Infisical CLI sources: `infisical run` copies its process environment
+into the child and overlays every secret it fetched. Universal-auth login reads
+`INFISICAL_UNIVERSAL_AUTH_CLIENT_ID` and `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET` when `--client-id` and
+`--client-secret` are omitted; `infisical run` reads `INFISICAL_TOKEN` when `--token` is omitted. Passing
+those values as flags puts them in argv. The per-repo command in [Secrets](#secrets) is for check secrets,
+not for this process.
+
+The host runs a scoped wrapper. It reads a `0600` credentials file only inside the Infisical subshell,
+never exports that file in the parent or in the LaunchAgent, and adds only `CONTEXT7_API_KEY` before
+`exec`. The wrapper must not print the key (no `echo`, no `set -x`, no `infisical export` to the log)
+and must not pass it as an argument (`env CONTEXT7_API_KEY=… factory` would). Paths below are quoted.
+
+The file is shell assignments, outside the repo, and is not the per-repo secrets file. Quote any value
+that contains spaces. Names: `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET`,
+`INFISICAL_PROJECT_ID`, `INFISICAL_ENVIRONMENT`, `INFISICAL_SECRET_PATH`, and `INFISICAL_DOMAIN` when not
+using US Cloud. No secret value belongs in this document. `PATH` in the wrapper must include the Infisical
+CLI; that directory is not a secret and is not this file.
+
+```sh
+install -m 600 /dev/null "$HOME/.factory/secrets/context7.env"
+install -m 700 /dev/null "$HOME/.local/bin/factory-context7-worker.sh"
+```
+
+```sh
+#!/bin/sh
+# Host script. This repository does not install it. No credential on this command line.
+set -eu
+if [ -n "${FACTORY_CONTEXT7_CREDENTIALS:-}" ]; then cred_file=$FACTORY_CONTEXT7_CREDENTIALS; else cred_file="$HOME/.factory/secrets/context7.env"; fi
+if [ -n "${FACTORY_BIN:-}" ]; then factory_bin=$FACTORY_BIN; else factory_bin="$HOME/.local/bin/factory"; fi
+key=$(
+  set -eu
+  set -a
+  . "$cred_file"
+  set +a
+  [ -n "${INFISICAL_SECRET_PATH:-}" ] && [ -n "${INFISICAL_PROJECT_ID:-}" ] || exit 1
+  token=$(infisical login --method=universal-auth --silent --plain) || exit 1
+  INFISICAL_TOKEN="$token" infisical run \
+    --projectId="$INFISICAL_PROJECT_ID" \
+    --env="${INFISICAL_ENVIRONMENT:-dev}" \
+    --path="$INFISICAL_SECRET_PATH" \
+    --include-imports=false \
+    --domain="${INFISICAL_DOMAIN:-https://app.infisical.com}" \
+    -- /usr/bin/printenv CONTEXT7_API_KEY
+) || exit 1
+[ -n "$key" ] || exit 1
+export CONTEXT7_API_KEY="$key"
+unset key
+if [ "$#" -eq 0 ]; then
+  set -- queue run --stay
+fi
+exec "$factory_bin" "$@"
+```
+
+- The client secret and the access token are environment variables of the Infisical processes in the
+  subshell, not argv. The subshell exits before `exec`, so the worker and the `factory run` children it
+  spawns do not inherit `INFISICAL_UNIVERSAL_AUTH_CLIENT_ID`, `INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET` or
+  `INFISICAL_TOKEN`. Do not `set -a` and source the file in the parent.
+- `--path="$INFISICAL_SECRET_PATH"` is quoted. It does not exclude imported secrets. `infisical run`
+  defaults `--include-imports` to true ("import linked secrets"); the secrets fetch takes `IncludeImport`.
+  Linked secrets from other folders stay in the fetch unless `--include-imports=false`. That flag is not
+  an isolation boundary: every secret in the selected folder is still fetched, and `infisical run` would
+  inject all of them plus its parent environment into its child. That child is `printenv`, not factory.
+  The wrapper exports only `CONTEXT7_API_KEY` and does not promise the fetch saw nothing else. Do not pass
+  `--recursive` (subfolders). If this CLI rejects `--include-imports=false`, the wrapper exits; do not drop
+  the flag and do not claim the folder is isolated.
+- `printenv` writes the key to the subshell's stdout, which the wrapper captures and does not log.
+  `export` then `exec` puts it in the worker environment, not in argv. The wrapper treats that stdout as
+  the key. Login uses `--silent --plain`; the run command logs the inject count with its logger, not as
+  the child's stdout. A version that prints a banner on stdout would export the banner as the key (doctor
+  then rejects it) rather than print the value. `CONTEXT7_API_KEY` stays in `NEVER_PASSED`, so agent tool
+  processes still do not receive it.
+- **LaunchAgent:** `ProgramArguments` runs the wrapper, for example `/bin/sh -c 'exec "$HOME/.local/bin/factory-context7-worker.sh"'`,
+  with `KeepAlive` true. No identity variables in `EnvironmentVariables`. The plist is
+  `"$HOME/Library/LaunchAgents/<label>.plist"` (outside this repo, like the gc agent in
+  [docs/GC_RETENTION.md](docs/GC_RETENTION.md)). Changing it is a production-host step (`host_steps`, see
+  [Risk & Security](#risk--security)). This tree does not bootout, bootstrap, install or start the worker.
+- **Update / restart.** `KeepAlive` starts the loaded job again as soon as its process exits, so
+  `factory queue drain` or `stop` alone brings the old worker back. The host sequence, not performed here:
+  1. `launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/<label>.plist"` — unload the job so
+     KeepAlive cannot restart the old program. bootout also sends SIGTERM; the factory signal handler
+     aborts the queue loop and is not a drain.
+  2. `factory queue drain` (a live coding run finishes, then the worker exits) or `factory queue stop`
+     (exits at the next tick and does not signal a live run), if the process is still running after bootout.
+     Drain or stop before bootout loses the race with KeepAlive.
+  3. Wait until that process has exited. A second `queue run` exits with `a queue worker is already running`.
+  4. Start one new worker from the new build: `launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/<label>.plist"`.
+     Not a second manual worker beside the agent. Keep the previous release until this one process is up.
+     Rollback is that previous build, started the same way, after the new process has exited.
+  A worker keeps the environment it started with. A new or revoked key takes effect on that restart only.
+  The factory never restarts the host unit itself.
+- **Proof:** `"$HOME/.local/bin/factory-context7-worker.sh" doctor` (same wrapper, not `infisical run -- factory doctor`).
+  The `docs_lookup` check detail is `Context7 for <roles>: <probe>` (text output prefixes `docs_lookup: `;
+  default roles are `plan, implement, fix`). A network failure still reports whether the key is present.
+  The parenthetical is `Error.message` sliced to 120 characters; the rest is fixed. For
+  `ENOTFOUND context7.com` and the default roles the code emits exactly:
+
+  `Context7 for plan, implement, fix: unreachable (ENOTFOUND context7.com); CONTEXT7_API_KEY is set (value not shown); docs_lookup returns errors to agents`
+
+  `Context7 for plan, implement, fix: unreachable (ENOTFOUND context7.com); no CONTEXT7_API_KEY in the environment; docs_lookup returns errors to agents`
+
+  The same prefix plus the probe detail: `reachable, CONTEXT7_API_KEY accepted`,
+  `CONTEXT7_API_KEY accepted, quota exhausted; docs lookup unavailable until <ISO-8601>`,
+  `reachable without API key (anonymous rate limit); set CONTEXT7_API_KEY for higher limits`,
+  `CONTEXT7_API_KEY rejected (401)` or `CONTEXT7_API_KEY rejected (403)`. A network failure is not itself
+  a missing key: only the `no CONTEXT7_API_KEY in the environment` clause says the injection missed this
+  process. Names and verdicts only, never a value.
 
 ## Secrets
 
@@ -919,7 +1031,7 @@ A crash before the run directory exists puts the issue back to pending. A resour
 
 `queue run` does not call `improve`. Monday (`findings`, `ci`, `security`) and the first Monday (`tests`, `performance`, `structure`) stay the only `improve` triggers.
 
-Do not replace `dist/` while a worker is running, and do not copy a worktree build over the checkout that worker was started from. A later install drains or stops the worker, keeps the previous commit, and starts one worker from the new build only after the old process has exited. Rollback is that previous commit's build, started the same way, after the new process has exited. This tree does not perform that switch.
+Do not replace `dist/` while a worker is running, and do not copy a worktree build over the checkout that worker was started from. A later install keeps the previous commit. On a KeepAlive LaunchAgent, `factory queue drain` or `stop` alone restarts the old worker: `launchctl bootout` the job first, then drain or stop if it is still running, wait until that process has exited, then start one worker from the new build. Quoted paths and the full sequence are in [Getting the key into the worker](#getting-the-key-into-the-worker). Rollback is that previous commit's build, started the same way, after the new process has exited. This tree does not perform that switch.
 
 ## Status, stats, cleanup
 

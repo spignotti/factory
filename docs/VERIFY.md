@@ -53,6 +53,24 @@ Unverified (needs a real provider):
 - `openai`: ChatGPT OAuth in the factory-owned `auth.json` (subscription) wins over `OPENAI_API_KEY`;
   `doctor` and `PiRunner` refuse OpenAI without the OAuth login. `openai-codex` is not allowed.
 
+## Docs lookup (Context7)
+
+- The client, its bearer header, the rate-limit handling and every `doctor` verdict (`accepted`,
+  `accepted, quota exhausted`, `rejected`, and the network-failure key-presence lines) are covered with a
+  synthetic key and a fake transport (`test/unit/docs-lookup.test.ts`, `test/e2e/docs.test.ts`);
+  `test/live/context7.test.ts` is anonymous unless the operator runs it with an injected key.
+  A network failure is not a missing key. `docsLookupCheck` emits, for `ENOTFOUND context7.com` and the
+  default roles, exactly `Context7 for plan, implement, fix: unreachable (ENOTFOUND context7.com); CONTEXT7_API_KEY is set (value not shown); docs_lookup returns errors to agents`
+  or the same line with `no CONTEXT7_API_KEY in the environment` when the key is absent. The parenthetical
+  is `Error.message` sliced to 120 characters.
+- UNVERIFIED here, operational verification on the host: one authenticated request through the scoped
+  wrapper in the README (`factory-context7-worker.sh doctor`, not `infisical run -- factory doctor`, and
+  not an exported machine identity) reporting `Context7 for plan, implement, fix: reachable, CONTEXT7_API_KEY accepted`.
+  It needs the real key and a live call to context7.com, so no automated test performs it.
+- UNVERIFIED against a live response: that Context7 answers a refused or expired key with 401/403 (never a
+  429). The doctor's `accepted, quota exhausted` verdict reads the credential as valid from a 429 that
+  carried the key; a rejection on another status would read as an unexpected HTTP status instead.
+
 ## GitHub (`src/gh.ts`)
 
 - `repoSettings` reads `security_and_analysis.secret_scanning.status`,

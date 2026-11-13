@@ -4,7 +4,7 @@ import { docsLookupCheck } from "../../src/commands/doctor.js";
 import { buildAgentEnv } from "../../src/agents/env.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
 import { parseLayer, resolveProfile, loadLayers } from "../../src/config.js";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,7 +99,7 @@ describe("Context7 client (docs_lookup)", () => {
     expect(second.text).toBe(first.text);
     expect(calls).toBe(1);
     const probe = await context7Probe(limited, now);
-    expect(probe.detail).toBe("rate limit reached; docs lookup unavailable until 2026-04-08T00:28:53.683Z");
+    expect(probe.detail).toBe("anonymous rate limit reached (no CONTEXT7_API_KEY set); docs lookup unavailable until 2026-04-08T00:28:53.683Z");
     expect(probe.detail).not.toContain("1733683s");
     const none = new Context7Client({ fetch: fakeFetch(() => [200, JSON.stringify({ results: [] })]).fetch });
     expect((await none.lookup({ library: "nope", topic: "x" })).status).toBe("not_found");
@@ -131,6 +131,56 @@ describe("Context7 client (docs_lookup)", () => {
     const down = await context7Probe(new Context7Client({ fetch: async () => { throw new Error("offline"); } }));
     expect(down.status).toBe("warn");
     expect((await docsLookupCheck(new Context7Client(), [])).status).toBe("info");
+  });
+
+  it("doctor probe: a key that is accepted but out of quota is not reported as missing or rejected", async () => {
+    const now = Date.parse("2026-04-08T00:00:00.000Z");
+    const limited = () => fakeFetch(() => [429, "{}", { "retry-after": "30" }]).fetch;
+    const withKey = await context7Probe(new Context7Client({ apiKey: KEY, fetch: limited() }), now);
+    expect(withKey.status).toBe("warn");
+    expect(withKey.detail).toBe("CONTEXT7_API_KEY accepted, quota exhausted; docs lookup unavailable until 2026-04-08T00:00:30.000Z");
+    expect(withKey.detail).not.toContain(KEY);
+
+    const anonymous = await context7Probe(new Context7Client({ fetch: limited() }), now);
+    expect(anonymous.detail).toMatch(/no CONTEXT7_API_KEY set/);
+    expect(anonymous.detail).not.toMatch(/accepted/);
+
+    const rejected = await context7Probe(new Context7Client({ apiKey: KEY, fetch: fakeFetch(() => [403, "{}"]).fetch }));
+    expect(rejected).toEqual({ status: "fail", detail: "CONTEXT7_API_KEY rejected (403)" });
+    expect(rejected.detail).not.toContain(KEY);
+  });
+
+  it("doctor probe: a network failure still says whether the key is configured, never its value", async () => {
+    const down = () => {
+      throw new Error("ENOTFOUND context7.com");
+    };
+    const configured = await context7Probe(new Context7Client({ apiKey: KEY, fetch: down as unknown as FetchLike }));
+    const configuredDetail = "unreachable (ENOTFOUND context7.com); CONTEXT7_API_KEY is set (value not shown); docs_lookup returns errors to agents";
+    const unsetDetail = "unreachable (ENOTFOUND context7.com); no CONTEXT7_API_KEY in the environment; docs_lookup returns errors to agents";
+    expect(configured).toEqual({ status: "warn", detail: configuredDetail });
+    expect(configured.detail).not.toContain(KEY);
+    const unset = await context7Probe(new Context7Client({ fetch: down as unknown as FetchLike }));
+    expect(unset).toEqual({ status: "warn", detail: unsetDetail });
+    const roles = ["plan", "implement", "fix"];
+    const doctor = await docsLookupCheck(new Context7Client({ apiKey: KEY, fetch: down as unknown as FetchLike }), roles);
+    const doctorSet = `Context7 for ${roles.join(", ")}: ${configuredDetail}`;
+    const doctorUnset = `Context7 for ${roles.join(", ")}: ${unsetDetail}`;
+    expect(doctor).toEqual({ name: "docs_lookup", status: "warn", detail: doctorSet });
+    expect((await docsLookupCheck(new Context7Client({ fetch: down as unknown as FetchLike }), roles)).detail).toBe(doctorUnset);
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+    const startup = readme.slice(readme.indexOf("### Getting the key into the worker"), readme.indexOf("## Secrets"));
+    const scriptStart = startup.indexOf("#!/bin/sh");
+    const script = startup.slice(scriptStart, startup.indexOf("```", scriptStart));
+    expect(startup).toContain(doctorSet);
+    expect(startup).toContain(doctorUnset);
+    expect(script).not.toMatch(/--client-secret|--client-id|--token=/);
+    expect(script).toContain('export CONTEXT7_API_KEY="$key"');
+    expect(script).toContain('--path="$INFISICAL_SECRET_PATH"');
+    expect(script).not.toMatch(/\becho\b/);
+    expect(startup).toContain("launchctl bootout");
+    expect(startup).toContain("launchctl bootstrap");
+    expect(startup).not.toMatch(/exported by the host/);
+    expect(startup).toContain("does not exclude imported secrets");
   });
 
   it("CONTEXT7_API_KEY never reaches agent tool processes, even when allowlisted", () => {
