@@ -49,7 +49,7 @@ export interface QueueEntry {
   /** Hash of the issue title and body at the last start. A mismatch drops the saved plan. */
   issue_rev?: string;
   /**
-   * Written when a coding run reaches `done`. Absent on older entries: those stay unknown,
+   * Set when a coding run reaches `done`. Absent on older entries: those stay unknown,
    * even when `status` is `done` and `pr` is set. `merged: "no"` is not a confirmed merge.
    */
   delivery?: {
@@ -57,6 +57,11 @@ export interface QueueEntry {
     pr: string | null;
     attempts: number | null;
   };
+  /**
+   * Release the worker that started this run was running. A handoff can switch the worker while this
+   * run continues, so the version of live work is reported per entry, not per worker.
+   */
+  release_id?: string;
 }
 
 export interface QueueFile {
@@ -93,6 +98,7 @@ const EntrySchema = z.object({
       attempts: z.number().int().min(0).nullable(),
     })
     .optional(),
+  release_id: z.string().optional(),
 });
 
 const FileSchema = z.object({

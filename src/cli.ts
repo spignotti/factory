@@ -18,6 +18,7 @@ import { autoGc, gcCommand, resumesBaseRedAfterGc } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { queueCommand } from "./commands/queue.js";
 import { statusCommand } from "./commands/status.js";
+import { releaseCommand } from "./commands/release.js";
 import { adoptCommand } from "./commands/adopt.js";
 import { standardsMigrateCommand } from "./commands/standards.js";
 import { auditAlias, hardenAlias, improveCommand } from "./commands/improve.js";
@@ -79,6 +80,26 @@ const USAGE = `usage:
                --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish;
                --stay keeps this worker up when idle and backs off; it does not raise the slot cap.
                The worker does not run improve.)
+  factory release stage (--from <built-tree> | --source <checkout>) [--commit <sha>] [--ref <tag>]
+              [--build <cmd>] [--test <cmd>]... [--approve] [--json]
+              (registers an immutable, version-pinned candidate under $FACTORY_HOME/releases/candidates/<id>,
+               built and checked outside the running installation; --approve permits activating it)
+  factory release list [--json]
+              (staged candidates: version, commit, tested checks, approved)
+  factory release approve <candidate-id> [--json]
+              (permission to activate that exact artifact; publishing a build is not that permission)
+  factory release plan <candidate-id> [--json]
+              (current and target versions, worker version, active and waiting work, state compatibility,
+               the handoff steps and the rollback target; writes nothing, starts nothing)
+  factory release activate <candidate-id> --yes [--allow-migration] [--drain-timeout <ms>] [--json]
+              (the one controlled operation: hold admissions, let active coding finish without signalling
+               it, wait for the old worker to release queue/worker.lock, switch the active release, start
+               one worker from the candidate and verify it owns the queue; on a failed verification roll
+               back when the previous release can still read the state. A transaction left by a crash is
+               resumed, never doubled. Published, active, worker and live run versions: factory release status)
+  factory release status [--json]
+              (this CLI, the active release, the live worker, published candidates, live runs, the
+               admission hold and the handoff transaction)
   factory status [--since <duration>] [--timezone <IANA>] [--json]
               (running, waiting for a human, interrupted runs; queues; open factory PRs;
                stale draft factory PRs, with a hint to close or resume them;
@@ -531,6 +552,9 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
     if (command === "status") {
       const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, timezone: { type: "string" }, json: { type: "boolean", default: false } } });
       return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), since: values.since, timezone: values.timezone, json: values.json }, io);
+    }
+    if (command === "release") {
+      return await releaseCommand(rest, { factoryHome: factoryHomeOf(), io });
     }
     if (command === "stats") {
       const { values } = parseArgs({

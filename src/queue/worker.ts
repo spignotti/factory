@@ -14,6 +14,8 @@ import { MAX_CONTINUATIONS } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
+import { admissionHold } from "./admission.js";
+import { clearWorkerIdentity, executingRelease, publishWorkerIdentity, type ReleaseIdentity } from "./identity.js";
 import type { Io } from "../commands/gates.js";
 import { admissionBlock, cycleReasons, fulfilledIssues, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
 import { clearWorkerMode, readWorkerMode } from "./control.js";
@@ -105,6 +107,12 @@ export interface RunQueueOptions {
   stay?: boolean;
   /** Unit interval for {@link nextPollMs}. Tests pin it. */
   random?: () => number;
+  /**
+   * Release this worker runs. Defaults to the installed build; a handoff starts a worker from a
+   * staged candidate and the child inherits its identity. Published as `queue/worker.json`, and
+   * stamped on every entry this worker starts, so live work keeps its own release after a switch.
+   */
+  release?: ReleaseIdentity;
 }
 
 interface Tracked {
@@ -139,6 +147,8 @@ interface TickCtx {
   pastUntil: boolean;
   /** Pause, drain, or past `--until`: do not discover issues and do not start runs. */
   holdStarts: boolean;
+  /** A release handoff holds admissions: classify finished runs, and change nothing else. */
+  releaseHold: boolean;
   /** A GitHub or git call in this tick failed. The next sleep backs off. */
   netFailed: boolean;
   nowMs: number;
@@ -158,6 +168,8 @@ interface TickCtx {
   mergeEnabled: Set<string>;
   /** `repo#pr` whose update-branch hit a conflict. Not retried. */
   behindConflict: Set<string>;
+  /** Release this worker runs; stamped on every entry it starts. */
+  release: ReleaseIdentity;
 }
 
 interface BehindWatch {
@@ -1264,7 +1276,9 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const snap = loadQueueByKey(ctx.factoryHome, key);
   if (!snap) return false;
 
-  const unpark = await unparkReady(snap, ctx.github, repo, ctx.io, timeoutMs, ctx.factoryHome, noteFailure);
+  // A release handoff classifies finished runs and changes nothing else: no unpark, no pause, no
+  // update-branch, no approval and no auto-merge while the admission hold is in place.
+  const unpark = ctx.releaseHold ? new Set<number>() : await unparkReady(snap, ctx.github, repo, ctx.io, timeoutMs, ctx.factoryHome, noteFailure);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
@@ -1290,17 +1304,19 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const issueByNumber = new Map<number, Issue>();
   const pauseFor = new Map<number, string>();
   const clearPauseFor = new Set<number>();
-  for (const entry of snap.entries) {
-    if (entry.status !== "running") continue;
-    try {
-      const issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), timeoutMs, `issue #${entry.issue}`);
-      const block = admissionBlock(issue);
-      // Closed is the run finishing, not a label pull. A missing ready label pauses in place.
-      if (block && block !== "is closed") pauseFor.set(entry.issue, block);
-      else if (!block && entry.paused) clearPauseFor.add(entry.issue);
-    } catch (e) {
-      noteFailure();
-      ctx.io.err(`factory: issue #${entry.issue}: ${(e as Error).message.slice(0, 200)}\n`);
+  if (!ctx.releaseHold) {
+    for (const entry of snap.entries) {
+      if (entry.status !== "running") continue;
+      try {
+        const issue = await withTimeout(ctx.github.getIssue(repo, entry.issue), timeoutMs, `issue #${entry.issue}`);
+        const block = admissionBlock(issue);
+        // Closed is the run finishing, not a label pull. A missing ready label pauses in place.
+        if (block && block !== "is closed") pauseFor.set(entry.issue, block);
+        else if (!block && entry.paused) clearPauseFor.add(entry.issue);
+      } catch (e) {
+        noteFailure();
+        ctx.io.err(`factory: issue #${entry.issue}: ${(e as Error).message.slice(0, 200)}\n`);
+      }
     }
   }
   if (mightStart) {
@@ -1494,6 +1510,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       delete entry.paused;
       entry.run_id = plannedId;
       entry.issue_rev = issueRevision(issue.title, issue.body);
+      entry.release_id = ctx.release.id;
       entry.choice = choice.choice;
       starts.push({
         issue: entry.issue,
@@ -1546,8 +1563,10 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       }, gitOpts);
     }
   }
-  const watch = await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.behindConflict, ctx.io, timeoutMs, noteFailure);
-  const waitingMerge = await enableReadyMerges(ctx.github, repo, ctx.factoryHome, ctx.mergeEnabled, ctx.io, timeoutMs, noteFailure);
+  const watch: BehindWatch = ctx.releaseHold
+    ? { needsUpdate: false, openDone: false }
+    : await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.behindConflict, ctx.io, timeoutMs, noteFailure);
+  const waitingMerge = ctx.releaseHold ? false : await enableReadyMerges(ctx.github, repo, ctx.factoryHome, ctx.mergeEnabled, ctx.io, timeoutMs, noteFailure);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
   const pending = q.entries.some((e) => e.status === "pending");
@@ -1600,12 +1619,15 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
   const redLogged = new Set<string>();
   const mergeEnabled = new Set<string>();
   const behindConflict = new Set<string>();
+  const release = opts.release ?? executingRelease();
   const dir = queueDir(opts.factoryHome);
   mkdirSync(dir, { recursive: true });
   const held = await tryPathLock(
     join(dir, "worker.lock"),
     "queue-worker",
     async () => {
+      // Names this pid and release, so a handoff can prove which worker owns the queue.
+      publishWorkerIdentity(opts.factoryHome, release);
       let lastTick = now();
       let streak = 0;
       try {
@@ -1622,7 +1644,10 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
           const jumped = t - lastTick > poll + suspendSlackMs(poll);
           lastTick = t;
           const pastUntil = opts.untilMs !== undefined && t >= opts.untilMs;
-          const holdStarts = pastUntil || mode === "pause" || mode === "drain";
+          // A release handoff holds admissions in its own file; the operator's pause/drain stays as it is.
+          const heldAdmission = admissionHold(opts.factoryHome);
+          const holdStarts = pastUntil || mode === "pause" || mode === "drain" || heldAdmission !== undefined;
+          const holdMutations = heldAdmission !== undefined;
           const repos = await reposFor(opts);
           let cont = false;
           let failed = false;
@@ -1634,6 +1659,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
               untilMs: opts.untilMs,
               pastUntil,
               holdStarts,
+              releaseHold: holdMutations,
               netFailed: false,
               nowMs: t,
               jumped,
@@ -1648,6 +1674,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
               redLogged,
               mergeEnabled,
               behindConflict,
+              release,
             };
             try {
               const busy = await tickRepo(tick, repo);
@@ -1660,8 +1687,10 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
             }
           }
           // Drain keeps queued issues and CI waits on disk. It leaves once coding runs are done.
-          if (mode === "drain" && !activeCoding(opts.factoryHome, handles)) {
-            io.out("queue: drained\n");
+          // A handoff drain asks the worker being replaced to leave. The target release stays up.
+          const handoffReplacesThis = heldAdmission?.state === "drain" && heldAdmission.target_release !== release.id;
+          if ((mode === "drain" || handoffReplacesThis) && !activeCoding(opts.factoryHome, handles)) {
+            io.out(heldAdmission ? `queue: drained for ${heldAdmission.tx}\n` : "queue: drained\n");
             return;
           }
           if (!cont) {
@@ -1682,6 +1711,7 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
         io.out("queue: stopped\n");
       } finally {
         for (const h of handles.values()) h.unref();
+        clearWorkerIdentity(opts.factoryHome);
       }
     },
     { waitMs: 0 },
