@@ -45,7 +45,10 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   event lists both attempts.
 - **Implement** (`src/steps/implement.ts`): DAG order, fresh session per package, handoff validation with one
   re-prompt, fast gates with the failure tail back into the same session (max 3), factory commits,
-  cascade-skip. Bug plans prove the repro red on base and green after the fix. A plan opts out only with
+  cascade-skip. An unchanged failure (same check, diagnostic code, and file when the output names one; reworded prose does not count,
+  swapped values do) makes the next turn, including the first turn after resume, run that check before
+  another edit. Suppression, a lower severity, a dropped gate, or an edited gate script (including one an interpreter or package script runs) is not a fix, and approval still requires
+  the complete gate set. The gate budget is not reset. Bug plans prove the repro red on base and green after the fix. A plan opts out only with
   `red_green: not_applicable` and `red_green_reason`, or the issue label `factory:red-green-not-applicable` plus that
   reason (test-stabilization, where the repro cannot fail on base). That opt-out is a loosening: the reason is required,
   and the gate result, config guard and PR body name it. The plan reviewer must justify it. Without the field and the

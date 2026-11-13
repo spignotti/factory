@@ -34,6 +34,13 @@ console.log(process.argv[3] || "external status: held");
 process.exit(1);
 `;
 
+// A stable ShellCheck finding whose report text changes every attempt (the pid is in the line and column).
+const SHELLCHECK = `#!/bin/sh
+grep -q multiply src/math.js || exit 0
+echo "src/math.js:$$:$$: SyntaxError: unexpected token (SC2166)"
+exit 1
+`;
+
 function brokenImplement(steps: FakeStep[]): FakeStep {
   const impl = steps.find((s) => s.role === "implement" && typeof s.writes?.["src/math.js"] === "string");
   const source = impl?.writes?.["src/math.js"];
@@ -173,6 +180,226 @@ describe("F02 recovery", () => {
     expect(JSON.parse(r2.file("plan.json")).goal).toBe(JSON.parse(r.file("plan.json")).goal);
     const after = JSON.parse(r2.file("state.json")) as { repair?: { gate_attempts?: number } };
     expect(after.repair?.gate_attempts).toBe(3);
+  });
+
+  it("#181: an unchanged repeated failure escalates to a diagnostic strategy instead of repeating the prompt", async () => {
+    const patch = (cfg: Record<string, unknown>) => {
+      const checks = cfg.checks as { name: string; run: string; tier: string; paths?: string[] }[];
+      checks.push({ name: "shellcheck", run: "tools/shcheck", tier: "fast", paths: ["src/**"] });
+    };
+    const brokenThrice = (steps: FakeStep[]) => {
+      const step = brokenImplement(steps);
+      return [...steps.filter((s) => s.role !== "implement"), step, step, step];
+    };
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      setup: (repo) => commitTools(repo, { shcheck: SHELLCHECK }),
+      patch,
+      steps: brokenThrice,
+    });
+    expect(r.result.result).toBe("needs_human");
+    const impl = r.runner.calls.filter((c) => c.role === "implement");
+    expect(impl).toHaveLength(3);
+    expect(impl[1]!.prompt).toContain("Gates are red");
+    expect(impl[1]!.prompt).not.toContain("Unchanged failure");
+    expect(impl[2]!.prompt).toContain("Unchanged failure");
+    expect(r.events.some((e) => e.data.repair === "strategy" && e.data.strategy === "diagnose")).toBe(true);
+    const st = JSON.parse(r.file("state.json")) as {
+      repair?: { gate_attempts?: number; failure?: { signature?: string; checkpoint?: string; unchanged?: number } };
+    };
+    expect(st.repair?.gate_attempts).toBe(3);
+    expect(st.repair?.failure?.signature).toMatch(/^[0-9a-f]{12}$/);
+    expect(st.repair?.failure?.checkpoint).toMatch(/^[0-9a-f]{7,12}$/);
+    expect(st.repair!.failure!.unchanged!).toBeGreaterThanOrEqual(2);
+    expect(r.result.reason).toMatch(/attempts=3\/3/);
+    expect(r.result.reason).toMatch(/failure=[0-9a-f]{12} unchanged=/);
+    expect(r.github.prs).toHaveLength(0);
+    expect(r.runner.calls.filter((c) => c.role.startsWith("plan"))).toHaveLength(1);
+  });
+
+  it("#181: resume keeps the spent budget and the same failure identity across process restart", async () => {
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      setup: (repo) => commitTools(repo, { shcheck: SHELLCHECK }),
+      patch: (cfg: Record<string, unknown>) => {
+        const checks = cfg.checks as { name: string; run: string; tier: string; paths?: string[] }[];
+        checks.push({ name: "shellcheck", run: "tools/shcheck", tier: "fast", paths: ["src/**"] });
+      },
+      steps: (steps) => {
+        const step = brokenImplement(steps);
+        return [...steps.filter((s) => s.role !== "implement"), step, step];
+      },
+    });
+    expect(r.result.result).toBe("failed");
+    const before = JSON.parse(r.file("state.json")) as { repair?: { gate_attempts?: number; failure?: { signature?: string; unchanged?: number } } };
+    expect(before.repair?.gate_attempts).toBe(2);
+    expect(before.repair?.failure?.unchanged).toBe(2);
+
+    const r2 = await resumeScenario(r, {
+      script: "gate-fail-fix.json",
+      steps: (steps) => [brokenImplement(steps)],
+    });
+    expect(r2.result.result).toBe("needs_human");
+    const after = JSON.parse(r2.file("state.json")) as { repair?: { gate_attempts?: number; failure?: { signature?: string; unchanged?: number } } };
+    expect(after.repair?.gate_attempts).toBe(3);
+    expect(after.repair?.failure?.signature).toBe(before.repair?.failure?.signature);
+    expect(after.repair!.failure!.unchanged!).toBeGreaterThanOrEqual(3);
+    expect(r2.result.reason).toMatch(/attempts=3\/3/);
+    expect(r2.result.reason).toMatch(/failure=[0-9a-f]{12} unchanged=[3-9]/);
+    expect(r2.runner.calls.filter((c) => c.role.startsWith("plan"))).toHaveLength(0);
+    expect(r2.result.branch).toBe(r.result.branch);
+  });
+
+  it("#181: resume applies the persisted diagnostic strategy before the next implement turn", async () => {
+    const marked = `#!/bin/sh
+echo "FOCUSED_CHECK_RAN"
+grep -q multiply src/math.js || exit 0
+echo "src/math.js:$$:$$: warning: SC2166 Don't use -a or -o."
+exit 1
+`;
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      setup: (repo) => commitTools(repo, { shcheck: marked }),
+      patch: (cfg: Record<string, unknown>) => {
+        const checks = cfg.checks as { name: string; run: string; tier: string; paths?: string[] }[];
+        checks.push({ name: "shellcheck", run: "tools/shcheck", tier: "fast", paths: ["src/**"] });
+      },
+      steps: (steps) => {
+        const step = brokenImplement(steps);
+        return [...steps.filter((s) => s.role !== "implement"), step, step];
+      },
+    });
+    expect(r.result.result).toBe("failed");
+    const before = JSON.parse(r.file("state.json")) as { repair?: { gate_attempts?: number; failure?: { unchanged?: number } } };
+    expect(before.repair?.gate_attempts).toBe(2);
+    expect(before.repair?.failure?.unchanged).toBe(2);
+
+    const r2 = await resumeScenario(r, {
+      script: "gate-fail-fix.json",
+      steps: (steps) => [brokenImplement(steps)],
+    });
+    const impl = r2.runner.calls.filter((c) => c.role === "implement");
+    expect(impl).toHaveLength(1);
+    expect(impl[0]!.prompt.startsWith("Unchanged failure")).toBe(true);
+    expect(impl[0]!.prompt).toContain("FOCUSED_CHECK_RAN");
+    expect(impl[0]!.prompt).toContain("failing_check");
+    expect(r2.events.some((e) => e.data.repair === "diagnose" && e.data.executed === true)).toBe(true);
+    const after = JSON.parse(r2.file("state.json")) as { repair?: { gate_attempts?: number } };
+    expect(after.repair?.gate_attempts).toBe(3);
+    expect(r2.result.reason).toMatch(/attempts=3\/3/);
+    expect(r2.runner.calls.filter((c) => c.role.startsWith("plan"))).toHaveLength(0);
+    expect(r2.github.approvedShas).toEqual([]);
+  });
+
+  it("#181: suppression, severity reduction, or a dropped gate is not a fix and does not approve", async () => {
+    const marked = `#!/bin/sh
+echo "FOCUSED_CHECK_RAN"
+grep -q multiply src/math.js || exit 0
+echo "src/math.js:$$:$$: error: SC2166 Don't use -a or -o."
+exit 1
+`;
+    const neuter = (steps: FakeStep[]): FakeStep => {
+      const step = brokenImplement(steps);
+      const source = steps.map((s) => s.writes?.["src/math.js"]).find((body) => typeof body === "string" && body.endsWith("}\n"));
+      if (typeof source !== "string") throw new Error("script has no closed src/math.js");
+      return { ...step, writes: { ...step.writes, "src/math.js": source, "tools/shcheck": "#!/bin/sh\nexit 0\n" } };
+    };
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      setup: (repo) => commitTools(repo, { shcheck: marked }),
+      patch: (cfg: Record<string, unknown>) => {
+        const checks = cfg.checks as { name: string; run: string; tier: string; paths?: string[] }[];
+        checks.push({ name: "shellcheck", run: "tools/shcheck", tier: "fast", paths: ["src/**"] });
+      },
+      steps: (steps) => {
+        const step = brokenImplement(steps);
+        return [...steps.filter((s) => s.role !== "implement"), step, step, neuter(steps)];
+      },
+    });
+    expect(r.result.result).not.toBe("done");
+    expect(r.github.prs).toHaveLength(0);
+    expect(r.github.approvedShas).toEqual([]);
+    expect(r.result.reason).toMatch(/not a fix|dropped gate|altered|suppress|severity/);
+    const gates = r.events.filter((e) => e.event === "gate_result").map((e) => e.data.check);
+    expect(gates).toContain("syntax");
+    expect(gates).toContain("unit");
+    expect(r.runner.calls.filter((c) => c.role === "implement").at(-1)?.prompt).toContain("Unchanged failure");
+    expect(r.runner.calls.filter((c) => c.role === "implement").at(-1)?.prompt).toContain("FOCUSED_CHECK_RAN");
+  });
+
+  it("#181: an interpreter-wrapped gate script rewritten to exit 0 is not a fix", async () => {
+    const marked = `#!/bin/sh
+echo "FOCUSED_CHECK_RAN"
+grep -q multiply src/math.js || exit 0
+echo "src/math.js:$$:$$: error: SC2166 Don't use -a or -o."
+exit 1
+`;
+    const neuter = (steps: FakeStep[]): FakeStep => {
+      const step = brokenImplement(steps);
+      const source = steps.map((s) => s.writes?.["src/math.js"]).find((body) => typeof body === "string" && body.endsWith("}\n"));
+      if (typeof source !== "string") throw new Error("script has no closed src/math.js");
+      return { ...step, writes: { ...step.writes, "src/math.js": source, "tools/shcheck": "#!/bin/sh\nexit 0\n" } };
+    };
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      setup: (repo) => commitTools(repo, { shcheck: marked }),
+      patch: (cfg: Record<string, unknown>) => {
+        const checks = cfg.checks as { name: string; run: string; tier: string; paths?: string[] }[];
+        checks.push({ name: "shellcheck", run: "sh tools/shcheck", tier: "fast", paths: ["src/**"] });
+      },
+      steps: (steps) => {
+        const step = brokenImplement(steps);
+        return [...steps.filter((s) => s.role !== "implement"), step, step, neuter(steps)];
+      },
+    });
+    expect(r.result.result).not.toBe("done");
+    expect(r.github.prs).toHaveLength(0);
+    expect(r.github.approvedShas).toEqual([]);
+    expect(r.result.reason).toMatch(/altered|not a fix/);
+    expect(r.runner.calls.filter((c) => c.role === "implement").at(-1)?.prompt).toContain("Unchanged failure");
+  });
+
+  it("#181: an npm test script rewritten to exit 0 is not a fix", async () => {
+    const marked = `#!/bin/sh
+grep -q multiply src/math.js || exit 0
+echo "src/math.js:$$:$$: error: SC2166 Don't use -a or -o."
+exit 1
+`;
+    const neuter = (steps: FakeStep[]): FakeStep => {
+      const step = brokenImplement(steps);
+      const source = steps.map((s) => s.writes?.["src/math.js"]).find((body) => typeof body === "string" && body.endsWith("}\n"));
+      if (typeof source !== "string") throw new Error("script has no closed src/math.js");
+      return {
+        ...step,
+        writes: {
+          ...step.writes,
+          "src/math.js": source,
+          "package.json": JSON.stringify({ name: "fixture", private: true, type: "module", scripts: { test: "exit 0" } }),
+        },
+      };
+    };
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      setup: (repo) => {
+        const pkgPath = join(repo, "package.json");
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+        pkg.scripts = { ...pkg.scripts, test: "sh tools/shcheck" };
+        writeFileSync(pkgPath, JSON.stringify(pkg));
+        commitTools(repo, { shcheck: marked });
+      },
+      patch: (cfg: Record<string, unknown>) => {
+        const checks = cfg.checks as { name: string; run: string; tier: string; paths?: string[] }[];
+        checks.push({ name: "shellcheck", run: "npm test", tier: "fast", paths: ["src/**"] });
+      },
+      steps: (steps) => {
+        const step = brokenImplement(steps);
+        return [...steps.filter((s) => s.role !== "implement"), step, step, neuter(steps)];
+      },
+    });
+    expect(r.result.result).not.toBe("done");
+    expect(r.github.prs).toHaveLength(0);
+    expect(r.github.approvedShas).toEqual([]);
+    expect(r.result.reason).toMatch(/altered|not a fix/);
   });
 
   it("resume keeps the checkpoint plan when the issue drops a quote", async () => {

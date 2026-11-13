@@ -1,9 +1,12 @@
-import { formatterWriteCommand } from "../adopt/mutation.js";
+import { createHash } from "node:crypto";
+import { commandParts, formatterWriteCommand } from "../adopt/mutation.js";
 import { sh } from "../exec.js";
-import { headSha } from "../git.js";
+import { changedFiles, diffText, headSha } from "../git.js";
+import { addedSuppressions } from "../gates/config-guard.js";
+import { asData } from "../prompts.js";
 import type { Check } from "../schemas/repo.js";
 import type { StopCause } from "../events.js";
-import { commandEnv, jailFor, type RunContext } from "./context.js";
+import { checkDeadline, commandEnv, jailFor, type RunContext } from "./context.js";
 import { failureSummary, type GateReport, runGates, withEnvCommand } from "../steps/gates.js";
 
 /** Gate-repair budget for one run. Resume continues these numbers; it does not start them over. */
@@ -13,6 +16,38 @@ export const MAX_CONTINUATIONS = 2;
 
 export type RepairClass = "format" | "code" | "infra" | "base" | "config" | "unknown";
 
+/** One failing check that defines the root failure: its name, diagnostic codes, and highest severity word. */
+export interface FailureRoot {
+  name: string;
+  codes: string[];
+  severity?: "error" | "warning" | "note" | "style" | "info";
+}
+
+/**
+ * Identity of one root failure (#181): a fingerprint of the failing checks, their diagnostic codes and
+ * ordered semantic values, plus the code checkpoint it was last seen on and how many observations in a
+ * row showed exactly this fingerprint. Reworded prose is not identity. Swapped values are. `roots` is
+ * what resume re-runs before the next turn, and what a later green report may not drop.
+ */
+export interface FailureIdentity {
+  signature: string;
+  checkpoint: string;
+  unchanged: number;
+  roots: FailureRoot[];
+}
+
+export type RepairStrategy = "repeat" | "diagnose";
+
+/** Same fingerprint at this many observations in a row: repeating the prompt has not helped, change strategy. */
+export const STRATEGY_ESCALATE_AT = 2;
+
+/**
+ * The escalated strategy. The factory has already run the failing check; the prompt carries that output.
+ * A sentence alone is not the escalation.
+ */
+export const DIAGNOSTIC_STEP =
+  "Unchanged failure since the previous attempt. The failing check was run again; its output is in failing_check. Do not repeat the same edit, do not lower the finding's severity, do not suppress or drop the check. Name the root cause (file, line, why it fails) before changing product code, then fix that root cause in every occurrence.";
+
 export interface RepairBudget {
   gateAttempts: number;
   /** Same-model network retries already spent. Shared across calls in this run. */
@@ -21,6 +56,8 @@ export interface RepairBudget {
   infraReruns: number;
   /** Last diagnosed class. A blocking class is not handed to the implementer again. */
   lastClass?: RepairClass;
+  /** Failure identity of the last observed red gate; the basis for strategy escalation (#181). */
+  failure?: FailureIdentity;
 }
 
 export interface StoredRepair {
@@ -29,6 +66,7 @@ export interface StoredRepair {
   format_used: boolean;
   infra_reruns: number;
   class?: RepairClass;
+  failure?: FailureIdentity;
 }
 
 export function emptyBudget(): RepairBudget {
@@ -42,6 +80,7 @@ export function budgetFrom(raw: StoredRepair | undefined): RepairBudget {
     formatUsed: raw?.format_used ?? false,
     infraReruns: raw?.infra_reruns ?? 0,
     ...(raw?.class ? { lastClass: raw.class } : {}),
+    ...(raw?.failure ? { failure: { ...raw.failure, roots: raw.failure.roots ?? [] } } : {}),
   };
 }
 
@@ -52,6 +91,7 @@ export function budgetTo(b: RepairBudget): StoredRepair {
     format_used: b.formatUsed,
     infra_reruns: b.infraReruns,
     ...(b.lastClass ? { class: b.lastClass } : {}),
+    ...(b.failure ? { failure: { ...b.failure } } : {}),
   };
 }
 
@@ -60,6 +100,7 @@ export function clearRepair(budget: RepairBudget): void {
   budget.formatUsed = false;
   budget.infraReruns = 0;
   delete budget.lastClass;
+  delete budget.failure;
 }
 
 /** A class the implementer must not "fix" by editing product code. */
@@ -133,9 +174,126 @@ export function classifyRepair(
   return "unknown";
 }
 
-/** What to do before spending another implementer turn. */
-export function repairDecision(cls: RepairClass, budget: Pick<RepairBudget, "formatUsed" | "infraReruns">): "format" | "rerun" | "stop" | "fix" {
-  if (cls === "format" && !budget.formatUsed) return "format";
+const DIAGNOSTIC_CODE = /\b[Ss][Cc]\d{3,4}\b|\b[Tt][Ss]\d{3,5}\b|\b[A-Z]{1,6}\d{3,5}\b/g;
+const SEVERITY_RANK = { error: 4, warning: 3, note: 2, style: 2, info: 1 } as const;
+const INTERPRETERS = new Set(["node", "nodejs", "npm", "pnpm", "yarn", "npx", "python", "python3", "pytest", "bash", "sh", "cargo", "go", "make", "ruby", "deno", "bun"]);
+
+/** Diagnostic codes in a report (`SC2166`, `TS2345`, `E501`). Prose around them is not identity. */
+export function diagnosticCodes(text: string): string[] {
+  return [...new Set((text.match(DIAGNOSTIC_CODE) ?? []).map((code) => code.toLowerCase()))].sort();
+}
+
+function stripNoise(text: string): string {
+  return text
+    .replace(/\b\d{4}-\d\d-\d\d([tT ]\d\d:\d\d(:\d\d)?)?\b/g, " ")
+    .replace(/\b\d{1,2}:\d\d(:\d\d)?\b/g, " ")
+    .replace(/(?<![\w.])[0-9a-fA-F]{7,}(?![\w.])/g, " ")
+    .replace(/\b(?:duration(?:_ms)?|elapsed|time)\b\s*[:=]?\s*\d+(?:[.,]\d+)?/gi, " ")
+    .replace(/\b\d+[.,]\d{3,}\b/g, " ")
+    .replace(/\b\d+(?:[.,]\d+)?(?:ms|seconds?|minutes?|kb|mb|gb|bytes?|x)\b/gi, " ")
+    .replace(/(:\d+)+(?=$|[^\w])/g, " ")
+    .replace(/\b(?:lines?|cols?|columns?)\s+\d+\b/gi, " ")
+    .replace(/((?:[\w.-]+\/)+[\w.-]+)\(\d+,\s*\d+\)/g, "$1");
+}
+
+/** Numbers that distinguish a failure, in order. Line, column, pid and timestamp noise is already gone. */
+function semanticValues(text: string): string[] {
+  return stripNoise(text).match(/(?<![\w.])\d+(?:[.,]\d+)?(?![\w.])/g) ?? [];
+}
+
+const DIAGNOSTIC_FILE = String.raw`(?:\.{1,2}/)?(?:[\w.-]+/)+[\w.-]+`;
+
+/** Subject files a diagnostic names. `./` is not a different file. A path mentioned only in prose is not identity. */
+function diagnosticPaths(text: string): string[] {
+  const found = new Set<string>();
+  const add = (raw: string) => {
+    const path = raw.replace(/^\.\//, "");
+    if (!path || path === "." || path.includes("://") || !path.includes("/")) return;
+    found.add(path);
+  };
+  const file = DIAGNOSTIC_FILE;
+  for (const match of text.matchAll(new RegExp(String.raw`(^|[\s:"'(])(${file}):\d+`, "g"))) add(match[2]!);
+  for (const match of text.matchAll(new RegExp(String.raw`\bIn\s+(${file})(?::\d+|\s+line\s+\d+)`, "gi"))) add(match[1]!);
+  for (const match of text.matchAll(new RegExp(String.raw`(^|[\s:"'(])(${file})\(\d+,\s*\d+\)`, "g"))) add(match[2]!);
+  for (const match of text.matchAll(/["']file["']\s*[:=]\s*["']([^"']+)["']/gi)) add(match[1]!);
+  return [...found].sort();
+}
+
+/**
+ * Identity text of one diagnostic. A code-bearing finding (ShellCheck, tsc, ruff) is its codes,
+ * subject file paths and ordered values, so a reworded message of the same finding matches.
+ * Without a code, words stay in order and values are not blanked or sorted: `expected 1 … 2` is not `expected 2 … 1`.
+ */
+export function diagnosticIdentity(text: string): string {
+  const codes = diagnosticCodes(text);
+  const values = semanticValues(text);
+  if (!codes.length) return stripNoise(text).toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+  const paths = diagnosticPaths(text);
+  return `codes=${codes.join(",")} values=${values.join(",")}${paths.length ? ` paths=${paths.join(",")}` : ""}`;
+}
+
+function highestSeverity(text: string): FailureRoot["severity"] | undefined {
+  let best: { name: NonNullable<FailureRoot["severity"]>; rank: number } | undefined;
+  for (const match of text.matchAll(/\b(error|warning|note|style|info)\b/gi)) {
+    const name = match[1]!.toLowerCase() as NonNullable<FailureRoot["severity"]>;
+    const rank = SEVERITY_RANK[name];
+    if (!best || rank > best.rank) best = { name, rank };
+  }
+  return best?.name;
+}
+
+/** Root checks of a red report: name, diagnostic codes, highest severity. `repair_hold` is not a root. */
+export function failureRoots(report: { checks: { name: string; status: string; output_tail?: string }[] }): FailureRoot[] {
+  return report.checks
+    .filter((c) => (c.status === "fail" || c.status === "timeout") && c.name !== "repair_hold")
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((c) => {
+      const tail = c.output_tail ?? "";
+      const severity = highestSeverity(tail);
+      return { name: c.name, codes: diagnosticCodes(tail), ...(severity ? { severity } : {}) };
+    });
+}
+
+/**
+ * Fingerprint of the failing checks (#181). The check name is the root-check identity. Diagnostic
+ * codes survive rewording. Ordered semantic values keep swapped results apart. Hashed so the
+ * persisted state stays short.
+ */
+export function failureSignature(report: { checks: { name: string; status: string; output_tail: string }[] }): string {
+  const parts = report.checks
+    .filter((c) => (c.status === "fail" || c.status === "timeout") && c.name !== "repair_hold")
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((c) => `${c.name}|${c.status}|${diagnosticIdentity(c.output_tail ?? "")}`);
+  return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 12);
+}
+
+/**
+ * Record one observation of a red gate against the budget: the same fingerprint keeps counting up
+ * (the checkpoint may move — the failure did not), a new fingerprint restarts at 1. Roots travel
+ * with the fingerprint so resume can re-run those checks. Returns the stored identity.
+ */
+export function recordFailure(budget: RepairBudget, signature: string, checkpoint: string, roots: FailureRoot[] = []): FailureIdentity {
+  const last = budget.failure;
+  const kept = roots.length ? roots : last?.signature === signature ? last.roots : [];
+  const identity: FailureIdentity =
+    last && last.signature === signature
+      ? { signature, checkpoint, unchanged: last.unchanged + 1, roots: kept }
+      : { signature, checkpoint, unchanged: 1, roots: kept };
+  budget.failure = identity;
+  return identity;
+}
+
+/** What the next repair turn must do: the same prompt, or the documented diagnostic strategy (#181). */
+export function repairStrategy(budget: Pick<RepairBudget, "failure">): RepairStrategy {
+  return (budget.failure?.unchanged ?? 0) >= STRATEGY_ESCALATE_AT ? "diagnose" : "repeat";
+}
+
+/** What to do before spending another implementer turn. A repeated unchanged failure never just repeats the format fix. */
+export function repairDecision(
+  cls: RepairClass,
+  budget: Pick<RepairBudget, "formatUsed" | "infraReruns" | "failure">,
+): "format" | "rerun" | "stop" | "fix" {
+  if (cls === "format" && !budget.formatUsed && repairStrategy(budget) === "repeat") return "format";
   if (cls === "infra" && budget.infraReruns < 1) return "rerun";
   if (blocksProductEdit(cls)) return "stop";
   return "fix";
@@ -156,9 +314,18 @@ export function nextStep(cls: RepairClass): string {
   }
 }
 
-export function repairHandover(v: { cls: RepairClass; attempts: number; max: number; diagnosis: string; checkpoint: string; next: string }): string {
+export function repairHandover(v: {
+  cls: RepairClass;
+  attempts: number;
+  max: number;
+  diagnosis: string;
+  checkpoint: string;
+  next: string;
+  failure?: { signature: string; unchanged: number };
+}): string {
   const diagnosis = v.diagnosis.replace(/\s+/g, " ").trim().slice(0, 400) || "(none)";
-  return [`repair exhausted: class=${v.cls} attempts=${v.attempts}/${v.max} checkpoint=${v.checkpoint}`, `diagnosis: ${diagnosis}`, `next: ${v.next}`].join("\n");
+  const failure = v.failure ? ` failure=${v.failure.signature} unchanged=${v.failure.unchanged}` : "";
+  return [`repair exhausted: class=${v.cls} attempts=${v.attempts}/${v.max} checkpoint=${v.checkpoint}${failure}`, `diagnosis: ${diagnosis}`, `next: ${v.next}`].join("\n");
 }
 
 function redChecks(report: GateReport): GateReport["checks"] {
@@ -230,15 +397,21 @@ async function explain(ctx: RunContext, cls: RepairClass, budget: RepairBudget, 
     diagnosis: failureSummary(report),
     checkpoint: await checkpoint(ctx),
     next: nextStep(cls),
+    ...(budget.failure ? { failure: { signature: budget.failure.signature, unchanged: budget.failure.unchanged } } : {}),
   });
 }
 
-export type Recovery = { action: "green"; gates: GateReport } | { action: "retry"; gates: GateReport } | { action: "stop"; gates: GateReport; reason: string; cause: StopCause };
+export type Recovery =
+  | { action: "green"; gates: GateReport }
+  | { action: "retry"; gates: GateReport; strategy: RepairStrategy }
+  | { action: "stop"; gates: GateReport; reason: string; cause: StopCause };
 
 /**
  * One mechanical format attempt, then at most one infrastructure rerun, then either a counted
- * fix turn or a stop. A stop for an unknown, config, infra or base failure does not ask the
- * implementer to edit product code.
+ * fix turn or a stop. Every red observation is recorded as a failure identity: when the same
+ * fingerprint comes back `STRATEGY_ESCALATE_AT` times, the retry strategy becomes `diagnose` — the
+ * caller must send the focused diagnostic step instead of the same repair prompt.
+ * A stop for an unknown, config, infra or base failure does not ask the implementer to edit product code.
  */
 export async function recoverRedGates(
   ctx: RunContext,
@@ -247,7 +420,17 @@ export async function recoverRedGates(
 ): Promise<Recovery> {
   const budget = ensureBudget(ctx);
   let current = report;
-  if (!budget.formatUsed && hasFormatterFailure(current, ctx.repo.checks)) {
+  // A held fake fix is the same unfixed failure. Do not reset the fingerprint because the check went green.
+  const held = current.checks.some((c) => c.name === "repair_hold" && (c.status === "fail" || c.status === "timeout"));
+  const signature = held && budget.failure ? budget.failure.signature : failureSignature(current);
+  const roots = held && budget.failure?.roots.length ? budget.failure.roots : failureRoots(current);
+  const identity = recordFailure(budget, signature, await checkpoint(ctx), roots);
+  if (identity.unchanged === STRATEGY_ESCALATE_AT) {
+    ctx.events.emit({ step: "gates", event: "progress", data: { repair: "strategy", strategy: "diagnose", failure: identity.signature, unchanged: identity.unchanged } });
+  }
+  ctx.persist?.();
+  const strategy = repairStrategy(budget);
+  if (strategy === "repeat" && !budget.formatUsed && hasFormatterFailure(current, ctx.repo.checks)) {
     const commands = formatterCommands(current, ctx.repo.checks);
     budget.formatUsed = true;
     budget.lastClass = "format";
@@ -279,14 +462,14 @@ export async function recoverRedGates(
     if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) {
       return { action: "stop", gates: current, cause: "budget_exhausted", reason: await explain(ctx, cls, budget, current) };
     }
-    return { action: "retry", gates: current };
+    return { action: "retry", gates: current, strategy };
   }
   budget.gateAttempts += 1;
   ctx.persist?.();
   if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) {
     return { action: "stop", gates: current, cause: "budget_exhausted", reason: await explain(ctx, cls, budget, current) };
   }
-  return { action: "retry", gates: current };
+  return { action: "retry", gates: current, strategy };
 }
 
 export function ensureBudget(ctx: { budget?: RepairBudget }): RepairBudget {
@@ -316,6 +499,246 @@ export async function blockedRepairReason(ctx: RunContext): Promise<{ reason: st
     diagnosis: "persisted failure class; product code was not edited",
     checkpoint: await checkpoint(ctx),
     next: nextStep(budget.lastClass),
+    ...(budget.failure ? { failure: { signature: budget.failure.signature, unchanged: budget.failure.unchanged } } : {}),
   });
   return { reason, cause: stopCauseForClass(budget.lastClass) };
+}
+
+const SHELLS = new Set(["sh", "bash", "dash", "zsh"]);
+const SCRIPT_RUNNERS = new Set(["node", "nodejs", "python", "python3", "ruby", "deno", "bun"]);
+const CHECK_MODE = new Set(["--check", "--test", "-c", "-e", "--eval", "-m"]);
+const PACKAGE_ALIASES = new Set(["test", "t", "tst", "start", "stop", "restart"]);
+const PACKAGE_SKIP = new Set(["exec", "dlx", "install", "add", "remove", "update", "ci", "publish", "pack", "link", "config", "outdated"]);
+
+function commandBase(token: string): string {
+  return token.split("/").pop() ?? token;
+}
+
+function repoPath(token: string): string {
+  return token.replace(/^\.\//, "");
+}
+
+function isScriptPath(token: string): boolean {
+  return !token.startsWith("-") && (token.includes("/") || token.startsWith(".") || /\.(?:sh|bash|js|mjs|cjs|py|rb)$/.test(token));
+}
+
+function shellScript(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--") {
+      const next = args[i + 1];
+      return next && isScriptPath(next) ? repoPath(next) : undefined;
+    }
+    if (arg === "-c" || arg === "-o") {
+      const next = args[++i];
+      if (arg === "-c" && next && isScriptPath(next)) return repoPath(next);
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return isScriptPath(arg) ? repoPath(arg) : undefined;
+  }
+  return undefined;
+}
+
+function packageManifest(exe: string, args: string[]): string | undefined {
+  if (exe !== "npm" && exe !== "pnpm" && exe !== "yarn" && exe !== "bun") return undefined;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--") break;
+    if (arg.startsWith("-")) {
+      if (arg === "--prefix" || arg === "--dir" || arg === "-C") i++;
+      continue;
+    }
+    positional.push(arg);
+  }
+  const sub = positional[0];
+  if (!sub) return undefined;
+  if (sub === "run" || sub === "run-script") return positional[1] ? "package.json" : undefined;
+  if (exe === "bun" && sub === "test") return undefined;
+  if (PACKAGE_SKIP.has(sub)) return undefined;
+  if (PACKAGE_ALIASES.has(sub)) return "package.json";
+  return undefined;
+}
+
+function runnerScript(args: string[]): string | undefined {
+  if (args.some((arg) => CHECK_MODE.has(arg) || arg.startsWith("--check=") || arg.startsWith("--test="))) return undefined;
+  for (const arg of args) {
+    if (arg.startsWith("-")) continue;
+    return isScriptPath(arg) ? repoPath(arg) : undefined;
+  }
+  return undefined;
+}
+
+function implementationOf(argv: string[]): string | undefined {
+  const first = argv[0];
+  if (!first || first.startsWith("-")) return undefined;
+  const exe = commandBase(first);
+  if (SHELLS.has(exe)) return shellScript(argv.slice(1));
+  const manifest = packageManifest(exe, argv.slice(1));
+  if (manifest) return manifest;
+  if (SCRIPT_RUNNERS.has(exe)) return runnerScript(argv.slice(1));
+  if (!INTERPRETERS.has(exe) && (first.includes("/") || first.startsWith("."))) return repoPath(first);
+  return undefined;
+}
+
+/** Repo paths a check command executes as its own implementation. Checker arguments (`node --check src/math.js`) are not included. */
+export function gateImplementations(command: string): string[] {
+  const out: string[] = [];
+  for (const argv of commandParts(command)) {
+    const path = implementationOf(argv);
+    if (path && !out.includes(path)) out.push(path);
+  }
+  return out;
+}
+
+/** First protected path of a check command, when it has one. */
+export function gateImplementation(command: string): string | undefined {
+  return gateImplementations(command)[0];
+}
+
+/**
+ * Why a green-looking report is not a fix (#181). Undefined when the recorded roots are still in the
+ * report and the diff did not suppress them, lower their severity, or alter the gate that runs them.
+ */
+export function fakeFixReason(input: {
+  roots: FailureRoot[];
+  reportNames: string[];
+  diff: string;
+  changed: string[];
+  commands: { name: string; run: string }[];
+}): string | undefined {
+  if (!input.roots.length) return undefined;
+  const have = new Set(input.reportNames);
+  const dropped = input.roots.filter((root) => !have.has(root.name));
+  if (dropped.length) return `dropped gate: ${dropped.map((root) => root.name).join(", ")} is not in the required gate set; not a fix`;
+  const hits = addedSuppressions(input.diff);
+  if (hits.length) {
+    const codes = new Set(input.roots.flatMap((root) => root.codes));
+    const targeted = hits.filter((hit) => [...codes].some((code) => hit.line.toLowerCase().includes(code)));
+    const hit = targeted[0] ?? hits[0]!;
+    return `suppression is not a fix: ${hit.file} ${hit.marker}`;
+  }
+  const added = input.diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).join("\n");
+  for (const code of input.roots.flatMap((root) => root.codes)) {
+    if (disablesCode(added, code)) return `severity reduced: ${code} disabled; not a fix`;
+  }
+  if (SEVERITY_BYPASS.test(added)) return "severity reduced; not a fix";
+  const changed = new Set(input.changed);
+  for (const root of input.roots) {
+    const command = input.commands.find((check) => check.name === root.name)?.run ?? "";
+    for (const impl of gateImplementations(command)) {
+      if (changed.has(impl)) return `gate ${root.name} altered (${impl}); not a fix`;
+    }
+  }
+  return undefined;
+}
+
+const SEVERITY_WORD = "error|warning|info|style|note";
+const SEVERITY_BYPASS = new RegExp(`(?:^|[^\\w-])(?:-S(?:=|\\s*)?|--severity(?:=|\\s+)|severity\\s*[:=]\\s*)(?:${SEVERITY_WORD})\\b`, "i");
+
+/** A disable/exclude list that names `code`, including `disable=SC2086,SC2166` and `-eSC2166`. */
+function disablesCode(added: string, code: string): boolean {
+  const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const list = "(?:[A-Za-z]{1,6}\\d{3,5}\\s*,\\s*)*";
+  const flag = new RegExp(`(?:^|[^\\w-])(?:--exclude|-e)(?:=|\\s+)?${list}${escaped}\\b`, "i");
+  const key = new RegExp(`(?:^|[^\\w-])(?:disable|exclude)\\s*[:=]\\s*${list}${escaped}\\b`, "i");
+  return flag.test(added) || key.test(added);
+}
+
+/** Missing or red members of the gate set that must pass before approval. */
+export function approvalGateGap(input: { required: string[]; report: { name: string; status: string }[] }): string | undefined {
+  const have = new Map(input.report.map((check) => [check.name, check.status]));
+  const required = [...new Set(input.required)];
+  const missing = required.filter((name) => !have.has(name));
+  if (missing.length) return `required gate set incomplete: ${missing.join(", ")}; not approving`;
+  const red = required.filter((name) => have.get(name) === "fail" || have.get(name) === "timeout");
+  if (red.length) return `required gates red: ${red.join(", ")}; not approving`;
+  return undefined;
+}
+
+function markHeld(report: GateReport, reason: string): GateReport {
+  if (report.checks.some((c) => c.name === "repair_hold" && c.status === "fail")) return { ...report, green: false };
+  return {
+    ...report,
+    green: false,
+    checks: [...report.checks, { name: "repair_hold", kind: "builtin", status: "fail", duration_ms: 0, output_tail: reason }],
+  };
+}
+
+/**
+ * A green report after a recorded failure is not success when the fix is a suppression, a severity
+ * reduction, a dropped gate, or an altered check script. The report stays red so approval cannot
+ * proceed, and the previous fingerprint is kept by `recoverRedGates`.
+ */
+export async function holdUnfixed(ctx: RunContext, report: GateReport): Promise<GateReport> {
+  const roots = ctx.budget?.failure?.roots ?? [];
+  if (!roots.length) return report;
+  let diff: string;
+  let changed: string[];
+  try {
+    diff = await diffText(ctx.worktree, ctx.baseSha);
+    changed = await changedFiles(ctx.worktree, ctx.baseSha);
+  } catch {
+    if (report.green) return markHeld(report, "could not read the diff; not a fix");
+    return report;
+  }
+  const reason = fakeFixReason({
+    roots,
+    reportNames: report.checks.map((check) => check.name),
+    diff,
+    changed,
+    commands: ctx.repo.checks.map((check) => ({ name: check.name, run: check.run })),
+  });
+  return reason ? markHeld(report, reason) : report;
+}
+
+async function executeFailingChecks(ctx: RunContext, names: string[]): Promise<{ name: string; code: number; output: string }[]> {
+  const out: { name: string; code: number; output: string }[] = [];
+  for (const name of [...new Set(names)]) {
+    const command = checkCommand(ctx.repo.checks, name);
+    if (!command) {
+      out.push({ name, code: 127, output: `check ${name} has no command` });
+      continue;
+    }
+    checkDeadline(ctx);
+    const cap = ctx.repo.limits.gate_timeout_minutes * 60_000;
+    const left = ctx.deadline.at - Date.now();
+    const timeoutMs = Math.max(1000, Math.min(cap, left));
+    const result = await sh(withEnvCommand(command, ctx.repo.env_command), {
+      cwd: ctx.worktree,
+      env: commandEnv(ctx),
+      timeoutMs,
+      jail: jailFor(ctx, ctx.worktree),
+    });
+    out.push({ name, code: result.code, output: result.output });
+  }
+  return out;
+}
+
+/**
+ * Prompt prefix for an already escalated failure. Runs the recorded failing checks and includes
+ * their full output. Empty when the persisted strategy is still `repeat`.
+ */
+export async function diagnosticPrefix(ctx: RunContext): Promise<string> {
+  const budget = ensureBudget(ctx);
+  if (repairStrategy(budget) !== "diagnose") return "";
+  const names = (budget.failure?.roots ?? []).map((root) => root.name);
+  const focused = await executeFailingChecks(ctx, names);
+  ctx.events.emit({
+    step: "gates",
+    event: "progress",
+    data: { repair: "diagnose", executed: focused.length > 0, checks: focused.map((check) => check.name) },
+  });
+  const body = focused.length
+    ? focused.map((check) => `### ${check.name} (exit ${check.code})\n${check.output.trimEnd() || "(no output)"}`).join("\n\n")
+    : "(no failing check command recorded)";
+  return `${DIAGNOSTIC_STEP}\n\n${asData("failing_check", body)}`;
+}
+
+/** Applies the persisted diagnostic strategy before an implement or fix turn. Does not spend a gate attempt. */
+export async function withDiagnosticStrategy(ctx: RunContext, prompt: string): Promise<string> {
+  const prefix = await diagnosticPrefix(ctx);
+  if (!prefix || prompt.includes("<failing_check>")) return prompt;
+  return `${prefix}\n\n${prompt}`;
 }

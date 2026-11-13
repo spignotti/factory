@@ -16,7 +16,9 @@ import type { RoleUsage } from "../events.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
 import { closesFooter, fulfilledIssues } from "../queue/admit.js";
 import { pauseRequested } from "../queue/pause.js";
-import { formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
+import { selectChecks } from "../gates/select.js";
+import { approvalGateGap, holdUnfixed } from "../pipeline/recovery.js";
+import { failureSummary, formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
@@ -461,6 +463,29 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       result = "needs_human";
       reason = synced.reason;
       cause = stopCauseForSyncFailure(synced.failure, synced.gates);
+    }
+  }
+  // Approval requires the complete required gate set. A focused check, a suppression, a lower
+  // severity or a dropped gate is not that set.
+  if (result === "done" && gates) {
+    gates = await holdUnfixed(ctx, gates);
+    if (!gates.green) {
+      result = "needs_human";
+      reason = failureSummary(gates);
+      cause = "technical_repair";
+    } else {
+      const gap = approvalGateGap({
+        required: [
+          ...selectChecks(ctx.repo.checks, "full", gates.changed_files).map((check) => check.name),
+          ...(ctx.budget?.failure?.roots.map((root) => root.name) ?? []),
+        ],
+        report: gates.checks,
+      });
+      if (gap) {
+        result = "needs_human";
+        reason = gap;
+        cause = "technical_repair";
+      }
     }
   }
 

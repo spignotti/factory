@@ -4,7 +4,7 @@ import { changedFiles, commitAll, diffText, headSha, stageAll } from "../git.js"
 import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { ReviewOutput } from "../schemas/review.js";
-import { blockedRepairReason, clearRepair, ensureBudget, recoverRedGates } from "./recovery.js";
+import { blockedRepairReason, clearRepair, ensureBudget, holdUnfixed, recoverRedGates, withDiagnosticStrategy } from "./recovery.js";
 import type { StopCause } from "../events.js";
 import { failureSummary, type GateReport, runGates } from "../steps/gates.js";
 import { dropStrayHandoff, gitAuthor, handoffShape, implementerTurn } from "../steps/implement.js";
@@ -83,7 +83,11 @@ export async function fixStep(
   if (input.gates && !input.gates.green) {
     const prepared = await recoverRedGates(ctx, input.gates, { tier, packages, spend: false });
     if (prepared.action === "stop") return { ok: false, reason: prepared.reason, cause: prepared.cause };
-    if (prepared.action === "green") return commitFix(prepared.gates);
+    if (prepared.action === "green") {
+      const held = await holdUnfixed(ctx, prepared.gates);
+      if (held.green) return commitFix(held);
+      prompt += `\n\n${asData("not_a_fix", failureSummary(held))}`;
+    }
     const timeoutNote = prepared.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
       : "";
@@ -92,6 +96,7 @@ export async function fixStep(
   const sessionKey = `${ctx.runId}-fix-${label}`;
   for (;;) {
     checkDeadline(ctx);
+    prompt = await withDiagnosticStrategy(ctx, prompt);
     const turn = await implementerTurn(ctx, "fix", {
       sessionKey,
       packageId: "fix",
@@ -107,11 +112,21 @@ export async function fixStep(
       const r = handoff.responses.find((x) => x.finding_id === f.id);
       if (r) f.response = r;
     }
-    const gates = await runGates(ctx, tier, packages);
+    const gates = await holdUnfixed(ctx, await runGates(ctx, tier, packages));
     if (gates.green) return commitFix(gates);
-    const recovered = await recoverRedGates(ctx, gates, { tier, packages, spend: true });
+    let recovered = await recoverRedGates(ctx, gates, { tier, packages, spend: true });
     state.gateFailures = ensureBudget(ctx).gateAttempts;
-    if (recovered.action === "green") return commitFix(recovered.gates);
+    if (recovered.action === "green") {
+      const held = await holdUnfixed(ctx, recovered.gates);
+      if (held.green) return commitFix(held);
+      recovered = await recoverRedGates(ctx, held, { tier, packages, spend: true });
+      state.gateFailures = ensureBudget(ctx).gateAttempts;
+    }
+    if (recovered.action === "green") {
+      const held = await holdUnfixed(ctx, recovered.gates);
+      if (held.green) return commitFix(held);
+      return { ok: false, reason: failureSummary(held), cause: "technical_repair" };
+    }
     if (recovered.action === "stop") return { ok: false, reason: recovered.reason, cause: recovered.cause };
     const timeoutNote = recovered.gates.checks.some((c) => c.status === "timeout")
       ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"

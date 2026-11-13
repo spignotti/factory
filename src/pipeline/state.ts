@@ -4,6 +4,7 @@ import type { RunResultKind, RunStop } from "../events.js";
 import type { Handoff } from "../schemas/handoff.js";
 import { type RunContext, type Task, writeJson } from "./context.js";
 import type { PackageStatus } from "./dag.js";
+import type { FailureIdentity } from "./recovery.js";
 import type { TrackedFinding } from "./merge.js";
 
 /**
@@ -62,6 +63,9 @@ export interface RunState {
   /**
    * Repair budget already spent. Resume continues it. A blocking `class` is not given another
    * product-code edit. Network retries are the same-model connection budget for the whole run.
+   * `failure` is the last observed failure identity (#181): repeated identical fingerprints
+   * escalate the repair strategy; resume applies that strategy before the next implement turn
+   * and keeps the count. Roots name the checks a later green report may not drop.
    */
   repair?: {
     gate_attempts: number;
@@ -69,6 +73,7 @@ export interface RunState {
     format_used: boolean;
     infra_reruns: number;
     class?: "format" | "code" | "infra" | "base" | "config" | "unknown";
+    failure?: FailureIdentity;
   };
   /**
    * Coding attempts on this checkpoint. Absent on runs stored before attempt counts existed;
