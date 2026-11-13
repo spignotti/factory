@@ -156,6 +156,11 @@ export interface GitHub {
   openFactoryPrFiles(repoDir: string): Promise<OpenFactoryPr[]>;
   /** `gh pr merge --auto --squash --match-head-commit <sha>`. A later push does not match that SHA. */
   enableAutoMerge(repoDir: string, pr: string, sha: string): Promise<void>;
+  /**
+   * Merge the expected head now: `gh pr merge --<method> --match-head-commit <sha>` (#183, the fallback
+   * after a clean-status refusal). Never `--admin`: branch protection and required checks still decide.
+   */
+  mergeNow(repoDir: string, pr: string, sha: string, method: MergeMethod): Promise<void>;
   /** `gh pr merge --disable-auto`. Not an error when auto-merge was not enabled. */
   disableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /**
@@ -242,6 +247,11 @@ export interface RepoSettings {
   branch_protected: boolean | null;
   required_checks: string[] | null;
   /**
+   * Merge methods the repository allows (`allow_*_merge` on the repo API). Null or absent when not readable.
+   * UNVERIFIED: live GitHub response shape (see docs/VERIFY.md).
+   */
+  merge_methods?: MergeMethods | null;
+  /**
    * `required_status_checks.strict`. Null when the branch is unprotected or the field was not readable.
    * UNVERIFIED: live GitHub response shape (see docs/VERIFY.md).
    */
@@ -258,6 +268,16 @@ export interface OpenPr {
   draft: boolean;
   /** Head commit as GitHub sees it. */
   headSha: string | null;
+}
+
+/** The three merge methods GitHub knows. */
+export type MergeMethod = "squash" | "merge" | "rebase";
+
+/** Which merge methods a repository allows. Explicit booleans only; unknown is not allowed. */
+export interface MergeMethods {
+  squash: boolean;
+  merge: boolean;
+  rebase: boolean;
 }
 
 /** An open PR on a `factory/*` branch, and the files it changes. */
@@ -702,6 +722,14 @@ export function autoMergeAlreadyEnabled(message: string): boolean {
   return /already enabled/i.test(message);
 }
 
+/**
+ * GitHub's exact refusal of `enablePullRequestAutoMerge` when the PR could merge right now (#183).
+ * Only this response lets finalize re-read live state and reconcile; any other error stays a stop.
+ */
+export function autoMergeCleanStatus(message: string): boolean {
+  return /pull request is in clean status \(enablePullRequestAutoMerge\)/i.test(message);
+}
+
 /** GitHub says this when auto-merge was not on. Disabling it again is a no-op. UNVERIFIED live wording. */
 export function autoMergeNotEnabled(message: string): boolean {
   return /not enabled/i.test(message);
@@ -726,11 +754,15 @@ export class GhCli implements GitHub {
           "api",
           "repos/{owner}/{repo}",
           "--jq",
-          "{private, allow_auto_merge, secret_scanning: (.security_and_analysis.secret_scanning.status // \"\"), push_protection: (.security_and_analysis.secret_scanning_push_protection.status // \"\")}",
+          "{private, allow_auto_merge, allow_merge_commit, allow_squash_merge, allow_rebase_merge, secret_scanning: (.security_and_analysis.secret_scanning.status // \"\"), push_protection: (.security_and_analysis.secret_scanning_push_protection.status // \"\")}",
         ]),
-      ) as { private?: boolean; allow_auto_merge?: boolean | null; secret_scanning?: string; push_protection?: string };
+      ) as { private?: boolean; allow_auto_merge?: boolean | null; allow_merge_commit?: boolean | null; allow_squash_merge?: boolean | null; allow_rebase_merge?: boolean | null; secret_scanning?: string; push_protection?: string };
       out.private = repo.private ?? null;
       out.auto_merge_allowed = repo.allow_auto_merge ?? null;
+      out.merge_methods =
+        typeof repo.allow_squash_merge === "boolean" && typeof repo.allow_merge_commit === "boolean" && typeof repo.allow_rebase_merge === "boolean"
+          ? { squash: repo.allow_squash_merge, merge: repo.allow_merge_commit, rebase: repo.allow_rebase_merge }
+          : null;
       out.secret_scanning = securityFlag(repo.secret_scanning);
       out.push_protection = securityFlag(repo.push_protection);
       const b = JSON.parse(
@@ -902,6 +934,12 @@ export class GhCli implements GitHub {
       if (autoMergeAlreadyEnabled((e as Error).message)) return;
       throw e;
     }
+  }
+
+  async mergeNow(repoDir: string, pr: string, sha: string, method: MergeMethod): Promise<void> {
+    // The #183 fallback after a clean-status refusal. The same expected-head guard as the enable,
+    // and no `--admin`: GitHub's protection and required checks still have to pass on their own.
+    await gh(repoDir, ["pr", "merge", pr, `--${method}`, "--match-head-commit", sha]);
   }
 
   async disableAutoMerge(repoDir: string, pr: string): Promise<void> {
@@ -1147,6 +1185,18 @@ export class FakeGitHub implements GitHub {
   async enableAutoMerge(_repoDir: string, pr: string, sha: string): Promise<void> {
     this.autoMerged.push(pr);
     this.autoMergeShas.push({ pr, sha });
+  }
+
+  /** Fallback merges (#183) with the method and expected head the caller passed. */
+  readonly mergedNow: { pr: string; sha: string; method: MergeMethod }[] = [];
+  /** When set, `mergeNow` throws this instead of merging. */
+  mergeNowError: string | null = null;
+
+  async mergeNow(_repoDir: string, pr: string, sha: string, method: MergeMethod): Promise<void> {
+    if (this.mergeNowError) throw new Error(this.mergeNowError);
+    this.mergedNow.push({ pr, sha, method });
+    const prev = this.prStates.get(pr) ?? { state: "open" as const, draft: false };
+    this.prStates.set(pr, { ...prev, state: "merged", draft: false });
   }
 
   /** When set, `disableAutoMerge` throws this instead of recording the call. */

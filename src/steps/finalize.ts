@@ -21,7 +21,8 @@ import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evalua
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
-import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { autoMergeCleanStatus } from "../gh.js";
+import { fallbackMergeMethod, mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
@@ -365,6 +366,75 @@ async function adoptablePr(ctx: RunContext, head: string): Promise<{ url: string
   return { url: open.url, draft: open.draft };
 }
 
+type AutoMergeOutcome =
+  | { kind: "enabled" | "merged" }
+  | { kind: "waiting"; ci: "pending" | "none" }
+  | { kind: "red" }
+  | { kind: "stop"; reason: string; cause: StopCause; draft?: boolean };
+
+/**
+ * Enable auto-merge for the approved head (#183). GitHub refuses the enable with its clean-status
+ * response when the PR could merge right now; that is neither a failure nor a stop. Any other API
+ * error propagates: it stays a stop and is never permission to merge. On the refusal, re-read the
+ * live PR state, head, required checks and merge prerequisites, then reconcile:
+ * - already merged: idempotent reconcile, no second merge and no new side effects;
+ * - open, still the approved (and, for `bot_review`, reviewed) green head with `done` required:
+ *   merge now with an explicitly allowed method and the expected-head guard, never `--admin`;
+ * - pending or missing checks: wait; the run stays done with `ciWait`;
+ * - red CI, closed PR, pause, draft, changed or unreviewed head, unknown settings or no allowed
+ *   method: stop for a human. A pause also puts the PR back to draft, like the outer pause path.
+ *   A concurrent change between gate and re-read cannot pass the gate again.
+ */
+async function enableAutoMergeOrReconcile(
+  ctx: RunContext,
+  gate: { pr: string; head: string; policy: MergePolicy; reviewedSha: string | null | undefined },
+): Promise<AutoMergeOutcome> {
+  try {
+    await ctx.deps.github.enableAutoMerge(ctx.worktree, gate.pr, gate.head);
+    return { kind: "enabled" };
+  } catch (e) {
+    if (!autoMergeCleanStatus((e as Error).message)) throw e;
+    ctx.events.emit({ step: "finalize", event: "progress", data: { pr_auto_merge_clean_status: gate.head.slice(0, 8) } });
+  }
+  // Re-read everything the decision needs: the values from before the refusal are stale.
+  const live = await ctx.deps.github.prStatus(ctx.worktree, gate.pr);
+  if (live.state === "merged") return { kind: "merged" };
+  if (live.state !== "open") return { kind: "stop", cause: "human_approval", reason: `PR ${gate.pr} is ${live.state} after the clean-status refusal` };
+  const open = await ctx.deps.github.findOpenPr(ctx.worktree, ctx.branch);
+  const settings = await ctx.deps.github.repoSettings(ctx.worktree, ctx.repo.base_branch);
+  const ci = live.ci ?? "none";
+  if (ci === "pending" || ci === "none") return { kind: "waiting", ci };
+  if (ci === "red") return { kind: "red" };
+  const pause = pauseRequested(ctx.deps.factoryHome, { runId: ctx.runId });
+  if (pause) {
+    // The same operator order as the outer pause path: the PR goes back to draft before the stop.
+    const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: gate.pr, draft: false });
+    if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: gate.pr } });
+    return { kind: "stop", cause: "human_approval", reason: `paused: ${pause}; resume with \`factory resume ${ctx.runId}\``, draft: held.draft };
+  }
+  const headSha = open?.headSha ?? null;
+  if (!mayEnableAutoMerge({
+    policy: gate.policy,
+    approvedSha: gate.head,
+    headSha,
+    reviewedSha: gate.reviewedSha,
+    ci,
+    draft: live.draft,
+    state: "open",
+    requiredChecks: settings.required_checks,
+  })) {
+    const reason =
+      headSha !== gate.head
+        ? `PR head changed to ${headSha?.slice(0, 8) ?? "unreadable"} after the clean-status refusal; not merging`
+        : "clean-status refusal left a merge prerequisite unmet (draft, review or required checks); not merging";
+    return { kind: "stop", cause: "human_approval", reason };
+  }
+  const method = fallbackMergeMethod(settings.merge_methods);
+  if (!method) return { kind: "stop", cause: "human_approval", reason: "the repository allows no merge method for the clean-status fallback; not merging" };
+  await ctx.deps.github.mergeNow(ctx.worktree, gate.pr, gate.head, method);
+  return { kind: "merged" };
+}
+
 export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<FinalizeOutput> {
   ctx.events.emit({ step: "finalize", event: "step_started", data: { result: input.result } });
   let result = input.result;
@@ -643,7 +713,27 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           requiredChecks,
         })
       ) {
-        await ctx.deps.github.enableAutoMerge(ctx.worktree, pr!, head);
+        const outcome = await enableAutoMergeOrReconcile(ctx, { pr: pr!, head, policy, reviewedSha });
+        if (outcome.kind === "red") {
+          // CI turned red between the poll and the reconciliation: the same self-merge red stop as above.
+          result = "needs_human";
+          cause = "technical_repair";
+          reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
+          continuation = { kind: "ci", sha: head };
+          const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr!, draft: false });
+          draft = held.draft;
+          if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
+        } else if (outcome.kind === "stop") {
+          result = "needs_human";
+          cause = outcome.cause;
+          reason = outcome.reason;
+          if (outcome.draft !== undefined) draft = outcome.draft;
+        } else if (outcome.kind === "waiting") {
+          ciWait = outcome.ci;
+          ctx.events.emit({ step: "finalize", event: "progress", data: { pr_ci: { status: outcome.ci, sha: head, waiting_up_to_minutes: ctx.repo.limits.pr_ci_wait_minutes } } });
+        } else if (outcome.kind === "merged") {
+          ctx.events.emit({ step: "finalize", event: "progress", data: { pr_merged: head.slice(0, 8) } });
+        }
       }
     } catch (e) {
       const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;

@@ -1,3 +1,5 @@
+import type { MergeMethod, MergeMethods } from "../gh.js";
+
 /** Commit status the runner posts on a SHA it has verified. The required `done` check reads it. */
 export const FACTORY_APPROVAL_CONTEXT = "factory";
 
@@ -65,4 +67,16 @@ export function mayEnableAutoMerge(opts: {
   if (!aligned || !selfMergePolicy(opts.policy)) return false;
   if (opts.policy === "bot_review") return !!opts.reviewedSha && opts.reviewedSha === opts.headSha;
   return true;
+}
+
+/**
+ * The merge method for the #183 fallback after a clean-status refusal. The first explicitly allowed
+ * method wins (squash, like the auto-merge enable). Null when none is known-allowed: no fallback merge.
+ */
+export function fallbackMergeMethod(methods: MergeMethods | null | undefined): MergeMethod | null {
+  if (!methods) return null;
+  if (methods.squash) return "squash";
+  if (methods.merge) return "merge";
+  if (methods.rebase) return "rebase";
+  return null;
 }
