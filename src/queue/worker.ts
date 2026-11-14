@@ -20,6 +20,7 @@ import type { Io } from "../commands/gates.js";
 import { admissionBlock, cycleReasons, fulfilledIssues, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
 import { clearWorkerMode, readWorkerMode } from "./control.js";
 import { clearPause, pausePaths, pauseRequested, requestPause, type PauseKey } from "./pause.js";
+import { advanceMergeBatch, batchBusy } from "./batch.js";
 import { loadAllQueues, loadQueueByKey, queueDir, repoQueueKey, type QueueEntry, type QueueFile, updateQueue } from "./store.js";
 
 /** Transient `needs_human` goes to the back at most this many times, then parks. */
@@ -1604,9 +1605,17 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   // A due wait (window already open, or paused past it) still waits for the next tick — not a busy poll.
   const windowWait = q.entries.some((e) => e.status === "parked" && e.wait_until !== undefined);
   const live = [...ctx.handles.values()].some((h) => resolve(h.repo) === resolve(repo) && h.settled === undefined && !h.failed && !h.ignoreResult);
+  if (!ctx.holdStarts && !ctx.releaseHold) {
+    try {
+      await advanceMergeBatch({ factoryHome: ctx.factoryHome, github: ctx.github, repo, io: ctx.io });
+    } catch (e) {
+      noteFailure();
+      ctx.io.err(`factory: merge batch (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
   if (ctx.pastUntil) return running || live;
   const behind = watch.needsUpdate || (ctx.untilMs !== undefined && (watch.openDone || waitingMerge));
-  return pending || running || overlap || live || behind || windowWait;
+  return pending || running || overlap || live || behind || windowWait || batchBusy(ctx.factoryHome, repo);
 }
 
 async function reposFor(opts: RunQueueOptions): Promise<string[]> {

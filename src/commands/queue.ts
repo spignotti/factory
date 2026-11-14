@@ -13,6 +13,7 @@ import {
 } from "../queue/store.js";
 import { clearWorkerMode, writeWorkerMode } from "../queue/control.js";
 import { previewQueues, renderPreview } from "../queue/preview.js";
+import { applyBatch, parsePrRef, previewBatch, renderBatch } from "../queue/batch.js";
 import { isStopCause, loadRecoverFacts, recoverApply, recoverPreview, renderApply, renderRecover, selectionGiven } from "../queue/recover.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { STOP_CAUSES } from "../events.js";
@@ -311,6 +312,35 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
     deps.io.out(values.json ? JSON.stringify(report) + "\n" : renderPreview(report));
     return 0;
   }
+  if (sub === "batch") {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: {
+        pr: { type: "string", multiple: true },
+        apply: { type: "boolean", default: false },
+        json: { type: "boolean", default: false },
+      },
+    });
+    if (positionals.length || !values.pr?.length) {
+      deps.io.err("factory: usage: factory queue batch --pr <repo>#<n> [--pr <repo>#<n>]... [--apply] [--json]\n");
+      return 2;
+    }
+    const refs = values.pr.map(parsePrRef);
+    if (refs.some((ref) => !ref)) {
+      deps.io.err("factory: --pr takes <repo>#<number>\n");
+      return 2;
+    }
+    const selected = refs.filter((ref): ref is NonNullable<typeof ref> => Boolean(ref));
+    try {
+      const rows = values.apply ? (await applyBatch(deps.factoryHome, deps.github, selected)).prs : await previewBatch(deps.factoryHome, deps.github, selected);
+      deps.io.out(values.json ? JSON.stringify({ prs: rows }) + "\n" : renderBatch(rows));
+      return 0;
+    } catch (e) {
+      deps.io.err(`factory: ${(e as Error).message}\n`);
+      return 1;
+    }
+  }
   if (sub === "recover") {
     const { values, positionals } = parseArgs({
       args: rest,
@@ -414,6 +444,6 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
       deps.io,
     );
   }
-  deps.io.err("factory: usage: factory queue add|list|remove|preview|recover|pause|drain|resume|stop|run\n");
+  deps.io.err("factory: usage: factory queue add|list|remove|preview|recover|batch|pause|drain|resume|stop|run\n");
   return sub === undefined || sub === "--help" ? 0 : 2;
 }

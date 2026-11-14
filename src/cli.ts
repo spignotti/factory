@@ -69,6 +69,12 @@ const USAGE = `usage:
               (no new starts; live coding runs finish; waiting CI and queued issues stay on disk)
   factory queue resume
               (clears pause or drain; does not resume parked tickets)
+  factory queue batch --pr <repo>#<n> [--pr <repo>#<n>]... [--apply] [--json]
+              (preview only the named PRs: reviewed head, current head, risk, protected changes,
+               required checks and the proposed step. --apply persists that selection as permission
+               for a conflict-free base update of those reviewed changes, nothing else. The running
+               worker updates, revalidates and merges one PR per repo at a time, with an expected-head
+               guard. It does not post factory=success and does not change a merge policy.)
   factory queue recover [--run <id>]... [--issue <n>]... [--cause <cause>] [--apply] [--grant] [--json]
               (preview parked tickets: continue checkpoint, revalidate existing PR, wait for blocker,
                ask for decision, or cannot resume. --apply releases only the selected eligible entries
