@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/spignotti/factory/compare/v0.6.0...v0.7.0) (2026-11-14)
+
+
+### Features
+
+* **queue:** merge explicitly approved PR batches after revalidation ([#194](https://github.com/spignotti/factory/issues/194)) ([225f9f5](https://github.com/spignotti/factory/commit/225f9f56d5632251a3e04e7b9ed75103adf1cc4b))
+* **queue:** prioritize repair of PRs blocking queued tickets ([#192](https://github.com/spignotti/factory/issues/192)) ([a93157a](https://github.com/spignotti/factory/commit/a93157ab9c116de2e3a78dd214d9d3fc070adeea))
+* **queue:** recover selected parked tickets through the running worker ([#193](https://github.com/spignotti/factory/issues/193)) ([d1642f3](https://github.com/spignotti/factory/commit/d1642f396e17d59ffad0a3c5173493acb2d8f577))
+* **repair:** remove run-owned out-of-scope changes before escalating ([#191](https://github.com/spignotti/factory/issues/191)) ([b325f9e](https://github.com/spignotti/factory/commit/b325f9ed51bbb6e7ce47f86e97819b671ec2e32c))
+
+
+### Bug Fixes
+
+* **adopt:** keep gitignored files and loader flags in tests.run ([#175](https://github.com/spignotti/factory/issues/175)) ([7a79750](https://github.com/spignotti/factory/commit/7a79750d35cb83c3c15a1e5072a0e8648c8a165d))
+
 ## [0.6.0](https://github.com/spignotti/factory/compare/v0.5.1...v0.6.0) (2026-11-12)
 
 
