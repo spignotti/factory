@@ -68,7 +68,13 @@ const USAGE = `usage:
   factory queue drain
               (no new starts; live coding runs finish; waiting CI and queued issues stay on disk)
   factory queue resume
-              (clears pause or drain)
+              (clears pause or drain; does not resume parked tickets)
+  factory queue recover [--run <id>]... [--issue <n>]... [--cause <cause>] [--apply] [--grant] [--json]
+              (preview parked tickets: continue checkpoint, revalidate existing PR, wait for blocker,
+               ask for decision, or cannot resume. --apply releases only the selected eligible entries
+               to pending so the running worker resumes the original run and PR. A selection is required
+               to apply. --grant records one extra repair allowance for a budget_exhausted ticket and
+               does not reset spent counts. Does not clear pause or drain.)
   factory queue stop
               (the worker exits at its next tick and does not signal a live run)
   factory queue run [--repo <path>] [--slots N] [--until HH:MM] [--stay]

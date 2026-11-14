@@ -14,6 +14,19 @@ export const MAX_GATE_ATTEMPTS = 3;
 /** Post-push repair/revalidation attempts, shared by the worker and persisted resume path. */
 export const MAX_CONTINUATIONS = 2;
 
+/** An operator grant adds exactly one attempt. Any other stored value is not an allowance. */
+export function grantedExtra(extra: number | undefined): number {
+  return extra === 1 ? 1 : 0;
+}
+
+export function gateLimit(extra: number | undefined): number {
+  return MAX_GATE_ATTEMPTS + grantedExtra(extra);
+}
+
+export function continuationLimit(extra: number | undefined): number {
+  return MAX_CONTINUATIONS + grantedExtra(extra);
+}
+
 export type RepairClass = "format" | "code" | "infra" | "base" | "config" | "unknown";
 
 /** One failing check that defines the root failure: its name, diagnostic codes, and highest severity word. */
@@ -62,6 +75,11 @@ export interface RepairBudget {
   lastClass?: RepairClass;
   /** Failure identity of the last observed red gate; the basis for strategy escalation (#181). */
   failure?: FailureIdentity;
+  /**
+   * One extra gate repair from an operator grant (#188). Only `1` counts. Spent `gateAttempts` stay.
+   * Cleared once that extra attempt has been spent, and by a successful repair.
+   */
+  gateExtra?: number;
 }
 
 export interface StoredRepair {
@@ -73,6 +91,8 @@ export interface StoredRepair {
   scope_last?: string;
   class?: RepairClass;
   failure?: FailureIdentity;
+  /** Remaining operator grant (#188). Only `1` is an allowance; absent or any other value is none. */
+  gate_extra?: number;
 }
 
 export function emptyBudget(): RepairBudget {
@@ -89,6 +109,7 @@ export function budgetFrom(raw: StoredRepair | undefined): RepairBudget {
     ...(raw?.scope_last !== undefined ? { scopeLast: raw.scope_last } : {}),
     ...(raw?.class ? { lastClass: raw.class } : {}),
     ...(raw?.failure ? { failure: { ...raw.failure, roots: raw.failure.roots ?? [] } } : {}),
+    ...(raw?.gate_extra === 1 ? { gateExtra: 1 as const } : {}),
   };
 }
 
@@ -102,6 +123,7 @@ export function budgetTo(b: RepairBudget): StoredRepair {
     ...(b.scopeLast !== undefined ? { scope_last: b.scopeLast } : {}),
     ...(b.lastClass ? { class: b.lastClass } : {}),
     ...(b.failure ? { failure: { ...b.failure } } : {}),
+    ...(b.gateExtra === 1 ? { gate_extra: 1 as const } : {}),
   };
 }
 
@@ -111,6 +133,7 @@ export function clearRepair(budget: RepairBudget): void {
   budget.infraReruns = 0;
   delete budget.lastClass;
   delete budget.failure;
+  delete budget.gateExtra;
   // scopeRepairs and scopeLast stay: a green commit elsewhere does not re-grant out-of-scope removals.
 }
 
@@ -404,7 +427,7 @@ async function explain(ctx: RunContext, cls: RepairClass, budget: RepairBudget, 
   return repairHandover({
     cls,
     attempts: budget.gateAttempts,
-    max: MAX_GATE_ATTEMPTS,
+    max: gateLimit(budget.gateExtra),
     diagnosis: failureSummary(report),
     checkpoint: await checkpoint(ctx),
     next: nextStep(cls),
@@ -470,14 +493,15 @@ export async function recoverRedGates(
   }
   if (!opts.spend) {
     ctx.persist?.();
-    if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) {
+    if (budget.gateAttempts >= gateLimit(budget.gateExtra)) {
       return { action: "stop", gates: current, cause: "budget_exhausted", reason: await explain(ctx, cls, budget, current) };
     }
     return { action: "retry", gates: current, strategy };
   }
   budget.gateAttempts += 1;
+  if (budget.gateAttempts > MAX_GATE_ATTEMPTS) budget.gateExtra = 0;
   ctx.persist?.();
-  if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) {
+  if (budget.gateAttempts >= gateLimit(budget.gateExtra)) {
     return { action: "stop", gates: current, cause: "budget_exhausted", reason: await explain(ctx, cls, budget, current) };
   }
   return { action: "retry", gates: current, strategy };
@@ -493,9 +517,9 @@ export function ensureBudget(ctx: { budget?: RepairBudget }): RepairBudget {
  * a blocking persisted class keeps its human/infra/unknown meaning, a spent gate budget is
  * exhausted, anything else stays a mechanical repair with the checkpoint kept.
  */
-export function stopCauseForBudget(budget: Pick<RepairBudget, "gateAttempts" | "lastClass">): StopCause {
+export function stopCauseForBudget(budget: Pick<RepairBudget, "gateAttempts" | "lastClass" | "gateExtra">): StopCause {
   if (budget.lastClass && blocksProductEdit(budget.lastClass)) return stopCauseForClass(budget.lastClass);
-  if (budget.gateAttempts >= MAX_GATE_ATTEMPTS) return "budget_exhausted";
+  if (budget.gateAttempts >= gateLimit(budget.gateExtra)) return "budget_exhausted";
   return "technical_repair";
 }
 
@@ -506,7 +530,7 @@ export async function blockedRepairReason(ctx: RunContext): Promise<{ reason: st
   const reason = repairHandover({
     cls: budget.lastClass,
     attempts: budget.gateAttempts,
-    max: MAX_GATE_ATTEMPTS,
+    max: gateLimit(budget.gateExtra),
     diagnosis: "persisted failure class; product code was not edited",
     checkpoint: await checkpoint(ctx),
     next: nextStep(budget.lastClass),
