@@ -61,6 +61,23 @@ export interface RunState {
   /** Persisted before each automatic continuation; restart never resets the two-attempt budget. */
   continuation_attempts?: number;
   /**
+   * One extra post-push continuation from an operator grant (#188). Only `1` counts.
+   * The spent `continuation_attempts` counter is not reset; this is cleared once that extra attempt runs.
+   */
+  continuation_extra?: number;
+  /**
+   * Audit of an explicit `queue recover --grant`. Spent counters in the record are what was kept.
+   * The usable remainder is `repair.gate_extra` and `continuation_extra`, not this object.
+   */
+  repair_grant?: {
+    at: string;
+    previous_cause: "budget_exhausted";
+    gate_attempts: number;
+    continuation_attempts: number;
+    gate_extra: 1;
+    continuation_extra: 1;
+  };
+  /**
    * Repair budget already spent. Resume continues it. A blocking `class` is not given another
    * product-code edit. Network retries are the same-model connection budget for the whole run.
    * `failure` is the last observed failure identity (#181): repeated identical fingerprints

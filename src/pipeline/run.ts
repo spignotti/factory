@@ -29,7 +29,7 @@ import { admissionBlock } from "../queue/admit.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
-import { budgetFrom, budgetTo, MAX_CONTINUATIONS, missingPlanQuotes, openPrProblem, stopCauseForBudget } from "./recovery.js";
+import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProblem, stopCauseForBudget } from "./recovery.js";
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -885,7 +885,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   if (fin.reviewedSha) st.reviewed_sha = fin.reviewedSha;
   if (fin.ciWait) st.ci_wait = fin.ciWait;
   else delete st.ci_wait;
-  if (fin.continuation && (st.continuation_attempts ?? 0) < MAX_CONTINUATIONS) st.continuation = fin.continuation;
+  if (fin.continuation && (st.continuation_attempts ?? 0) < continuationLimit(st.continuation_extra)) st.continuation = fin.continuation;
   else delete st.continuation;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
@@ -1030,11 +1030,12 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     events.emit({ step: "resume", event: "step_started", data: { from: st.step, previous_result: previous } });
     const continuation = st.continuation;
     if (continuation) {
-      if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
+      if ((st.continuation_attempts ?? 0) >= continuationLimit(st.continuation_extra)) {
         delete st.continuation;
-        return f.set({ result: "needs_human", reason: `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS})`, stop: stopFor("budget_exhausted") });
+        return f.set({ result: "needs_human", reason: `post-push repair exhausted (${st.continuation_attempts ?? 0}/${continuationLimit(st.continuation_extra)})`, stop: stopFor("budget_exhausted") });
       }
       st.continuation_attempts = (st.continuation_attempts ?? 0) + 1;
+      if (st.continuation_attempts > continuationLimit(0)) st.continuation_extra = 0;
       delete st.continuation;
       if (st.step === "finished") st.step = "review";
       delete st.approved_sha;

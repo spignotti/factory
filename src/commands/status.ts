@@ -56,7 +56,7 @@ function humanReviewReasons(input: { risk_reasons?: string[]; risk?: string | nu
  * spent, so `status` says when recovery is exhausted instead of leaving the reason text alone.
  * Only the persisted stop cause and the persisted budget numbers are read, never free-text matching.
  */
-function recoveryNote(st: { stop?: unknown; repair?: { gate_attempts?: number } | null; continuation_attempts?: number | null }): string {
+function recoveryNote(st: { stop?: unknown; repair?: { gate_attempts?: number; gate_extra?: number } | null; continuation_attempts?: number | null; continuation_extra?: number | null; repair_grant?: { at: string } | null }): string {
   const cause = stopCauseOf(st.stop);
   if (!cause) return "";
   const spent: string[] = [];
@@ -64,11 +64,13 @@ function recoveryNote(st: { stop?: unknown; repair?: { gate_attempts?: number } 
   if (cont >= MAX_CONTINUATIONS) spent.push(`post-push repair ${cont}/${MAX_CONTINUATIONS}`);
   const gates = st.repair?.gate_attempts ?? 0;
   if (gates >= MAX_GATE_ATTEMPTS) spent.push(`gate repair ${gates}/${MAX_GATE_ATTEMPTS}`);
+  const grant = st.repair_grant?.at ? `; grant recorded ${st.repair_grant.at}` : "";
+  const extra = st.repair?.gate_extra === 1 || st.continuation_extra === 1 ? "; one extra attempt still unused" : "";
   if (cause === "budget_exhausted") {
     if (!spent.length) spent.push("wall-time or attempt budget");
-    return `; budgets spent (${spent.join(", ")}); not reset, explicit grant required`;
+    return `; budgets spent (${spent.join(", ")}); not reset, explicit grant required${grant}`;
   }
-  return spent.length ? `; recovery exhausted: ${spent.join(", ")}` : "";
+  return `${spent.length ? `; recovery exhausted: ${spent.join(", ")}` : ""}${grant}${extra}`;
 }
 
 function resultFinishedMs(run: RunRecord): number | undefined {

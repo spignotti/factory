@@ -10,7 +10,7 @@ import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeli
 import { saveState } from "../pipeline/state.js";
 import { deliveryForDone, isProviderRetryCause, readStop, repairContinuationAllowed, stopCauseOf } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
-import { MAX_CONTINUATIONS } from "../pipeline/recovery.js";
+import { continuationLimit } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
@@ -1103,10 +1103,10 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
                 : undefined;
       if (!kind) continue;
       await withTimeout(ctx.github.disableAutoMerge(repo, st.pr), ctx.netTimeoutMs, "disable stale approval");
-      if ((st.continuation_attempts ?? 0) >= MAX_CONTINUATIONS) {
+      if ((st.continuation_attempts ?? 0) >= continuationLimit(st.continuation_extra)) {
         await updateQueue(ctx.factoryHome, repo, (queue) => {
           const own = queue.entries.find((e) => e.run_id === run.run_id);
-          if (own) park(own, `post-push repair exhausted (${MAX_CONTINUATIONS}/${MAX_CONTINUATIONS}); factory resume ${run.run_id}`);
+          if (own) park(own, `post-push repair exhausted (${st.continuation_attempts ?? 0}/${continuationLimit(st.continuation_extra)}); factory resume ${run.run_id}`);
         });
         continue;
       }

@@ -8,7 +8,7 @@ import { asData, taskBlock, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
 import type { Package } from "../schemas/plan.js";
 import { failureSummary, type GateReport, runGates } from "./gates.js";
-import { blockedRepairReason, clearRepair, ensureBudget, holdUnfixed, MAX_GATE_ATTEMPTS, recoverRedGates, repairHandover, withDiagnosticStrategy } from "../pipeline/recovery.js";
+import { blockedRepairReason, clearRepair, ensureBudget, gateLimit, holdUnfixed, MAX_GATE_ATTEMPTS, recoverRedGates, repairHandover, withDiagnosticStrategy } from "../pipeline/recovery.js";
 
 export { MAX_GATE_ATTEMPTS };
 
@@ -159,14 +159,14 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
     };
     const blocked = await blockedRepairReason(ctx);
     if (blocked) reason = blocked.reason;
-    for (let guard = 0; !reason && guard < MAX_GATE_ATTEMPTS + 1; guard++) {
+    for (let guard = 0; !reason && guard < gateLimit(ensureBudget(ctx).gateExtra) + 1; guard++) {
       const spent = ensureBudget(ctx).gateAttempts;
-      if (spent >= MAX_GATE_ATTEMPTS) {
+      if (spent >= gateLimit(ensureBudget(ctx).gateExtra)) {
         const b = ensureBudget(ctx);
         reason = repairHandover({
           cls: b.lastClass === "format" ? "format" : "code",
           attempts: spent,
-          max: MAX_GATE_ATTEMPTS,
+          max: gateLimit(b.gateExtra),
           diagnosis: report ? failureSummary(report) : "repair budget already spent",
           checkpoint: (await headSha(ctx.worktree).catch(() => "unknown")).slice(0, 12),
           next: "Fix the failing checks on this branch, then factory resume. Do not open a new plan or a second pull request.",
@@ -226,7 +226,7 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       reason = repairHandover({
         cls: "code",
         attempts: b.gateAttempts,
-        max: MAX_GATE_ATTEMPTS,
+        max: gateLimit(b.gateExtra),
         diagnosis: report ? failureSummary(report) : "repair budget already spent",
         checkpoint: "unknown",
         next: "Fix the failing checks on this branch, then factory resume. Do not open a new plan or a second pull request.",

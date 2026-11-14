@@ -13,6 +13,9 @@ import {
 } from "../queue/store.js";
 import { clearWorkerMode, writeWorkerMode } from "../queue/control.js";
 import { previewQueues, renderPreview } from "../queue/preview.js";
+import { isStopCause, loadRecoverFacts, recoverApply, recoverPreview, renderApply, renderRecover, selectionGiven } from "../queue/recover.js";
+import { loadRepoConfig } from "../schemas/repo.js";
+import { STOP_CAUSES } from "../events.js";
 import { DEFAULT_SLOTS, runQueue, type RunQueueOptions, type StartRun } from "../queue/worker.js";
 import type { Io } from "./gates.js";
 
@@ -308,6 +311,73 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
     deps.io.out(values.json ? JSON.stringify(report) + "\n" : renderPreview(report));
     return 0;
   }
+  if (sub === "recover") {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: {
+        run: { type: "string", multiple: true },
+        issue: { type: "string", multiple: true },
+        cause: { type: "string" },
+        apply: { type: "boolean", default: false },
+        grant: { type: "boolean", default: false },
+        json: { type: "boolean", default: false },
+      },
+    });
+    if (positionals.length) {
+      deps.io.err("factory: usage: factory queue recover [--run <id>]... [--issue <n>]... [--cause <cause>] [--apply] [--grant] [--json]\n");
+      return 2;
+    }
+    const issues = (values.issue ?? []).map((s) => Number(s));
+    if (issues.some((n) => !Number.isInteger(n) || n < 1)) {
+      deps.io.err("factory: --issue takes positive issue numbers\n");
+      return 2;
+    }
+    if (values.cause !== undefined && !isStopCause(values.cause)) {
+      deps.io.err(`factory: --cause must be one of ${STOP_CAUSES.join(", ")}\n`);
+      return 2;
+    }
+    if (values.grant && !values.apply) {
+      deps.io.err("factory: --grant is only applied with --apply\n");
+      return 2;
+    }
+    const sel = {
+      ...(values.run?.length ? { runs: values.run } : {}),
+      ...(issues.length ? { issues } : {}),
+      ...(values.cause ? { cause: values.cause } : {}),
+    };
+    if (values.apply && !selectionGiven(sel)) {
+      deps.io.err("factory: queue recover --apply needs --run, --issue or --cause; a factory fix does not resume every parked ticket\n");
+      return 2;
+    }
+    let facts;
+    try {
+      facts = await loadRecoverFacts(deps.factoryHome, deps.github, sel, (repo) => {
+        try {
+          loadRepoConfig(repo);
+          return undefined;
+        } catch (e) {
+          return (e as Error).message;
+        }
+      });
+    } catch (e) {
+      deps.io.err(`factory: ${(e as Error).message}\n`);
+      return 1;
+    }
+    if (!values.apply) {
+      const rows = recoverPreview(deps.factoryHome, sel, facts);
+      deps.io.out(values.json ? JSON.stringify({ entries: rows }) + "\n" : renderRecover(rows));
+      return 0;
+    }
+    try {
+      const result = await recoverApply(deps.factoryHome, sel, { facts, grant: values.grant === true });
+      deps.io.out(values.json ? JSON.stringify(result) + "\n" : renderApply(result));
+      return 0;
+    } catch (e) {
+      deps.io.err(`factory: ${(e as Error).message}\n`);
+      return 1;
+    }
+  }
   if (sub === "run") {
     const { values } = parseArgs({
       args: rest,
@@ -344,6 +414,6 @@ export async function queueCommand(argv: string[], deps: QueueCommandDeps): Prom
       deps.io,
     );
   }
-  deps.io.err("factory: usage: factory queue add|list|remove|preview|pause|drain|resume|stop|run\n");
+  deps.io.err("factory: usage: factory queue add|list|remove|preview|recover|pause|drain|resume|stop|run\n");
   return sub === undefined || sub === "--help" ? 0 : 2;
 }
