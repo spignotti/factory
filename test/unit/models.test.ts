@@ -60,6 +60,10 @@ describe("error classification", () => {
     [new AgentError("500 internal error", undefined, 500), "other"],
     [new Error("socket hang up"), "network"],
     [new Error("terminated"), "network"],
+    [new Error("terminated: SSL routines:ssl3_read_bytes:tlsv1 alert internal error"), "network"],
+    [new Error("terminated: other side closed"), "network"],
+    [new Error("Terminated: "), "network"],
+    [new Error("terminated by signal SIGTERM"), "other"],
     [new Error("read ECONNRESET"), "network"],
     [new AgentError("Stream ended without finish_reason"), "stream"],
     [new Error("premature EOF"), "stream"],
@@ -68,6 +72,9 @@ describe("error classification", () => {
     [new Error("Error while streaming the response"), "stream"],
     [new AgentError("Request timed out."), "network"],
     [new AgentError("request timed out"), "network"],
+    [new AgentError("Request timed out. (cause: connect ETIMEDOUT)"), "network"],
+    [new AgentError("Request timed out after 60000ms"), "network"],
+    [new AgentError("Request timed out.", undefined, 504), "other"],
     [new AgentError("Connection error."), "network"],
     [new AgentError("Connection error.\nTLS: certificate verify failed: unable to verify the first certificate"), "network"],
     [new Error("TLS handshake timeout"), "network"],
@@ -118,6 +125,22 @@ describe("fallback", () => {
     expect(slept).toEqual([100]);
     expect(runner.calls.map((c) => c.model)).toEqual(["openai/sol", "openai/sol"]);
     expect(read()[0]).toMatchObject({ event: "agent_error", data: { class: "network" } });
+  });
+
+  it("treats `terminated: <detail>` like a bare `terminated`: same-model retry, then the next entry, then a transient error", async () => {
+    const tls = { message: "terminated: SSL routines:ssl3_read_bytes:tlsv1 alert internal error" };
+    const retried = setup([
+      { role: "plan_high", model: "openai/sol", error: tls },
+      { role: "plan_high", model: "openai/sol", raw: "ok" },
+    ]);
+    await expect(callModel(retried.deps, "plan", req("plan_high"))).resolves.toMatchObject({ text: "ok", model: "openai/sol" });
+    expect(retried.read()[0]).toMatchObject({ event: "agent_error", data: { class: "network" } });
+
+    const t = { role: "plan_medium", error: tls };
+    const spent = setup([t, t, t]);
+    const err = await callModel(spent.deps, "plan", req("plan_medium")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TransientAgentError);
+    expect(err).toMatchObject({ errorClass: "network" });
   });
 
   it("falls back immediately on limit without backoff", async () => {

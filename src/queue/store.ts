@@ -32,6 +32,8 @@ export interface QueueEntry {
    * periodic recheck); the release only happens after this time. Cleared with `wait_until`.
    */
   window_resets_at?: number;
+  /** `window_resets_at` is an assumed time (the provider reported none). Cleared with it. */
+  window_estimated?: boolean;
   /** Times this entry waited for a provider usage window. Bounded; a window reset does not give it back. */
   window_waits?: number;
   /** Open factory PR numbers that overlap this run. Pending again once each is merged or closed. */
@@ -82,6 +84,7 @@ const EntrySchema = z.object({
   requeues: z.number().int().min(0).optional(),
   wait_until: z.number().int().positive().optional(),
   window_resets_at: z.number().int().positive().optional(),
+  window_estimated: z.boolean().optional(),
   window_waits: z.number().int().min(0).optional(),
   blocked_by: z.array(z.number().int().positive()).optional(),
   blocked_runs: z.array(z.string()).optional(),
