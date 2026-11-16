@@ -37,6 +37,17 @@ export class InvalidOutputError extends Error {
  */
 const LIMIT = /\bquota\b|usage limit|insufficient_quota|spending limit|used all available credits/i;
 
+/**
+ * A subscription usage window that reports no reset time (`You have hit your ChatGPT usage limit`). It is
+ * a window all the same, so it waits on an assumed reset. Billing and credit wording is excluded: that
+ * limit does not lift by itself and stays a permanent failure.
+ */
+const USAGE_WINDOW = /usage limit/i;
+const BILLING_LIMIT = /insufficient_quota|spending limit|used all available credits|billing/i;
+
+/** Assumed length of a usage window whose reset time the provider did not report. */
+export const ESTIMATED_WINDOW_MS = 3_600_000;
+
 /** `rate limit … try again in N` — capacity, and the delay is parsed from the same text. */
 const RATE_LIMIT_BACKOFF = /rate.?limit[\s\S]{0,160}?try again in\s+\d/i;
 
@@ -230,8 +241,10 @@ export class ProviderWindowError extends Error {
   constructor(
     readonly resetsAtMs: number,
     cause: unknown,
+    /** The reset time is an assumption (`ESTIMATED_WINDOW_MS` from the error), not one the provider reported. */
+    readonly estimated = false,
   ) {
-    super(`every usable model is at its usage limit until ${new Date(resetsAtMs).toISOString()}`, { cause });
+    super(`every usable model is at its usage limit until ${new Date(resetsAtMs).toISOString()}${estimated ? " (estimated; the provider reported no reset time)" : ""}`, { cause });
     this.name = "ProviderWindowError";
   }
 }
@@ -322,8 +335,8 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
   let streamRetriesUsed = 0;
   let lastError: unknown;
   let lastClass: ErrorClass = "other";
-  /** Chain index -> explicit reset window of that entry's final `limit` error. */
-  const windows = new Map<number, number>();
+  /** Chain index -> reset window of that entry's final `limit` error: reported, or assumed when `estimated`. */
+  const windows = new Map<number, { at: number; estimated: boolean }>();
   const { packageId, ...agentReq } = req;
   for (let i = 0; i >= 0 && i < chain.length; ) {
     const entry = chain[i]!;
@@ -392,8 +405,10 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
         }
         next = nextEntry(chain, i, cls);
         if (cls === "limit") {
+          const message = err instanceof Error ? err.message : String(err);
           const resetsAt = providerWindowResetsAtMs(err);
-          if (resetsAt !== undefined) windows.set(i, resetsAt);
+          if (resetsAt !== undefined) windows.set(i, { at: resetsAt, estimated: false });
+          else if (USAGE_WINDOW.test(message) && !BILLING_LIMIT.test(message)) windows.set(i, { at: Date.now() + ESTIMATED_WINDOW_MS, estimated: true });
         }
         if (next >= 0) {
           events.emit({
@@ -410,10 +425,11 @@ export async function callModel(deps: CallDeps, step: string, req: ModelRequest)
     i = next;
   }
   if (!req.signal?.aborted) {
-    // Fallback had its chance: only when every usable model waited on an explicit window the entry waits (#177).
+    // Fallback had its chance: only when every usable model waited on a usage window (reported or assumed) the entry waits (#177).
     const usable = chain.map((e, idx) => (e.capacity_only ? -1 : idx)).filter((idx) => idx >= 0);
     if (usable.length > 0 && usable.every((idx) => windows.has(idx))) {
-      throw new ProviderWindowError(Math.max(...usable.map((idx) => windows.get(idx)!)), lastError);
+      const latest = usable.map((idx) => windows.get(idx)!).reduce((a, b) => (b.at > a.at ? b : a));
+      throw new ProviderWindowError(latest.at, lastError, latest.estimated);
     }
   }
   if (TRANSIENT_CLASSES.includes(lastClass) && !req.signal?.aborted) {

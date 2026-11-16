@@ -240,6 +240,9 @@
       "exclusiveMinimum": 0,
       "maximum": 9007199254740991
     },
+    "window_estimated": {
+      "type": "boolean"
+    },
     "outcome": {
       "type": "object",
       "properties": {

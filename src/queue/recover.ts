@@ -196,7 +196,7 @@ function classify(factoryHome: string, q: QueueFile, entry: QueueEntry, facts: R
     if (resetsAt === undefined || !Number.isFinite(resetsAt) || resetsAt <= 0) {
       return makeRow(q, entry, "cannot", "provider window has no reset time; not resumed", base);
     }
-    if (resetsAt > nowMs) return makeRow(q, entry, "cannot", `provider window has not reset (until ${new Date(resetsAt).toISOString()})`, base);
+    if (resetsAt > nowMs) return makeRow(q, entry, "cannot", `provider window has not reset (until ${new Date(resetsAt).toISOString()}${entry.window_estimated ? ", estimated" : ""})`, base);
   } else if (cause !== "technical_repair" && cause !== "transient_retry") {
     return makeRow(q, entry, "cannot", cause ? `not an automatic recovery cause (${cause}); a factory fix is not permission to resume` : "no canonical stop cause; fails closed", base);
   }
@@ -307,6 +307,7 @@ function releaseEntry(entry: QueueEntry): void {
   delete entry.choice;
   delete entry.wait_until;
   delete entry.window_resets_at;
+  delete entry.window_estimated;
 }
 
 /**
