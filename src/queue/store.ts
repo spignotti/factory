@@ -8,6 +8,8 @@ import { lockRepoKey, tryPathLock } from "../pipeline/lock.js";
 export const FACTORY_READY_LABEL = "factory-ready";
 /** Issue with this label is not ready to run. */
 export const NEEDS_PLAN_LABEL = "needs-plan";
+/** A run asked questions on the issue. The ticket runs again once a human removes it and sets `factory-ready`. */
+export const NEEDS_INPUT_LABEL = "needs-input";
 
 export const QUEUE_STATUSES = ["pending", "running", "done", "parked"] as const;
 export type QueueStatus = (typeof QUEUE_STATUSES)[number];
@@ -62,6 +64,12 @@ export interface QueueEntry {
    * run continues, so the version of live work is reported per entry, not per worker.
    */
   release_id?: string;
+  /**
+   * Parked on the questions of run `run_id` (`needs_input`). `posted` turns true once the question comment and the
+   * label swap (`needs-input` on, `factory-ready` off) are on the issue; until then the worker retries.
+   * A posted entry starts a fresh run when the issue is admissible again. Cleared on any other park or release.
+   */
+  awaiting_answer?: { questions: string[]; posted: boolean };
 }
 
 export interface QueueFile {
@@ -99,6 +107,7 @@ const EntrySchema = z.object({
     })
     .optional(),
   release_id: z.string().optional(),
+  awaiting_answer: z.object({ questions: z.array(z.string()), posted: z.boolean() }).optional(),
 });
 
 const FileSchema = z.object({

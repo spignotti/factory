@@ -63,8 +63,11 @@ export interface Task {
   ref: string;
   issue?: number;
   title: string;
+  /** `# title` and the issue body (or the file). Never the comments: continuation and quote checks compare it to the issue. */
   text: string;
   labels: string[];
+  /** Issue comments rendered for the planner (`renderIssueComments`). Absent when there are none. */
+  comments?: string;
 }
 
 export interface RunContext {

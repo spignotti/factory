@@ -386,6 +386,15 @@
         "type": "string"
       }
     },
+    "questions_posted": {
+      "type": "boolean"
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "branch": {
       "type": [
         "string",

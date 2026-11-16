@@ -2,6 +2,7 @@
 
 {{summary}}
 {{protected}}
+{{assumptions}}
 
 ## Risk & Security
 

@@ -310,6 +310,13 @@ export const ResultSchema = z.object({
   /** Test-file lines left out of that limit. Set only when `limits.diff_count_tests` is false. */
   excluded_test_lines: z.number().int().min(0).optional(),
   questions: z.array(z.string()).optional(),
+  /**
+   * `needs_input` on an issue: whether the questions comment and the `needs-input` label swap reached
+   * GitHub. False after a GitHub error (the queue worker retries). Omitted when nothing was posted.
+   */
+  questions_posted: z.boolean().optional(),
+  /** Assumptions the plan stated instead of asking. Omitted when there are none. */
+  assumptions: z.array(z.string()).optional(),
   /** Where to find the work (null until created); needed to fix and `factory resume` a run. */
   branch: z.string().nullable(),
   worktree: z.string().nullable(),
