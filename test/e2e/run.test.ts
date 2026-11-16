@@ -61,7 +61,7 @@ describe("notify hook on run_finished", () => {
   it.each([
     ["done", "clean.json", {}],
     ["base_red", "base-red.json", { github: (gh: { status: string }) => void (gh.status = "red") }],
-    ["needs_human", "invalid-handoff.json", {}],
+    ["failed", "invalid-handoff.json", {}],
   ] as const)("%s: POSTs the minimal payload once, after result.json; events never hold the URL or key", async (expected, script, extra) => {
     const h = withHook();
     const r = await runScenario({ script, setup: h.setup, before: h.before, deps: h.deps, ...(extra as object) });
@@ -396,19 +396,20 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.github.readied).toEqual([]);
   });
 
-  it("stalemate: rejected wontfix -> needs_human, draft PR, human_review", async () => {
+  it("stalemate: rejected wontfix goes to the resolver; when it cannot fix it the run fails before a PR", async () => {
     const r = await runScenario({ script: "stalemate.json", patch: (c) => void (c.merge = { auto_merge_max_risk: "medium" }) });
-    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", rounds: 2 });
-    expect(r.result.reason).toMatch(/stalemate/);
-    expect(r.github.prs[0]?.draft).toBe(true);
-    expect(r.github.readied).toEqual([]);
-    expect(r.github.prs[0]?.body).toContain("Blockers (needs_human)");
+    expect(r.result).toMatchObject({ result: "failed", rounds: 2 });
+    expect(r.result.reason).toMatch(/^stalemate.*; resolver: /s);
+    expect(r.runner.calls.filter((c) => c.role === "resolve")).toHaveLength(2);
+    expect(r.github.prs).toEqual([]);
     expect(r.github.autoMerged).toEqual([]);
   });
 
-  it("bug at max rounds: one extra round, then needs_human", async () => {
-    const r = await runScenario({ script: "bug-max-rounds.json" });
-    expect(r.result).toMatchObject({ result: "needs_human", rounds: 3 });
+  it("bug at max rounds: one extra round, then the resolver", async () => {
+    // No PR: the stop goes to the resolver before finalize.
+    const r = await runScenario({ script: "bug-max-rounds.json", steps: (s) => s.filter((x) => x.role !== "pr_writer") });
+    expect(r.result).toMatchObject({ result: "failed", rounds: 3 });
+    expect(r.result.reason).toMatch(/^open bug after .*; resolver: /s);
     const decisions = eventsOf(r, "round_finished").map((e) => (e.data.decision as { rule: number }).rule);
     expect(decisions).toEqual([6, 4, 5]);
     expect(r.runner.remaining()).toEqual({});
@@ -420,7 +421,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(mem.entries.length).toBeGreaterThan(0);
     expect(mem.entries.every((e) => e.status === "open" && e.count === 1 && e.runs[0] === first.runId)).toBe(true);
     expect(eventsOf(first, "progress").some((e) => (e.data.memory as { observations: number } | undefined)?.observations === mem.entries.length)).toBe(true);
-    expect(first.github.prs[0]?.body).not.toContain("Recurring");
+    expect(first.result.result).toBe("failed");
 
     const text = mem.entries[0]!.text;
     const second = await runScenario({
@@ -597,18 +598,17 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(eventsOf(r, "agent_error")[0]).toMatchObject({ tokens_in: 300, cost_usd: 0, data: { billing: "subscription" } });
   });
 
-  it("invalid handoff: one re-prompt, then the package fails -> needs_human", async () => {
+  it("invalid handoff: one re-prompt, then the package fails and goes to the resolver", async () => {
     const r = await runScenario({ script: "invalid-handoff.json" });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(r.result.reason).toMatch(/P1 failed: invalid handoff/);
     const impl = r.runner.calls.filter((c) => c.role === "implement");
     expect(impl).toHaveLength(2);
     expect(impl[1]?.prompt).toContain("Your handoff was invalid");
     expect(impl[1]?.prompt).toContain('{"package":"P1"');
     expect(git(join(r.runDir, "worktree"), "status", "--porcelain")).toBe("");
-    // all work was discarded, so there is nothing to open a PR for
+    // all work was discarded and the resolver had no fix: no PR
     expect(r.github.prs).toEqual([]);
-    expect(r.result.reason).toContain("no commits, no PR");
   });
 
   it("base_red: fast checks red on base stop the run before implement", async () => {
@@ -766,7 +766,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.github.autoMerged).toEqual([r.result.pr]);
   });
 
-  it("red CI on the PR head is needs_human, draft again, and is not auto-merged", async () => {
+  it("red CI on the PR head goes to the resolver, the PR is draft again and is not auto-merged", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
@@ -775,8 +775,9 @@ describe("E2E with fake-runner on a fixture repo", () => {
       },
       patch: autoMerge,
     });
-    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
-    expect(r.result.reason).toMatch(/CI on the PR head \([0-9a-f]{8}\) is red/);
+    expect(r.result).toMatchObject({ result: "failed", merge_policy: "human_review" });
+    expect(r.result.reason).toMatch(/CI on the PR head \([0-9a-f]{8}\) is red; resolver: /);
+    expect(r.runner.calls.filter((c) => c.role === "resolve")).toHaveLength(2);
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.readied).toEqual([]);
     expect(r.github.drafted).toEqual([r.result.pr]);
@@ -901,7 +902,7 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.github.mergedNow).toEqual([]);
   });
 
-  it("any other auto-merge API error stays a stop and is not permission to merge", async () => {
+  it("any other auto-merge API error goes to the resolver and is not permission to merge", async () => {
     let n = 0;
     const r = await runScenario({
       script: "clean.json",
@@ -916,8 +917,9 @@ describe("E2E with fake-runner on a fixture repo", () => {
       },
       patch: autoMerge,
     });
-    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
-    expect(r.resultFile.stop).toEqual({ cause: "unknown", action: "none" });
+    expect(r.result).toMatchObject({ result: "failed", merge_policy: "human_review" });
+    expect(r.result.reason).toMatch(/^PR step failed: gh pr merge failed: HTTP 403.*; resolver: /s);
+    expect(r.resultFile.stop).toBeUndefined();
     expect(r.github.mergedNow).toEqual([]);
   });
 
@@ -1210,13 +1212,24 @@ describe("E2E with fake-runner on a fixture repo", () => {
     });
   });
 
-  it("a failing push ends as needs_human, not failed", async () => {
+  it("a rejected push goes to the resolver; without a fix the run fails", async () => {
     const r = await runScenario({
       script: "clean.json",
       github: (gh) => void (gh.push = async () => Promise.reject(new Error("remote rejected"))),
     });
-    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", pr: null });
-    expect(r.result.reason).toMatch(/PR step failed: remote rejected/);
+    expect(r.result).toMatchObject({ result: "failed", merge_policy: "human_review", pr: null });
+    expect(r.result.reason).toMatch(/PR step failed: remote rejected; resolver: /);
+  });
+
+  it("a push that fails on a GitHub outage is a transient retry, not a resolver turn", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      github: (gh) => void (gh.push = async () => Promise.reject(new Error("fatal: unable to access: The requested URL returned error: 503"))),
+    });
+    expect(r.result).toMatchObject({ result: "needs_human", pr: null });
+    expect(r.resultFile.stop).toEqual({ cause: "transient_retry", action: "retry" });
+    expect(r.result.reason).toMatch(/PR step failed: .*503; factory resume /);
+    expect(r.runner.calls.filter((c) => c.role === "resolve")).toEqual([]);
   });
 
   it("--no-pr skips push and PR", async () => {
@@ -1272,13 +1285,14 @@ describe("base moved before finalize", () => {
     expect(r.github.readied).toEqual([]);
   });
 
-  it("conflict: merge aborted, needs_human naming the files, draft PR, worktree clean", async () => {
+  it("conflict: the resolver gets the merge; without a resolution the merge is aborted, the run fails, worktree clean", async () => {
     const r = await runScenario({
       script: "clean.json",
       onCall: moveBaseOnReview("src/math.js", "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function divide(a, b) {\n  return a / b;\n}\n"),
     });
-    expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review" });
-    expect(r.result.reason).toMatch(/^base main moved \([0-9a-f]{8}\): merge conflict in src\/math\.js$/);
+    expect(r.result).toMatchObject({ result: "failed", merge_policy: "human_review" });
+    expect(r.result.reason).toMatch(/^base main moved \([0-9a-f]{8}\): merge conflict in src\/math\.js; resolver: /);
+    expect(r.runner.calls.filter((c) => c.role === "resolve")).toHaveLength(2);
     expect(r.github.prs[0]!.draft).toBe(true);
     expect(r.github.prs[0]!.body).toContain("merge conflict in src/math.js");
     const wt = join(r.runDir, "worktree");
@@ -1325,9 +1339,9 @@ describe("one run per repo", () => {
 });
 
 describe("run guards", () => {
-  it("max_wall_minutes is the outer limit -> needs_human", async () => {
+  it("max_wall_minutes is the outer limit -> failed", async () => {
     const r = await runScenario({ script: "base-red.json", patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.00001) });
-    expect(r.result).toMatchObject({ result: "needs_human" });
+    expect(r.result).toMatchObject({ result: "failed" });
     expect(r.result.reason).toMatch(/max_wall_minutes/);
     expect(r.resultFile).toMatchObject({ worktree: null, run_dir: r.runDir });
   });
@@ -1340,26 +1354,27 @@ describe("run guards", () => {
       // includes fixture setup and fails when the worker is busy, without saying the limit failed.
       steps: (steps) => steps.map((s) => (s.role === "plan_high" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
     });
-    expect(r.result).toMatchObject({ result: "needs_human" });
+    expect(r.result).toMatchObject({ result: "failed" });
     expect(r.result.reason).toMatch(/max_wall_minutes/);
     expect(eventsOf(r, "heartbeat").length).toBeGreaterThan(3);
     expect(r.events.some((e) => e.event === "progress" && e.data.aborted === "max_wall_minutes")).toBe(true);
   });
 
-  it("max_wall_minutes mid-implement: needs_human with active minutes and the resume command, no 1 s gate run", async () => {
+  it("max_wall_minutes mid-implement: failed with active minutes, no resolver turn and no 1 s gate run", async () => {
     const r = await runScenario({
       script: "clean.json",
       patch: (c) => void ((c.limits as Record<string, unknown>).max_wall_minutes = 0.01), // 600 ms
       steps: (steps) => steps.map((s) => (s.role === "implement" ? { ...s, heartbeats: { count: 1000, interval_ms: 10 } } : s)),
     });
-    expect(r.result).toMatchObject({ result: "needs_human" });
-    expect(r.result.reason).toMatch(/^max_wall_minutes \(0\.01\) exceeded \(\d+ active min\); factory resume \d{8}-\d{6}-[0-9a-f]{6}$/);
+    expect(r.result).toMatchObject({ result: "failed" });
+    expect(r.result.reason).toMatch(/^max_wall_minutes \(0\.01\) exceeded \(\d+ active min\)$/);
+    expect(r.runner.calls.filter((c) => c.role === "resolve")).toEqual([]);
     expect(r.events.some((e) => e.event === "progress" && e.data.aborted === "max_wall_minutes")).toBe(true);
     const abort = r.events.findIndex((e) => e.data.aborted === "max_wall_minutes");
     expect(r.events.slice(abort).some((e) => e.event === "gate_result")).toBe(false);
   });
 
-  it("an external abort (SIGTERM handler) stops the run as failed and still writes result.json", async () => {
+  it("an external abort (SIGTERM handler) stops the run as a transient retry and still writes result.json", async () => {
     const controller = new AbortController();
     // The plan session is blocked in a long sleep. Abort from outside that call, and time only the
     // stop itself: the old bound included fixture setup and fired late when the worker was busy.
@@ -1376,8 +1391,8 @@ describe("run guards", () => {
     expect(abortedAt).toBeGreaterThan(0);
     expect(Date.now() - abortedAt).toBeLessThan(5000);
     expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
-    expect(r.resultFile).toMatchObject({ result: "failed", reason: "interrupted by SIGTERM" });
-    expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "failed" } });
+    expect(r.resultFile).toMatchObject({ result: "needs_human", reason: `interrupted by SIGTERM; factory resume ${r.runId}`, stop: { cause: "transient_retry", action: "retry" } });
+    expect(r.events.at(-1)).toMatchObject({ event: "run_finished", data: { result: "needs_human" } });
     expect(r.github.prs).toEqual([]);
   });
 

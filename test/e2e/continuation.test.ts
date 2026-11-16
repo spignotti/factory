@@ -17,7 +17,7 @@ const issue = { number: 7, title: "Multiply", body, labels: ["factory-ready"] };
 async function redPr() {
   let checks = 0;
   return runScenario({ script: "clean.json", options: { issue: 7 }, patch: (cfg) => { cfg.merge = { auto_merge_max_risk: "low" }; }, github: (gh) => {
-    gh.issues.set(7, issue);
+    gh.issues.set(7, { ...issue, labels: [...issue.labels] });
     gh.baseStatus = async () => checks++ === 0 ? "none" : "red";
   } });
 }
@@ -35,70 +35,34 @@ describe("bounded post-push continuation", () => {
     // One fast gate and one final full gate; neither adds a duplicate evidence invocation.
     expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(2);
   });
-  it("repairs a CI-only assertion on the same PR, then reviews the actual fixed commit", async () => {
-    const r = await redPr();
-    expect(r.result.result).toBe("needs_human");
-    expect(readState(r.runDir).continuation?.kind).toBe("ci");
-    r.github.baseStatus = async () => "green";
+  it("a red CI continuation of a done run goes through finalize to the resolver and repairs the same PR", async () => {
+    const r = await runScenario({ script: "clean.json", options: { issue: 7 }, patch: (cfg) => void (cfg.merge = { auto_merge_max_risk: "low" }), github: (gh) => {
+      gh.issues.set(7, { ...issue, labels: [...issue.labels] });
+      gh.status = "green";
+    } });
+    expect(r.result.result).toBe("done");
+    const st = readState(r.runDir);
+    st.continuation = { kind: "ci", sha: st.approved_sha! };
+    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(st));
+    let polls = 0;
+    r.github.baseStatus = async () => (polls++ === 0 ? "red" : "green");
     r.github.failures = [{ name: "unit", output_tail: "AssertionError: CI-only boundary is wrong" }];
-    await updateQueue(r.factoryHome, r.repo, (q) => q.entries.push({
-      issue: 7, status: "parked", added_at: new Date().toISOString(), run_id: r.runId,
-      issue_rev: issueRevision(issue.title, issue.body), pr: r.result.pr!,
-    }));
-    let resumed: Awaited<ReturnType<typeof resumeScenario>> | undefined;
-    const starts: string[] = [];
-    await runQueue({ factoryHome: r.factoryHome, github: r.github, repo: r.repo, pollMs: 10,
-      start: (req) => {
-        expect(req.resumeRunId).toBe(r.runId);
-        starts.push(req.resumeRunId!);
-        const done = resumeScenario(r, { script: "clean.json", steps: (steps) => steps
-          .filter((s) => !s.role.startsWith("plan_"))
-          .map((s) => s.role !== "implement" ? s : { ...s,
-            writes: { ...s.writes, "src/math.js": `${s.writes!["src/math.js"]}\n// Correct the CI-only boundary.\n` },
-            output: { ...(s.output as object), package: "fix" },
-          }) }).then((result) => { resumed = result; return result.result; });
-        return { done, pid: 0, runId: () => r.runId, kill: () => {}, unref: () => {} };
-      },
-    });
-    expect(starts).toEqual([r.runId]);
-    expect(resumed!.result).toMatchObject({ result: "done", pr: r.result.pr, run_id: r.runId, branch: readState(r.runDir).branch, worktree: readState(r.runDir).worktree });
-    expect(resumed!.runner.calls.map((c) => c.role)).toEqual(["implement", "review_plan", "review_simplicity", "pr_writer"]);
+    const math = readFileSync(join(st.worktree!, "src/math.js"), "utf8");
+    const next = await resumeScenario(r, { script: "clean.json", steps: (steps) => [
+      ...steps.filter((s) => s.role === "pr_writer"),
+      { role: "resolve", writes: { "src/math.js": `${math}// Correct the CI-only boundary.\n` }, output: { outcome: "fixed", summary: "boundary" } },
+      ...steps.filter((s) => ["review_plan", "review_simplicity", "pr_writer"].includes(s.role)),
+    ] });
+    expect(next.result).toMatchObject({ result: "done", pr: r.result.pr, run_id: r.runId, branch: st.branch, worktree: st.worktree });
+    expect(next.runner.remaining()).toEqual({});
+    expect(next.runner.calls.map((c) => c.role)).toEqual(["pr_writer", "resolve", "review_plan", "review_simplicity", "pr_writer"]);
+    expect(next.runner.calls.find((c) => c.role === "resolve")!.prompt).toContain("CI-only boundary is wrong");
     expect(r.github.prs).toHaveLength(1);
-    const st = readState(r.runDir);
-    expect(st.continuation_attempts).toBe(1);
-    expect(st.continuation).toBeUndefined();
-    expect(st.reviewed_sha).toBe(st.approved_sha);
-    expect(st.reviewed_sha).not.toBe((JSON.parse(r.file("ci-failure-1.json")) as { sha: string }).sha);
-  });
-
-  it("does not edit product code when the diagnosed CI head is no longer current", async () => {
-    const r = await redPr();
-    const st = readState(r.runDir);
-    st.continuation = { kind: "ci", sha: "f".repeat(40) };
-    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(st));
-    r.github.baseStatus = async () => "green";
-    r.github.failures = [{ name: "unit", output_tail: "AssertionError: CI-only boundary is wrong" }];
-    const next = await resumeScenario(r, { script: "clean.json" });
-    expect(next.result.reason).toMatch(/head moved before diagnosis/);
-    expect(next.runner.calls).toEqual([]);
-  });
-
-  it("does not reset the persisted attempt budget or edit code for an unknown CI failure", async () => {
-    const r = await redPr();
-    r.github.baseStatus = async () => "green";
-    r.github.failures = [{ name: "external", output_tail: "No actionable diagnosis" }];
-    const resumed = await resumeScenario(r, { script: "clean.json" });
-    expect(resumed.result.result).toBe("needs_human");
-    expect(resumed.runner.calls).toEqual([]);
-    expect(readState(r.runDir).continuation_attempts).toBe(1);
-    const st = readState(r.runDir);
-    st.continuation_attempts = 2;
-    st.continuation = { kind: "ci", sha: st.reviewed_sha! };
-    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(st));
-    const exhausted = await resumeScenario(r, { script: "clean.json" });
-    expect(exhausted.result.reason).toMatch(/exhausted/);
-    expect(exhausted.runner.calls).toEqual([]);
-    expect(readState(r.runDir).continuation_attempts).toBe(2);
+    const after = readState(r.runDir);
+    expect(after.continuation_attempts).toBe(1);
+    expect(after.continuation).toBeUndefined();
+    expect(after.resolver_turns).toBe(1);
+    expect(after.reviewed_sha).toBe(after.approved_sha);
   });
 
   it("revalidates a moved base with gates and delta review instead of stamping a review SHA", async () => {
@@ -117,7 +81,10 @@ describe("bounded post-push continuation", () => {
   });
 
   it("leaves uncommitted work untouched during automatic recovery", async () => {
-    const r = await redPr();
+    const r = await runScenario({ script: "clean.json", github: (gh) => void (gh.status = "green") });
+    const st = readState(r.runDir);
+    st.continuation = { kind: "ci", sha: st.approved_sha! };
+    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(st));
     writeFileSync(join(r.runDir, "worktree/src/personal.js"), "uncommitted\n");
     const next = await resumeScenario(r, { script: "clean.json" });
     expect(next.result.reason).toMatch(/uncommitted changes/);
@@ -285,6 +252,8 @@ describe("worker continuation follows the stored stop, not a stale field", () =>
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.autoMergeDisabled).toEqual([]);
     clearPause(r.factoryHome, { runId: r.runId });
+    // The red run failed and swapped the labels; a human set factory-ready again.
+    r.github.issues.set(7, { ...issue, labels: ["factory-ready"] });
     const after: { issue: number; resume?: string }[] = [];
     const ctl2 = new AbortController();
     // An immediate done is requeued on the next poll and records the same resume before abort is observed.

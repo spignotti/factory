@@ -34,7 +34,7 @@ describe("state.json", () => {
       script: "invalid-handoff.json",
       steps: (s) => s.map((x) => (x.role === "implement" ? { ...x, raw: `no handoff, token ${SECRET}` } : x)),
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(r.file("state.json")).not.toContain(SECRET);
   });
 });
@@ -42,7 +42,7 @@ describe("state.json", () => {
 describe("factory resume", () => {
   it("after a human fix: commits it, re-checks the gates, continues from implement and opens the PR", async () => {
     const r = await runScenario({ script: "invalid-handoff.json" });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(readState(r.runDir)).toMatchObject({ step: "implement", packages: { P1: "failed" } });
     const wt = join(r.runDir, "worktree");
     writeFileSync(join(wt, "src/math.js"), MULTIPLY);
@@ -95,7 +95,8 @@ describe("factory resume", () => {
       deps: { signal: ac.signal },
       onCall: (req) => void (req.role === "implement" && ac.abort(new Interrupted("SIGTERM"))),
     });
-    expect(r.result.result).toBe("failed");
+    expect(r.result.result).toBe("needs_human");
+    expect(r.resultFile.stop).toEqual({ cause: "transient_retry", action: "retry" });
     expect(readState(r.runDir).step).toBe("implement");
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer") });
     expect(r2.result.result).toBe("done");
@@ -125,7 +126,7 @@ describe("factory resume", () => {
       script: "clean.json",
       onCall: (req, repo) => void (req.role === "review_plan" && commitFile(repo, "src/math.js", DIVIDE, "main moved")),
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const wt = join(r.runDir, "worktree");
     expect(() => gitAs(wt, "merge", "main")).toThrow(); // conflict, left in progress
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
@@ -133,7 +134,7 @@ describe("factory resume", () => {
     expect(r2.result.reason).toMatch(/^resume: a merge is in progress/);
   });
 
-  it("merge conflict: still conflicting → needs_human again; resolved on the PR branch → plain push, PR updated and marked ready", async () => {
+  it("merge conflict: still conflicting with no resolver turn left → failed again; resolved on the PR branch → plain push, PR updated and marked ready", async () => {
     let origin = "";
     const r = await runScenario({
       script: "clean.json",
@@ -150,7 +151,7 @@ describe("factory resume", () => {
         git(repo, "push", "-q", "origin", "main");
       },
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(r.result.reason).toMatch(/merge conflict in src\/math\.js/);
     const branch = r.result.branch!;
     const firstPush = git(origin, "rev-parse", branch).trim();
@@ -158,8 +159,8 @@ describe("factory resume", () => {
 
     // nobody resolved it yet
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
-    expect(r2.result.result).toBe("needs_human");
-    expect(r2.result.reason).toMatch(/^resume: base main moved \([0-9a-f]{8}\): merge conflict in src\/math\.js$/);
+    expect(r2.result.result).toBe("failed");
+    expect(r2.result.reason).toMatch(/^resume: base main moved \([0-9a-f]{8}\): merge conflict in src\/math\.js; resolver: no resolver turn left \(2\/2\)$/);
     expect(r2.runner.calls).toEqual([]);
 
     // a human resolves the conflict on the PR branch (as if on GitHub)
@@ -195,7 +196,7 @@ describe("factory resume", () => {
         gh.baseStatus = async () => (n++ === 0 ? "none" : "red");
       },
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const url = r.result.pr!;
     r.github.prStates.set(url, { state: "open", draft: false });
     const release = acquireRepoLock(r.factoryHome, r.repo, "20261029-000000-eeeeee")!;
@@ -225,11 +226,11 @@ describe("factory resume", () => {
         git(repo, "push", "-q", "origin", "main");
       },
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const url = r.result.pr!;
     r.github.prStates.set(url, { state: "open", draft: false });
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("pr_writer") });
-    expect(r2.result.result).toBe("needs_human");
+    expect(r2.result.result).toBe("failed");
     expect(r2.result.reason).toMatch(/merge conflict in src\/math\.js/);
     expect(r2.github.drafted).toEqual([url]);
     expect(r2.github.readied).toEqual([]);
@@ -251,7 +252,7 @@ describe("notify hook on resume", () => {
       before: (_repo, home) => writeFileSync(join(home, "notify.yaml"), "repos:\n  acme/widgets:\n    url: https://hooks.example.test/x\n    key: k-resume-0123456789\n", { mode: 0o600 }),
       deps,
     });
-    expect(sent.map((p) => p.result)).toEqual(["needs_human"]);
+    expect(sent.map((p) => p.result)).toEqual(["failed"]);
 
     const release = acquireRepoLock(r.factoryHome, git(r.repo, "remote", "get-url", "origin").trim(), "20261029-000000-dddddd")!;
     try {
@@ -259,13 +260,13 @@ describe("notify hook on resume", () => {
     } finally {
       release();
     }
-    expect(sent.map((p) => p.result)).toEqual(["needs_human", "locked"]);
+    expect(sent.map((p) => p.result)).toEqual(["failed", "locked"]);
 
     const wt = r.result.worktree!;
     writeFileSync(join(wt, "src/math.js"), MULTIPLY);
     const r2 = await resumeScenario(r, { script: "clean.json", steps: roles("implement", "review_plan", "review_simplicity", "pr_writer"), deps });
     expect(r2.result.result).toBe("done");
-    expect(sent.map((p) => [p.run_id, p.result])).toEqual([[r.runId, "needs_human"], [r.runId, "locked"], [r.runId, "done"]]);
+    expect(sent.map((p) => [p.run_id, p.result])).toEqual([[r.runId, "failed"], [r.runId, "locked"], [r.runId, "done"]]);
   });
 });
 
@@ -277,7 +278,7 @@ describe("result.json across resumes", () => {
       deps: { signal: ac.signal },
       onCall: (req) => void (req.role === "implement" && ac.abort(new Interrupted("SIGTERM"))),
     });
-    expect(r.resultFile.result).toBe("failed");
+    expect(r.resultFile.result).toBe("needs_human");
     let duringPush: boolean | undefined;
     const push = r.github.push.bind(r.github);
     r.github.push = async (dir, branch) => {
@@ -291,11 +292,12 @@ describe("result.json across resumes", () => {
     expect(readState(r.runDir)).toMatchObject({ step: "finished", result: "done" });
   });
 
-  it("a resume that ends needs_human rewrites it too", async () => {
+  it("a resume that ends failed rewrites it too", async () => {
     const r = await runScenario({ script: "invalid-handoff.json" });
-    expect(r.resultFile.result).toBe("needs_human");
+    expect(r.resultFile.result).toBe("failed");
     const r2 = await resumeScenario(r, { script: "invalid-handoff.json", steps: roles("implement") });
-    expect(r2.result.result).toBe("needs_human");
+    expect(r2.result.result).toBe("failed");
+    expect(r2.result.reason).toMatch(/no resolver turn left \(2\/2\)$/);
     expect(r2.resultFile).toEqual(r2.result);
   });
 });

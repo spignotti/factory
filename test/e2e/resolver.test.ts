@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { FakeStep } from "../../src/agents/fake-runner.js";
 import type { FakeGitHub } from "../../src/gh.js";
 import { readState } from "../../src/pipeline/state.js";
-import { FIXTURES } from "../helpers/repo.js";
+import { commitFile, FIXTURES, gitIn as git } from "../helpers/repo.js";
 import { runScenario } from "../helpers/scenario.js";
 
 const body = readFileSync(join(FIXTURES, "tasks/multiply.md"), "utf8");
@@ -109,6 +109,31 @@ describe("resolver on a technical stop", () => {
     expect(comments[0]!.body).toContain(`Its pull request ${pr} is closed.`);
     expect(comments[0]!.body).toContain("rewrite the ticket");
     expect(comments[0]!.body).toContain(`<!-- factory:failed run=${r.runId} -->`);
+  });
+
+  it("a base merge conflict: the factory starts the merge, the resolver resolves the markers, the factory commits it", async () => {
+    let moved = false;
+    const divide = "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function divide(a, b) {\n  return a / b;\n}\n";
+    const both = `${divide}\nexport function multiply(a, b) {\n  return a * b;\n}\n`;
+    const r = await runScenario({
+      script: "clean.json",
+      onCall: (req, repo) => {
+        if (moved || !req.role.startsWith("review_")) return;
+        moved = true;
+        commitFile(repo, "src/math.js", divide, "main moved");
+      },
+      steps: (steps) => [...repeatReviews(steps, 2), resolve({ "src/math.js": both })],
+    });
+    expect(r.result.result).toBe("done");
+    expect(r.runner.remaining()).toEqual({});
+    const turn = r.runner.calls.find((c) => c.role === "resolve")!;
+    expect(turn.prompt).toContain("These files have conflict markers; resolve every one: src/math.js");
+    const wt = join(r.runDir, "worktree");
+    expect(git(wt, "log", "--format=%s", "-3")).toContain("chore: merge main into");
+    expect(git(wt, "merge-base", "--is-ancestor", "main", "HEAD")).toBe("");
+    expect(readFileSync(join(wt, "src/math.js"), "utf8")).toBe(both);
+    expect(r.github.prs[0]!.draft).toBe(true);
+    expect(r.github.readied).toEqual([r.github.prs[0]!.url]);
   });
 
   it("the resolver may declare the approach wrong; the run fails at once with that reason", async () => {

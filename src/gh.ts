@@ -746,7 +746,7 @@ async function workflowNames(repoDir: string): Promise<Map<string, string>> {
  * connection failures. A PR step that fails this way is retried later; any other failure is technical.
  */
 export function githubUnavailable(message: string): boolean {
-  return /\bHTTP 5\d\d\b|\b50[0234]\b|bad gateway|service unavailable|gateway time-?out|something went wrong|rate limit|timed out|\bETIMEDOUT\b|\bECONNRESET\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|could not resolve host|connection (reset|refused)|i\/o timeout|TLS handshake/i.test(message);
+  return /\bHTTP 5\d\d\b|\b50[0234]\b|bad gateway|service unavailable|gateway time-?out|something went wrong|rate limit|timed out|\btimeout\b|\bETIMEDOUT\b|\bECONNRESET\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|could not resolve host|connection (reset|refused)|i\/o timeout|TLS handshake/i.test(message);
 }
 
 /** GitHub says this when auto-merge is already on. A restarted runner asks again. */

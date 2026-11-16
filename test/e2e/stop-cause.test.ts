@@ -37,7 +37,7 @@ async function redPr(): Promise<ScenarioRun> {
       cfg.merge = { auto_merge_max_risk: "low" };
     },
     github: (gh) => {
-      gh.issues.set(7, issue);
+      gh.issues.set(7, { ...issue, labels: [...issue.labels] });
       gh.baseStatus = async () => (checks++ === 0 ? "none" : "red");
     },
   });
@@ -96,15 +96,17 @@ describe("stop cause on the run result and state", () => {
     expect(readState(r.runDir).stop).toEqual({ cause: "explicit_decision", action: "decide" });
   });
 
-  it("a red PR head on a continuable run persists technical_repair", async () => {
+  it("a red PR head the resolver cannot fix ends failed: no stop, no continuation", async () => {
     const r = await redPr();
-    expect(r.result.result).toBe("needs_human");
-    expect(readState(r.runDir).continuation?.kind).toBe("ci");
-    expect(r.resultFile.stop).toEqual({ cause: "technical_repair", action: "repair" });
-    expect(readState(r.runDir).stop).toEqual({ cause: "technical_repair", action: "repair" });
+    expect(r.result.result).toBe("failed");
+    const st = readState(r.runDir);
+    expect(st.continuation).toBeUndefined();
+    expect(st.resolver_turns).toBe(2);
+    expect(r.resultFile.stop).toBeUndefined();
+    expect(st.stop).toBeUndefined();
   });
 
-  it("a protected diff with red PR CI is human_approval, not a technical recovery", async () => {
+  it("a protected diff with red PR CI also goes to the resolver and is never merged", async () => {
     let repoDir = "";
     let checks = 0;
     const r = await runScenario({
@@ -132,15 +134,13 @@ describe("stop cause on the run result and state", () => {
         return s;
       }),
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(r.result.reason).toMatch(/CI on the PR head/);
     expect(r.result.merge_policy).toBe("human_review");
     expect(r.result.risk).toBe("high");
     expect(r.result.risk_reasons ?? []).toContain("changes protected config (CI / factory)");
-    expect(r.resultFile.stop).toEqual({ cause: "human_approval", action: "approve" });
-    expect(readState(r.runDir).stop).toEqual({ cause: "human_approval", action: "approve" });
+    expect(r.runner.calls.filter((c) => c.role === "resolve")).toHaveLength(2);
     expect(readState(r.runDir).continuation).toBeUndefined();
-    expect(r.resultFile.stop).not.toEqual({ cause: "technical_repair", action: "repair" });
     expect(r.github.autoMerged).toEqual([]);
     expect(r.github.labels.map((l) => l.label)).toContain("factory:protected-config");
     expect(r.github.prs).toHaveLength(1);
@@ -185,45 +185,40 @@ describe("stop cause on the run result and state", () => {
     expect(readState(r.runDir).stop).toBeUndefined();
   });
 
-  it("a completed technical recovery keeps the original run, branch, worktree, PR and spent budgets", async () => {
-    const r = await redPr();
-    const before = readState(r.runDir);
-    expect(before.stop).toEqual({ cause: "technical_repair", action: "repair" });
-    before.repair = { gate_attempts: 1, network_retries: 2, format_used: false, infra_reruns: 0, class: "code" };
-    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(before));
-    const identity = { run_id: r.runId, branch: before.branch, worktree: before.worktree, pr: before.pr };
-    r.github.baseStatus = async () => "green";
-    r.github.failures = [{ name: "unit", output_tail: "AssertionError: CI-only boundary is wrong" }];
-    const done = await resumeScenario(r, {
+  it("a resolver turn that fixes red PR CI keeps the original run, branch, worktree and PR", async () => {
+    let checks = 0;
+    const r = await runScenario({
       script: "clean.json",
-      steps: (steps) =>
-        steps
-          .filter((s) => !s.role.startsWith("plan_"))
-          .map((s) =>
-            s.role !== "implement"
-              ? s
-              : { ...s, writes: { ...s.writes!, "src/math.js": `${s.writes!["src/math.js"]}\n// Correct the CI-only boundary.\n` }, output: { ...(s.output as object), package: "fix" } },
-          ),
+      options: { issue: 7 },
+      patch: (cfg) => void (cfg.merge = { auto_merge_max_risk: "low" }),
+      github: (gh) => {
+        gh.issues.set(7, { ...issue, labels: [...issue.labels] });
+        // base check, then red PR CI, then green after the resolver's push
+        gh.baseStatus = async () => (["none", "red"][checks++] ?? "green") as "none" | "red" | "green";
+        gh.failures = [{ name: "unit", output_tail: "AssertionError: CI-only boundary is wrong" }];
+      },
+      steps: (steps) => [
+        ...steps.flatMap((s) => (["review_plan", "review_simplicity", "pr_writer"].includes(s.role) ? [s, s] : [s])),
+        { role: "resolve", writes: { "src/math.js": "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function multiply(a, b) {\n  return a * b;\n}\n// Correct the CI-only boundary.\n" }, output: { outcome: "fixed", summary: "boundary" } },
+      ],
     });
-    expect(done.result.result).toBe("done");
-    expect(done.result).toMatchObject(identity);
-    expect(done.resultFile.stop).toBeUndefined();
-    const after = readState(r.runDir);
-    expect(after.stop).toBeUndefined();
-    expect(after).toMatchObject(identity);
-    // A successful fix clears the gate counter. It must not drop the spent network budget or start a new run.
-    expect(after.repair?.network_retries).toBe(2);
-    expect(after.continuation_attempts).toBe(1);
-    expect(after.pr).toBe(identity.pr);
-    expect(done.github.prs).toHaveLength(1);
-    expect(done.github.prs[0]!.url).toBe(identity.pr);
+    expect(r.result.result).toBe("done");
+    expect(r.runner.remaining()).toEqual({});
+    expect(r.resultFile.stop).toBeUndefined();
+    const st = readState(r.runDir);
+    expect(st.stop).toBeUndefined();
+    expect(st.resolver_turns).toBe(1);
+    expect(r.github.prs).toHaveLength(1);
+    expect(r.result.pr).toBe(r.github.prs[0]!.url);
+    expect(r.result.branch).toBe(st.branch);
+    expect(r.github.closed).toEqual([]);
+    expect(r.github.issues.get(7)!.labels).toEqual(["factory-ready"]);
     // Recovery permission is not a protected-config approval.
-    expect(done.result.risk_reasons ?? []).not.toContain("changes protected config (CI / factory)");
-    expect(done.github.labels.map((l) => l.label)).not.toContain("factory:protected-config");
-    expect(done.github.autoMerged.every((pr) => pr === identity.pr)).toBe(true);
+    expect(r.result.risk_reasons ?? []).not.toContain("changes protected config (CI / factory)");
+    expect(r.github.labels.map((l) => l.label)).not.toContain("factory:protected-config");
   });
 
-  it("a base merge conflict is an explicit decision, not a technical repair", async () => {
+  it("a base merge conflict goes to the resolver, not to a decision stop", async () => {
     let moved = false;
     const r = await runScenario({
       script: "clean.json",
@@ -233,10 +228,10 @@ describe("stop cause on the run result and state", () => {
         commitFile(repo, "src/math.js", "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function divide(a, b) {\n  return a / b;\n}\n", "main moved");
       },
     });
-    expect(r.result.result).toBe("needs_human");
-    expect(r.result.reason).toMatch(/merge conflict in src\/math\.js/);
-    expect(r.resultFile.stop).toEqual({ cause: "explicit_decision", action: "decide" });
-    expect(readState(r.runDir).stop).toEqual({ cause: "explicit_decision", action: "decide" });
+    expect(r.result.result).toBe("failed");
+    expect(r.result.reason).toMatch(/merge conflict in src\/math\.js; resolver: /);
+    expect(r.resultFile.stop).toBeUndefined();
+    expect(readState(r.runDir).stop).toBeUndefined();
     expect(r.github.autoMerged).toEqual([]);
   });
 });

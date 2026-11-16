@@ -1007,9 +1007,12 @@ async function resolveStop(f: RunFrame, ctx: RunContext, stop: ResolverStop): Pr
   }
 }
 
-function failRun(f: RunFrame, stopReason: string, why: string): undefined {
+/** The run ends failed. Its PR is not left ready for review (the failure report closes it on an issue). */
+async function failRun(f: RunFrame, stopReason: string, why: string): Promise<undefined> {
   f.events.emit({ step: "resolve", event: "progress", data: { failed: why.slice(0, 300) } });
-  f.set({ result: "failed", reason: `${stopReason}; resolver: ${why}`, stop: undefined, pr: f.state?.pr ?? f.out.pr });
+  const draftError = await keepDraft(f);
+  const reason = `${stopReason}; resolver: ${why}`;
+  f.set({ result: "failed", reason: draftError ? `${reason}; ${draftError}` : reason, stop: undefined, pr: f.state?.pr ?? f.out.pr, rounds: f.state?.rounds ?? f.out.rounds });
   return undefined;
 }
 
