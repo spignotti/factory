@@ -591,11 +591,15 @@ describe("queue waits for a provider usage window (#177)", () => {
     }
   });
 
-  it("an overlap wake-up still starts while another entry waits on a usage window", async () => {
+  it("an entry parked behind an open PR before the upgrade starts while another entry waits on a usage window", async () => {
     const repo = createFixtureRepo();
     const home = mkdtempSync(join(tmpdir(), "factory-win-"));
     const github = new FakeGitHub();
     await enqueue(home, repo, github, [1, 2]);
+    const key = await repoQueueKey(repo);
+    const q = loadQueueByKey(home, key)!;
+    Object.assign(q.entries.find((e) => e.issue === 2)!, { status: "parked", blocked_by: [9], reason: "planned paths overlap open factory PR #9 (src/math.js)" });
+    saveQueue(home, q);
     github.prStates.set("9", { state: "open", draft: false });
     const clock = fakeTime();
     const g = gate();
@@ -603,14 +607,11 @@ describe("queue waits for a provider usage window (#177)", () => {
     const worker = runQueue({ factoryHome: home, github, repo, slots: 1, pollMs: 5, now: clock.now, sleep: clock.sleep, signal: ctl.signal, start: g.start, io });
     try {
       await waitFor("issue 1 starts", () => g.reqs.length === 1);
+      expect(g.reqs[0]!.issue).toBe(1);
       const runId = g.reqs[0]!.runId!;
       g.release(1, outcome(repo, runId, 1, { stop: WINDOW, window_resets_at: clock.now() + 60 * MIN }));
-      await waitFor("issue 2 starts", () => g.reqs.some((r) => r.issue === 2));
-      g.release(2, outcome(repo, g.reqs.find((r) => r.issue === 2)!.runId!, 2, { result: "locked", reason: "planned paths overlap open factory PR #9 (src/math.js)" }));
-      await waitFor("issue 2 parked on the PR", async () => (await row(home, repo, 2)).blocked_by?.[0] === 9);
-      expect(await row(home, repo, 1).then((e) => e.status)).toBe("parked");
-      github.prStates.set("9", { state: "closed", draft: false });
-      await waitFor("issue 2 unparks while issue 1 still waits", () => g.reqs.filter((r) => r.issue === 2).length === 2);
+      await waitFor("issue 2 starts while issue 1 still waits", () => g.reqs.some((r) => r.issue === 2));
+      expect((await row(home, repo, 2)).blocked_by).toBeUndefined();
       expect(await row(home, repo, 1).then((e) => e.wait_until)).toBeGreaterThan(clock.now());
       expect(g.reqs.filter((r) => r.issue === 1)).toHaveLength(1);
     } finally {

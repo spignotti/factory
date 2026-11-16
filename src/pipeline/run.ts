@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { IncompletePrListError, type BaseStatus } from "../gh.js";
+import type { BaseStatus } from "../gh.js";
 import { prepareAgentHome } from "../agents/env.js";
 import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, ProviderWindowError, TransientAgentError } from "../agents/models.js";
@@ -27,7 +27,6 @@ import { acquireRepoLockWithRetry, claimResources, decidePathClaim, lockRepoKey,
 import { pauseRequested } from "../queue/pause.js";
 import { admissionBlock } from "../queue/admit.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
-import { factoryPrOverlapReason, openFactoryPrOverlap } from "./path-claim.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProblem, stopCauseForBudget } from "./recovery.js";
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
@@ -145,10 +144,10 @@ export async function takeRepoLock(
 }
 
 /**
- * After the plan names files: keep the slot only when those paths do not overlap another live run
- * or an open `factory/*` PR. A conflict releases the slot before waiting, so two runs cannot each
- * hold a slot and wait. Returns false when the run is `locked` (the lock is already released).
- * `ownBranch` is this run's branch on resume, so its own open PR is not a conflict.
+ * After the plan names files: keep the slot only when those paths do not overlap another live run.
+ * Open pull requests do not block; a conflict between them is resolved when it happens. A conflict
+ * releases the slot before waiting, so two runs cannot each hold a slot and wait. Returns false when
+ * the run is `locked` (the lock is already released).
  */
 async function ensurePathClaim(
   f: RunFrame,
@@ -159,7 +158,6 @@ async function ensurePathClaim(
   plan: Plan,
   exclusivePaths: string[],
   wait: boolean,
-  ownBranch?: string,
 ): Promise<boolean> {
   const paths = planPaths(plan);
   const exclusive = touchesExclusive(paths, exclusivePaths);
@@ -189,8 +187,6 @@ async function ensurePathClaim(
   for (;;) {
     const slot = f.release?.slot;
     if (slot === undefined) return false;
-    // Publish before the PR list. Otherwise a neighbor can open its PR and drop its slot in the gap
-    // and both checks miss.
     const decision = decidePathClaim(deps.factoryHome, raw, slot, runId, { paths, exclusive });
     if (!decision.ok) {
       if (decision.kind === "busy") {
@@ -199,25 +195,6 @@ async function ensurePathClaim(
       }
       const reason = `planned paths overlap active runs: ${decision.conflicts.join("; ")}`;
       if (!(await yieldSlot(reason, decision.conflicts))) return false;
-      continue;
-    }
-    let hits: Awaited<ReturnType<typeof openFactoryPrOverlap>>;
-    try {
-      hits = await openFactoryPrOverlap(deps.github, repoDir, paths, ownBranch, deps.factoryHome);
-    } catch (e) {
-      if (e instanceof WallTimeExceeded || e instanceof Interrupted || deps.signal?.aborted) throw e;
-      if (e instanceof IncompletePrListError) {
-        if (!(await yieldSlot(e.message, [e.message]))) return false;
-        continue;
-      }
-      f.release?.();
-      f.release = undefined;
-      f.set({ result: "needs_human", reason: `PR step failed: ${(e as Error).message.slice(0, 300)}`, stop: stopFor("unknown") });
-      return false;
-    }
-    if (hits.length) {
-      const reason = factoryPrOverlapReason("planned", hits);
-      if (!(await yieldSlot(reason, hits.map((h) => `#${h.number} (${h.files.slice(0, 8).join(", ")})`)))) return false;
       continue;
     }
     return true;
@@ -731,7 +708,7 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     throw e;
   }
   try {
-    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, false, st.branch ?? undefined))) return undefined;
+    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, false))) return undefined;
   } catch (e) {
     f.release?.();
     f.release = undefined;
@@ -988,7 +965,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     throw e;
   }
   try {
-    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false, st.branch ?? undefined))) {
+    if (!(await ensurePathClaim(f, deps, st.repo, runId, events, plan, checkout.concurrency.exclusive_paths, opts.wait ?? false))) {
       f.state = st;
       const draftError = await keepDraft(f);
       const queryFailed = f.out.result === "needs_human";
