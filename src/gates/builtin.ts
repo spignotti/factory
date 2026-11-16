@@ -88,8 +88,10 @@ export function testPresence(plan: Plan, packages: string[], handoffs: Handoff[]
  * Every evidence ref matches a real run: a test that exists and passed in the cited scope,
  * or a known check that was selected and passed. Invented refs and skipped tests do not.
  */
-export function evidenceCheck(handoffs: Handoff[], evidence: EvidenceInputs): BuiltinResult {
+/** Handoff evidence split into the refs this checkpoint proves and the rejected ones (with why). */
+export function judgeEvidence(handoffs: Handoff[], evidence: EvidenceInputs): { accepted: Handoff["evidence"]; bad: string[] } {
   const files = new Set(evidence.files);
+  const accepted: Handoff["evidence"] = [];
   const bad: string[] = [];
   for (const h of handoffs) {
     for (const e of h.evidence) {
@@ -97,9 +99,15 @@ export function evidenceCheck(handoffs: Handoff[], evidence: EvidenceInputs): Bu
         e.kind === "test"
           ? matchTestEvidence(e.ref, evidence.executed, files.has(refPath(e.ref)), evidence.checkpoint)
           : matchCheckEvidence(e.ref, evidence.knownChecks, evidence.ranChecks);
-      if (!match.ok) bad.push(`${e.acceptance_id}:${e.ref} (${match.reason})`);
+      if (match.ok) accepted.push({ acceptance_id: e.acceptance_id, kind: e.kind, ref: e.ref });
+      else bad.push(`${e.acceptance_id}:${e.ref} (${match.reason})`);
     }
   }
+  return { accepted, bad };
+}
+
+export function evidenceCheck(handoffs: Handoff[], evidence: EvidenceInputs): BuiltinResult {
+  const { bad } = judgeEvidence(handoffs, evidence);
   return bad.length ? fail("evidence", withEligible(`evidence refs not accepted: ${bad.join("; ")}`, evidence)) : ok("evidence");
 }
 

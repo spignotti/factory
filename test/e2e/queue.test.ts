@@ -1217,6 +1217,9 @@ describe("factory queue", () => {
     expect(factoryRunArgs("/cli.js", { repo: "/repo", issue: 4, runId })).toEqual([
       "/cli.js", "run", "--repo", "/repo", "--issue", "4", "--no-notify", "--run-id", runId,
     ]);
+    expect(factoryRunArgs("/cli.js", { repo: "/repo", issue: 4, runId, bundle: [5, 7] })).toEqual([
+      "/cli.js", "run", "--repo", "/repo", "--issue", "4", "--no-notify", "--run-id", runId, "--bundle", "5,7",
+    ]);
     const repo = createFixtureRepo();
     const factoryHome = home();
     const github = new FakeGitHub();

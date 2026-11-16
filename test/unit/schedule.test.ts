@@ -155,22 +155,23 @@ describe("resource claims", () => {
 });
 
 describe("pull request closes", () => {
-  it("closes the primary issue and only evidenced bundle extras", () => {
-    const plan: Plan = {
-      version: 1,
-      type: "feature",
-      goal: "Ship the pair",
-      context: "",
-      packages: [{ id: "P1", title: "pair", description: "", files: [], depends_on: [], changes_flows: [] }],
-      acceptance: [
-        { id: "a2", package: "P1", text: "fulfills #2", verify: "test", kind: "behavior", risk: false },
-        { id: "a3", package: "P1", text: "fulfills #3", verify: "review", kind: "behavior", risk: false },
-        { id: "a4", package: "P1", text: "fulfills #4", verify: "test", kind: "behavior", risk: false },
-      ],
-      out_of_scope: [],
-      resolves_findings: [],
-      protected_changes: [],
-    };
+  const plan: Plan = {
+    version: 1,
+    type: "feature",
+    goal: "Ship the pair",
+    context: "",
+    packages: [{ id: "P1", title: "pair", description: "", files: [], depends_on: [], changes_flows: [] }],
+    acceptance: [
+      { id: "a2", package: "P1", text: "fulfills #2", verify: "test", kind: "behavior", risk: false },
+      { id: "a3", package: "P1", text: "fulfills #3", verify: "review", kind: "behavior", risk: false },
+      { id: "a4", package: "P1", text: "fulfills #4", verify: "test", kind: "behavior", risk: false },
+      { id: "a5", package: "P1", text: "fulfills #5", verify: "test", kind: "behavior", risk: false },
+    ],
+    out_of_scope: [],
+    resolves_findings: [],
+    protected_changes: [],
+  };
+  function body(opts: { bundle?: number[]; accepted: { acceptance_id: string; kind: "test" | "check"; ref: string }[] }): string {
     const home = mkdtempSync(join(tmpdir(), "factory-pr-"));
     const events = new EventLog(join(home, "run"), "run");
     const ctx = {
@@ -182,14 +183,19 @@ describe("pull request closes", () => {
         deviations_from_plan: [],
         skipped: [],
         uncertain: [],
-        evidence: [{ acceptance_id: "a2", kind: "test", ref: "test/pair.test.ts" }],
+        evidence: [
+          { acceptance_id: "a2", kind: "test", ref: "test/pair.test.ts" },
+          // Invented: the evidence gate did not accept it.
+          { acceptance_id: "a4", kind: "test", ref: "test/does-not-exist.test.ts::nope" },
+          { acceptance_id: "a5", kind: "test", ref: "test/other.test.ts" },
+        ],
         responses: [],
       }],
       repo: parseRepoConfig(""),
       events,
-      task: { ref: "#1", issue: 1, title: "Ship", text: "Ship it", labels: [] },
+      task: { ref: "#1", issue: 1, title: "Ship", text: "Ship it", labels: [], ...(opts.bundle ? { bundle: opts.bundle } : {}) },
     } as unknown as RunContext;
-    const body = renderPrBody(ctx, {
+    return renderPrBody(ctx, {
       summary: "Shipped",
       input: {
         result: "done",
@@ -202,11 +208,38 @@ describe("pull request closes", () => {
         startedAt: Date.now(),
       },
       out: { result: "done", reason: "", risk: { risk: "low", reasons: [] }, mergePolicy: "human_review" },
+      gates: { n: 1, tier: "full", green: true, changed_files: [], checks: [], scope_report: [], accepted_evidence: opts.accepted },
       changed: [],
     });
-    expect(body).toContain("Closes #1");
-    expect(body).toContain("Closes #2");
-    expect(body).toContain("Closes #3");
-    expect(body).not.toContain("Closes #4");
+  }
+
+  it("closes the primary issue and only evidenced bundle partners", () => {
+    const text = body({
+      bundle: [2, 3, 4],
+      accepted: [{ acceptance_id: "a2", kind: "test", ref: "test/pair.test.ts" }, { acceptance_id: "a5", kind: "test", ref: "test/other.test.ts" }],
+    });
+    expect(text).toContain("Closes #1");
+    expect(text).toContain("Closes #2");
+    expect(text).toContain("Closes #3");
+    expect(text).not.toContain("Closes #4");
+    expect(text).toContain("| [x] | a2 |");
+  });
+
+  it("an invented evidence reference is neither a checked box nor a close", () => {
+    const text = body({ bundle: [2, 3, 4], accepted: [{ acceptance_id: "a2", kind: "test", ref: "test/pair.test.ts" }] });
+    expect(text).toContain("| [ ] | a4 |");
+    expect(text).not.toContain("does-not-exist");
+    expect(text).not.toContain("Closes #4");
+    expect(text).toContain("Unverified criteria: a4, a5");
+  });
+
+  it("fulfills #N closes only an issue that is the run's bundle partner", () => {
+    const accepted = [{ acceptance_id: "a2", kind: "test" as const, ref: "test/pair.test.ts" }, { acceptance_id: "a5", kind: "test" as const, ref: "test/other.test.ts" }];
+    const partner = body({ bundle: [2], accepted });
+    expect(partner).toContain("Closes #2");
+    expect(partner).not.toMatch(/Closes #[35]/);
+    const alone = body({ accepted });
+    expect(alone).toContain("Closes #1");
+    expect(alone).not.toMatch(/Closes #[2-5]/);
   });
 });

@@ -12,6 +12,8 @@ export type PlanEffort = "none" | "medium" | "high";
 
 export interface TaskInput {
   issue?: number;
+  /** Bundle partners of `issue` (queue only). */
+  bundle?: number[];
   planFile?: string;
   textFile?: string;
 }
@@ -66,6 +68,7 @@ export async function readTask(input: TaskInput, repoDir: string, github: GitHub
       text: `# ${issue.title}\n\n${issue.body}`,
       labels: issue.labels,
       ...(comments ? { comments } : {}),
+      ...(input.bundle?.length ? { bundle: input.bundle } : {}),
     };
   }
   const file = input.planFile ?? input.textFile;

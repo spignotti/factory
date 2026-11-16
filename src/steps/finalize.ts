@@ -4,7 +4,7 @@ import { publishEvidence, evidenceUrl } from "../evaluate/evidence.js";
 import { criterionEvidence, type EvidenceLink, evaluationMarkdown } from "../evaluate/pr.js";
 import { baseRef, changedFiles, diffCountFields, diffFiles, diffTotals, isAncestor, linesCountingTests, mergeRef, repoDiffStat, revParse } from "../git.js";
 import { Interrupted } from "../interrupt.js";
-import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeRunFile } from "../pipeline/context.js";
+import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, writeJson, writeRunFile } from "../pipeline/context.js";
 import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep, reviewDelta } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
@@ -214,6 +214,35 @@ export function hostStepsMarkdown(title: string | undefined, steps: HostSteps | 
   ].join("\n");
 }
 
+/**
+ * Evidence cells of one criterion: refs the evidence gate accepted for the final tree, and an
+ * evaluator criterion the evaluator found met. A handoff ref the gate rejected is not evidence.
+ */
+function evidenceCells(gates: GateReport | undefined, report: EvaluateReport | undefined, id: string, link: EvidenceLink): string[] {
+  return [
+    ...(gates?.accepted_evidence ?? []).filter((e) => e.acceptance_id === id).map((e) => `${e.kind}: \`${e.ref}\``),
+    ...[criterionEvidence(report, id, link)].filter((c) => c?.met).map((c) => c!.cell),
+  ];
+}
+
+/**
+ * Bundle partners this run fulfilled: a `fulfills #N` line on a verified criterion, where N is one of
+ * the partners the queue started with this issue. Any other `fulfills #N` closes nothing.
+ */
+export function bundleFulfilled(
+  ctx: Pick<RunContext, "plan" | "task">,
+  packages: FinalizeInput["packages"],
+  gates: GateReport | undefined,
+  report: EvaluateReport | undefined,
+): number[] {
+  const partners = new Set(ctx.task.bundle ?? []);
+  if (!partners.size) return [];
+  const verified = ctx.plan.acceptance.filter(
+    (a) => packages.get(a.package) === "done" && (a.verify === "review" || evidenceCells(gates, report, a.id, () => undefined).length > 0),
+  );
+  return fulfilledIssues(ctx.plan, new Set(verified.map((a) => a.id))).filter((n) => partners.has(n));
+}
+
 export function renderPrBody(ctx: RunContext, v: {
   summary: string;
   input: FinalizeInput;
@@ -230,11 +259,7 @@ export function renderPrBody(ctx: RunContext, v: {
   const { plan, handoffs } = ctx;
   const { input, out } = v;
   const link = v.evaluation?.link ?? (() => undefined);
-  const evidence = (id: string) => [
-    ...handoffs.flatMap((h) => h.evidence.filter((e) => e.acceptance_id === id).map((e) => `${e.kind}: \`${e.ref}\``)),
-    // An evaluator criterion counts as evidenced only when the evaluator found it met.
-    ...[criterionEvidence(v.evaluation?.report, id, link)].filter((c) => c?.met).map((c) => c!.cell),
-  ];
+  const evidence = (id: string) => evidenceCells(v.gates, v.evaluation?.report, id, link);
   const pkgDone = (id: string) => input.packages.get(id) === "done";
   const rows = plan.acceptance.map((a) => {
     const ev = evidence(a.id);
@@ -292,14 +317,7 @@ export function renderPrBody(ctx: RunContext, v: {
     blockers: out.result === "needs_human"
       ? `\n## Blockers (needs_human)\n\n${out.reason}\n${list(openFindings(input.findings).filter((f) => f.severity === "bug").map((f) => `${f.id}: ${f.claim} (${f.file}:${f.line})`))}\n`
       : "",
-    closes: closesFooter(
-      ctx.task.issue,
-      out.result,
-      fulfilledIssues(
-        plan,
-        new Set(plan.acceptance.filter((a) => pkgDone(a.package) && (evidence(a.id).length > 0 || a.verify === "review")).map((a) => a.id)),
-      ),
-    ),
+    closes: closesFooter(ctx.task.issue, out.result, bundleFulfilled(ctx, input.packages, v.gates, v.evaluation?.report)),
   };
   return asset("standards/pr-template.md").replace(/\{\{(\w+)\}\}/g, (_, k: string) => fill[k] ?? "");
 }
@@ -557,6 +575,8 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   if (guarded.length) ctx.events.emit({ step: "finalize", event: "progress", data: { protected_changes: guarded } });
   const body = ctx.events.redact(renderPrBody(ctx, { summary: await summarize(ctx), input, out, gates, changed, evaluation, protectedConfig, sizeSignal }));
   writeRunFile(ctx, "pr.md", body);
+  // The queue settles bundle partners from this list, the same one the `Closes` footer names.
+  writeJson(ctx, "fulfilled.json", { issues: result === "done" ? bundleFulfilled(ctx, input.packages, gates, evaluation?.report) : [] });
 
   throwIfInterrupted(ctx.deps);
   let pr: string | null = input.existingPr?.url ?? null;

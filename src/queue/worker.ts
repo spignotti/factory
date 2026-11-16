@@ -19,7 +19,7 @@ import { loadRepoConfig } from "../schemas/repo.js";
 import { admissionHold } from "./admission.js";
 import { clearWorkerIdentity, executingRelease, publishWorkerIdentity, type ReleaseIdentity } from "./identity.js";
 import type { Io } from "../commands/gates.js";
-import { admissionBlock, cycleReasons, fulfilledIssues, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
+import { admissionBlock, cycleReasons, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
 import { clearWorkerMode, readWorkerMode } from "./control.js";
 import { clearPause, pausePaths, pauseRequested, requestPause, type PauseKey } from "./pause.js";
 import { advanceMergeBatch, batchBusy } from "./batch.js";
@@ -474,29 +474,15 @@ function releaseEntryResources(factoryHome: string, repo: string, entry: QueueEn
   if (names.length) releaseResourceClaims(factoryHome, names, entry.run_id);
 }
 
-/** Review lines count as evidenced. Other lines count when a handoff recorded evidence for them. */
-function evidencedIds(factoryHome: string, runId: string): Set<string> {
-  const dir = join(factoryHome, "runs", runId);
-  const plan = JSON.parse(readFileSync(join(dir, "plan.json"), "utf8")) as { acceptance?: { id: string; verify?: string }[] };
-  const ids = new Set<string>();
-  for (const row of plan.acceptance ?? []) if (row.verify === "review" && row.id) ids.add(row.id);
-  try {
-    const st = JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as { handoffs?: { evidence?: { acceptance_id?: string }[] }[] };
-    for (const handoff of st.handoffs ?? []) for (const ev of handoff.evidence ?? []) if (ev.acceptance_id) ids.add(ev.acceptance_id);
-  } catch {
-    // no state yet: review lines above still count
-  }
-  return ids;
-}
-
 function settleBundle(q: QueueFile, entry: QueueEntry, factoryHome: string, io: Io): void {
   const extras = q.entries.filter((e) => e.bundled_with === entry.issue);
   if (!extras.length) return;
+  // finalize wrote the partners its `Closes` footer names: accepted evidence only, bundle partners only.
   let met = new Set<number>();
   if (entry.run_id) {
     try {
-      const plan = JSON.parse(readFileSync(join(factoryHome, "runs", entry.run_id, "plan.json"), "utf8")) as { acceptance?: { id: string; text: string }[] };
-      met = new Set(fulfilledIssues({ acceptance: plan.acceptance ?? [] }, evidencedIds(factoryHome, entry.run_id)));
+      const file = JSON.parse(readFileSync(join(factoryHome, "runs", entry.run_id, "fulfilled.json"), "utf8")) as { issues?: unknown };
+      met = new Set(Array.isArray(file.issues) ? file.issues.filter((n): n is number => typeof n === "number") : []);
     } catch {
       met = new Set();
     }

@@ -95,6 +95,67 @@ describe("evidence scenarios", () => {
     expect(advisory).toMatch(/- 📝 test_presence \(builtin, advisory, failed\)/);
     expect(blocking).not.toMatch(/evidence \(builtin/);
     expect(blocking).not.toContain("❌");
+    // The invented reference is no evidence: the criterion stays unchecked.
+    expect(body).toContain("| [ ] | A1 | sum(1, 2) returns 3 | test | — |");
+    expect(body).toContain("Unverified criteria: A1");
+  });
+
+  it("an invented reference on a bundle row does not close the partner issue", async () => {
+    const plan = { ...unchanged, acceptance: [{ ...unchanged.acceptance[0]!, text: "sum(1, 2) returns 3; fulfills #8" }] };
+    const r = await runScenario({
+      script: "clean.json",
+      options: { issue: 5, bundle: [8] },
+      github: (gh) => {
+        gh.issues.set(5, { number: 5, title: "Sum", body: "Keep sum covered.\nfactory-bundle: #8", labels: ["factory-ready"] });
+      },
+      steps: () => [
+        planStep(plan),
+        {
+          role: "implement",
+          writes: { "src/math.js": math },
+          output: { package: "P1", done: ["cited a test that does not exist"], evidence: [{ acceptance_id: "A1", kind: "test", ref: "test/does-not-exist.test.js::nope" }] },
+        },
+        ...reviews(),
+      ],
+    });
+    expect(r.result.result).toBe("done");
+    const body = r.github.prs[0]?.body ?? "";
+    expect(body).toContain("Closes #5");
+    expect(body).not.toContain("Closes #8");
+    expect(body).toMatch(/\| \[ \] \| A1 \|/);
+    expect(JSON.parse(r.file("fulfilled.json"))).toEqual({ issues: [] });
+  });
+
+  it("an accepted reference closes the bundle partner, and fulfills #N of a non-partner closes nothing", async () => {
+    const plan = {
+      ...unchanged,
+      acceptance: [
+        { ...unchanged.acceptance[0]!, text: "sum(1, 2) returns 3; fulfills #8" },
+        { id: "A2", package: "P1", text: "sum stays exported; fulfills #9", verify: "review", kind: "behavior", risk: false },
+      ],
+    };
+    const r = await runScenario({
+      script: "clean.json",
+      options: { issue: 5, bundle: [8] },
+      github: (gh) => {
+        gh.issues.set(5, { number: 5, title: "Sum", body: "Keep sum covered.\nfactory-bundle: #8", labels: ["factory-ready"] });
+      },
+      steps: () => [
+        planStep(plan),
+        {
+          role: "implement",
+          writes: { "src/math.js": math },
+          output: { package: "P1", done: ["cited the existing sum test"], evidence: [{ acceptance_id: "A1", kind: "test", ref: "test/math.test.js::sum adds" }] },
+        },
+        ...reviews(),
+      ],
+    });
+    expect(r.result.result).toBe("done");
+    const body = r.github.prs[0]?.body ?? "";
+    expect(body).toContain("Closes #5\nCloses #8");
+    expect(body).not.toContain("Closes #9");
+    expect(JSON.parse(r.file("fulfilled.json"))).toEqual({ issues: [8] });
+    expect(JSON.parse(r.file("state.json")).task.bundle).toEqual([8]);
   });
 
   it("V10: a documentation change finishes with review and without a new test", async () => {

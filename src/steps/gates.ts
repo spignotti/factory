@@ -9,6 +9,7 @@ import {
   evidenceCheck,
   forbiddenPaths,
   guideUpdate,
+  judgeEvidence,
   protectedPaths,
   reproFiles,
   scopeReport,
@@ -27,6 +28,7 @@ import type { Deadline } from "../pipeline/budget.js";
 import { checkDeadline, commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
 import type { Jail } from "../sandbox/sandbox.js";
 import { EnvMissing, type Services } from "../services.js";
+import type { Handoff } from "../schemas/handoff.js";
 import type { Check, Tier } from "../schemas/repo.js";
 
 export interface CheckResult {
@@ -79,6 +81,11 @@ export interface GateReport {
   scope_report: string[];
   /** Bug plans: whether the repro test fails on base (false = it does not reproduce the bug). */
   repro_red_on_base?: boolean;
+  /**
+   * Handoff evidence the evidence gate accepted for this tree. Only these refs check an acceptance
+   * box or close a bundle issue; a rejected (invented) ref is a note, not evidence.
+   */
+  accepted_evidence?: Handoff["evidence"];
 }
 
 export function withEnvCommand(run: string, envCommand: string): string {
@@ -429,6 +436,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     checks: all,
     scope_report: scopeReport(plan, changed),
     repro_red_on_base: reproRedOnBase,
+    accepted_evidence: judgeEvidence(handoffs, evidence).accepted,
   };
   writeJson(ctx, `gates-${report.n}.json`, report);
   for (const c of all) {

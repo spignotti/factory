@@ -68,6 +68,8 @@ export interface Task {
   labels: string[];
   /** Issue comments rendered for the planner (`renderIssueComments`). Absent when there are none. */
   comments?: string;
+  /** Bundle partners the queue started with this issue. Only these may be closed by a `fulfills #N` line. */
+  bundle?: number[];
 }
 
 export interface RunContext {
