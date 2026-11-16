@@ -9,6 +9,7 @@ import type { RunDeps } from "../../src/pipeline/context.js";
 import { readBaseCheck, writeBaseCheck } from "../../src/pipeline/base-check.js";
 import { acquireRepoLock, lockRepoKey } from "../../src/pipeline/lock.js";
 import { repoLockId } from "../../src/git.js";
+import { isFailedExit } from "../../src/pipeline/failure.js";
 import { continueBaseRed } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { requestPause } from "../../src/queue/pause.js";
@@ -435,6 +436,9 @@ describe("E2E with fake-runner on a fixture repo", () => {
       expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", pr: null });
       expect(r.result.reason).toContain("gitleaks did not pass");
       expect(r.result.reason).toContain("the branch was not pushed");
+      // Not a resolver stop: nothing could push after it; the queue fails the ticket.
+      expect(r.runner.calls.some((c) => c.role === "resolve")).toBe(false);
+      expect(isFailedExit(r.result)).toBe(true);
       expect(r.github.pushes).toEqual([]);
       expect(r.github.prs).toEqual([]);
       expect(r.github.autoMerged).toEqual([]);
