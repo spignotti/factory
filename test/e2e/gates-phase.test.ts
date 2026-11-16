@@ -27,4 +27,17 @@ describe("gate phase", () => {
     expect(leaks).toHaveLength(1);
     expect(leaks[0]).toMatchObject({ kind: "check", status: "pass" });
   });
+
+  it("a repo check named gitleaks that fails keeps the branch off the remote too", async () => {
+    const r = await runScenario({
+      script: "clean.json",
+      patch: (c) => {
+        (c.checks as Record<string, unknown>[]).push({ name: "gitleaks", run: "test ! -f test/multiply.test.js", tier: "full" });
+      },
+    });
+    expect(r.result.result).not.toBe("done");
+    expect(r.result.reason).toContain("gitleaks did not pass");
+    expect(r.github.pushes).toEqual([]);
+    expect(r.github.prs).toEqual([]);
+  });
 });

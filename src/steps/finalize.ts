@@ -555,7 +555,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
   if (holds.secret && hasCommits) {
     result = "needs_human";
-    reason = "gitleaks flagged the diff; the branch was not pushed (remove the secret from every commit of the branch)";
+    reason = "gitleaks did not pass (a finding, a timeout, or missing with baseline.require_tools); the branch was not pushed. Remove any secret from every commit of the branch";
     cause = "unknown";
     policy = "human_review";
     blockPush = true;

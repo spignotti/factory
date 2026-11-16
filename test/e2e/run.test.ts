@@ -433,7 +433,8 @@ describe("E2E with fake-runner on a fixture repo", () => {
     it("a gitleaks finding keeps the branch off the remote", async () => {
       const r = await withScanners({ gitleaks: 1, semgrep: 0 }, () => runScenario({ script: "clean.json", ...autoLow } as Parameters<typeof runScenario>[0]));
       expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", pr: null });
-      expect(r.result.reason).toContain("gitleaks flagged the diff; the branch was not pushed");
+      expect(r.result.reason).toContain("gitleaks did not pass");
+      expect(r.result.reason).toContain("the branch was not pushed");
       expect(r.github.pushes).toEqual([]);
       expect(r.github.prs).toEqual([]);
       expect(r.github.autoMerged).toEqual([]);

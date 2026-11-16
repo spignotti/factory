@@ -476,12 +476,14 @@ const BOOKKEEPING_GATES = new Set(["test_presence", "evidence", "guide_update", 
  * off the remote: a pushed secret is public at once. A timed-out scanner counts as failed.
  */
 export function mergeHolds(checks: Pick<CheckResult, "name" | "status" | "advisory">[]): { reasons: string[]; secret: boolean } {
-  const failed = checks.filter((c) => c.advisory && (c.status === "fail" || c.status === "timeout"));
+  const red = checks.filter((c) => c.status === "fail" || c.status === "timeout");
+  const failed = red.filter((c) => c.advisory);
   const reasons: string[] = [];
   if (failed.some((c) => c.name === "config_guard")) reasons.push("config_guard failed: the diff loosens the repo's own checks");
   const scanners = failed.filter((c) => !BOOKKEEPING_GATES.has(c.name)).map((c) => c.name);
   if (scanners.length) reasons.push(`security scanner failed: ${scanners.join(", ")}`);
-  return { reasons, secret: scanners.includes("gitleaks") };
+  // A repo check named gitleaks replaces the baseline scanner, so it counts the same.
+  return { reasons, secret: red.some((c) => c.name === "gitleaks") };
 }
 
 /** A failed advisory gate's note: the first detail line for bookkeeping gates, never scanner output. */
