@@ -25,6 +25,11 @@ DOMAIN="gui/$(id -u)"
 CLI=(node "$DIR/dist/cli.js")
 
 mkdir -p "$STATE"
+# bash reads a script while it runs, and the fast-forward below rewrites this file: run from a copy.
+if [ "${FACTORY_SELF_UPDATE_COPY:-}" != 1 ]; then
+  cp "$0" "$STATE/self-update.run.sh" && FACTORY_DIR="$DIR" FACTORY_SELF_UPDATE_COPY=1 exec bash "$STATE/self-update.run.sh"
+  exit 1
+fi
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
 worker_pid() { launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3; exit}'; }
