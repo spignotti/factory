@@ -690,6 +690,11 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
     const sha = git(r.repo, "rev-parse", "HEAD").trim();
     expect(readBaseCheck(r.factoryHome, lockRepoKey(await repoLockId(r.repo)))).toMatchObject({ sha, status: "red", failed: ["broken"] });
+    // The worktree (with its setup output) is gone at once; the result still names it as a local stop.
+    expect(r.result.worktree).toBe(join(r.runDir, "worktree"));
+    expect(existsSync(join(r.runDir, "worktree"))).toBe(false);
+    expect(git(r.repo, "worktree", "list")).not.toContain(r.runDir);
+    expect(git(r.repo, "branch", "--list", r.result.branch!).trim()).toBe("");
   });
 
   it("a green base check is recorded per base commit; a run on that commit skips the local check", async () => {
