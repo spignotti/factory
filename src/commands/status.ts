@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { GitHub, PrStatus } from "../gh.js";
 import { assertTimezone, attemptFinishMs, classifyWait, dedupeRuns, idleSlotMinutes, observeMerge, resolveInterval, successfulRecoveries, ticketFunnel, type DeliveryFunnel, type FunnelPrState, type FunnelSource, type WaitClass } from "../pipeline/accounting.js";
@@ -13,14 +13,16 @@ import type { FactoryEvent, StopCause } from "../events.js";
 import { listRuns, runStartedAt, type RunRecord } from "../runs.js";
 import type { Io } from "./gates.js";
 import type { z } from "zod";
-import type { StatusReportSchema } from "../schemas/reports.js";
-import { loadReadableQueues } from "../queue/store.js";
+import type { StatusCheckinSchema, StatusReportSchema } from "../schemas/reports.js";
+import { loadReadableQueues, type QueueEntry } from "../queue/store.js";
 import { currentCheckName, currentStepRetry, eventsForRun, isQueuedWaiter, lastEventMs, orphanedRunIds, queuedFromEvents } from "../run-health.js";
 import { summarizeQueues } from "../queue/store.js";
 import { parseSince } from "./stats.js";
 
 /** `factory status --json` (schema `schemas/status.schema.json`). */
 export type StatusReport = z.infer<typeof StatusReportSchema>;
+/** `factory status --repo <path> --since <time> --json` (schema `schemas/status-checkin.schema.json`). */
+export type StatusCheckin = z.infer<typeof StatusCheckinSchema>;
 
 const repoOf = (r: RunRecord) => r.state?.repo ?? r.result?.repo ?? "";
 const taskOf = (r: RunRecord) => r.state?.task.ref ?? r.result?.task ?? "";
@@ -573,5 +575,148 @@ export function renderStatus(s: StatusReport): string {
 export async function statusCommand(opts: { factoryHome: string; github: GitHub; since?: string; timezone?: string; json: boolean; now?: () => number }, io: Io): Promise<number> {
   const report = await statusReport(opts);
   io.out(opts.json ? JSON.stringify(report) + "\n" : renderStatus(report));
+  return 0;
+}
+
+/** `--since` as an instant: a duration back from now (`12h`, `2d`, `1w`) or an ISO time. */
+function sinceInstant(since: string, now: number): number {
+  const text = since.trim();
+  if (/^\d+(?:\.\d+)?[hdw]$/.test(text)) return now - parseSince(text);
+  const at = /^\d{4}-\d{2}-\d{2}/.test(text) ? Date.parse(text) : Number.NaN;
+  if (!Number.isFinite(at)) throw new Error(`invalid --since ${since} (use a duration like 12h, 2d, or an ISO time like 2026-11-16T08:00:00Z)`);
+  if (at > now) throw new Error(`invalid --since ${since} (in the future)`);
+  return at;
+}
+
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+const firstLine = (text: string) => text.split("\n", 1)[0]!.trim();
+
+/**
+ * The short check-in for one repository (`status --repo <path> --since <time>`). Merged and failed
+ * are windowed. The rest is the state now, so a PR that has waited since yesterday or an unanswered
+ * question still shows. A merge is what GitHub reports for the run's PR (`prStatus`), never a `done` result.
+ * Limit: `prStatus` has no merge time, so a PR merged in the window whose run finished before it is not listed.
+ */
+export async function checkinReport(opts: { factoryHome: string; github: GitHub; repo: string; since: string; now?: () => number }): Promise<StatusCheckin> {
+  const now = opts.now?.() ?? Date.now();
+  const from = sinceInstant(opts.since, now);
+  const repoKey = canonicalPath(opts.repo);
+  const inRepo = (repo: string | undefined) => !!repo && canonicalPath(repo) === repoKey;
+
+  const queues = loadReadableQueues(opts.factoryHome).queues.filter((q) => inRepo(q.repo));
+  const entries = queues.flatMap((q) => q.entries);
+  const entryOfIssue = new Map<number, QueueEntry>(entries.map((e) => [e.issue, e]));
+  const entryOfRun = new Map<string, QueueEntry>(entries.filter((e) => e.run_id).map((e) => [e.run_id!, e]));
+
+  const runs = dedupeRuns(listRuns(opts.factoryHome).filter((r) => inRepo(repoOf(r)))).sort((a, b) => a.run_id.localeCompare(b.run_id));
+  const issueOf = (r: RunRecord): number | null => {
+    const queued = entryOfRun.get(r.run_id);
+    if (queued) return queued.issue;
+    const ticket = readOutcome(r.result).ticket;
+    if (typeof ticket === "number") return ticket;
+    const ref = /^#(\d+)$/.exec(taskOf(r));
+    return ref ? Number(ref[1]) : null;
+  };
+  // A newer run of the same task supersedes an older one: its PR was closed or replaced.
+  const latestOfTask = new Map<string, RunRecord>();
+  for (const r of runs) if (r.result) latestOfTask.set(taskOf(r), r);
+
+  const prCache = new Map<string, Promise<PrStatus | Error>>();
+  const loadPr = (pr: string) => {
+    if (!prCache.has(pr)) prCache.set(pr, opts.github.prStatus(opts.repo, pr).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e)))));
+    return prCache.get(pr)!;
+  };
+
+  const merged: StatusCheckin["merged"] = [];
+  const waiting: StatusCheckin["waiting_for_merge"] = [];
+  const seenPr = new Set<string>();
+  for (const r of [...runs].reverse()) {
+    const res = r.result;
+    if (!res?.pr || seenPr.has(res.pr) || (res.result !== "done" && res.result !== "needs_human")) continue;
+    const finished = resultFinishedMs(r);
+    const inWindow = finished !== undefined && finished >= from;
+    const waits = res.result === "done" && res.merge_policy === "human_review" && latestOfTask.get(taskOf(r)) === r && !r.state?.gc_at;
+    if (!inWindow && !waits) continue;
+    seenPr.add(res.pr);
+    const live = await loadPr(res.pr);
+    const row = { issue: issueOf(r), task: taskOf(r), pr: res.pr };
+    if (!(live instanceof Error) && live.state === "merged") {
+      if (inWindow) merged.push({ ...row, assumptions: res.assumptions ?? [] });
+    } else if (waits && (live instanceof Error || (live.state === "open" && !live.draft))) {
+      waiting.push({ ...row, reason: res.risk_reasons?.length ? res.risk_reasons.join("; ") : `merge policy human_review, risk ${res.risk ?? "unknown"}`, pr_state: live instanceof Error ? "unknown" : "open" });
+    }
+  }
+  merged.reverse();
+  waiting.reverse();
+
+  const questions_open: StatusCheckin["questions_open"] = entries
+    .filter((e) => e.status === "parked" && e.awaiting_answer)
+    .map((e) => ({ issue: e.issue, questions: e.awaiting_answer!.questions, posted: e.awaiting_answer!.posted }));
+
+  const failed: StatusCheckin["failed"] = [];
+  for (const e of entries) {
+    if (!e.failed) continue;
+    const run = e.run_id ? runs.find((r) => r.run_id === e.run_id) : undefined;
+    const at = run ? resultFinishedMs(run) ?? run.started_at.getTime() : undefined;
+    // An entry that names no readable run cannot be dated: show it rather than lose a failure.
+    if (at !== undefined && at < from) continue;
+    failed.push({ issue: e.issue, task: `#${e.issue}`, reason: firstLine(e.reason ?? "no reason recorded"), reported: e.failed.reported });
+  }
+  // Direct runs have no queue entry. An entry that exists and is not failed means the ticket moved on.
+  for (const r of latestOfTask.values()) {
+    const issue = issueOf(r);
+    const finished = resultFinishedMs(r);
+    if (r.result?.result !== "failed" || finished === undefined || finished < from || (issue !== null && entryOfIssue.has(issue))) continue;
+    failed.push({ issue, task: taskOf(r), reason: firstLine(r.result.reason || "no reason recorded"), reported: r.result.failure_reported === true });
+  }
+
+  const pendingBase = entries.find((e) => e.status === "pending" && e.reason?.startsWith("base problem:"));
+  const count = (status: QueueEntry["status"]) => entries.filter((e) => e.status === status).length;
+  return {
+    generated_at: new Date(now).toISOString(),
+    repo: repoKey,
+    since: { since: opts.since, from: new Date(from).toISOString() },
+    merged,
+    waiting_for_merge: waiting,
+    questions_open,
+    failed,
+    base_problem: pendingBase?.reason ?? null,
+    queue: { pending: count("pending"), running: count("running"), parked: count("parked") },
+  };
+}
+
+const ticket = (row: { issue: number | null; task: string }) => (row.issue !== null ? `#${row.issue}` : row.task);
+
+export function renderCheckin(c: StatusCheckin): string {
+  const out: string[] = [];
+  const section = (title: string, rows: string[][]) => {
+    if (!rows.length) return;
+    out.push("", `${title} (${rows.length})`);
+    for (const [head, ...rest] of rows) out.push(`  ${head}`, ...rest.map((l) => `    ${l}`));
+  };
+  section("Merged since", c.merged.map((m) => {
+    const shown = m.assumptions.slice(0, 3).map((a) => `assumed: ${a}`);
+    return [`${ticket(m)} ${m.pr}`, ...shown, ...(m.assumptions.length > 3 ? [`+${m.assumptions.length - 3} more`] : [])];
+  }));
+  section("Waiting for a human merge", c.waiting_for_merge.map((w) => [`${ticket(w)} ${w.pr}${w.pr_state === "unknown" ? " (PR state unknown)" : ""}`, w.reason]));
+  section("Questions open", c.questions_open.map((q) => [`#${q.issue} (${q.posted ? "posted on the issue" : "not posted yet"})`, ...q.questions.map((t, i) => `${i + 1}. ${t}`)]));
+  section("Failed since", c.failed.map((f) => [`${ticket(f)} (${f.reported ? "reported on GitHub" : "not reported on GitHub"})`, f.reason]));
+  if (c.base_problem) out.push("", "Base problem", `  ${c.base_problem}`);
+  const q = c.queue;
+  if (q.pending + q.running + q.parked > 0) out.push("", `Queue: pending ${q.pending}, running ${q.running}, parked ${q.parked}`);
+  if (out.length === 0) out.push("", "Nothing to report.");
+  return [`Factory check-in ${c.repo}, since ${c.since.from}`, ...out].join("\n") + "\n";
+}
+
+export async function checkinCommand(opts: { factoryHome: string; github: GitHub; repo: string; since: string; json: boolean; now?: () => number }, io: Io): Promise<number> {
+  const report = await checkinReport(opts);
+  io.out(opts.json ? JSON.stringify(report) + "\n" : renderCheckin(report));
   return 0;
 }
