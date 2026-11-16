@@ -109,6 +109,7 @@ describe("unattended queue acceptance (#184)", () => {
     const windowRun = "20261114-150000-aaaaaa";
     const blockedRun = "20261114-150001-bbbbbb";
     const decisionRun = "20261114-150002-cccccc";
+    const overlapRun = "20261114-150003-dddddd";
     checkpoint(home, repo, windowRun, 1, { stop: WINDOW, pr: "https://github.test/pr/1" });
     checkpoint(home, repo, blockedRun, 4, { stop: { cause: "technical_repair", action: "repair" } });
     checkpoint(home, repo, decisionRun, 3, { stop: DECISION });
@@ -118,10 +119,9 @@ describe("unattended queue acceptance (#184)", () => {
       q.entries.push(
         { issue: 1, status: "parked", added_at: "2026-11-14T00:00:00.000Z", run_id: windowRun, issue_rev: issueRevision("Issue 1", "Do the work."), pr: "https://github.test/pr/1", wait_until: resetsAt, window_resets_at: resetsAt, window_waits: 1, reason: "provider window" },
         { issue: 3, status: "parked", added_at: "2026-11-14T00:00:00.000Z", run_id: decisionRun, issue_rev: issueRevision("Issue 3", "Do the work."), reason: "needs a human decision" },
-        { issue: 4, status: "parked", added_at: "2026-11-14T00:00:00.000Z", run_id: blockedRun, issue_rev: issueRevision("Issue 4", "Do the work."), blocked_by: [9], reason: "planned paths overlap open factory PR #9" },
+        { issue: 4, status: "parked", added_at: "2026-11-14T00:00:00.000Z", run_id: blockedRun, issue_rev: issueRevision("Issue 4", "Do the work."), blocked_runs: [overlapRun], reason: `planned paths overlap active runs: ${overlapRun} (src/math.js)` },
       );
     });
-    github.prStates.set("9", { state: "open", draft: false });
     const clock = fakeTime();
     const g = gate();
     const ctl = new AbortController();
@@ -141,7 +141,8 @@ describe("unattended queue acceptance (#184)", () => {
       expect(await row(home, repo, 3)).toMatchObject({ status: "parked", run_id: decisionRun });
 
       g.release(2, outcome(repo, g.reqs[0]!.runId!, 2, { result: "done", pr: "https://github.test/pr/2", reason: "" }));
-      github.prStates.set("9", { state: "merged", draft: false });
+      mkdirSync(join(home, "runs", overlapRun), { recursive: true });
+      writeFileSync(join(home, "runs", overlapRun, "result.json"), JSON.stringify({ result: "done", run_id: overlapRun }) + "\n");
       await waitFor("dependent resumes after the blocker closes", () => g.reqs.some((r) => r.issue === 4 && r.resumeRunId === blockedRun));
       expect(g.reqs.filter((r) => r.issue === 1)).toEqual([]);
       expect(g.reqs.filter((r) => r.issue === 3)).toEqual([]);
