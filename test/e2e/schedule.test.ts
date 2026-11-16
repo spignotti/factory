@@ -205,10 +205,11 @@ describe("queue schedule", () => {
     const worker = runQueue({ factoryHome, github, slots: 2, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
     try {
       await waitFor("first coding run", () => g.calls.length === 1);
-      await new Promise((r) => setTimeout(r, 50));
-      expect(g.calls).toHaveLength(1);
       const waitingRepo = g.calls[0]!.issue === 1 ? repoB : repoA;
       const waitingIssue = g.calls[0]!.issue === 1 ? 2 : 1;
+      // The other repo's tick records the held resource; under CI load that can take longer than one poll.
+      await waitFor("resource wait recorded", async () => Boolean((await entries(factoryHome, waitingRepo)).find((e) => e.issue === waitingIssue)?.reason));
+      expect(g.calls).toHaveLength(1);
       expect((await entries(factoryHome, waitingRepo)).find((e) => e.issue === waitingIssue)?.reason).toContain("db");
       g.release(g.calls[0]!.issue, outcome(g.calls[0]!.repo, g.calls[0]!.issue, "done"));
       await waitFor("second after release", () => g.calls.length === 2);

@@ -14,7 +14,7 @@ import { activeHolders, lockRepoKey, tryPathLock } from "../../src/pipeline/lock
 import { runFactory } from "../../src/pipeline/run.js";
 import { factoryRunArgs } from "../../src/queue/spawn.js";
 import { loadQueueByKey, queueDir, repoQueueKey, updateQueue, type QueueEntry } from "../../src/queue/store.js";
-import { runQueue, type StartRun } from "../../src/queue/worker.js";
+import { runQueue, type StartRun, type StartRunRequest } from "../../src/queue/worker.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { FIXTURES, createFixtureRepo } from "../helpers/repo.js";
 
@@ -221,6 +221,90 @@ describe("factory queue", () => {
         [4, "parked", "CI on main is red"],
       ]);
       expect(g.calls).toEqual([1, 2, 3, 4]);
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("posts a run's questions once, retries a failed post, and starts a fresh run once the labels say answered", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const starts: StartRunRequest[] = [];
+    const g = gate();
+    const start: StartRun = (req) => (starts.push(req), g.start(req));
+    const ctl = new AbortController();
+    const cap = capture();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start, io: cap.io, stay: true, random: () => 0 });
+    const asked = outcome(repo, 1, "needs_input", "plan needs input", { questions: ["Which unit?", "Round or truncate?"], questions_posted: false, stop: { cause: "explicit_decision", action: "decide" } });
+    const marker = `<!-- factory:questions run=${asked.run_id} -->`;
+    const row = async () => (await entries(factoryHome, repo)).find((e) => e.issue === 1)!;
+    try {
+      await waitFor("first start", () => g.calls.length === 1);
+      // The run could not post; GitHub keeps failing for a while.
+      github.commentError = "HTTP 502";
+      g.release(1, asked);
+      await waitFor("parked on questions", async () => (await row()).status === "parked");
+      expect((await row()).awaiting_answer).toEqual({ questions: ["Which unit?", "Round or truncate?"], posted: false });
+      await waitFor("a failed retry", () => cap.err().includes("posting questions on #1 failed"));
+      // Labels still say ready, but nothing reached the issue: no restart without an answer.
+      expect(github.issues.get(1)!.labels).toEqual(["factory-ready"]);
+      expect(g.calls).toEqual([1]);
+
+      github.commentError = null;
+      await waitFor("posted", async () => (await row()).awaiting_answer?.posted === true);
+      const comments = github.comments.get(1)!;
+      expect(comments).toHaveLength(1);
+      expect(comments[0]!.body).toContain(marker);
+      expect(comments[0]!.body).toContain("1. Which unit?\n2. Round or truncate?");
+      expect(github.issues.get(1)!.labels).toEqual(["needs-input"]);
+      expect((await row()).status).toBe("parked");
+
+      // A later tick neither posts again nor restarts while needs-input is on.
+      await new Promise((r) => setTimeout(r, 120));
+      expect(github.comments.get(1)).toHaveLength(1);
+      expect(g.calls).toEqual([1]);
+
+      // Only factory-ready back is not enough: needs-input must go too.
+      github.issues.get(1)!.labels = ["needs-input", "factory-ready"];
+      await new Promise((r) => setTimeout(r, 120));
+      expect(g.calls).toEqual([1]);
+
+      github.comments.get(1)!.push({ author: "maintainer", association: "OWNER", body: "Meters. Round.", created_at: "2026-11-16T10:00:00Z" });
+      github.issues.get(1)!.labels = ["factory-ready"];
+      await waitFor("fresh start", () => g.calls.length === 2);
+      expect(starts[1]!.resumeRunId).toBeUndefined();
+      expect(starts[1]!.runId).not.toBe(asked.run_id);
+      expect((await row()).awaiting_answer).toBeUndefined();
+      expect(github.comments.get(1)).toHaveLength(2);
+      expect(cap.out()).toContain("queue: #1 pending (questions answered, fresh run)");
+      g.release(1, outcome(repo, 1, "done", "", { run_id: starts[1]!.runId!, pr: "https://github.test/pr/1" }));
+      await waitFor("done", async () => (await row()).status === "done");
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("a run that already posted its questions is not posted again by the worker", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const g = gate();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io, stay: true, random: () => 0 });
+    try {
+      await waitFor("first start", () => g.calls.length === 1);
+      github.issues.get(1)!.labels = ["needs-input"];
+      g.release(1, outcome(repo, 1, "needs_input", "plan needs input", { questions: ["Which unit?"], questions_posted: true }));
+      await waitFor("parked", async () => (await entries(factoryHome, repo))[0]!.status === "parked");
+      expect((await entries(factoryHome, repo))[0]!.awaiting_answer).toEqual({ questions: ["Which unit?"], posted: true });
+      await new Promise((r) => setTimeout(r, 120));
+      expect(github.comments.get(1)).toBeUndefined();
+      expect(g.calls).toEqual([1]);
     } finally {
       ctl.abort();
       await worker.catch(() => undefined);

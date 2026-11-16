@@ -85,6 +85,8 @@ export const PlanSchema = z.object({
    */
   red_green: z.enum(["required", "not_applicable"]).optional(),
   red_green_reason: z.string().trim().min(1).optional(),
+  /** What the planner assumed instead of asking, where a wrong guess is cheap to correct in a follow-up. */
+  assumptions: z.array(z.string().trim().min(1)).optional(),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 

@@ -249,6 +249,9 @@ export function renderPrBody(ctx: RunContext, v: {
   const fill: Record<string, string> = {
     summary: v.summary,
     protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
+    assumptions: plan.assumptions?.length
+      ? `\n## Assumptions\n\nThe plan assumed these instead of asking. If one is wrong, correct it in a follow-up issue.\n\n${list(plan.assumptions)}\n`
+      : "",
     risk: out.risk.risk,
     risk_reason: cell([riskReasonLine(out.risk), v.sizeSignal ? `size signal (does not change risk): ${v.sizeSignal}` : ""].filter(Boolean).join("; ")),
     security_rows: securityRows(v.changed, humanReviewPaths(ctx.repo))

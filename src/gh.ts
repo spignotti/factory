@@ -88,6 +88,17 @@ export interface Issue {
   state?: "open" | "closed";
 }
 
+export interface IssueComment {
+  /** Login, `ghost` when GitHub reports none. */
+  author: string;
+  /** `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, … as GitHub reports it; absent when unknown. */
+  association?: string;
+  body: string;
+  created_at: string;
+  /** Hidden by a maintainer (spam, off-topic). */
+  minimized?: boolean;
+}
+
 /** Open issues from a full pagination. `complete` is false when a later page may still exist. */
 export interface OpenIssueList {
   issues: Issue[];
@@ -138,6 +149,14 @@ export interface GitHub {
   createIssue(repoDir: string, req: IssueWrite & { labels: string[] }): Promise<Issue>;
   /** Replaces title and body; adds labels, never removes one. */
   updateIssue(repoDir: string, n: number, req: IssueWrite): Promise<Issue>;
+  /** Every comment on the issue, oldest first. */
+  issueComments(repoDir: string, n: number): Promise<IssueComment[]>;
+  /** Posts a comment on the issue. Throws on failure. */
+  commentIssue(repoDir: string, n: number, body: string): Promise<void>;
+  /** Adds a label to an issue, creating the label from `spec` when the repo lacks it (an existing label is not changed). Throws on failure. */
+  addIssueLabel(repoDir: string, n: number, spec: LabelSpec): Promise<void>;
+  /** Removes a label from an issue. Throws on failure; callers skip labels the issue does not carry. */
+  removeIssueLabel(repoDir: string, n: number, label: string): Promise<void>;
   /**
    * Factory PR for this issue (`factory/<n>` or `factory/<n>-*`), any state. Null when there is none.
    * Queue `--after` when the dependency is not in the queue. Open wins over merged.
@@ -876,6 +895,46 @@ export class GhCli implements GitHub {
     return this.getIssue(repoDir, n);
   }
 
+  async issueComments(repoDir: string, n: number): Promise<IssueComment[]> {
+    // UNVERIFIED: `gh issue view --json comments` returns every comment of a long thread, oldest first (docs/VERIFY.md).
+    const out = await gh(repoDir, ["issue", "view", String(n), "--json", "comments"]);
+    const raw = (JSON.parse(out || "{}") as { comments?: unknown[] }).comments ?? [];
+    return raw.map((c) => {
+      const j = c as { author?: { login?: string } | null; authorAssociation?: string; body?: string; createdAt?: string; isMinimized?: boolean };
+      return {
+        author: j.author?.login || "ghost",
+        ...(j.authorAssociation ? { association: j.authorAssociation } : {}),
+        body: j.body ?? "",
+        created_at: j.createdAt ?? "",
+        ...(j.isMinimized ? { minimized: true } : {}),
+      };
+    });
+  }
+
+  async commentIssue(repoDir: string, n: number, body: string): Promise<void> {
+    await gh(repoDir, ["issue", "comment", String(n), "--body", body]);
+  }
+
+  async addIssueLabel(repoDir: string, n: number, spec: LabelSpec): Promise<void> {
+    try {
+      await gh(repoDir, ["issue", "edit", String(n), "--add-label", spec.name]);
+      return;
+    } catch (e) {
+      // UNVERIFIED: a missing label fails the edit with "'<name>' not found" (docs/VERIFY.md).
+      if (!/not found/i.test((e as Error).message)) throw e;
+    }
+    // No `--force`: an existing label keeps the colour and description the repo gave it.
+    await gh(repoDir, ["label", "create", spec.name, "--color", spec.color, "--description", spec.description]).catch((e: Error) => {
+      if (!/already exists/i.test(e.message)) throw e;
+      return "";
+    });
+    await gh(repoDir, ["issue", "edit", String(n), "--add-label", spec.name]);
+  }
+
+  async removeIssueLabel(repoDir: string, n: number, label: string): Promise<void> {
+    await gh(repoDir, ["issue", "edit", String(n), "--remove-label", label]);
+  }
+
   async findFactoryPr(repoDir: string, issue: number): Promise<FactoryPrRef | null> {
     if (!(await hasRemote(repoDir))) return null;
     // UNVERIFIED: `gh pr list --search head:factory/N` (docs/VERIFY.md). Client-side filter is exact.
@@ -1125,6 +1184,43 @@ export class FakeGitHub implements GitHub {
     if (req.labels) prev.labels = [...new Set([...prev.labels, ...req.labels])];
     this.issueEdits.push({ number: n, title: req.title, body: req.body });
     return { ...prev, state: prev.state ?? "open" };
+  }
+
+  /** Comments per issue, oldest first. `commentIssue` appends as author `factory-bot`. */
+  readonly comments = new Map<number, IssueComment[]>();
+  /** When set, `commentIssue` throws this instead of posting. */
+  commentError: string | null = null;
+  /** When set, `addIssueLabel` and `removeIssueLabel` throw this. */
+  issueLabelError: string | null = null;
+  /** When set, `issueComments` throws this. */
+  commentsReadError: string | null = null;
+
+  async issueComments(_repoDir: string, n: number): Promise<IssueComment[]> {
+    if (this.commentsReadError) throw new Error(this.commentsReadError);
+    return (this.comments.get(n) ?? []).map((c) => ({ ...c }));
+  }
+
+  async commentIssue(_repoDir: string, n: number, body: string): Promise<void> {
+    if (this.commentError) throw new Error(this.commentError);
+    if (!this.issues.has(n)) throw new Error(`issue #${n} not found`);
+    const list = this.comments.get(n) ?? [];
+    list.push({ author: "factory-bot", association: "OWNER", body, created_at: new Date().toISOString() });
+    this.comments.set(n, list);
+  }
+
+  async addIssueLabel(_repoDir: string, n: number, spec: LabelSpec): Promise<void> {
+    if (this.issueLabelError) throw new Error(this.issueLabelError);
+    const issue = this.issues.get(n);
+    if (!issue) throw new Error(`issue #${n} not found`);
+    if (!this.ensuredLabels.some((l) => l.name === spec.name)) this.ensuredLabels.push(spec);
+    if (!issue.labels.includes(spec.name)) issue.labels = [...issue.labels, spec.name];
+  }
+
+  async removeIssueLabel(_repoDir: string, n: number, label: string): Promise<void> {
+    if (this.issueLabelError) throw new Error(this.issueLabelError);
+    const issue = this.issues.get(n);
+    if (!issue) throw new Error(`issue #${n} not found`);
+    issue.labels = issue.labels.filter((l) => l !== label);
   }
 
   /** Planted factory PR for `--after` when the dependency is not queued. Open `factoryPrs` are also seen. */
