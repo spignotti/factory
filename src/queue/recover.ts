@@ -8,7 +8,7 @@ import { listRuns } from "../runs.js";
 import { admissionBlock, issueRevision } from "./admit.js";
 import { pauseRequested } from "./pause.js";
 import { loadAllQueues, updateQueue, type QueueEntry, type QueueFile } from "./store.js";
-import { MAX_WINDOW_WAITS } from "./worker.js";
+import { MAX_ESTIMATED_WAIT_MS, MAX_WINDOW_WAITS } from "./worker.js";
 
 /**
  * #188: one explicit recovery path through the running queue worker. Preview is read-only.
@@ -189,7 +189,7 @@ function classify(factoryHome: string, q: QueueFile, entry: QueueEntry, facts: R
     return makeRow(q, entry, "decision", `budget exhausted; not reset. An explicit grant is required and was not given.${spentNote(state, entry)}`, { ...base, exhausted: true });
   }
   if (cause === "provider_window_wait") {
-    if ((entry.window_waits ?? 0) > MAX_WINDOW_WAITS) {
+    if ((entry.window_waits ?? 0) > MAX_WINDOW_WAITS || (entry.window_estimated_ms ?? 0) > MAX_ESTIMATED_WAIT_MS) {
       return makeRow(q, entry, "decision", "provider window waits are exhausted; not reset and not resumed", base);
     }
     const resetsAt = entry.window_resets_at;

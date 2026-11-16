@@ -16,11 +16,12 @@ import { continuationLimit } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
 import { postQuestions } from "../pipeline/questions.js";
 import { listRuns, type RunRecord } from "../runs.js";
+import { ESTIMATED_WINDOW_MS } from "../agents/models.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { admissionHold } from "./admission.js";
 import { clearWorkerIdentity, executingRelease, publishWorkerIdentity, type ReleaseIdentity } from "./identity.js";
 import type { Io } from "../commands/gates.js";
-import { admissionBlock, cycleReasons, fulfilledIssues, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
+import { admissionBlock, cycleReasons, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
 import { clearWorkerMode, readWorkerMode } from "./control.js";
 import { clearPause, pausePaths, pauseRequested, requestPause, type PauseKey } from "./pause.js";
 import { advanceMergeBatch, batchBusy } from "./batch.js";
@@ -33,6 +34,11 @@ export const MAX_REQUEUES = 2;
  * A separate budget from `requeues`; a window reset never gives it back.
  */
 export const MAX_WINDOW_WAITS = 2;
+/**
+ * Total assumed waiting for usage windows whose reset time the provider did not report. Those waits
+ * do not spend `MAX_WINDOW_WAITS`: a one-hour guess for a five-hour or weekly window would use it up early.
+ */
+export const MAX_ESTIMATED_WAIT_MS = 12 * 60 * 60_000;
 /** One wait step is capped to this: a far window wakes for a bounded periodic recheck, not only at the reset. */
 export const MAX_WINDOW_WAIT_MS = 6 * 60 * 60_000;
 /** A run whose `events.jsonl` has not grown for `stall_minutes` times this is killed. */
@@ -350,6 +356,10 @@ const BASE_PROBLEM = "base problem:";
  * A `base_red` from the local fast checks on the base. It got as far as its worktree; a GitHub-CI
  * `base_red` stops before that and is resumed by its own run once the base CI is green.
  */
+function hours(ms: number): string {
+  return `${Math.round((ms / 3_600_000) * 10) / 10}h`;
+}
+
 export function isLocalBaseRed(result: RunResult): boolean {
   return result.result === "base_red" && !!result.worktree;
 }
@@ -375,15 +385,20 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
   if (result.result === "needs_human" && isWindowWaitStop(result, opts?.stateStop)) {
     // Model fallback already had its chance in the run. The wait holds no coding slot; the persisted
     // wake-up survives a restart and the entry resumes with its original run, checkpoint and PR.
-    const waits = (entry.window_waits ?? 0) + 1;
-    entry.window_waits = waits;
     const now = opts?.now ?? Date.now();
     const resetsAt = result.window_resets_at;
-    if (waits <= MAX_WINDOW_WAITS && resetsAt !== undefined && Number.isFinite(resetsAt) && resetsAt > 0) {
+    const estimated = result.window_estimated === true;
+    // An assumed window is charged at least its assumed length, so a reset already past still counts.
+    const charged = estimated ? (entry.window_estimated_ms ?? 0) + Math.max(ESTIMATED_WINDOW_MS, (resetsAt ?? now) - now) : 0;
+    const waits = (entry.window_waits ?? 0) + (estimated ? 0 : 1);
+    if (estimated) entry.window_estimated_ms = charged;
+    else entry.window_waits = waits;
+    const budgetLeft = estimated ? charged <= MAX_ESTIMATED_WAIT_MS : waits <= MAX_WINDOW_WAITS;
+    if (budgetLeft && resetsAt !== undefined && Number.isFinite(resetsAt) && resetsAt > 0) {
       // A window that has already opened is due on the next tick. applyOutcome does not resume: the
       // worker revalidates issue revision, pause and stop authorization first.
-      const estimated = result.window_estimated === true;
-      park(entry, `provider usage window resets ${new Date(resetsAt).toISOString()} (${estimated ? "estimated; " : ""}wait ${waits}/${MAX_WINDOW_WAITS}); factory resume ${result.run_id}`, result.run_id);
+      const budget = estimated ? `estimated; ${hours(charged)} of ${hours(MAX_ESTIMATED_WAIT_MS)} assumed waits` : `wait ${waits}/${MAX_WINDOW_WAITS}`;
+      park(entry, `provider usage window resets ${new Date(resetsAt).toISOString()} (${budget}); factory resume ${result.run_id}`, result.run_id);
       entry.wait_until = resetsAt > now ? Math.min(resetsAt, now + MAX_WINDOW_WAIT_MS) : now;
       entry.window_resets_at = resetsAt;
       if (estimated) entry.window_estimated = true;
@@ -393,9 +408,11 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     // and never a reset of the spent code-repair budgets (`requeues`, run `repair`, continuations).
     park(
       entry,
-      waits > MAX_WINDOW_WAITS
-        ? `provider usage window waits exhausted (${waits - 1}/${MAX_WINDOW_WAITS}); ${result.reason}`.slice(0, 400)
-        : result.reason || result.result,
+      budgetLeft
+        ? result.reason || result.result
+        : estimated
+          ? `estimated provider usage window waits exhausted (${hours(MAX_ESTIMATED_WAIT_MS)}); ${result.reason}`.slice(0, 400)
+          : `provider usage window waits exhausted (${waits - 1}/${MAX_WINDOW_WAITS}); ${result.reason}`.slice(0, 400),
       result.run_id,
     );
     return "parked";
@@ -491,29 +508,15 @@ function releaseEntryResources(factoryHome: string, repo: string, entry: QueueEn
   if (names.length) releaseResourceClaims(factoryHome, names, entry.run_id);
 }
 
-/** Review lines count as evidenced. Other lines count when a handoff recorded evidence for them. */
-function evidencedIds(factoryHome: string, runId: string): Set<string> {
-  const dir = join(factoryHome, "runs", runId);
-  const plan = JSON.parse(readFileSync(join(dir, "plan.json"), "utf8")) as { acceptance?: { id: string; verify?: string }[] };
-  const ids = new Set<string>();
-  for (const row of plan.acceptance ?? []) if (row.verify === "review" && row.id) ids.add(row.id);
-  try {
-    const st = JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as { handoffs?: { evidence?: { acceptance_id?: string }[] }[] };
-    for (const handoff of st.handoffs ?? []) for (const ev of handoff.evidence ?? []) if (ev.acceptance_id) ids.add(ev.acceptance_id);
-  } catch {
-    // no state yet: review lines above still count
-  }
-  return ids;
-}
-
 function settleBundle(q: QueueFile, entry: QueueEntry, factoryHome: string, io: Io): void {
   const extras = q.entries.filter((e) => e.bundled_with === entry.issue);
   if (!extras.length) return;
+  // finalize wrote the partners its `Closes` footer names: accepted evidence only, bundle partners only.
   let met = new Set<number>();
   if (entry.run_id) {
     try {
-      const plan = JSON.parse(readFileSync(join(factoryHome, "runs", entry.run_id, "plan.json"), "utf8")) as { acceptance?: { id: string; text: string }[] };
-      met = new Set(fulfilledIssues({ acceptance: plan.acceptance ?? [] }, evidencedIds(factoryHome, entry.run_id)));
+      const file = JSON.parse(readFileSync(join(factoryHome, "runs", entry.run_id, "fulfilled.json"), "utf8")) as { issues?: unknown };
+      met = new Set(Array.isArray(file.issues) ? file.issues.filter((n): n is number => typeof n === "number") : []);
     } catch {
       met = new Set();
     }
@@ -1308,7 +1311,9 @@ async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx,
   for (const entry of snap.entries) {
     if (entry.status !== "parked" || !entry.awaiting_answer || entry.awaiting_answer.posted || !entry.run_id) continue;
     try {
-      await withTimeout(postQuestions(ctx.github, repo, entry.issue, entry.run_id, entry.awaiting_answer.questions), ctx.netTimeoutMs, `questions #${entry.issue}`);
+      const done = await withTimeout(postQuestions(ctx.github, repo, entry.issue, entry.run_id, entry.awaiting_answer.questions), ctx.netTimeoutMs, `questions #${entry.issue}`);
+      // Answered before the label swap landed: posted all the same, so the answer releases the entry.
+      if (done === "answered") ctx.io.out(`queue: #${entry.issue} answered before the label swap; labels left as they are\n`);
       posted.add(entry.issue);
     } catch (e) {
       noteFailure();
@@ -1652,7 +1657,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       // Pause is not only a scheduling filter. An already pending continuation must not take a slot
       // or edit product. The marker stays until a human clears it. Other runs are not signalled.
       if (resume && pauseRequested(ctx.factoryHome, { runId: entry.run_id, repo, issue: entry.issue })) continue;
-      if (resume && (entry.window_waits ?? 0) > 0 && !windowResumeAuthorized(ctx.factoryHome, entry.run_id)) {
+      if (resume && ((entry.window_waits ?? 0) > 0 || (entry.window_estimated_ms ?? 0) > 0) && !windowResumeAuthorized(ctx.factoryHome, entry.run_id)) {
         park(entry, `provider window resume refused: stop does not authorize it`, entry.run_id);
         ctx.io.out(`queue: #${entry.issue} parked: ${entry.reason}\n`);
         continue;
@@ -1697,7 +1702,8 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       room -= 1;
     }
     // The re-check window restarts now, so later ticks wait for this run's own base check.
-    if (recheck && starts.length) writeBaseCheck(ctx.factoryHome, key, { ...recheck, at: new Date(ctx.nowMs).toISOString() });
+    // Only a fresh start runs the base check; a resume does not, so it does not advance the backoff.
+    if (recheck && starts.some((s) => !s.resumeRunId)) writeBaseCheck(ctx.factoryHome, key, { ...recheck, at: new Date(ctx.nowMs).toISOString(), rechecks: (recheck.rechecks ?? 0) + 1 });
     const runningNow = q.entries.filter((e) => e.status === "running").length;
     const globalLeft = ctx.slots - (othersRunning(ctx.factoryHome, repo) + runningNow);
     if (globalLeft <= 0 && runningNow < repoMax) {

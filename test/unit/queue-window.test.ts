@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunResult } from "../../src/events.js";
 import type { QueueEntry, QueueFile } from "../../src/queue/store.js";
-import { applyOutcome, MAX_WINDOW_WAITS, MAX_WINDOW_WAIT_MS } from "../../src/queue/worker.js";
+import { applyOutcome, MAX_ESTIMATED_WAIT_MS, MAX_WINDOW_WAITS, MAX_WINDOW_WAIT_MS } from "../../src/queue/worker.js";
 
 const NOW = Date.parse("2026-01-15T10:00:00.000Z");
 const MIN = 60_000;
@@ -53,7 +53,10 @@ describe("window wait parks without a slot (#177)", () => {
     expect(e.wait_until).toBe(NOW + HOUR);
     expect(e.window_resets_at).toBe(NOW + HOUR);
     expect(e.window_estimated).toBe(true);
-    expect(e.reason).toMatch(/\(estimated; wait 1\/2\)/);
+    expect(e.reason).toMatch(/\(estimated; 1h of 12h assumed waits\)/);
+    // An assumed window does not spend the reported-window budget.
+    expect(e.window_waits).toBeUndefined();
+    expect(e.window_estimated_ms).toBe(HOUR);
     const exact = entry(2);
     apply(exact, windowResult(NOW + HOUR));
     expect(exact.window_estimated).toBeUndefined();
@@ -125,6 +128,29 @@ describe("window wait parks without a slot (#177)", () => {
     expect(spent.wait_until).toBeUndefined();
     expect(spent.window_resets_at).toBeUndefined();
     expect(spent.reason).toContain(`${MAX_WINDOW_WAITS}`);
+  });
+
+  it("estimated waits are capped at 12 assumed hours in total, apart from MAX_WINDOW_WAITS", () => {
+    const e = entry(1, { window_waits: MAX_WINDOW_WAITS });
+    const waits = MAX_ESTIMATED_WAIT_MS / HOUR;
+    expect(waits).toBe(12);
+    for (let i = 1; i <= waits; i++) {
+      e.status = "running";
+      expect(apply(e, windowResult(NOW + HOUR, { window_estimated: true })), `wait ${i}`).toBe("parked");
+      expect(e.wait_until, `wait ${i}`).toBe(NOW + HOUR);
+    }
+    expect(e.window_waits).toBe(MAX_WINDOW_WAITS);
+    e.status = "running";
+    expect(apply(e, windowResult(NOW + HOUR, { window_estimated: true }))).toBe("parked");
+    expect(e.wait_until).toBeUndefined();
+    expect(e.window_resets_at).toBeUndefined();
+    expect(e.reason).toMatch(/estimated provider usage window waits exhausted \(12h\)/);
+  });
+
+  it("an estimated reset already in the past still charges the assumed window length", () => {
+    const e = entry(1);
+    apply(e, windowResult(NOW - MIN, { window_estimated: true }));
+    expect(e.window_estimated_ms).toBe(HOUR);
   });
 
   it("spent code-repair budgets survive the window wait untouched", () => {
