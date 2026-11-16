@@ -1284,7 +1284,9 @@ async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx,
   for (const entry of snap.entries) {
     if (entry.status !== "parked" || !entry.awaiting_answer || entry.awaiting_answer.posted || !entry.run_id) continue;
     try {
-      await withTimeout(postQuestions(ctx.github, repo, entry.issue, entry.run_id, entry.awaiting_answer.questions), ctx.netTimeoutMs, `questions #${entry.issue}`);
+      const done = await withTimeout(postQuestions(ctx.github, repo, entry.issue, entry.run_id, entry.awaiting_answer.questions), ctx.netTimeoutMs, `questions #${entry.issue}`);
+      // Answered before the label swap landed: posted all the same, so the answer releases the entry.
+      if (done === "answered") ctx.io.out(`queue: #${entry.issue} answered before the label swap; labels left as they are\n`);
       posted.add(entry.issue);
     } catch (e) {
       noteFailure();
