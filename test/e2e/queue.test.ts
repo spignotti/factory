@@ -311,24 +311,53 @@ describe("factory queue", () => {
     }
   });
 
-  it("parks an overlap with an open factory PR and starts again once that PR closes", async () => {
+  it("a locked result never parks on an open factory PR", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
     const github = new FakeGitHub();
     await enqueue(factoryHome, repo, github, [1]);
-    github.prStates.set("9", { state: "open", draft: false });
     const g = gate();
     const ctl = new AbortController();
     const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
     try {
       await waitFor("started", () => g.calls.length === 1);
+      // A reason an older run may still write: it is no longer a PR park.
       g.release(1, outcome(repo, 1, "locked", "planned paths overlap open factory PR #9 (src/math.js)"));
-      await waitFor("parked", async () => (await entries(factoryHome, repo))[0]?.status === "parked");
-      expect((await entries(factoryHome, repo))[0]).toMatchObject({ status: "parked", blocked_by: [9] });
-      await new Promise((r) => setTimeout(r, 40));
-      expect(g.calls).toEqual([1]);
-      github.prStates.set("9", { state: "closed", draft: false });
-      await waitFor("unparked start", () => g.calls.length === 2);
+      await waitFor("settled", async () => (await entries(factoryHome, repo))[0]?.status === "parked");
+      expect((await entries(factoryHome, repo))[0]?.blocked_by).toBeUndefined();
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("an entry parked behind an open factory PR before the upgrade is pending again on the next tick", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    await updateQueue(factoryHome, repo, (q) => {
+      Object.assign(q.entries[0]!, { status: "parked", blocked_by: [9], reason: "planned paths overlap open factory PR #9 (src/math.js)" });
+    });
+    // The blocking PR is still open: it must not keep the ticket parked, and its status is not even read.
+    github.prStates.set("9", { state: "open", draft: false });
+    const prStatus = github.prStatus.bind(github);
+    const asked: string[] = [];
+    github.prStatus = async (dir, pr) => {
+      asked.push(pr);
+      return prStatus(dir, pr);
+    };
+    const g = gate();
+    const cap = capture();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: cap.io });
+    try {
+      await waitFor("started again", () => g.calls.length === 1);
+      const row = (await entries(factoryHome, repo))[0];
+      expect(row?.status).toBe("running");
+      expect(row?.blocked_by).toBeUndefined();
+      expect(asked).not.toContain("9");
+      expect(cap.out()).toContain("#1 pending (open PRs no longer block)");
       g.release(1, outcome(repo, 1, "done", "", { pr: "https://github.test/pr/1" }));
       await worker;
       expect((await entries(factoryHome, repo))[0]?.status).toBe("done");

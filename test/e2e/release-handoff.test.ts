@@ -331,7 +331,7 @@ describe("release handoff (#187)", () => {
       repo,
       { issue: 5, status: "parked", reason: "needs a decision", run_id: parkedRun, added_at: "2026-01-01T00:00:00Z" },
       { issue: 6, status: "pending", run_id: "20261112-120000-cccccc", issue_rev: "rev", added_at: "2026-01-01T00:00:00Z" },
-      { issue: 7, status: "parked", blocked_by: [12], reason: "planned paths overlap open factory PR #12", added_at: "2026-01-01T00:00:00Z" },
+      { issue: 7, status: "parked", blocked_runs: ["20261112-120000-dddddd"], reason: "planned paths overlap active runs: 20261112-120000-dddddd (src/a.js)", added_at: "2026-01-01T00:00:00Z" },
     );
 
     const current = await approved({ version: "0.6.0", commit: SHA_A });
@@ -370,7 +370,7 @@ describe("release handoff (#187)", () => {
       expect(after.find((e) => e.issue === 4)?.after).toBe(3);
       expect(after.find((e) => e.issue === 5)).toMatchObject({ status: "parked", reason: "needs a decision", run_id: parkedRun });
       expect(after.find((e) => e.issue === 6)?.run_id).toBe("20261112-120000-cccccc");
-      expect(after.find((e) => e.issue === 7)?.blocked_by).toEqual([12]);
+      expect(after.find((e) => e.issue === 7)?.blocked_runs).toEqual(["20261112-120000-dddddd"]);
       expect(readFileSync(join(home, "runs", ciRun, "state.json"), "utf8")).toContain("ci_wait");
       // No duplicate run or PR, and no merge action across the changed commit.
       expect(github.prs).toHaveLength(0);
@@ -669,8 +669,8 @@ describe("release handoff (#187)", () => {
     const behindRun = "20261112-120000-cccccc";
     mkdirSync(join(home, "runs", behindRun), { recursive: true });
     writeFileSync(join(home, "runs", behindRun, "result.json"), JSON.stringify(outcome(repo, 8, "done", { run_id: behindRun, pr: "https://github.test/pr/8", branch: "factory/8-x", merge_policy: "human_review" })) + "\n");
-    await pushEntries(home, repo, { issue: 7, status: "parked", blocked_by: [12], reason: "planned paths overlap open factory PR #12", added_at: "2026-01-01T00:00:00Z" });
-    github.prStates.set("12", { state: "open", draft: false });
+    const overlapRun = "20261112-120000-dddddd";
+    await pushEntries(home, repo, { issue: 7, status: "parked", blocked_runs: [overlapRun], reason: `planned paths overlap active runs: ${overlapRun} (src/a.js)`, added_at: "2026-01-01T00:00:00Z" });
 
     const current = await approved({ version: "0.6.0", commit: SHA_A });
     writeActive(home, current);
@@ -693,7 +693,8 @@ describe("release handoff (#187)", () => {
       github.prs.push({ repoDir: repo, head: "factory/9-x", base: "main", title: "t", body: "b", draft: false, url: pr });
       github.remoteShas.set("factory/9-x", head);
       github.prStates.set(pr, { state: "open", draft: false, ci: "green", behind: false });
-      github.prStates.set("12", { state: "merged", draft: false });
+      mkdirSync(join(home, "runs", overlapRun), { recursive: true });
+      writeFileSync(join(home, "runs", overlapRun, "result.json"), JSON.stringify(outcome(repo, 12, "done", { run_id: overlapRun })) + "\n");
       await new Promise((r) => setTimeout(r, 250));
       expect(github.updatedBranches, cap.out() + cap.err()).toEqual([]);
       expect(github.autoMerged).toEqual([]);

@@ -380,6 +380,11 @@ export const RepoConfigSchema = z
           })
           .default({ low: "human_review", medium: "human_review", high: "human_review" }),
         low_max_diff_lines: z.number().int().min(0).default(300),
+        /**
+         * Globs of files that always make a run `high` risk, so a person merges. Same matching as
+         * `sensitive_paths`. Absent: migrations and secret files (`DEFAULT_HUMAN_REVIEW_PATHS`). `[]`: none.
+         */
+        human_review_paths: z.array(z.string()).optional(),
       })
       .default({
         auto_merge_max_risk: "none",
@@ -424,8 +429,8 @@ export const RepoConfigSchema = z
         // Progress warning when one agent call's tokens_in reaches this. Does not fail the call.
         // 0 disables. A multi-million-token step is a common partner of a stream abort.
         step_token_warn: z.number().int().min(0).default(1_000_000),
-        // Open factory drafts do not block another run once the newer of the head commit time and
-        // PR updatedAt is this many days old, unless a live run still holds that branch. 0 disables.
+        // `factory status` lists an open factory draft as stale once the newer of the head commit time
+        // and PR updatedAt is this many days old, unless a live run still holds that branch. 0 disables.
         stale_draft_days: z.number().int().min(0).max(365).default(3),
       })
       .default({

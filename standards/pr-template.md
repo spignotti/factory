@@ -34,7 +34,7 @@
 ## Deviations, skipped, uncertain
 
 {{deviations}}
-
+{{out_of_plan}}
 ## Gate results
 
 {{gates}}
