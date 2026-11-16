@@ -8,8 +8,7 @@ import { callAgent, type RunContext, throwIfInterrupted, WallTimeExceeded, write
 import type { PackageStatus } from "../pipeline/dag.js";
 import { fixStep, reviewDelta } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
-import { repairScope } from "../pipeline/scope-repair.js";
-import { protectedFiles } from "../gates/builtin.js";
+import { protectedFiles, scopeReport } from "../gates/builtin.js";
 import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
 import type { HostSteps } from "../schemas/plan.js";
 import type { StopCause } from "../events.js";
@@ -269,6 +268,11 @@ export function renderPrBody(ctx: RunContext, v: {
       ...h.skipped.map((d) => `skipped (${h.package}): ${d}`),
       ...h.uncertain.map((d) => `uncertain (${h.package}): ${d}`),
     ])),
+    // Listed for the reader, never removed or blocking: extra work is a review matter.
+    out_of_plan: (() => {
+      const extra = scopeReport(plan, v.changed);
+      return extra.length ? `\n## Files outside the plan\n\n${list(extra.map((f) => `\`${f}\``))}\n` : "";
+    })(),
     gates: v.gates ? formatGateResults(v.gates.checks) : "- not run",
     review: list(input.findings.filter((f) => f.status !== "open").map((f) => `${f.id} ${f.severity}: ${f.status}`)),
     stats: [
@@ -504,45 +508,20 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     }
   }
 
-  // The overlap claim and its risk signal must see the full diff, including out-of-scope changes that
-  // scope repair may remove afterwards.
-  let changed = await changedFiles(ctx.worktree, ctx.baseSha);
+  // The overlap claim and its risk signal see the full diff, including files outside the plan.
+  const changed = await changedFiles(ctx.worktree, ctx.baseSha);
   const countTests = ctx.repo.limits.diff_count_tests;
-  let totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
-  let diffLines = linesCountingTests(totals);
-  let risk = riskClass({ changed, diffLines, repo: ctx.repo });
-  let guarded = protectedFiles(changed, ctx.repo.human_only_paths);
+  const totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
+  const diffLines = linesCountingTests(totals);
+  const risk = riskClass({ changed, diffLines, repo: ctx.repo });
+  const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
   // Protected config never merges on its own, whatever the merge settings say.
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   let blockPush = false;
-  let githubClaimError: string | undefined;
   if (!input.noPr && hasCommits) {
     const claim = await ensureChangedPathClaim(ctx, changed, ctx.wait ?? false);
-    if (!claim.ok && claim.kind === "pr") {
-      // A ready PR must not stay ready when this resume stops locked (gates may already have failed).
-      let draft: boolean | null = input.existingPr?.draft ?? null;
-      if (input.existingPr) {
-        try {
-          const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, input.existingPr);
-          draft = held.draft;
-          if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
-        } catch (e) {
-          const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
-          ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-          return { result: "needs_human", cause: "unknown", reason: `${claim.reason}; ${msg}`, risk, mergePolicy: "human_review", pr: input.existingPr.url, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
-        }
-      }
-      return { result: "locked", reason: claim.reason, risk, mergePolicy: "human_review", pr: input.existingPr?.url ?? null, draft, ...(reviewedSha ? { reviewedSha } : {}) };
-    }
-    if (!claim.ok && claim.kind === "github") {
-      githubClaimError = `PR step failed: ${claim.reason.slice(0, 300)}`;
-      reason = result === "done" ? githubClaimError : `${reason}; ${githubClaimError}`;
-      result = "needs_human";
-      cause = "unknown";
-      policy = "human_review";
-      blockPush = true;
-    } else if (!claim.ok) {
+    if (!claim.ok) {
       result = "needs_human";
       reason = claim.reason;
       cause = "unknown";
@@ -551,37 +530,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     }
   }
 
-  // A fix round in finalize can add unplanned files too: the bounded scope repair runs on the head
-  // about to be pushed, AFTER the overlap claim, so a concurrency conflict is never silently removed.
-  // A new commit invalidates the review, and the diff-derived signals are recomputed for the final head.
-  if (result === "done" && gates && !blockPush) {
-    const scope = await repairScope(ctx, gates);
-    if (scope.action === "stop") {
-      result = "needs_human";
-      reason = scope.reason;
-      cause = scope.cause;
-    } else if (scope.action === "repaired") {
-      gates = scope.gates;
-      if (reviewedSha) {
-        const delta = await reviewDelta(ctx, { round: input.rounds + 1, gates, findings: input.findings, reviewedSha });
-        input.findings = delta.findings;
-        if (!delta.ok) {
-          result = "needs_human";
-          reason = delta.reason;
-          cause = delta.cause;
-        } else reviewedSha = delta.reviewedSha;
-      }
-      changed = await changedFiles(ctx.worktree, ctx.baseSha);
-      totals = diffTotals(await repoDiffStat(ctx.worktree, ctx.baseSha, ctx.repo, { countTests }));
-      diffLines = linesCountingTests(totals);
-      risk = riskClass({ changed, diffLines, repo: ctx.repo });
-      guarded = protectedFiles(changed, ctx.repo.human_only_paths);
-      policy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
-    }
-  }
-
-  // Final tree, after a base merge and any scope repair. Test lines stay in the size signal and do not
-  // raise the risk class.
+  // Final tree, after a base merge. Test lines stay in the size signal and do not raise the risk class.
   const sizeSignal = diffSizeSignal(diffLines, ctx.repo.merge.low_max_diff_lines);
   if (sizeSignal) ctx.events.emit({ step: "finalize", event: "progress", data: { diff_signal: sizeSignal } });
   const diffReport = diffCountFields(totals, countTests);
@@ -613,10 +562,6 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
       return { result: "needs_human", cause: "unknown", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
     }
-  }
-  if (githubClaimError) {
-    ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: githubClaimError } });
-    return { result: "needs_human", cause: "unknown", reason, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
