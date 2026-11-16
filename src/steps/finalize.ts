@@ -18,7 +18,7 @@ import { closesFooter, fulfilledIssues } from "../queue/admit.js";
 import { pauseRequested } from "../queue/pause.js";
 import { selectChecks } from "../gates/select.js";
 import { approvalGateGap, holdUnfixed } from "../pipeline/recovery.js";
-import { failureSummary, formatGateResults, type GateReport, runGates, skippedSecurityGates } from "./gates.js";
+import { failureSummary, formatGateResults, type GateReport, mergeHolds, runGates, skippedSecurityGates } from "./gates.js";
 import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evaluate.js";
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
@@ -518,8 +518,11 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   const diffLines = linesCountingTests(totals);
   const risk = riskClass({ changed, diffLines, repo: ctx.repo });
   const guarded = protectedFiles(changed, ctx.repo.human_only_paths);
+  // A failed safety-relevant advisory gate keeps the run done but takes the merge to a person.
+  const holds = mergeHolds(gates?.checks ?? []);
+  risk.reasons.unshift(...holds.reasons);
   // Protected config never merges on its own, whatever the merge settings say.
-  let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
+  let policy: MergePolicy = guarded.length || holds.reasons.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   let blockPush = false;
   if (!input.noPr && hasCommits) {
@@ -531,6 +534,13 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       policy = "human_review";
       blockPush = true;
     }
+  }
+  if (holds.secret && hasCommits) {
+    result = "needs_human";
+    reason = "gitleaks flagged the diff; the branch was not pushed (remove the secret from every commit of the branch)";
+    cause = "unknown";
+    policy = "human_review";
+    blockPush = true;
   }
 
   // Final tree, after a base merge. Test lines stay in the size signal and do not raise the risk class.
