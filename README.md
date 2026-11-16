@@ -71,8 +71,8 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 - **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (no
   rebase, so never a force-push) plus full gates again, conflict → `needs_human`; risk class and merge
   policy stay in `result.json`. The PR body (`standards/pr-template.md`) has one **Risk & Security** section:
-  five yes/no rows (data/migrations, auth/permissions, secrets handling, prod deploy/infra, dependencies)
-  and an overall rating (low/medium/high) with a one-line reason. When the plan carries `host_steps` and
+  six yes/no rows (data/migrations, auth/permissions, secrets handling, prod deploy/infra, dependencies,
+  hard list) and an overall rating (low/medium/high) with a one-line reason. When the plan carries `host_steps` and
   the repo sets `pr.host_steps_section`, the body also has that section (copy-paste commands, verify, roll back);
   otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, `none` and pending
   CI on the head are polled up to `limits.pr_ci_wait_minutes` and do not fail the run. Still none or pending
@@ -243,6 +243,11 @@ merge:
   auto_merge_max_risk: none          # none | low | medium [none]; high is never auto
   policy: { low: human_review, medium: human_review }   # bot_review merges the reviewed green head; human_review waits
   low_max_diff_lines: 300            # size signal only; a larger diff is not medium by itself
+  # human_review_paths: ["**/migrations/**", "**/.env*", "billing/**"]   # hard list: a changed match is high risk, so a person merges
+  # merge.human_review_paths [default: migration and secret globs: **/migrations/**, **/.env, **/.env.*, **/secrets/**, **/*credential*,
+  # **/*secret*, **/*.pem, **/*.key]: same glob matching as sensitive_paths. Setting it replaces the default; [] means no
+  # hard-list paths. Migrations the list does not cover are medium. The PR body names the hit in the risk line and in the
+  # "Human review (hard list)" row. human_only_paths stay as they are.
 limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, command_timeout_minutes: 10, gate_timeout_minutes: 10, forbidden_paths: [".env*"], diff_exclude: ["src/gen/**"], diff_count_tests: true, stream_retries: 2, step_token_warn: 1000000 }
 # limits.stream_retries [2]: same-model retries after a provider stream abort (0–5; 0 = off). The current
 # agent call only. Auth, quota and invalid output are not retried. Exhausted retries end needs_human.
@@ -349,7 +354,7 @@ After the plan names files, the run publishes those paths. Overlap with another 
 
 ## Risk & Security
 
-The PR body has a single **Risk & Security** section: whether the diff touches data/migrations, auth/permissions, secrets handling, prod deploy/infra, or dependencies (yes/no plus a short note), then the overall rating and a one-line reason. The rating is the same `risk` as `result.json`. Merge policy stays on the result and in `factory status`; the PR body does not recommend a merge.
+The PR body has a single **Risk & Security** section: whether the diff touches data/migrations, auth/permissions, secrets handling, prod deploy/infra, dependencies, or the hard list `merge.human_review_paths` (yes/no plus a short note; a hard-list hit makes the rating `high` and the PR waits for a person), then the overall rating and a one-line reason. The rating is the same `risk` as `result.json`. Merge policy stays on the result and in `factory status`; the PR body does not recommend a merge.
 
 When the change needs manual steps on the production host (launchd plists, restic, Docker Desktop, files outside the repo), the plan includes `host_steps`: `{ commands, verify, rollback }` with the commands in order. The section is rendered only when both that object and `pr.host_steps_section` are set; the heading is the configured title (for example `Mac install steps` on tourenpilot-ops, see [docs/examples/tourenpilot-ops.yaml](docs/examples/tourenpilot-ops.yaml)). Other repos leave the key unset. An empty plan omits the key, and the section is omitted with it.
 

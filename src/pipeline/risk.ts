@@ -11,6 +11,14 @@ export const PROTECTED_REASON = "changes protected config (CI / factory)";
 const DATA_GLOBS = [...MIGRATION_GLOBS, "**/migration/**", "**/*.sql", "**/schema.prisma"];
 const AUTH_GLOBS = ["**/*auth*", "**/*auth*/**", "**/auth/**", "**/*permission*", "**/*rbac*", "**/*rls*", "**/policies/**", "**/*policies*"];
 const SECRET_GLOBS = ["**/.env", "**/.env.*", "**/secrets/**", "**/*credential*", "**/*secret*", "**/*.pem", "**/*.key"];
+/** `merge.human_review_paths` when the repo does not set it: files whose change always waits for a person. */
+export const DEFAULT_HUMAN_REVIEW_PATHS = [...MIGRATION_GLOBS, ...SECRET_GLOBS];
+
+/** The hard list in effect: the repo's `merge.human_review_paths`, or the default when the key is absent. */
+export function humanReviewPaths(repo: RepoConfig): string[] {
+  return repo.merge.human_review_paths ?? DEFAULT_HUMAN_REVIEW_PATHS;
+}
+
 const DEPLOY_GLOBS = [
   "**/Dockerfile",
   "**/Dockerfile.*",
@@ -35,8 +43,8 @@ export interface SecurityRow {
   note: string;
 }
 
-/** What the diff touches, one yes/no row per area. Notes list up to eight paths. */
-export function securityRows(changed: string[]): SecurityRow[] {
+/** What the diff touches, one yes/no row per area; the last row is the hard list. Notes list up to eight paths. */
+export function securityRows(changed: string[], hardList: string[] = DEFAULT_HUMAN_REVIEW_PATHS): SecurityRow[] {
   const row = (area: string, globs: string[]): SecurityRow => {
     const hits = changed.filter((f) => matchesAny(f, globs)).slice(0, 8);
     return { area, touched: hits.length > 0, note: hits.length ? hits.join(", ") : "none in this diff" };
@@ -47,6 +55,7 @@ export function securityRows(changed: string[]): SecurityRow[] {
     row("Secrets handling", SECRET_GLOBS),
     row("Prod deploy/infra", DEPLOY_GLOBS),
     row("Dependencies", DEPENDENCY_GLOBS),
+    row("Human review (hard list)", hardList),
   ];
 }
 
@@ -69,7 +78,10 @@ export function diffSizeSignal(diffLines: number, limit: number): string | null 
   return diffLines > limit ? `diff ${diffLines} lines > ${limit}` : null;
 }
 
-/** Risk classification, in code: sensitive paths, dependencies, migrations and protected files. */
+/**
+ * Risk classification, in code. `high`: `human_only_paths` or the hard list (`merge.human_review_paths`).
+ * `medium`: `sensitive_paths`, dependencies, and migrations the hard list does not cover.
+ */
 export function riskClass(input: { changed: string[]; diffLines: number; repo: RepoConfig }): RiskAssessment {
   const { changed, repo } = input;
   const hits = (globs: string[]) => changed.filter((f) => matchesAny(f, globs));
@@ -77,13 +89,17 @@ export function riskClass(input: { changed: string[]; diffLines: number; repo: R
   if (humanOnly.length) {
     return { risk: "high", reasons: [`human_only_paths: ${humanOnly.join(", ")}`, PROTECTED_REASON] };
   }
-  const reasons: string[] = [];
-  const sensitive = hits(repo.sensitive_paths);
+  const hard = changed.filter((f) => matchesAny(f, humanReviewPaths(repo)));
+  // A file on the hard list is named once, under its hard-list reason.
+  const rest = (globs: string[]) => hits(globs).filter((f) => !hard.includes(f));
+  const reasons: string[] = hard.length ? [`human_review_paths: ${hard.join(", ")}`] : [];
+  const sensitive = rest(repo.sensitive_paths);
   if (sensitive.length) reasons.push(`sensitive_paths: ${sensitive.join(", ")}`);
-  const deps = hits(DEPENDENCY_GLOBS);
+  const deps = rest(DEPENDENCY_GLOBS);
   if (deps.length) reasons.push(`dependencies: ${deps.join(", ")}`);
-  const migrations = hits(MIGRATION_GLOBS);
+  const migrations = rest(MIGRATION_GLOBS);
   if (migrations.length) reasons.push(`migrations: ${migrations.join(", ")}`);
+  if (hard.length) return { risk: "high", reasons };
   return reasons.length ? { risk: "medium", reasons } : { risk: "low", reasons: [] };
 }
 
