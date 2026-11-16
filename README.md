@@ -872,7 +872,7 @@ improve:
     security: "Privacy and GDPR: personal data in logs, fixtures, exports and retention."
 ```
 
-`thinking` replaces that aspect's model-chain level. `focus.<aspect>` is an optional note (a string or a
+`thinking` sets the level of the first model in that aspect's chain; fallback models keep their own level. `focus.<aspect>` is an optional note (a string or a
 list of bullet points, at most 2000 characters) injected only into that aspect's prompt, as data. It is not
 a checklist. Do not put secrets or customer data in it.
 

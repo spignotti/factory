@@ -108,8 +108,12 @@ export function resolveImproveConfig(repo: RepoConfig, raw: Record<string, unkno
   return { aspects, maxProposals: max, thinking, focus, warnings };
 }
 
-function withThinking(profile: Profile, role: ProfileRole, thinking: ImproveConfig["thinking"][ImproveAspect]): Profile {
-  return { ...profile, roles: { ...profile.roles, [role]: profile.roles[role].map((e) => ({ ...e, thinking })) } };
+/**
+ * The repo's improve thinking level sets the first model of the role's chain. Fallback models keep their own
+ * level, so a profile can pair a subscription model with a stronger fallback (e.g. high, then xhigh).
+ */
+export function withThinking(profile: Profile, role: ProfileRole, thinking: ImproveConfig["thinking"][ImproveAspect]): Profile {
+  return { ...profile, roles: { ...profile.roles, [role]: profile.roles[role].map((e, i) => (i === 0 ? { ...e, thinking } : e)) } };
 }
 
 function selectShape(max: number, aspect: ImproveAspect, checklist: boolean): string {
