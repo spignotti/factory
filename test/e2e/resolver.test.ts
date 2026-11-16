@@ -130,7 +130,8 @@ describe("resolver on a technical stop", () => {
     expect(comments[0]!.body).toMatch(/\*\*Why:\*\* CI on the PR head \([0-9a-f]{8}\) is red \(resolver: no resolver turn left \(2\/2\)\)/);
     expect(comments[0]!.body).toContain("<details><summary>Full reason");
     expect(comments[0]!.body).toContain(`The factory closes its pull request ${pr}`);
-    expect(comments[0]!.body).toContain("rewrite the ticket");
+    expect(comments[0]!.body).toContain("rewrite it or split it");
+    expect(comments[0]!.body).toContain("A technical failure");
     expect(comments[0]!.body).toContain(`<!-- factory:failed run=${r.runId} -->`);
   });
 
