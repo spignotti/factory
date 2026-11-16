@@ -139,6 +139,39 @@
             ]
           }
         },
+        "resolve": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "type": "string",
+                "pattern": "^[^/\\s]+\\/\\S+$"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              },
+              "family": {
+                "type": "string"
+              },
+              "capacity_only": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "model"
+            ]
+          }
+        },
         "review_plan": {
           "minItems": 1,
           "type": "array",

@@ -192,7 +192,8 @@ export type AgentCall = Omit<ModelRequest, "env" | "signal" | "onActivity" | "ag
 /** Whether an agent step gets `docs_lookup`: repo.yaml `docs_lookup.roles`, else the profile's. */
 export function docsEnabled(ctx: Pick<RunContext, "deps" | "repo">, step: string): boolean {
   const roles: string[] = ctx.repo.docs_lookup?.roles ?? ctx.deps.profile.docs_lookup.roles;
-  return ctx.deps.docs !== undefined && roles.includes(step as DocsStep);
+  // The resolver edits code like a fix round and gets the same tools.
+  return ctx.deps.docs !== undefined && roles.includes((step === "resolve" ? "fix" : step) as DocsStep);
 }
 
 /** One supervised agent call: model chain with backoff/fallback, heartbeat events, watchdog. */

@@ -59,8 +59,9 @@ describe("stored outcomes", () => {
 
   it("resume writes a recovery note, increments a known attempt, and does not start a new plan", async () => {
     const r = await runScenario({ script: "invalid-handoff.json" });
-    expect(r.result.result).toBe("needs_human");
-    expect(r.resultFile.outcome).toMatchObject({ ticket: null, attempts: 1, merged: "no", open_decision: true });
+    expect(r.result.result).toBe("failed");
+    // A failed run waits for nobody: no open decision.
+    expect(r.resultFile.outcome).toMatchObject({ ticket: null, attempts: 1, merged: "no", open_decision: false });
     const wt = join(r.runDir, "worktree");
     writeFileSync(join(wt, "src/math.js"), MULTIPLY);
     writeFileSync(join(wt, "test/multiply.test.js"), MULTIPLY_TEST);
@@ -69,7 +70,7 @@ describe("stored outcomes", () => {
     expect(resumed.result.result).toBe("done");
     expect(resumed.runner.calls.some((call) => call.role.startsWith("plan"))).toBe(false);
     expect(JSON.parse(resumed.file("recovery.json"))).toMatchObject({
-      previous_result: "needs_human",
+      previous_result: "failed",
       attempts: 2,
       checkpoint: "implement",
       plan_kept: true,
@@ -84,7 +85,7 @@ describe("stored outcomes", () => {
 
   it("V24: resume does not invent an attempt count the checkpoint never stored", async () => {
     const r = await runScenario({ script: "invalid-handoff.json" });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const saved = JSON.parse(r.file("state.json")) as { attempts?: number };
     delete saved.attempts;
     writeFileSync(join(r.runDir, "state.json"), JSON.stringify(saved));

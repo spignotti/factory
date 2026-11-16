@@ -82,7 +82,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   a bug when the reviewer finds it harmful, otherwise a suggestion or nit; it never stops the run on its own.
 - **Merge/exit** (`src/pipeline/merge.ts`, `loop.ts`): ids, dedupe, nit cap, stalemate, exit rules, fix rounds.
 - **Finalize** (`src/steps/finalize.ts`, `src/pipeline/risk.ts`): full gates; if the base moved, a merge (no
-  rebase, so never a force-push) plus full gates again, conflict → `needs_human`; risk class and merge
+  rebase, so never a force-push) plus full gates again, conflict → resolver; risk class and merge
   policy stay in `result.json`. The PR body (`standards/pr-template.md`) has one **Risk & Security** section:
   six yes/no rows (data/migrations, auth/permissions, secrets handling, prod deploy/infra, dependencies,
   hard list) and an overall rating (low/medium/high) with a one-line reason. When the plan carries `host_steps` and
@@ -90,7 +90,24 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   otherwise it is omitted. Push/PR through `src/gh.ts`. After the PR exists, `none` and pending
   CI on the head are polled up to `limits.pr_ci_wait_minutes` and do not fail the run. Still none or pending
   keeps an auto policy and does not enable auto-merge; the runner enables it later when that SHA is green.
-  Red CI ends it `needs_human` and converts the PR back to draft.
+  Red CI converts the PR back to draft and goes to the resolver with the failed checks' logs.
+- **Resolver** (`src/pipeline/resolve.ts`, role `resolve`, `roles/resolve.md`): every technical stop of a run
+  with a worktree goes to one resolver turn instead of ending the run: the gate repair budget spent, a review
+  stalemate or round limit, an open bug after the rounds or in the final delta review, a base merge conflict
+  or red gates after it, red PR CI, a PR step that failed for another reason than a GitHub outage, invalid
+  reviewer output, and a silent agent (the last two only while `stall_minutes` of wall time is left). It runs
+  in the run's worktree with the implementer's tools and gets the task, plan, stop reason, latest gate report,
+  open findings, CI logs and the diff. It may fix code or tests, keep an out-of-plan change, resolve a base
+  merge the factory started for it, or answer that the approach is wrong. It edits files only; the factory
+  commits, re-runs the full gates with the fake-fix hold, and continues the run where it stopped (the next
+  package, or finalize with a delta review). `human_only_paths` stay protected by the `protected_paths` gate.
+  Two turns per run (`state.resolver_turns`). When the resolver gives up, the turns are spent, or the wall
+  budget is gone, the run ends `failed` with the stop and the resolver's reason; on an issue the reason is
+  posted as a comment, the issue gets `factory-failed` and loses `factory-ready`, and then the run's own PR is
+  closed with its remote branch, but only while its head is still a commit the run produced (not for `--no-pr`;
+  `failure_reported` in `result.json`). A stop that waits for a person (`human_approval`, such as a clean-status
+  refusal or a missing secret) is reported the same way but never closes the PR. A resolver turn that leaves
+  the reviewed head unchanged never clears an open finding, and finalize never approves a head with an open bug.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
   env allowlist and isolated `HOME`; capacity/network/stream/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
@@ -159,8 +176,8 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 Every run keeps `state.json` (current step, package status, rounds, PR) next to `result.json` in
 `~/.factory/runs/<run-id>/`. After a `needs_human` stop, fix things in the run's worktree (or push to the
 PR branch), then `factory resume <run-id>`: it commits the uncommitted fix as `fix: human changes before
-resume`, merges new commits from `origin/<branch>` and the moved base (conflict → `needs_human` again),
-re-runs the gates (red → one fixer round) and continues from the saved step. It never force-pushes; an
+resume`, merges new commits from `origin/<branch>` and the moved base (conflict → resolver),
+re-runs the gates (red → one fixer round, then the resolver) and continues from the saved step. It never force-pushes; an
 existing PR is updated and marked ready when the run ends `done`. After an interrupted/failed run, or a
 `needs_human` stop on a transient provider error, uncommitted agent leftovers are discarded instead and the
 step re-runs. A resumed review starts with a fresh round
@@ -285,12 +302,12 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # ticket goes back to pending in the queue (see Queue).
 # limits.pr_ci_wait_minutes [20]: after the PR is pushed, none and pending CI on the head are polled
 # this long (0–120; 0 = one sample). Still none or pending does not fail the run, keeps an auto
-# policy, and does not enable auto-merge until that same SHA is green. Only green enables auto-merge. Red CI ends it
-# needs_human and marks the PR draft again. The wait is not work time.
+# policy, and does not enable auto-merge until that same SHA is green. Only green enables auto-merge. Red CI
+# marks the PR draft again and goes to the resolver. The wait is not work time.
 # max_wall_minutes [240, 4 h] is active time: time the box was suspended (VM paused, laptop asleep) is credited
 # back, as for the stall watchdog. It is enforced between steps, inside agent calls and before gate
-# commands; the run ends needs_human ("… exceeded (N active min; M min box suspended, not counted);
-# factory resume <run-id>"), the worktree keeps the work and resume re-runs the gates over it.
+# commands; the run ends failed ("… exceeded (N active min; M min box suspended, not counted)") and says
+# so on the issue. The worktree keeps the work.
 # limits.max_diff_lines is a gate. merge.low_max_diff_lines is a size signal and does not change the risk class. Both count
 # added + removed lines since base (renames detected: a moved file counts only its changed lines; a
 # move into or out of an excluded path counts as delete + add), without lockfiles (package-lock.json, pnpm-lock.yaml, uv.lock, …;
@@ -994,7 +1011,7 @@ API key for OpenCode Go).
 
 An ordered list of issues per repository, in `$FACTORY_HOME/queue/<repo key>.json` (atomic writes). A restarted `queue run` continues that list and does not start an issue that already has a live run.
 
-`factory queue add` queues issues. Closed, missing `factory-ready`, carrying `needs-plan`, `needs-decision`, `needs-input` or `factory-proposal`, or with an empty title or body is refused:
+`factory queue add` queues issues. Closed, missing `factory-ready`, carrying `needs-plan`, `needs-decision`, `needs-input`, `factory-failed` or `factory-proposal`, or with an empty title or body is refused:
 
 ```
 factory queue add --repo ~/code/app 120 121 122
@@ -1003,23 +1020,24 @@ factory queue add --repo ~/code/app 130 --after 120
 
 `--after 120` leaves #130 pending until issue 120's factory PR is merged.
 
-The worker takes the queue. On each repo that already has a queue file it also takes open `factory-ready` issues with a title and a body, once. A later poll or a restarted worker does not add them again, and an incomplete issue list adds nothing. `needs-plan`, `needs-decision`, `needs-input`, `factory-proposal`, closed issues, and anything already in the file stay out. `queue add` remains the override and can queue a finished issue again.
+The worker takes the queue. On each repo that already has a queue file it also takes open `factory-ready` issues with a title and a body, once. A later poll or a restarted worker does not add them again, and an incomplete issue list adds nothing. `needs-plan`, `needs-decision`, `needs-input`, `factory-failed`, `factory-proposal`, closed issues, and anything already in the file stay out. `queue add` remains the override and can queue a finished issue again.
 
 The worker starts `factory run --issue N --no-notify` up to `--slots` coding runs in total (default 2), and also up to `concurrency.max_runs` in that repo. Priority is `prio:high`, then normal, then `prio:low` (legacy `priority:*` labels remain accepted); equal priority keeps queue order, oldest first. A normal ticket waiting 24 hours starts ahead of a newer higher-priority one. The choice is priority and wait, not a model reordering the queue. Waiting on `--after`, on CI, or on a `concurrency.resources` name does not use a coding slot. A second run, including a manual `factory run`, waits while that name is held.
 
-It starts nothing for a repo while the base branch CI is red. When GitHub reports no CI for the base commit, the run checks the base with the repo's fast checks once and records the result per repository and base commit in `$FACTORY_HOME/base-checks/`: a green record lets later runs on that commit skip the check; a red one makes the worker start nothing for the repo until the base commit changes or the re-check interval has passed (then one run checks again). The interval starts at 30 minutes and doubles with each re-check of the same red commit (1 h, 2 h, at most 4 h); a new base commit resets it. A run that ends with that local `base_red` removes its worktree and branch at once. Pending entries, `factory queue list` and `factory status` show it as `base problem: fast checks red on base <sha>: <checks>`, and a ticket whose run ended with that local `base_red` goes back to pending without spending a requeue. It does not start an issue that is closed, missing `factory-ready`, carrying a blocked label, or already has an open factory PR. Losing `factory-ready` (or gaining `needs-plan`, `needs-decision`, `needs-input`, or `factory-proposal`) while a run is in progress pauses at the next step, keeps the worktree, and does not auto-merge; restoring the label lets that same run continue. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. A `needs_input` with questions is parked until answered: the worker posts the questions when the run could not (retried every poll until the comment and labels are there), and once the issue carries `factory-ready` again and no longer `needs-input`, the ticket starts a fresh run that reads the answers from the comments. Any other `needs_human`, `needs_input`, `failed` or GitHub-CI `base_red` is parked with the reason and is not resumed. A `locked` overlap with a live run stays parked until that run ends, then resumes the saved plan when the issue text is unchanged. Open factory PRs never park a ticket; an entry an older version parked behind one (`blocked_by`) is pending again on the next tick. A predecessor that closed without merging, and an `after` cycle, stay parked with the reason and are not started again. `factory status` lists a draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) as stale.
+It starts nothing for a repo while the base branch CI is red. When GitHub reports no CI for the base commit, the run checks the base with the repo's fast checks once and records the result per repository and base commit in `$FACTORY_HOME/base-checks/`: a green record lets later runs on that commit skip the check; a red one makes the worker start nothing for the repo until the base commit changes or the re-check interval has passed (then one run checks again). The interval starts at 30 minutes and doubles with each re-check of the same red commit (1 h, 2 h, at most 4 h); a new base commit resets it. A run that ends with that local `base_red` removes its worktree and branch at once. A base fast check that times out or is unstable (red then green) is the same base problem, not a ticket failure. Pending entries, `factory queue list` and `factory status` show it as `base problem: fast checks red on base <sha>: <checks>`, and a ticket whose run ended with that local `base_red` goes back to pending without spending a requeue. It does not start an issue that is closed, missing `factory-ready`, carrying a blocked label, or already has an open factory PR. Losing `factory-ready` (or gaining `needs-plan`, `needs-decision`, `needs-input`, `factory-failed`, or `factory-proposal`) while a run is in progress pauses at the next step, keeps the worktree, and does not auto-merge; restoring the label lets that same run continue. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. A `needs_input` with questions is parked until answered: the worker posts the questions when the run could not (retried every poll until the comment and labels are there), and once the issue carries `factory-ready` again and no longer `needs-input`, the ticket starts a fresh run that reads the answers from the comments. A GitHub-CI `base_red` and a pause stay parked with the reason. A run that ended without `result.json` or could not be started gets the same bounded retry as a provider drop (twice). Every other outcome fails the ticket, including one no rule lists, a stall, and spent provider retries or window waits: the worker posts the reason on the issue (once per run, hidden marker), adds `factory-failed`, removes `factory-ready`, and then closes the run's PR with its remote branch when the PR's head is still a commit the run produced. A `human_approval` stop, spent provider retries and a done PR whose post-push repair is spent keep their PR open. The worker retries the report on later polls, at most 10 times (`queue list` and `status` show `failed: <reason>`). A ticket whose kept PR is still open stays parked on it and starts once that PR is merged or closed. A done run whose PR waits for a human merge (the hard list) is done, not failed. Once the issue carries `factory-ready` again and no longer `factory-failed`, the ticket starts a fresh run. A `locked` overlap with a live run stays parked until that run ends, then resumes the saved plan when the issue text is unchanged; any other `locked` goes back to pending. Open factory PRs never park a ticket; an entry an older version parked behind one (`blocked_by`) is pending again on the next tick. A predecessor that closed without merging, and an `after` cycle, stay parked with the reason and are not started again. `factory status` lists a draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) as stale.
 
 Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when it is a bundle partner the queue started with this run (`factory run --bundle`) and an acceptance line `fulfills #N` is verified by evidence the evidence gate accepted (or by review); any other `fulfills #N` closes nothing. File overlap alone is not a bundle.
 
-For `auto`/`bot_review`, red head CI, a new head or a moved base schedules the **same** run/PR through
-`factory resume`, under normal global/repo/resource limits. Auto-merge is disabled first; new commits
+For a **done** `auto`/`bot_review` run, red head CI, a new head or a moved base schedules the **same** run/PR through
+`factory resume`, under normal global/repo/resource limits; a stopped run is never continued this way (its
+resolver turns were in the run). Auto-merge is disabled first; new commits
 gain no inherited approval or review SHA. The pipeline synchronizes the branch/base, runs gates and
 reviews the actual delta before approval. Post-push continuations have a persisted two-attempt budget;
 pause, drain, the work window, withdrawn admission or a changed issue prevent automatic starts. Missing
-checkpoints and uncommitted work require a person. Failed-CI diagnostics are read for the exact SHA,
-bounded and redacted; unknown/config/base failures never authorize product edits. A conflict stops and
-asks for a decision. Human-policy PRs may still receive `gh pr update-branch` without any new approval.
-A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and parked.
+checkpoints and uncommitted work fail the ticket. Red CI goes through finalize to the resolver with the
+failed-check logs of the exact SHA, bounded and redacted. A base conflict goes to the resolver. Spent
+continuations fail the ticket. Human-policy PRs may still receive `gh pr update-branch` without any new approval.
+A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and failed.
 `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish.
 
 Test evidence accepts existing executed tests without requiring edits. Pytest names/skips are parsed

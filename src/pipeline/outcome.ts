@@ -48,20 +48,6 @@ export function stopCauseOf(stop: unknown): StopCause | undefined {
 }
 
 /**
- * A stopped run may be re-driven only when both stored stops grant repair and the result names the
- * same run, branch, worktree and PR as state. Done self-merge revalidation does not use this.
- */
-export function repairContinuationAllowed(
-  state: { run_id: string; branch: string | null; worktree: string | null; pr: string | null; stop?: unknown },
-  result: { result: string; run_id: string; branch: string | null; worktree: string | null; pr: string | null; stop?: unknown },
-): boolean {
-  if (result.result === "done") return false;
-  if (!state.branch || !state.worktree || !state.pr) return false;
-  if (result.run_id !== state.run_id || result.branch !== state.branch || result.worktree !== state.worktree || result.pr !== state.pr) return false;
-  return readStop(state.stop)?.cause === "technical_repair" && readStop(result.stop)?.cause === "technical_repair";
-}
-
-/**
  * A coding run never stores a confirmed merge. `ticket: null` means the task has no ticket.
  * `attempts: null` means this checkpoint did not record a count (legacy); that is not zero.
  */

@@ -3,6 +3,7 @@ roles:
   plan_medium:       [{ model: openai/sol, thinking: medium }]
   plan_normalize:    [{ model: opencode-go/deepseek-v4.1-flash }]
   implement:         [{ model: opencode-go/deepseek-v4.1-flash }, { model: opencode-go/deepseek-v4-pro }]
+  resolve:           [{ model: openai/sol, thinking: high }]
   review_plan:       [{ model: openai/mid-codex, thinking: medium }]
   review_simplicity: [{ model: openai/mid-codex, thinking: medium }]
   review_security:   [{ model: openai/mid-codex, thinking: high }]

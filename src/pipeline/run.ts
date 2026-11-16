@@ -23,15 +23,18 @@ import { EnvMissing } from "../services.js";
 import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "../secrets.js";
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
-import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, writeJson } from "./context.js";
 import { readBaseCheck, writeBaseCheck } from "./base-check.js";
 import { acquireRepoLockWithRetry, claimResources, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
 import { pauseRequested } from "../queue/pause.js";
 import { admissionBlock } from "../queue/admit.js";
 import { planPaths, touchesExclusive } from "./overlap.js";
 import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
-import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProblem, stopCauseForBudget } from "./recovery.js";
+import { openFindings } from "./merge.js";
+import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProblem } from "./recovery.js";
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
+import { closableTarget, isFailedExit, keepsPr, reportFailure } from "./failure.js";
+import { MAX_RESOLVER_TURNS, type ResolverStop, resolverTurn } from "./resolve.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
 import { postQuestions as postQuestionsOnIssue } from "./questions.js";
@@ -256,6 +259,8 @@ interface Outcome {
   questions?: string[];
   /** Whether the questions reached the issue (comment and labels). Set only when a post was attempted. */
   questions_posted?: boolean;
+  /** Whether a failed run's comment, label swap and PR close reached the issue. Set only when a report was attempted. */
+  failure_reported?: boolean;
   /** The plan's stated assumptions. */
   assumptions?: string[];
   skipped_gates?: string[];
@@ -307,8 +312,12 @@ class RunFrame {
       await body();
     } catch (e) {
       const reason = (e as Error).message;
-      if (e instanceof Interrupted) this.set({ result: "failed", reason });
-      else if (e instanceof TransientAgentError) {
+      if (e instanceof Interrupted) {
+        // A reboot or Ctrl-C is not the change's fault: the same bounded retry as a provider drop.
+        // Resume discards the uncommitted leftovers of the interrupted step.
+        if (this.state) this.state.transient = true;
+        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("transient_retry") });
+      } else if (e instanceof TransientAgentError) {
         // Provider timeout/drop/capacity, retries used up: the run is fine, the provider was not. Resumable;
         // the uncommitted leftovers are the agent's (not a human fix), so resume discards them.
         if (this.state) this.state.transient = true;
@@ -322,18 +331,19 @@ class RunFrame {
         // checkpoint and spent budgets stay; generic 429/capacity stays on the transient_retry path above.
         if (this.state) this.state.transient = true;
         this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("provider_window_wait"), window_resets_at: e.resetsAtMs, ...(e.estimated ? { window_estimated: true } : {}) });
-      } else if (e instanceof WallTimeExceeded) {
-        // The work so far stays in the worktree; resume re-runs the gates over it and continues.
-        this.set({ result: "needs_human", reason: this.state?.worktree ? `${reason}; factory resume ${this.runId}` : reason, stop: stopFor("budget_exhausted") });
       } else if (e instanceof EnvMissing) {
         this.set({ result: "needs_human", reason, stop: stopFor("human_approval") });
-      } else if (e instanceof WatchdogAbort || e instanceof InvalidOutputError) {
-        // Not classifiable without a diagnosis: fail closed, no automatic recovery is implied.
-        this.set({ result: "needs_human", reason, stop: stopFor("unknown") });
-      } else this.set({ result: "failed", reason });
+      } else {
+        // Wall time spent, or a silent agent / invalid output the resolver could not take (no time left
+        // or no turn left), or any other error: the run fails and says why on the issue. What the
+        // aborted step left uncommitted is not a human fix: a manual resume discards it.
+        if (this.state) this.state.transient = true;
+        this.set({ result: "failed", reason, stop: undefined });
+      }
     }
     for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
     await this.postQuestions();
+    await this.reportFailure();
     // Service logs and browser captures are written by child processes: redact them in place.
     if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
     let result: RunResult;
@@ -363,6 +373,29 @@ class RunFrame {
     } catch (e) {
       this.out.questions_posted = false;
       this.events.emit({ step: "run", event: "progress", data: { questions_posted: false, issue, error: (e as Error).message.slice(0, 300) } });
+    }
+  }
+
+  /**
+   * A failed run says why on its issue and closes its own PR, so the ticket waits for nobody (the queue
+   * worker does the same for every stop it fails, and retries after a GitHub error). A `--no-pr` run
+   * writes nothing to GitHub.
+   */
+  private async reportFailure(): Promise<void> {
+    const st = this.state;
+    const issue = st?.task.issue;
+    if (issue === undefined || !this.deps || st?.no_pr) return;
+    const paused = pauseRequested(this.deps.factoryHome, { runId: this.runId }) !== undefined;
+    if (!isFailedExit({ result: this.out.result, stop: this.out.stop, questions: this.out.questions }, { paused })) return;
+    try {
+      // A stop that waits for a person keeps its PR; otherwise only the run's own head is closed.
+      const target = await closableTarget(st, this.out.pr ?? st?.pr ?? null, keepsPr(this.out.stop));
+      await reportFailure(this.deps.github, this.repoDir, issue, this.runId, this.out.reason, target, (t) => this.events.redact(t));
+      this.out.failure_reported = true;
+      this.events.emit({ step: "run", event: "progress", data: { failure_reported: true, issue } });
+    } catch (e) {
+      this.out.failure_reported = false;
+      this.events.emit({ step: "run", event: "progress", data: { failure_reported: false, issue, error: (e as Error).message.slice(0, 300) } });
     }
   }
 
@@ -423,6 +456,7 @@ class RunFrame {
       ...(this.events.diffCount ?? {}),
       ...(out.questions ? { questions: out.questions } : {}),
       ...(out.questions_posted !== undefined ? { questions_posted: out.questions_posted } : {}),
+      ...(out.failure_reported !== undefined ? { failure_reported: out.failure_reported } : {}),
       ...(out.assumptions?.length ? { assumptions: out.assumptions } : {}),
       ...(out.skipped_gates?.length ? { skipped_gates: out.skipped_gates } : {}),
       branch: out.branch,
@@ -677,10 +711,9 @@ async function beginWork(
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
     const stop = baseCheckOutcome(results);
-    if (!stop || stop.result === "base_red") {
-      const failed = results.filter((r) => r.status === "fail").map((r) => r.name);
-      writeBaseCheck(deps.factoryHome, baseKey, { sha: baseSha, status: stop ? "red" : "green", failed: stop ? failed : [], at: new Date(f.now()).toISOString() });
-    }
+    // A timed-out or unstable check is recorded red too: later starts wait for the re-check, not fail.
+    const failed = results.filter((r) => r.status !== "pass").map((r) => r.name);
+    writeBaseCheck(deps.factoryHome, baseKey, { sha: baseSha, status: stop ? "red" : "green", failed: stop ? failed : [], at: new Date(f.now()).toISOString() });
     // A local base_red starts over on its next try: drop the worktree (and its setup output) once services stop.
     if (stop?.result === "base_red") {
       f.cleanups.push(async () => {
@@ -688,9 +721,9 @@ async function beginWork(
         await withRepoGitOps(repoDir, () => git(repoDir, ["branch", "-D", branch])).catch(() => undefined);
       });
     }
-    if (stop) return f.set(stop.result === "needs_human" ? { result: stop.result, reason: stop.reason, stop: stopFor("unknown") } : stop);
+    if (stop) return f.set(stop);
   }
-  await advance(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
+  await drive(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
 }
 
 /** A stopped GitHub-CI `base_red` that gc / `factory run` may continue. */
@@ -826,9 +859,10 @@ async function stopIfPaused(f: RunFrame): Promise<boolean> {
 
 /**
  * implement → review loop → finalize, starting at `state.step`, persisting state.json after every
- * package, round and step. Shared by run and resume.
+ * package, round and step. Shared by run and resume. Returns the technical stop for the resolver, or
+ * nothing when the run's result is set (done, or a stop that is not technical: pause, outage, lock).
  */
-async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<void> {
+async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport }): Promise<ResolverStop | undefined> {
   const st = f.state!;
   if (await stopIfPaused(f)) return;
   const sync = () => {
@@ -857,15 +891,13 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     st.failures = impl.failures;
     sync();
     gates = impl.lastGates ?? gates;
-    const failed = [...impl.status].filter(([, s]) => s !== "done").map(([id, s]) => `${id} ${s}${impl.failures[id] ? `: ${impl.failures[id]}` : ""}`);
-    if (failed.length || !gates) {
-      // The persisted repair state says what this stop means: a blocking class stays a human
-      // question, a spent gate budget is exhausted, otherwise the same checkpoint can be repaired.
-      loop = { result: "needs_human", reason: `packages not done: ${failed.join("; ")}`, cause: ctx.budget ? stopCauseForBudget(ctx.budget) : "technical_repair", rounds: st.rounds, findings: [], gates };
-    } else {
-      st.step = "review";
-      sync();
+    const notDone = [...impl.status].filter(([, s]) => s !== "done");
+    if (notDone.length || !gates) {
+      const failed = notDone.map(([id, s]) => `${id} ${s}${impl.failures[id] ? `: ${impl.failures[id]}` : ""}`);
+      return { reason: `packages not done: ${failed.join("; ")}`, gates, packages: notDone.filter(([, s]) => s === "failed").map(([id]) => id) };
     }
+    st.step = "review";
+    sync();
   }
   if (st.step === "review") {
     if (await stopIfPaused(f)) return;
@@ -880,10 +912,9 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
         sync();
       },
     });
-    if (loop.result === "done") {
-      st.step = "finalize";
-      sync();
-    }
+    if (loop.result !== "done") return { reason: loop.reason, gates: loop.gates, findings: openFindings(loop.findings) };
+    st.step = "finalize";
+    sync();
   }
   loop ??= { result: "done", reason: "", rounds: st.rounds, findings: st.findings, gates, reviewedSha: st.reviewed_sha };
 
@@ -904,11 +935,105 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   if (fin.reviewedSha) st.reviewed_sha = fin.reviewedSha;
   if (fin.ciWait) st.ci_wait = fin.ciWait;
   else delete st.ci_wait;
-  if (fin.continuation && (st.continuation_attempts ?? 0) < continuationLimit(st.continuation_extra)) st.continuation = fin.continuation;
-  else delete st.continuation;
+  delete st.continuation;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
-  f.set({ result: fin.result, reason: fin.reason, ...(fin.cause && fin.result !== "done" ? { stop: stopFor(fin.cause) } : {}), risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
+  f.set({ result: fin.result, reason: fin.reason, stop: fin.cause && fin.result === "needs_human" ? stopFor(fin.cause) : undefined, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
+  const tech = fin.result === "needs_human" ? fin.technical : undefined;
+  if (!tech) return;
+  const stop: ResolverStop = { reason: fin.reason, gates: tech.gates, ...(tech.findings?.length ? { findings: tech.findings } : {}) };
+  if (tech.ciSha) {
+    const failures = await ctx.deps.github.headFailures(ctx.repoDir, tech.ciSha).catch(() => []);
+    stop.ci = { sha: tech.ciSha, failures: failures.map((c) => ({ ...c, output_tail: ctx.events.redact(c.output_tail) })) };
+  }
+  if (tech.baseConflict) {
+    const sha = await revParse(ctx.repoDir, await baseRef(ctx.repoDir, ctx.repo.base_branch));
+    stop.merge = { sha, label: ctx.repo.base_branch, base: true };
+  }
+  return stop;
+}
+
+/** A silent agent or an invalid model output gets a resolver turn only while the wall budget has room for one. */
+function wallAllowsResolver(ctx: RunContext): boolean {
+  return ctx.deadline.at - Date.now() >= ctx.repo.limits.stall_minutes * 60_000;
+}
+
+/**
+ * The run's pipeline with its resolver: every technical stop goes to a resolver turn instead of ending
+ * the run, then the run continues where it stopped. At most {@link MAX_RESOLVER_TURNS} turns per run
+ * (`state.resolver_turns`); after that, or when the resolver says the approach is wrong, the run fails.
+ */
+async function drive(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; startedAt: number; gates?: GateReport; stop?: ResolverStop }): Promise<void> {
+  let gates = opts.gates;
+  let stop = opts.stop;
+  for (;;) {
+    if (!stop) {
+      try {
+        stop = await advance(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt, gates });
+      } catch (e) {
+        if (!(e instanceof WatchdogAbort || e instanceof InvalidOutputError) || !wallAllowsResolver(ctx)) throw e;
+        stop = { reason: e.message };
+      }
+      if (!stop) return;
+    }
+    const resolved = await resolveStop(f, ctx, stop);
+    if (!resolved) return;
+    gates = resolved;
+    stop = undefined;
+  }
+}
+
+/** Resolver turns on one stop until one is green or the run's budget is spent. Undefined: the run failed. */
+async function resolveStop(f: RunFrame, ctx: RunContext, stop: ResolverStop): Promise<GateReport | undefined> {
+  const st = f.state!;
+  // Open findings travel with every stop (a thrown error carries none): a turn that changes nothing
+  // then cannot clear them.
+  const open = openFindings(st.findings);
+  let current: ResolverStop = stop.findings?.length || !open.length ? stop : { ...stop, findings: open };
+  let previous: string | undefined;
+  for (;;) {
+    const used = st.resolver_turns ?? 0;
+    if (used >= MAX_RESOLVER_TURNS) return failRun(f, stop.reason, previous ?? `no resolver turn left (${used}/${MAX_RESOLVER_TURNS})`);
+    st.resolver_turns = used + 1;
+    f.save();
+    const out = await resolverTurn(ctx, current, used + 1, previous);
+    st.base_sha = ctx.baseSha;
+    st.gate_count = ctx.gateCount;
+    if (out.ok) {
+      // The next review reads the resolver's account next to each finding it answered.
+      const answered = new Set((current.findings ?? []).map((f) => f.id));
+      for (const finding of st.findings) {
+        if (answered.has(finding.id)) finding.response = { finding_id: finding.id, status: "fixed", response: `resolver: ${out.summary}`.slice(0, 2000) };
+      }
+      if (st.step === "implement") {
+        // The resolver finished the failed packages; dependents that were skipped run next.
+        for (const [id, status] of Object.entries(st.packages)) {
+          if (status === "failed") st.packages[id] = "done";
+          else if (status === "skipped") delete st.packages[id];
+        }
+        st.failures = {};
+      } else if (st.step === "review" && st.reviewed_sha && (await headSha(ctx.worktree)) !== st.reviewed_sha) {
+        // Finalize reviews the resolver's commits as a delta; a fresh review loop would reset the round budget.
+        // An unchanged reviewed head stays in review, where an open bug blocks it again.
+        st.step = "finalize";
+      }
+      f.save();
+      return out.gates;
+    }
+    f.save();
+    if (out.final) return failRun(f, stop.reason, out.reason);
+    previous = out.reason;
+    current = { ...current, ...(out.gates ? { gates: out.gates } : {}) };
+  }
+}
+
+/** The run ends failed. Its PR is not left ready for review (the failure report closes it on an issue). */
+async function failRun(f: RunFrame, stopReason: string, why: string): Promise<undefined> {
+  f.events.emit({ step: "resolve", event: "progress", data: { failed: why.slice(0, 300) } });
+  const draftError = await keepDraft(f);
+  const reason = `${stopReason}; resolver: ${why}`;
+  f.set({ result: "failed", reason: draftError ? `${reason}; ${draftError}` : reason, stop: undefined, pr: f.state?.pr ?? f.out.pr, rounds: f.state?.rounds ?? f.out.rounds });
+  return undefined;
 }
 
 /**
@@ -1109,44 +1234,27 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     st.base_sha = ctx.baseSha;
     st.gate_count = ctx.gateCount;
     f.save();
-    if (!ready.ok) {
+    if (continuation && st.step === "finalize") st.step = "review";
+    if (!ready.ok && !ready.stop) {
       const draftError = await keepDraft(f);
       return f.set({ result: "needs_human", reason: draftError ? `${ready.reason}; ${draftError}` : ready.reason, ...(ready.cause ? { stop: stopFor(ready.cause) } : {}) });
     }
-    let gates = ready.gates;
-    if (continuation?.kind === "ci") {
-      const currentHead = await headSha(ctx.worktree);
-      // A base merge or remote update makes the saved CI diagnosis apply to a different tree.
-      // Do not fall through to a generic product edit.
-      if (currentHead !== continuation.sha) {
-        return f.set({ result: "needs_human", reason: "post-CI repair refused: head moved before diagnosis; no product edit", stop: stopFor("unknown") });
-      }
-      const baseCi = await deps.github.baseStatus(ctx.repoDir, ctx.baseSha);
-      if (baseCi === "red" || baseCi === "pending") return f.set({ result: "needs_human", reason: "post-CI repair: base CI is not green; no product edit", stop: stopFor("unknown") });
-      const failures = await deps.github.headFailures(ctx.repoDir, continuation.sha);
-      if (!failures.length) return f.set({ result: "needs_human", reason: "post-CI repair: no actionable failed-check diagnostics; no product edit", stop: stopFor("unknown") });
-      const ciGates: GateReport = { n: ctx.gateCount, tier: "full", green: false, changed_files: [], scope_report: [],
-        checks: failures.map((c) => ({ ...c, output_tail: events.redact(c.output_tail), kind: "check", status: "fail", duration_ms: 0 })) };
-      writeJson(ctx, `ci-failure-${st.continuation_attempts}.json`, { sha: continuation.sha, ...ciGates });
-      const fixed = await fixStep(ctx, "post-ci", { open: [], gates: ciGates, tier: "full" }, { gateFailures: 0 });
-      if (!fixed.ok) return f.set({ result: "needs_human", reason: `post-CI repair: ${fixed.reason}`, stop: stopFor(fixed.cause) });
-      gates = fixed.gates;
-    }
-    if (gates && !gates.green) {
+    // A red CI continuation needs no step of its own: finalize polls the PR head again and hands red
+    // checks to the resolver with their logs.
+    let gates = ready.ok ? ready.gates : ready.stop?.gates;
+    let stop = ready.ok ? undefined : ready.stop;
+    if (!stop && gates && !gates.green) {
       const fixed = await fixStep(ctx, "resume", { open: [], gates }, { gateFailures: 0 });
-      if (!fixed.ok) {
-        const draftError = await keepDraft(f);
-        return f.set({ result: "needs_human", reason: draftError ? `resume: ${fixed.reason}; ${draftError}` : `resume: ${fixed.reason}`, stop: stopFor(fixed.cause) });
-      }
-      gates = fixed.gates;
+      if (fixed.ok) gates = fixed.gates;
+      else stop = { reason: `resume: ${fixed.reason}`, gates };
     }
     events.emit({ step: "resume", event: "step_finished", data: { continue_at: st.step } });
-    if (continuation && st.step === "finalize") st.step = "review";
-    await advance(f, ctx, { noPr: opts.noPr ?? st.no_pr, startedAt, gates });
+    await drive(f, ctx, { noPr: opts.noPr ?? st.no_pr, startedAt, gates, ...(stop ? { stop } : {}) });
   });
 }
 
-type Ready = { ok: true; gates?: GateReport } | { ok: false; reason: string; cause: StopCause };
+/** `stop`: a technical problem the resolver takes over before the run continues. */
+type Ready = { ok: true; gates?: GateReport } | { ok: false; reason: string; cause: StopCause; stop?: ResolverStop };
 
 /** Re-validation before a resumed run continues. */
 async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["result"]): Promise<Ready> {
@@ -1172,7 +1280,7 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
   for (const [ref, what] of [["MERGE_HEAD", "merge"], ["REBASE_HEAD", "rebase"], ["CHERRY_PICK_HEAD", "cherry-pick"]] as const) {
     if (await gitOk(wt, ["rev-parse", "-q", "--verify", ref])) return fail(`a ${what} is in progress in the worktree; finish or abort it first`);
   }
-  if (previous === "needs_human" && !st.transient) {
+  if ((previous === "needs_human" || previous === "failed") && !st.transient) {
     // The run stopped for a human: whatever is uncommitted now is their fix.
     if (await commitAll(wt, "fix: human changes before resume", gitAuthor(ctx))) {
       ctx.events.emit({ step: "resume", event: "progress", data: { human_changes_committed: await headSha(wt) } });
@@ -1192,17 +1300,22 @@ async function prepareResume(ctx: RunContext, st: RunState, previous: RunState["
     });
     if (fetched && !(await isAncestor(wt, remote))) {
       const merged = await mergeRef(wt, remote, `chore: merge origin/${branch}`, gitAuthor(ctx));
-      if (!merged.ok) return fail(`commits on origin/${branch} conflict with the worktree in ${merged.conflicts.join(", ") || merged.error.slice(0, 200)}`, stopCauseForMergeFailure(merged.conflicts));
+      if (!merged.ok) {
+        const reason = `commits on origin/${branch} conflict with the worktree in ${merged.conflicts.join(", ") || merged.error.slice(0, 200)}`;
+        return { ...(fail(reason, stopCauseForMergeFailure(merged.conflicts)) as Ready & { ok: false }), stop: { reason: `resume: ${reason}`, merge: { sha: await revParse(wt, remote), label: `origin/${branch}`, base: false } } };
+      }
       ctx.events.emit({ step: "resume", event: "progress", data: { remote_branch_merged: await headSha(wt) } });
     }
   }
   const synced = await syncBase(ctx, "resume");
   if (!synced.ok) {
     const cause = stopCauseForSyncFailure(synced.failure, synced.gates);
-    // A clean merge whose gates are actually red can be repaired. A conflict, an ambiguous
-    // merge failure and an inconclusive timeout cannot, and they do not widen merge permission.
+    // A clean merge whose gates are red gets the usual fix session first. A conflict, an ambiguous
+    // merge failure and an inconclusive timeout go to the resolver; none widens merge permission.
     if (synced.failure === "gates" && cause === "technical_repair" && synced.gates) return { ok: true, gates: synced.gates };
-    return fail(synced.reason, cause);
+    const merge = synced.failure === "conflict" ? { sha: await revParse(ctx.repoDir, await baseRef(ctx.repoDir, ctx.repo.base_branch)), label: ctx.repo.base_branch, base: true } : undefined;
+    const reason = `resume: ${synced.reason}`;
+    return { ok: false, reason, cause, stop: { reason, ...(synced.gates ? { gates: synced.gates } : {}), ...(merge ? { merge } : {}) } };
   }
   if (synced.gates) return { ok: true, gates: synced.gates };
   const done = st.step === "implement" ? Object.keys(st.packages).filter((id) => st.packages[id] === "done") : ctx.plan.packages.map((p) => p.id);

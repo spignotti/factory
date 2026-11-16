@@ -228,11 +228,13 @@ export function visibleGateDetail(output: string): string {
  * Fast checks on a base commit. A timeout is inconclusive. A product red-then-green is not a pass.
  * A real failure is `base_red`.
  */
-export function baseCheckOutcome(results: CheckResult[]): { result: "base_red" | "needs_human"; reason: string } | undefined {
+export function baseCheckOutcome(results: CheckResult[]): { result: "base_red"; reason: string } | undefined {
+  // A timeout or an unexplained flake on the base is not a green base, and not the ticket's fault:
+  // a base problem the worker holds starts on, like a red check.
   const timed = results.filter((r) => r.status === "timeout").map((r) => r.name);
-  if (timed.length) return { result: "needs_human", reason: `fast checks timed out on base (inconclusive): ${timed.join(", ")}` };
+  if (timed.length) return { result: "base_red", reason: `fast checks timed out on base (inconclusive): ${timed.join(", ")}` };
   const unstable = results.filter((r) => r.status === "flaky" && checkBlocksGate(r)).map((r) => r.name);
-  if (unstable.length) return { result: "needs_human", reason: `fast checks unstable on base (red then green, not a pass): ${unstable.join(", ")}` };
+  if (unstable.length) return { result: "base_red", reason: `fast checks unstable on base (red then green, not a pass): ${unstable.join(", ")}` };
   const red = results.filter((r) => r.status === "fail").map((r) => r.name);
   if (red.length) return { result: "base_red", reason: `fast checks red on base: ${red.join(", ")}` };
   return undefined;

@@ -84,11 +84,14 @@ describe("factory status", () => {
     }
   });
 
-  it("works on a real run: a needs_human run with its draft PR", async () => {
-    const r = await runScenario({ script: "stalemate.json" });
+  it("works on a real run: a failed run waits for nobody; its draft PR is still listed", async () => {
+    let n = 0;
+    // Red PR CI the resolver cannot fix; a text task, so nothing closes the PR.
+    const r = await runScenario({ script: "clean.json", github: (gh) => void (gh.baseStatus = async () => (n++ === 0 ? "none" : "red")) });
+    expect(r.result.result).toBe("failed");
     const s = await statusReport({ factoryHome: r.factoryHome, github: r.github });
-    expect(s.waiting).toEqual([expect.objectContaining({ run_id: r.runId, result: "needs_human", pr: r.result.pr, worktree: join(r.runDir, "worktree") })]);
-    expect(s.prs).toEqual([expect.objectContaining({ pr: r.result.pr, state: "open", draft: true, merge_policy: "human_review" })]);
+    expect(s.waiting).toEqual([]);
+    expect(s.prs).toEqual([expect.objectContaining({ run_id: r.runId, pr: r.result.pr, state: "open", draft: true, merge_policy: "human_review", result: "failed" })]);
     expect(s.running).toEqual([]);
   });
 

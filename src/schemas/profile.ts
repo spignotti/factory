@@ -88,6 +88,7 @@ export const PROFILE_ROLES = [
   "plan_medium",
   "plan_normalize",
   "implement",
+  "resolve",
   ...REVIEW_ROLES,
   "evaluate",
   "pr_writer",

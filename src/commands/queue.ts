@@ -4,6 +4,7 @@ import { Interrupted } from "../interrupt.js";
 import { spawnFactoryRun } from "../queue/spawn.js";
 import { admissionBlock } from "../queue/admit.js";
 import {
+  failedReason,
   loadAllQueues,
   loadQueueByKey,
   repoQueueKey,
@@ -86,7 +87,7 @@ function toList(q: QueueFile): QueueListReport["queues"][number] {
       after: e.after ?? null,
       run_id: e.run_id ?? null,
       pr: e.pr ?? null,
-      reason: e.reason ?? null,
+      reason: failedReason(e),
       requeues: e.requeues ?? 0,
       choice: e.choice ?? null,
     })),
