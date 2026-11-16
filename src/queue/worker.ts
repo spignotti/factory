@@ -1022,15 +1022,15 @@ async function baseBlocks(github: GitHub, repo: string, io: Io, redLogged: Set<s
   }
 }
 
+function runIsForPr(r: RunRecord, pr: OpenFactoryPr): boolean {
+  const branch = r.state?.branch ?? r.result?.branch;
+  if (branch && branch === pr.branch) return true;
+  const url = r.result?.pr ?? r.state?.pr ?? "";
+  return url !== "" && prNumberOf(url) === pr.number;
+}
+
 function runEndedDone(runs: RunRecord[], pr: OpenFactoryPr): boolean {
-  return runs.some((r) => {
-    const done = r.result?.result === "done" || r.state?.result === "done";
-    if (!done) return false;
-    const branch = r.state?.branch ?? r.result?.branch;
-    if (branch && branch === pr.branch) return true;
-    const url = r.result?.pr ?? r.state?.pr ?? "";
-    return url !== "" && prNumberOf(url) === pr.number;
-  });
+  return runs.some((r) => (r.result?.result === "done" || r.state?.result === "done") && runIsForPr(r, pr));
 }
 
 /** Branch protection contexts, or null when they cannot be read. Null does not enable auto-merge. */
@@ -1213,6 +1213,7 @@ async function updateBehind(
     return { needsUpdate: true, openDone: false };
   }
   const runs = listRuns(factoryHome).filter((r) => sameRepo(r, repo));
+  const holders = holderIds(factoryHome);
   let needsUpdate = false;
   let openDone = false;
   for (const pr of prs) {
@@ -1235,6 +1236,12 @@ async function updateBehind(
     openDone = true;
     if (!status.behind) {
       updated.delete(key);
+      continue;
+    }
+    // A resumed run keeps its old `done` result while it is live again and merges the base locally; a server-side
+    // update-branch now would make its push non-fast-forward.
+    if (runs.some((r) => holders.has(r.run_id) && runIsForPr(r, pr))) {
+      needsUpdate = true;
       continue;
     }
     // Automatic runs merge locally under their normal slot, then run gates and a delta review.

@@ -892,6 +892,42 @@ describe("factory queue", () => {
     expect(github.updatedBranches).toEqual(["17"]);
   });
 
+  it("does not update-branch a PR whose done run was resumed and holds a lock", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await updateQueue(factoryHome, repo, () => undefined);
+    const runId = "20261029-160000-bbbbbb";
+    mkdirSync(join(factoryHome, "runs", runId), { recursive: true });
+    writeFileSync(
+      join(factoryHome, "runs", runId, "result.json"),
+      JSON.stringify(outcome(repo, 17, "done", "", { run_id: runId, pr: "https://github.test/pull/17", branch: "factory/17-goal" })) + "\n",
+    );
+    mkdirSync(join(factoryHome, "locks"), { recursive: true });
+    writeFileSync(join(factoryHome, "locks", "resumed.lock"), `${process.pid}\n${runId}`);
+    github.factoryPrs.push({ number: 17, branch: "factory/17-goal", files: ["src/b.js"] });
+    github.prStates.set("17", { state: "open", draft: false, behind: true });
+    let clock = 1_700_000_000_000;
+    let polls = 0;
+    await runQueue({
+      factoryHome,
+      github,
+      repo,
+      slots: 1,
+      pollMs: 15,
+      untilMs: clock + 60_000,
+      now: () => clock,
+      sleep: async () => {
+        polls += 1;
+        if (polls >= 3) clock += 60_000;
+      },
+      start: () => { throw new Error("should not start"); },
+      io: capture().io,
+    });
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(github.updatedBranches).toEqual([]);
+  });
+
   it("retries a failed behind update and still updates the other PRs", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
