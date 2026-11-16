@@ -1134,6 +1134,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.factory.gc.plist
 ```
 
 `--scheduled` never forces. It stays dry-run while `gc.retention.dry_run` is true.
+
+Nightly self-update of a launchd worker: [scripts/self-update.sh](scripts/self-update.sh), run by a second LaunchAgent with `StartCalendarInterval` (for example 03:00) and a `PATH` that has `node`, `pnpm`, `gh` and `git`. When `origin/main` is ahead of the checkout and the head commit's pull request has green checks, it drains the worker, waits for it to exit (at most `FACTORY_DRAIN_MAX` seconds, default 5 h; otherwise it resumes and tries the next night), fast-forwards, builds, loads the agent again and requires `doctor --ping` to report the model config and the live ping ok. A failure rolls the checkout back to the previous commit, rebuilds and starts that, and records the bad commit in `$FACTORY_HOME/self-update/bad-sha` so it is not retried. The script never leaves the queue drained or the agent unloaded. Settings: `FACTORY_DIR`, `FACTORY_WORKER_LABEL`, `FACTORY_BRANCH`; the agent's log is the record.
 `factory doctor` reports space and inode usage of the filesystems holding `$FACTORY_HOME` and the temp dir: warn from 85 %, fail from 95 %.
 
 ## JSON contracts
