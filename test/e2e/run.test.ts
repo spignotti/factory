@@ -362,26 +362,24 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(eventsOf(r, "gate_result").some((e) => e.data.status === "fail")).toBe(true);
   });
 
-  it("an added lint suppression the plan does not name fails the gates and goes back to the implementer", async () => {
-    let first = true;
+  it("an added lint suppression the plan does not name is an advisory config_guard note, not a repair turn", async () => {
     const r = await runScenario({
       script: "gate-fail-fix.json",
-      steps: (s) =>
-        s.map((x) => {
-          if (x.role !== "implement" || !first || !x.writes) return x;
-          first = false;
-          const fixed = s.filter((y) => y.role === "implement")[1]!.writes!["src/math.js"]!;
-          return { ...x, writes: { ...x.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars
-${fixed}` } };
-        }),
+      steps: (s) => {
+        const impl = s.filter((y) => y.role === "implement");
+        const fixed = impl[1]!.writes!["src/math.js"]!;
+        const first = { ...impl[0]!, writes: { ...impl[0]!.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars\n${fixed}` } };
+        return s.filter((x) => x !== impl[1]).map((x) => (x === impl[0] ? first : x));
+      },
     });
     expect(r.result.result).toBe("done");
     const gate1 = JSON.parse(r.file("gates-1.json"));
+    expect(gate1.green).toBe(true);
     const guard = gate1.checks.find((c: { name: string }) => c.name === "config_guard");
-    expect(guard.status).toBe("fail");
+    expect(guard).toMatchObject({ status: "fail", advisory: true });
     expect(guard.output_tail).toContain("src/math.js: adds `eslint-disable`");
-    expect(r.runner.calls.filter((c) => c.role === "implement")[1]!.prompt).toContain("config_guard");
-    expect(JSON.parse(r.file("gates-2.json")).green).toBe(true);
+    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
+    expect(r.github.prs[0]?.body ?? "").toMatch(/config_guard \(builtin, advisory, failed\): .*src\/math.js: adds `eslint-disable`/);
   });
 
   it("accepted wontfix: done after round 2", async () => {

@@ -67,7 +67,7 @@ describe("protected config changes (human_only_paths)", () => {
     expect(r.result.reason).toMatch(/\.github\/workflows\/ci\.yml is under human_only_paths; declare it in protected_changes/);
   });
 
-  it("repo.yaml loosening fails config_guard even when declared", async () => {
+  it("repo.yaml loosening is an advisory config_guard note even when declared; the protected change still needs a human", async () => {
     let repoDir = "";
     const r = await runScenario({
       script: "clean.json",
@@ -78,11 +78,12 @@ describe("protected config changes (human_only_paths)", () => {
         return stringify(cfg);
       }),
     });
-    const gates = JSON.parse(r.file("gates-1.json")) as { checks: { name: string; status: string; output_tail: string }[] };
+    const gates = JSON.parse(r.file("gates-1.json")) as { checks: { name: string; status: string; output_tail: string; advisory?: boolean }[] };
     const guard = gates.checks.find((c) => c.name === "config_guard")!;
-    expect(guard.status).toBe("fail");
+    expect(guard).toMatchObject({ status: "fail", advisory: true });
     expect(guard.output_tail).toMatch(/check unit removed \(loosens the factory's own checks/);
-    expect(r.result.result).not.toBe("done");
+    expect(r.result).toMatchObject({ result: "done", merge_policy: "human_review" });
+    expect(r.github.prs[0]?.body ?? "").toMatch(/config_guard \(builtin, advisory, failed\): .*check unit removed/);
   });
 
   it("an uncommitted repo.yaml edit in the checkout is ignored: the base commit's config runs", async () => {

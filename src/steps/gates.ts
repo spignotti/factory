@@ -466,7 +466,9 @@ const BOOKKEEPING_GATES = new Set(["test_presence", "evidence", "guide_update", 
 function advisoryNote(c: CheckResult): string {
   if (c.status === "pass") return visibleGateDetail(c.output_tail);
   if (!BOOKKEEPING_GATES.has(c.name)) return "";
-  const head = c.output_tail.split("\n").find((line) => line.trim())?.trim() ?? "";
+  const lines = c.output_tail.split("\n").map((line) => line.trim()).filter(Boolean);
+  // A heading line ("…:") says nothing alone; the first finding under it does.
+  const head = lines[0]?.endsWith(":") && lines[1] ? `${lines[0]} ${lines[1]}` : (lines[0] ?? "");
   return head.length > 200 ? `${head.slice(0, 199)}…` : head;
 }
 

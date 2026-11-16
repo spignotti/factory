@@ -349,7 +349,7 @@ const BASE_PROBLEM = "base problem:";
  * `base_red` stops before that and is resumed by its own run once the base CI is green.
  */
 export function isLocalBaseRed(result: RunResult): boolean {
-  return result.result === "base_red" && result.worktree !== null;
+  return result.result === "base_red" && !!result.worktree;
 }
 
 /** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. Overlap `locked` parks on the PR numbers. A repo-lock `locked` goes back to pending. Everything else parks. */
