@@ -97,6 +97,8 @@ export interface IssueComment {
   created_at: string;
   /** Hidden by a maintainer (spam, off-topic). */
   minimized?: boolean;
+  /** Written by the account the factory's `gh` runs as (GitHub's `viewerDidAuthor`). */
+  viewer_did_author?: boolean;
 }
 
 /** Open issues from a full pagination. `complete` is false when a later page may still exist. */
@@ -900,13 +902,14 @@ export class GhCli implements GitHub {
     const out = await gh(repoDir, ["issue", "view", String(n), "--json", "comments"]);
     const raw = (JSON.parse(out || "{}") as { comments?: unknown[] }).comments ?? [];
     return raw.map((c) => {
-      const j = c as { author?: { login?: string } | null; authorAssociation?: string; body?: string; createdAt?: string; isMinimized?: boolean };
+      const j = c as { author?: { login?: string } | null; authorAssociation?: string; body?: string; createdAt?: string; isMinimized?: boolean; viewerDidAuthor?: boolean };
       return {
         author: j.author?.login || "ghost",
         ...(j.authorAssociation ? { association: j.authorAssociation } : {}),
         body: j.body ?? "",
         created_at: j.createdAt ?? "",
         ...(j.isMinimized ? { minimized: true } : {}),
+        ...(j.viewerDidAuthor ? { viewer_did_author: true } : {}),
       };
     });
   }
@@ -1204,7 +1207,7 @@ export class FakeGitHub implements GitHub {
     if (this.commentError) throw new Error(this.commentError);
     if (!this.issues.has(n)) throw new Error(`issue #${n} not found`);
     const list = this.comments.get(n) ?? [];
-    list.push({ author: "factory-bot", association: "OWNER", body, created_at: new Date().toISOString() });
+    list.push({ author: "factory-bot", association: "OWNER", body, created_at: new Date().toISOString(), viewer_did_author: true });
     this.comments.set(n, list);
   }
 

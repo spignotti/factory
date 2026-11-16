@@ -7,6 +7,14 @@ export const NEEDS_INPUT_LABEL_SPEC: LabelSpec = {
   description: "The factory asked questions on this issue",
 };
 
+/** Associations of people with write access to the repository. */
+const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/** A comment by someone with write access, or by the account the factory posts as. A body marker proves nothing. */
+export function trustedComment(c: Pick<IssueComment, "association" | "viewer_did_author">): boolean {
+  return c.viewer_did_author === true || TRUSTED_ASSOCIATIONS.has(c.association ?? "");
+}
+
 /** Hidden in the rendered comment. One run never posts its questions twice. */
 export function questionsMarker(runId: string): string {
   return `<!-- factory:questions run=${runId} -->`;
