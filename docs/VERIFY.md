@@ -116,8 +116,9 @@ Unverified (needs a real provider):
   `commentIssue` is `gh issue comment <n> --body`. `addIssueLabel` is `gh issue edit --add-label`; on a
   "not found" error it creates the label without `--force` and adds it again. UNVERIFIED: the exact error text
   for a missing label. `removeIssueLabel` is `gh issue edit --remove-label`.
-- Failed runs: `closePr` reads `gh pr view <pr> --json state,headRefName,isCrossRepository`, runs
-  `gh pr close <pr>` when open, then deletes the head ref with
+- Failed runs: `closePr` reads `gh pr view <pr> --json state,headRefName,headRefOid,isCrossRepository`
+  and does nothing unless the head is the run's branch in this repo and `headRefOid` is a commit the run
+  produced. Then it runs `gh pr close <pr>` when open and deletes the head ref with
   `gh api --method DELETE repos/{owner}/{repo}/git/refs/heads/<branch>`. UNVERIFIED against a live `gh`:
   that an already deleted ref answers 422 "Reference does not exist".
 - Branch protection and auto-merge hints on a private repository without GitHub Pro.

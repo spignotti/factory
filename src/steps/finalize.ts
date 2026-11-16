@@ -548,6 +548,15 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       } else reviewedSha = delta.reviewedSha;
     }
   }
+  // A head with an open bug finding is never approved, whatever path led here (an unchanged reviewed
+  // commit is not reviewed again): a technical stop for the resolver.
+  const openBugs = openFindings(input.findings).filter((f) => f.severity === "bug");
+  if (result === "done" && openBugs.length) {
+    result = "needs_human";
+    reason = `open bug on the final tree: ${openBugs.map((b) => b.claim).join("; ")}`;
+    cause = "technical_repair";
+    technical = { gates, findings: openBugs };
+  }
 
   // The overlap claim and its risk signal see the full diff, including files outside the plan.
   const changed = await changedFiles(ctx.worktree, ctx.baseSha);

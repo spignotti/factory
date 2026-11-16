@@ -67,9 +67,9 @@ describe("gate check timeout", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   }, 10_000);
 
-  it("a base-check timeout is inconclusive, a real failure is base_red", () => {
+  it("a base-check timeout is a base problem (base_red), like a real failure", () => {
     expect(baseCheckOutcome([{ name: "unit", kind: "check", status: "timeout", duration_ms: 1, output_tail: "timed out", timed_out: true }])).toEqual({
-      result: "needs_human",
+      result: "base_red",
       reason: "fast checks timed out on base (inconclusive): unit",
     });
     expect(baseCheckOutcome([{ name: "unit", kind: "check", status: "fail", duration_ms: 1, output_tail: "no" }])).toEqual({

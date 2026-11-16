@@ -191,7 +191,9 @@ describe("factory queue", () => {
       await worker;
       const rows = await entries(factoryHome, repo);
       expect(rows.find((e) => e.issue === 1)).toMatchObject({ status: "parked", requeues: 3 });
-      expect(rows.find((e) => e.issue === 1)!.reason).toMatch(/^transient capacity/);
+      // Spent: the failed exit with a reason; the PR is left open (the change itself was not judged).
+      expect(rows.find((e) => e.issue === 1)!.reason).toMatch(/^provider retries spent \(2\/2\); transient capacity/);
+      expect(rows.find((e) => e.issue === 1)!.failed).toMatchObject({ keep_pr: true });
       expect(g.calls).toEqual([1, 2, 1, 1]);
     } finally {
       ctl.abort();
@@ -682,6 +684,7 @@ describe("factory queue", () => {
     await updateQueue(factoryHome, repo, (q) => {
       q.entries[0]!.status = "running";
       q.entries[0]!.run_id = newId;
+      q.entries[0]!.requeues = 2;
     });
     let calls = 0;
     await runQueue({
@@ -697,7 +700,7 @@ describe("factory queue", () => {
       io: capture().io,
     });
     expect(calls).toBe(0);
-    expect((await entries(factoryHome, repo))[0]).toMatchObject({ status: "parked", run_id: newId, reason: "run ended without result.json" });
+    expect((await entries(factoryHome, repo))[0]).toMatchObject({ status: "parked", run_id: newId, reason: "run ended without result.json (retried 2 times)", failed: { reported: true } });
   });
 
   it("keeps the slot after a stall until the process exits, then SIGKILLs and parks", async () => {
@@ -1193,9 +1196,11 @@ describe("factory queue", () => {
         q.entries[0]!.status = "running";
         q.entries[0]!.run_id = missed;
         q.entries[0]!.pid = foreign.pid;
+        // Its crash-retry budget is spent: the dead run goes straight to the failed exit.
+        q.entries[0]!.requeues = 2;
       });
       await runQueue({ factoryHome: home2, github: gh2, repo: repo2, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: capture().io });
-      expect((await entries(home2, repo2))[0]).toMatchObject({ status: "parked", reason: "run ended without result.json" });
+      expect((await entries(home2, repo2))[0]).toMatchObject({ status: "parked", reason: "run ended without result.json (retried 2 times)", failed: { reported: true } });
       expect(foreign.exitCode).toBeNull();
     } finally {
       foreign.kill("SIGKILL");

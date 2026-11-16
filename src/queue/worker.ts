@@ -7,10 +7,10 @@ import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
-import { readState, saveState } from "../pipeline/state.js";
+import { readState, type RunState, saveState } from "../pipeline/state.js";
 import { baseCheckGate, baseProblem, type BaseCheckRecord, readBaseCheck, writeBaseCheck } from "../pipeline/base-check.js";
 import { deliveryForDone, isProviderRetryCause, readStop, stopCauseOf } from "../pipeline/outcome.js";
-import { isFailedExit, reportFailure } from "../pipeline/failure.js";
+import { closableTarget, isFailedExit, keepsPr, reportFailure } from "../pipeline/failure.js";
 import { newRunId } from "../pipeline/run.js";
 import { continuationLimit } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
@@ -304,9 +304,25 @@ function park(entry: QueueEntry, reason: string, runId?: string, blockedRuns?: s
  * issue, swaps `factory-ready` for `factory-failed` and closes the run's PR (unless the run already
  * did: `reported`); the entry starts a fresh run once a human sets `factory-ready` again.
  */
-function failEntry(entry: QueueEntry, reason: string, runId?: string, reported = false): void {
+function failEntry(entry: QueueEntry, reason: string, runId?: string, reported = false, keepPr = false): void {
   park(entry, reason, runId);
-  entry.failed = { reported };
+  entry.failed = { reported, ...(keepPr ? { keep_pr: true } : {}) };
+}
+
+/**
+ * A run that died without a result (hard kill, crash) or could not be started: the same bounded retry
+ * as a provider drop, then the failed exit. `keepRun`: a resumable checkpoint is continued, not redone.
+ */
+function requeueOrFail(q: QueueFile, entry: QueueEntry, reason: string, keepRun: boolean): "requeue" | "parked" {
+  const n = (entry.requeues ?? 0) + 1;
+  entry.requeues = n;
+  if (n <= MAX_REQUEUES) {
+    releaseToPending(entry, keepRun);
+    moveToEnd(q, entry);
+    return "requeue";
+  }
+  failEntry(entry, `${reason} (retried ${MAX_REQUEUES} times)`, entry.run_id);
+  return "parked";
 }
 
 function moveToEnd(q: QueueFile, entry: QueueEntry): void {
@@ -322,6 +338,8 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
   if (!keepRun) {
     delete entry.run_id;
     delete entry.issue_rev;
+    // A fresh run has no PR yet; a stale one must never be the target of a later failure report.
+    delete entry.pr;
   }
   delete entry.blocked_by;
   delete entry.blocked_runs;
@@ -404,9 +422,9 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
       if (estimated) entry.window_estimated = true;
       return "parked";
     }
-    // No usable window metadata, or the bounded wait budget is spent: a permanent stop, never a requeue
-    // and never a reset of the spent code-repair budgets (`requeues`, run `repair`, continuations).
-    park(
+    // No usable window metadata, or the bounded wait budget is spent: the failed exit (the PR stays
+    // open: the change itself was not judged), never a requeue and never a reset of the spent budgets.
+    failEntry(
       entry,
       budgetLeft
         ? result.reason || result.result
@@ -414,6 +432,8 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
           ? `estimated provider usage window waits exhausted (${hours(MAX_ESTIMATED_WAIT_MS)}); ${result.reason}`.slice(0, 400)
           : `provider usage window waits exhausted (${waits - 1}/${MAX_WINDOW_WAITS}); ${result.reason}`.slice(0, 400),
       result.run_id,
+      false,
+      true,
     );
     return "parked";
   }
@@ -426,7 +446,7 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
       moveToEnd(q, entry);
       return "requeue";
     }
-    park(entry, result.reason, result.run_id);
+    failEntry(entry, `provider retries spent (${MAX_REQUEUES}/${MAX_REQUEUES}); ${result.reason}`.slice(0, 400), result.run_id, false, true);
     return "parked";
   }
   if (isLocalBaseRed(result)) {
@@ -443,13 +463,14 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
       park(entry, result.reason, result.run_id, runs);
       return "parked";
     }
-    // A repo slot or a resource held by another run: try again on a later tick.
-    releaseToPending(entry);
+    // A repo slot or a resource held by another run: try again on a later tick, keeping a run that
+    // already has a worktree (its work is not thrown away).
+    releaseToPending(entry, !!result.worktree);
     return "requeue";
   }
   // The run decided it failed and reported it (or tried to): the queue does not judge it again.
   if (result.failure_reported !== undefined || isFailedExit(result, { paused: opts?.paused === true })) {
-    failEntry(entry, result.reason || result.result, result.run_id, result.failure_reported === true);
+    failEntry(entry, result.reason || result.result, result.run_id, result.failure_reported === true, keepsPr(result.stop));
     return "parked";
   }
   park(entry, result.reason || result.result, result.run_id);
@@ -640,7 +661,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>,
         continue;
       }
       releaseEntryResources(factoryHome, q.repo, entry);
-      failEntry(entry, "run ended without result.json", entry.run_id);
+      requeueOrFail(q, entry, "run ended without result.json", false);
     }
   }
 }
@@ -659,8 +680,9 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
     if (tracked.failed && !tracked.settled) {
       releaseEntryResources(factoryHome, q.repo, entry);
       releaseBundle(q, entry.issue);
-      failEntry(entry, tracked.failed);
-      io.out(`queue: #${entry.issue} failed: ${tracked.failed}\n`);
+      const keepRun = !!entry.run_id && checkpointResumable(factoryHome, entry.run_id);
+      const action = requeueOrFail(q, entry, tracked.failed, keepRun);
+      io.out(`queue: #${entry.issue} ${action === "requeue" ? `requeued (${entry.requeues}/${MAX_REQUEUES})` : "failed"}: ${tracked.failed}\n`);
       continue;
     }
     if (!tracked.settled) continue;
@@ -1141,7 +1163,8 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
       if ((st.continuation_attempts ?? 0) >= continuationLimit(st.continuation_extra)) {
         await updateQueue(ctx.factoryHome, repo, (queue) => {
           const own = queue.entries.find((e) => e.run_id === run.run_id);
-          if (own) failEntry(own, `post-push repair exhausted (${st.continuation_attempts ?? 0}/${continuationLimit(st.continuation_extra)})`);
+          // A done PR whose head or base moved under it: report, but leave the PR to a person.
+          if (own) failEntry(own, `post-push repair exhausted (${st.continuation_attempts ?? 0}/${continuationLimit(st.continuation_extra)})`, undefined, false, true);
         });
         continue;
       }
@@ -1298,6 +1321,7 @@ function releaseAnswered(q: QueueFile, open: Issue[], repo: string, ctx: TickCtx
     if (hasRealPause(ctx.factoryHome, pauseKey)) continue;
     clearPause(ctx.factoryHome, pauseKey);
     releaseToPending(entry);
+    freshBudgets(entry);
     ctx.io.out(`queue: #${entry.issue} pending (questions answered, fresh run)\n`);
   }
 }
@@ -1330,49 +1354,59 @@ async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx,
 function releaseFailed(q: QueueFile, open: Issue[], repo: string, ctx: TickCtx): void {
   const byNumber = new Map(open.map((i) => [i.number, i]));
   for (const entry of q.entries) {
-    if (entry.status !== "parked" || !entry.failed?.reported) continue;
+    if (entry.status !== "parked" || !entry.failed) continue;
+    if (!entry.failed.reported && (entry.failed.attempts ?? 0) < MAX_REPORT_ATTEMPTS) continue;
     const issue = byNumber.get(entry.issue);
     if (!issue || admissionBlock(issue)) continue;
     const pauseKey = { runId: entry.run_id, repo, issue: entry.issue };
     if (hasRealPause(ctx.factoryHome, pauseKey)) continue;
     clearPause(ctx.factoryHome, pauseKey);
     releaseToPending(entry);
+    freshBudgets(entry);
     ctx.io.out(`queue: #${entry.issue} pending (factory-ready again after a failure, fresh run)\n`);
   }
 }
 
-/** The run's PR when the entry does not name one (a stall or a crash before result.json). */
-function failedPr(factoryHome: string, entry: QueueEntry): string | null {
-  if (entry.pr) return entry.pr;
-  if (!entry.run_id) return null;
-  try {
-    return readState(join(factoryHome, "runs", entry.run_id)).pr;
-  } catch {
-    return null;
-  }
+/** A human restarted the ticket: a fresh run gets fresh retry budgets. */
+function freshBudgets(entry: QueueEntry): void {
+  delete entry.requeues;
+  delete entry.window_waits;
+  delete entry.window_estimated_ms;
 }
+
+/** Report attempts per failed entry; after this the worker logs once and stops retrying. */
+export const MAX_REPORT_ATTEMPTS = 10;
 
 /**
  * Failed entries whose report did not reach GitHub: post it again (comment once per run, the label
- * swap, the run's PR closed). Network on the snapshot; the caller marks the reported ones under the lock.
+ * swap, then the run's own PR closed when allowed). Network on the snapshot; the caller records the
+ * outcome under the queue lock. A failing report is logged; it does not put the worker into backoff.
  */
-async function reportPendingFailures(snap: QueueFile, repo: string, ctx: TickCtx, noteFailure: () => void): Promise<Set<number>> {
-  const reported = new Set<number>();
+async function reportPendingFailures(snap: QueueFile, repo: string, ctx: TickCtx): Promise<Map<number, boolean>> {
+  const outcome = new Map<number, boolean>();
   for (const entry of snap.entries) {
-    if (entry.status !== "parked" || !entry.failed || entry.failed.reported) continue;
+    if (entry.status !== "parked" || !entry.failed || entry.failed.reported || (entry.failed.attempts ?? 0) >= MAX_REPORT_ATTEMPTS) continue;
     try {
+      let st: RunState | undefined;
+      try {
+        st = entry.run_id ? readState(join(ctx.factoryHome, "runs", entry.run_id)) : undefined;
+      } catch {
+        st = undefined;
+      }
+      // The current run's own PR first; `entry.pr` only when its state names none.
+      const target = await closableTarget(st, st?.pr ?? entry.pr ?? null, entry.failed.keep_pr === true);
       await withTimeout(
-        reportFailure(ctx.github, repo, entry.issue, entry.run_id ?? `issue-${entry.issue}`, entry.reason ?? "failed", failedPr(ctx.factoryHome, entry)),
+        reportFailure(ctx.github, repo, entry.issue, entry.run_id ?? `issue-${entry.issue}`, entry.reason ?? "failed", target),
         ctx.netTimeoutMs,
         `failure #${entry.issue}`,
       );
-      reported.add(entry.issue);
+      outcome.set(entry.issue, true);
     } catch (e) {
-      noteFailure();
+      outcome.set(entry.issue, false);
       ctx.io.err(`factory: reporting the failure on #${entry.issue} failed: ${(e as Error).message.slice(0, 200)}\n`);
     }
   }
-  return reported;
+  return outcome;
 }
 
 async function discoverReady(q: QueueFile, ctx: TickCtx, repo: string): Promise<void> {
@@ -1434,7 +1468,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const questionsPosted = ctx.releaseHold ? new Set<number>() : await postPendingQuestions(snap, repo, ctx, noteFailure);
-  const failuresReported = ctx.releaseHold ? new Set<number>() : await reportPendingFailures(snap, repo, ctx, noteFailure);
+  const failuresReported = ctx.releaseHold ? new Map<number, boolean>() : await reportPendingFailures(snap, repo, ctx);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
   const evaluatedAfter = new Set<number>();
@@ -1533,11 +1567,16 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       entry.awaiting_answer.posted = true;
       ctx.io.out(`queue: #${issue} questions posted on the issue\n`);
     }
-    for (const issue of failuresReported) {
+    for (const [issue, ok] of failuresReported) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.failed && !e.failed.reported);
       if (!entry?.failed) continue;
-      entry.failed.reported = true;
-      ctx.io.out(`queue: #${issue} failure reported on the issue\n`);
+      if (ok) {
+        entry.failed.reported = true;
+        ctx.io.out(`queue: #${issue} failure reported on the issue\n`);
+        continue;
+      }
+      entry.failed.attempts = (entry.failed.attempts ?? 0) + 1;
+      if (entry.failed.attempts >= MAX_REPORT_ATTEMPTS) ctx.io.err(`factory: gave up reporting the failure on #${issue} after ${MAX_REPORT_ATTEMPTS} attempts; set factory-ready again to restart it\n`);
     }
     // Window waits (#177): a far window only moves the next recheck; an opened one becomes pending again.
     for (const issue of win.clearAdmissionPause) {
@@ -1620,6 +1659,9 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       const hit = openPrs?.find((p) => factoryIssueOfBranch(p.branch) === entry.issue);
       if (hit && !canResume(ctx.factoryHome, entry, issueByNumber.get(entry.issue)!)) {
         park(entry, `open factory PR #${hit.number}`);
+        // Re-checked every tick (`blocked_by`): once that PR is merged or closed the ticket starts, e.g.
+        // after a failed run left its PR open for a person.
+        entry.blocked_by = [hit.number];
         ctx.io.out(`queue: #${entry.issue} parked: open factory PR #${hit.number}\n`);
         continue;
       }
@@ -1732,9 +1774,9 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
         const entry = q.entries.find((en) => en.issue === planned.issue && en.status === "running");
         if (!entry) return;
         releaseBundle(q, entry.issue);
-        failEntry(entry, msg);
+        requeueOrFail(q, entry, msg, planned.resumeRunId !== undefined);
       }, gitOpts);
-      ctx.io.out(`queue: #${planned.issue} failed: ${msg}\n`);
+      ctx.io.out(`queue: #${planned.issue} start failed: ${msg}\n`);
       continue;
     }
     ctx.handles.set(handleKey(repo, planned.issue), track(started, repo, planned.issue));

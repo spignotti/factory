@@ -2,17 +2,18 @@
  * The queue's one failed exit: every outcome that is not done, a question, a provider wait, a base
  * problem, a lock or a pause fails the ticket on its issue, closes the run's PR and waits for nobody.
  */
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RunResult } from "../../src/events.js";
-import { FakeGitHub } from "../../src/gh.js";
+import { FakeGitHub, githubUnavailable } from "../../src/gh.js";
 import { isFailedExit } from "../../src/pipeline/failure.js";
 import { stopFor } from "../../src/pipeline/outcome.js";
 import { loadQueueByKey, repoQueueKey, summarizeQueue, updateQueue, type QueueEntry, type QueueFile } from "../../src/queue/store.js";
-import { applyOutcome, runQueue, type StartRunRequest } from "../../src/queue/worker.js";
-import { createFixtureRepo, FIXTURES } from "../helpers/repo.js";
+import { applyOutcome, MAX_REPORT_ATTEMPTS, runQueue, type StartRunRequest } from "../../src/queue/worker.js";
+
+import { createFixtureRepo, FIXTURES, gitIn } from "../helpers/repo.js";
 
 const body = readFileSync(join(FIXTURES, "tasks/multiply.md"), "utf8");
 
@@ -46,7 +47,15 @@ async function setup(): Promise<Setup> {
       start: (req) => {
         starts.push(req);
         const done = (async () => {
-          const pr = await gh.createPr({ repoDir: repo, head: `factory/7-multiply-${starts.length}`, base: "main", title: "feat: multiply", body: "", draft: false });
+          const branch = `factory/7-multiply-${starts.length}`;
+          const pr = await gh.createPr({ repoDir: repo, head: branch, base: "main", title: "feat: multiply", body: "", draft: false });
+          // The run's checkpoint: its branch, worktree and the head it pushed.
+          const head = gitIn(repo, "rev-parse", "HEAD").trim();
+          gh.remoteShas.set(branch, head);
+          const dir = join(home, "runs", req.runId!);
+          mkdirSync(join(dir, "worktree"), { recursive: true });
+          writeFileSync(join(dir, "plan.json"), "{}");
+          writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, run_id: req.runId, repo, task: { ref: "#7", issue: 7, text: "", labels: [] }, step: "finalize", result: null, reason: "", branch, worktree: repo, base_sha: null, approved_sha: head, pr, packages: {}, failures: {}, handoffs: [], rounds: 0, findings: [], gate_count: 0, pr_draft: false, no_pr: false, updated_at: new Date().toISOString() }));
           return result(req, outcome(pr));
         })();
         return { done, pid: 0, runId: () => req.runId, kill: () => {}, unref: () => {} };
@@ -106,6 +115,85 @@ describe("queue failed exit", () => {
     expect(entry.failed).toBeUndefined();
   });
 
+  it("a fresh run never reports on the previous run's PR", async () => {
+    const s = await setup();
+    await s.work((pr) => ({ result: "failed", reason: "resolver gave up", pr }));
+    s.gh.issues.get(7)!.labels = ["factory-ready"];
+    // The fresh run fails before result.json names a PR: its own state's PR is the target.
+    const entry = await s.work(() => ({ result: "failed", reason: "second try gave up", pr: null }));
+    expect(entry).toMatchObject({ status: "parked", failed: { reported: true }, run_id: s.starts[1]!.runId });
+    expect(s.gh.closed).toEqual(["https://github.test/pr/1", "https://github.test/pr/2"]);
+    expect(s.gh.comments.get(7)!.at(-1)!.body).toContain("https://github.test/pr/2");
+  });
+
+  it("a PR whose head is not the run's own commit is never closed", async () => {
+    const s = await setup();
+    const entry = await s.work((pr) => {
+      // Someone pushed to the run's branch after it ended.
+      s.gh.remoteShas.set(s.gh.prs[0]!.head, "f".repeat(40));
+      return { result: "failed", reason: "resolver gave up", pr };
+    });
+    expect(entry).toMatchObject({ status: "parked", failed: { reported: true } });
+    expect(s.gh.closed).toEqual([]);
+    expect(s.gh.remoteShas.get(s.gh.prs[0]!.head)).toBe("f".repeat(40));
+  });
+
+  it("spent provider retries fail the ticket with a reason, but leave its PR open", async () => {
+    const s = await setup();
+    const entry = await s.work((pr) => ({ result: "needs_human", reason: "provider down; factory resume x", stop: stopFor("transient_retry"), pr }));
+    expect(s.starts).toHaveLength(3);
+    expect(entry).toMatchObject({ status: "parked", failed: { reported: true, keep_pr: true } });
+    expect(entry.reason).toMatch(/^provider retries spent \(2\/2\); provider down/);
+    expect(s.gh.closed).toEqual([]);
+    expect(s.gh.issues.get(7)!.labels).toEqual(["factory-failed"]);
+    expect(s.gh.comments.get(7)![0]!.body).toContain("stays open");
+    // The kept PR holds a fresh start, visibly, until a human closes it.
+    s.gh.issues.get(7)!.labels = ["factory-ready"];
+    const held = await s.work(() => ({}));
+    expect(held).toMatchObject({ status: "parked", reason: "open factory PR #1", blocked_by: [1] });
+    expect(s.starts).toHaveLength(3);
+    // A person closes the PRs the retried runs left open.
+    for (const p of s.gh.prs) await s.gh.closePr(s.repo, p.url, { branch: p.head, heads: [s.gh.remoteShas.get(p.head)!] });
+    // A human restart gets fresh retry budgets.
+    const again = await s.work((pr) => ({ result: "done", pr }));
+    expect(again).toMatchObject({ status: "done" });
+    expect(again.requeues).toBeUndefined();
+  });
+
+  it("a spawn error gets the bounded retry before the failed exit", async () => {
+    const s = await setup();
+    let tries = 0;
+    await runQueue({
+      factoryHome: s.home, github: s.gh, repo: s.repo, pollMs: 5, io: { out: () => {}, err: () => {} },
+      start: () => {
+        tries++;
+        throw new Error("spawn EAGAIN");
+      },
+    });
+    const entry = loadQueueByKey(s.home, await repoQueueKey(s.repo))!.entries[0]!;
+    expect(tries).toBe(3);
+    expect(entry).toMatchObject({ status: "parked", reason: "spawn EAGAIN (retried 2 times)", failed: { reported: false } });
+    // The next tick reports it.
+    const reported = await s.work(() => ({}));
+    expect(reported).toMatchObject({ status: "parked", failed: { reported: true } });
+    expect(s.gh.comments.get(7)![0]!.body).toContain("spawn EAGAIN");
+  });
+
+  it("a permanent close error still posts the comment and labels, and stops retrying at the bound", async () => {
+    const s = await setup();
+    s.gh.closeError = "HTTP 403: Resource not accessible by integration";
+    const first = await s.work((pr) => ({ result: "failed", reason: "resolver gave up", pr }));
+    expect(first).toMatchObject({ status: "parked", failed: { reported: false, attempts: 1 } });
+    expect(s.gh.comments.get(7)).toHaveLength(1);
+    expect(s.gh.issues.get(7)!.labels).toEqual(["factory-failed"]);
+    await updateQueue(s.home, s.repo, (q) => void (q.entries[0]!.failed!.attempts = MAX_REPORT_ATTEMPTS - 1));
+    const capped = await s.work(() => ({}));
+    expect(capped.failed).toEqual({ reported: false, attempts: MAX_REPORT_ATTEMPTS });
+    await s.work(() => ({}));
+    expect(loadQueueByKey(s.home, await repoQueueKey(s.repo))!.entries[0]!.failed!.attempts).toBe(MAX_REPORT_ATTEMPTS);
+    expect(s.gh.comments.get(7)).toHaveLength(1);
+  });
+
   it("a hard-list done run is not failed: its ready PR stays open for a human merge", async () => {
     const s = await setup();
     const entry = await s.work((pr) => ({ result: "done", merge_policy: "human_review", risk: "high", pr }));
@@ -148,7 +236,7 @@ describe("which outcomes fail", () => {
     ["done", r({}), false],
     ["question", r({ result: "needs_input", questions: ["?"] }), false],
     ["transient retry", r({ result: "needs_human", stop: stopFor("transient_retry") }), false],
-    ["usage window", r({ result: "needs_human", stop: stopFor("provider_window_wait") }), false],
+    ["usage window", r({ result: "needs_human", stop: stopFor("provider_window_wait"), window_resets_at: Date.now() + 3_600_000 }), false],
     ["base_red", r({ result: "base_red" }), false],
     ["locked", r({ result: "locked", reason: "resource db is held by run x (pid 1)" }), false],
     ["failed", r({ result: "failed", reason: "x" }), true],
@@ -171,7 +259,16 @@ describe("which outcomes fail", () => {
     expect(e.failed).toBeUndefined();
     const f = entry();
     applyOutcome(q(), f, paused);
-    expect(f.failed).toEqual({ reported: false });
+    // Reported on the issue, but a stop that waits for a person never closes its PR.
+    expect(f.failed).toEqual({ reported: false, keep_pr: true });
+  });
+
+  it("only HTTP 5xx forms and outage wording count as a GitHub outage", () => {
+    expect(githubUnavailable("HTTP 503: Service Unavailable")).toBe(true);
+    expect(githubUnavailable("fatal: unable to access: The requested URL returned error: 502")).toBe(true);
+    expect(githubUnavailable("gh: timeout")).toBe(true);
+    expect(githubUnavailable("! [remote rejected] factory/42-fix-500-error (protected branch hook declined)")).toBe(false);
+    expect(githubUnavailable("HTTP 403: Resource not accessible by integration")).toBe(false);
   });
 
   it("any other locked result goes back to pending", () => {

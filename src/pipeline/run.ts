@@ -33,7 +33,7 @@ import { fixStep, type LoopOutcome, reviewLoop } from "./loop.js";
 import { openFindings } from "./merge.js";
 import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProblem } from "./recovery.js";
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
-import { isFailedExit, reportFailure } from "./failure.js";
+import { closableTarget, isFailedExit, keepsPr, reportFailure } from "./failure.js";
 import { MAX_RESOLVER_TURNS, type ResolverStop, resolverTurn } from "./resolve.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -388,7 +388,9 @@ class RunFrame {
     const paused = pauseRequested(this.deps.factoryHome, { runId: this.runId }) !== undefined;
     if (!isFailedExit({ result: this.out.result, stop: this.out.stop, questions: this.out.questions }, { paused })) return;
     try {
-      await reportFailure(this.deps.github, this.repoDir, issue, this.runId, this.out.reason, this.out.pr ?? st?.pr ?? null, (t) => this.events.redact(t));
+      // A stop that waits for a person keeps its PR; otherwise only the run's own head is closed.
+      const target = await closableTarget(st, this.out.pr ?? st?.pr ?? null, keepsPr(this.out.stop));
+      await reportFailure(this.deps.github, this.repoDir, issue, this.runId, this.out.reason, target, (t) => this.events.redact(t));
       this.out.failure_reported = true;
       this.events.emit({ step: "run", event: "progress", data: { failure_reported: true, issue } });
     } catch (e) {
@@ -709,10 +711,9 @@ async function beginWork(
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
     const stop = baseCheckOutcome(results);
-    if (!stop || stop.result === "base_red") {
-      const failed = results.filter((r) => r.status === "fail").map((r) => r.name);
-      writeBaseCheck(deps.factoryHome, baseKey, { sha: baseSha, status: stop ? "red" : "green", failed: stop ? failed : [], at: new Date(f.now()).toISOString() });
-    }
+    // A timed-out or unstable check is recorded red too: later starts wait for the re-check, not fail.
+    const failed = results.filter((r) => r.status !== "pass").map((r) => r.name);
+    writeBaseCheck(deps.factoryHome, baseKey, { sha: baseSha, status: stop ? "red" : "green", failed: stop ? failed : [], at: new Date(f.now()).toISOString() });
     // A local base_red starts over on its next try: drop the worktree (and its setup output) once services stop.
     if (stop?.result === "base_red") {
       f.cleanups.push(async () => {
@@ -720,7 +721,7 @@ async function beginWork(
         await withRepoGitOps(repoDir, () => git(repoDir, ["branch", "-D", branch])).catch(() => undefined);
       });
     }
-    if (stop) return f.set(stop.result === "needs_human" ? { result: stop.result, reason: stop.reason, stop: stopFor("unknown") } : stop);
+    if (stop) return f.set(stop);
   }
   await drive(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
 }
@@ -985,7 +986,10 @@ async function drive(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; starte
 /** Resolver turns on one stop until one is green or the run's budget is spent. Undefined: the run failed. */
 async function resolveStop(f: RunFrame, ctx: RunContext, stop: ResolverStop): Promise<GateReport | undefined> {
   const st = f.state!;
-  let current = stop;
+  // Open findings travel with every stop (a thrown error carries none): a turn that changes nothing
+  // then cannot clear them.
+  const open = openFindings(st.findings);
+  let current: ResolverStop = stop.findings?.length || !open.length ? stop : { ...stop, findings: open };
   let previous: string | undefined;
   for (;;) {
     const used = st.resolver_turns ?? 0;
@@ -997,9 +1001,9 @@ async function resolveStop(f: RunFrame, ctx: RunContext, stop: ResolverStop): Pr
     st.gate_count = ctx.gateCount;
     if (out.ok) {
       // The next review reads the resolver's account next to each finding it answered.
-      const open = new Set((current.findings ?? []).map((f) => f.id));
+      const answered = new Set((current.findings ?? []).map((f) => f.id));
       for (const finding of st.findings) {
-        if (open.has(finding.id)) finding.response = { finding_id: finding.id, status: "fixed", response: `resolver: ${out.summary}`.slice(0, 2000) };
+        if (answered.has(finding.id)) finding.response = { finding_id: finding.id, status: "fixed", response: `resolver: ${out.summary}`.slice(0, 2000) };
       }
       if (st.step === "implement") {
         // The resolver finished the failed packages; dependents that were skipped run next.
@@ -1008,8 +1012,9 @@ async function resolveStop(f: RunFrame, ctx: RunContext, stop: ResolverStop): Pr
           else if (status === "skipped") delete st.packages[id];
         }
         st.failures = {};
-      } else if (st.step === "review" && st.reviewed_sha) {
+      } else if (st.step === "review" && st.reviewed_sha && (await headSha(ctx.worktree)) !== st.reviewed_sha) {
         // Finalize reviews the resolver's commits as a delta; a fresh review loop would reset the round budget.
+        // An unchanged reviewed head stays in review, where an open bug blocks it again.
         st.step = "finalize";
       }
       f.save();

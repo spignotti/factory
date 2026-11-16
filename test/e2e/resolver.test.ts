@@ -129,7 +129,7 @@ describe("resolver on a technical stop", () => {
     expect(comments[0]!.body).toContain("The factory gave up on this issue");
     expect(comments[0]!.body).toMatch(/\*\*Why:\*\* CI on the PR head \([0-9a-f]{8}\) is red \(resolver: no resolver turn left \(2\/2\)\)/);
     expect(comments[0]!.body).toContain("<details><summary>Full reason");
-    expect(comments[0]!.body).toContain(`Its pull request ${pr} is closed.`);
+    expect(comments[0]!.body).toContain(`The factory closes its pull request ${pr}`);
     expect(comments[0]!.body).toContain("rewrite the ticket");
     expect(comments[0]!.body).toContain(`<!-- factory:failed run=${r.runId} -->`);
   });
@@ -209,5 +209,65 @@ describe("resolver on a technical stop", () => {
     expect(r.result.result).toBe("failed");
     expect(r.resultFile).not.toHaveProperty("failure_reported");
     expect(r.github.comments.get(7)).toBeUndefined();
+  });
+});
+
+describe("review findings and foreign heads after a resolver turn", () => {
+  it("a no-op resolver turn on a thrown stop never auto-merges a head with an open bug", async () => {
+    const r = await runScenario({
+      script: "bug-max-rounds.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.status = "green";
+      },
+      patch: (c) => void (c.merge = { auto_merge_max_risk: "medium", policy: { low: "bot_review", medium: "bot_review" } }),
+      steps: (steps) => {
+        const by = (role: string) => steps.filter((s) => s.role === role);
+        const bad: FakeStep = { role: "review_plan", output: { nonsense: true } };
+        const noop = resolve(undefined);
+        // Round 1 finds a bug, the fix round writes nothing, round 2's reviewer output is invalid twice.
+        return [...by("plan_high"), by("implement")[0]!, by("review_plan")[0]!, by("review_simplicity")[0]!, by("implement")[1]!, bad, bad, by("review_simplicity")[1]!, noop, noop, ...by("pr_writer"), ...by("pr_writer")];
+      },
+    });
+    expect(r.result.result).not.toBe("done");
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.approvedShas).toEqual([]);
+  });
+
+  it("a human_approval stop after a clean-status refusal reports on the issue but never closes the PR or deletes its branch", async () => {
+    const CLEAN_STATUS = "gh pr merge failed: GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)";
+    let n = 0;
+    const r = await runScenario({
+      script: "clean.json",
+      options: { issue: 7 },
+      github: (gh) => {
+        withIssue(gh);
+        gh.settings.required_checks = ["done"];
+        gh.settings.merge_methods = { squash: true, merge: true, rebase: true };
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+        let refused = false;
+        gh.enableAutoMerge = async () => {
+          refused = true;
+          throw new Error(CLEAN_STATUS);
+        };
+        const real = gh.findOpenPr.bind(gh);
+        // A human pushed to the branch between the refusal and the re-read.
+        gh.findOpenPr = async (dir, branch) => {
+          const pr = await real(dir, branch);
+          return refused && pr ? { ...pr, headSha: "f".repeat(40) } : pr;
+        };
+        gh.prStatus = async () => ({ state: "open", draft: false, ci: "green" as const });
+      },
+      patch: (c) => {
+        (c.limits as Record<string, unknown>).pr_ci_wait_minutes = 2;
+        ((c.merge ??= {}) as Record<string, unknown>).auto_merge_max_risk = "medium";
+      },
+    });
+    expect(r.result.reason).toMatch(/PR head changed/);
+    expect(r.github.closed).toEqual([]);
+    expect(r.github.remoteShas.has(r.result.branch!)).toBe(true);
+    expect(r.github.issues.get(7)!.labels).toEqual(["factory-failed"]);
+    expect(r.github.comments.get(7)![0]!.body).toContain("stays open");
+    expect(r.resultFile.failure_reported).toBe(true);
   });
 });

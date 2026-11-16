@@ -84,10 +84,10 @@ describe("red then green", () => {
     expect(checkBlocksGate(row!)).toBe(false);
   });
 
-  it("an unexplained flake on the base is not a green base", () => {
+  it("an unexplained flake on the base is not a green base: a base problem", () => {
     const flaky = { name: "unit", kind: "check" as const, status: "flaky" as const, duration_ms: 400, output_tail: "instability: red then green; not a pass" };
     expect(baseCheckOutcome([flaky])).toEqual({
-      result: "needs_human",
+      result: "base_red",
       reason: "fast checks unstable on base (red then green, not a pass): unit",
     });
     expect(baseCheckOutcome([{ ...flaky, flake_allowed: true, output_tail: "flake allowed (clock): red then green" }])).toBeUndefined();

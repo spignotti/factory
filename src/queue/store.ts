@@ -83,7 +83,13 @@ export interface QueueEntry {
    * until then the worker retries. A reported entry starts a fresh run when the issue is admissible again.
    * Cleared on any other park or release.
    */
-  failed?: { reported: boolean };
+  failed?: {
+    reported: boolean;
+    /** The failure report never closes the PR: a stop that waits for a person, or a spent retry budget. */
+    keep_pr?: boolean;
+    /** Failed report attempts; the worker stops retrying at a bound and logs it. */
+    attempts?: number;
+  };
 }
 
 export interface QueueFile {
@@ -124,7 +130,7 @@ const EntrySchema = z.object({
     .optional(),
   release_id: z.string().optional(),
   awaiting_answer: z.object({ questions: z.array(z.string()), posted: z.boolean() }).optional(),
-  failed: z.object({ reported: z.boolean() }).optional(),
+  failed: z.object({ reported: z.boolean(), keep_pr: z.boolean().optional(), attempts: z.number().int().min(0).optional() }).optional(),
 });
 
 const FileSchema = z.object({

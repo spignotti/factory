@@ -205,8 +205,10 @@ export interface GitHub {
   /**
    * A failed run's PR: closes it when open and deletes its head branch on origin, so a fresh run of the
    * issue is not held by an open factory PR. The local branch stays (the run's worktree has it checked out).
+   * Does nothing and returns false unless the PR's head is `expect.branch` in this repo and its head
+   * commit is one of `expect.heads` (commits the run produced): a human push or another branch is never closed.
    */
-  closePr(repoDir: string, pr: string): Promise<void>;
+  closePr(repoDir: string, pr: string, expect: { branch: string; heads: string[] }): Promise<boolean>;
   /** `status` / `gc`: current state of a factory PR. */
   prStatus(repoDir: string, pr: string): Promise<PrStatus>;
   /**
@@ -748,7 +750,7 @@ async function workflowNames(repoDir: string): Promise<Map<string, string>> {
  * connection failures. A PR step that fails this way is retried later; any other failure is technical.
  */
 export function githubUnavailable(message: string): boolean {
-  return /\bHTTP 5\d\d\b|\b50[0234]\b|bad gateway|service unavailable|gateway time-?out|something went wrong|rate limit|timed out|\btimeout\b|\bETIMEDOUT\b|\bECONNRESET\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|could not resolve host|connection (reset|refused)|i\/o timeout|TLS handshake/i.test(message);
+  return /\bHTTP 5\d\d\b|\bstatus(?: code)?:? 5\d\d\b|returned error: 5\d\d\b|bad gateway|service unavailable|gateway time-?out|something went wrong|rate limit|timed out|\btimeout\b|\bETIMEDOUT\b|\bECONNRESET\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|could not resolve host|connection (reset|refused)|i\/o timeout|TLS handshake/i.test(message);
 }
 
 /** GitHub says this when auto-merge is already on. A restarted runner asks again. */
@@ -1065,20 +1067,22 @@ export class GhCli implements GitHub {
     await gh(repoDir, ["pr", "ready", "--undo", pr]);
   }
 
-  async closePr(repoDir: string, pr: string): Promise<void> {
-    const view = JSON.parse((await gh(repoDir, ["pr", "view", pr, "--json", "state,headRefName,isCrossRepository"])) || "{}") as {
+  async closePr(repoDir: string, pr: string, expect: { branch: string; heads: string[] }): Promise<boolean> {
+    const view = JSON.parse((await gh(repoDir, ["pr", "view", pr, "--json", "state,headRefName,headRefOid,isCrossRepository"])) || "{}") as {
       state?: string;
       headRefName?: string;
+      headRefOid?: string;
       isCrossRepository?: boolean;
     };
+    if (view.isCrossRepository || view.headRefName !== expect.branch || !view.headRefOid || !expect.heads.includes(view.headRefOid)) return false;
     if ((view.state ?? "").toUpperCase() === "OPEN") await gh(repoDir, ["pr", "close", pr]);
     // Not `gh pr close --delete-branch`: it also deletes the local branch, which the run's worktree has checked out.
     // UNVERIFIED: DELETE on an already deleted ref answers 422 "Reference does not exist" (docs/VERIFY.md).
-    if (!view.headRefName || view.isCrossRepository) return;
     await gh(repoDir, ["api", "--method", "DELETE", `repos/{owner}/{repo}/git/refs/heads/${view.headRefName}`]).catch((e: Error) => {
       if (!/reference does not exist|\b422\b|not found/i.test(e.message)) throw e;
       return "";
     });
+    return true;
   }
 
   async ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]> {
@@ -1372,19 +1376,21 @@ export class FakeGitHub implements GitHub {
   /** When set, `closePr` throws this instead of closing. */
   closeError: string | null = null;
 
-  async closePr(_repoDir: string, pr: string): Promise<void> {
+  async closePr(_repoDir: string, pr: string, expect: { branch: string; heads: string[] }): Promise<boolean> {
     if (this.closeError) throw new Error(this.closeError);
     const created = this.prs.find((p) => p.url === pr);
+    const live = created ? this.remoteShas.get(created.head) : undefined;
+    if (!created || created.head !== expect.branch || !live || !expect.heads.includes(live)) return false;
     const prev = this.prStates.get(pr) ?? { state: "open" as const, draft: created?.draft ?? false };
     if (prev.state === "open") {
       this.closed.push(pr);
       this.prStates.set(pr, { ...prev, state: "closed" });
     }
-    const branch = created?.head;
-    if (!branch) return;
+    const branch = created.head;
     this.remoteShas.delete(branch);
     const i = this.factoryPrs.findIndex((p) => p.branch === branch);
     if (i >= 0) this.factoryPrs.splice(i, 1);
+    return true;
   }
 
   /** PR states by URL; created PRs are open. */
