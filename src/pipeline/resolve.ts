@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { ProviderWindowError, TransientAgentError } from "../agents/models.js";
 import { extractJson } from "../agents/runner.js";
-import { commitAll, commitMerge, diffText, discardChanges, gitOk, stageAll, startMerge } from "../git.js";
+import { commitAll, commitMerge, diffText, discardChanges, gitOk, headSha, stageAll, startMerge } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { asData, rolePrompt, taskBlock } from "../prompts.js";
 import { EnvMissing } from "../services.js";
@@ -32,7 +32,8 @@ export interface ResolverStop {
 }
 
 export type ResolverOutcome =
-  | { ok: true; gates: GateReport }
+  /** `summary`: the resolver's account of the turn; it goes to the next review as the findings' response. */
+  | { ok: true; gates: GateReport; summary: string }
   /** `final`: the resolver said the approach is wrong; another turn would not help. */
   | { ok: false; reason: string; final?: boolean; gates?: GateReport };
 
@@ -68,7 +69,9 @@ function prompt(ctx: RunContext, stop: ResolverStop, v: { diff: string; conflict
         ? `The factory merged ${stop.merge.label} into this branch without conflicts; the merge is not committed yet.`
         : "",
     red ? asData("gate_failures", red) : "",
-    findings.length ? asData("open_findings", JSON.stringify(findings, null, 2)) : "",
+    findings.length
+      ? `${asData("open_findings", JSON.stringify(findings, null, 2))}\nEvery open finding needs a change: the next review checks your commit and reads your summary next to each finding. A finding the task cannot satisfy means the approach is wrong.`
+      : "",
     stop.ci?.failures.length ? asData("ci_failures", stop.ci.failures.map((f) => `### ${f.name}\n${f.output_tail}`).join("\n\n")) : "",
     asData("plan", JSON.stringify(ctx.plan, null, 2)),
     taskBlock(ctx),
@@ -104,6 +107,7 @@ async function abandonTurn(ctx: RunContext, merging: boolean): Promise<void> {
 export async function resolverTurn(ctx: RunContext, stop: ResolverStop, turn: number, previous?: string): Promise<ResolverOutcome> {
   checkDeadline(ctx);
   const author = gitAuthor(ctx);
+  const before = await headSha(ctx.worktree);
   let merging = false;
   let conflicts: string[] = [];
   try {
@@ -152,11 +156,14 @@ export async function resolverTurn(ctx: RunContext, stop: ResolverStop, turn: nu
     const gates = await holdUnfixed(ctx, await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id)));
     // Committed red or green: a second turn builds on this one, and a failed run keeps it for reading.
     await commitAll(ctx.worktree, `fix: resolve technical stop (turn ${turn})`, author);
-    ctx.events.emit({ step: "resolve", event: "step_finished", data: { turn, outcome: reply.outcome, green: gates.green } });
+    const moved = (await headSha(ctx.worktree)) !== before;
+    ctx.events.emit({ step: "resolve", event: "step_finished", data: { turn, outcome: reply.outcome, green: gates.green, moved } });
     if (!gates.green) return { ok: false, reason: `gates red after the resolver turn:\n${failureSummary(gates)}`, gates };
+    // An unchanged reviewed commit is not reviewed again: open findings with no change would reach the PR unreviewed.
+    if (stop.findings?.length && !moved) return { ok: false, reason: "the resolver changed nothing, so the open review findings still stand", gates };
     clearRepair(ensureBudget(ctx));
     ctx.persist?.();
-    return { ok: true, gates };
+    return { ok: true, gates, summary: reply.summary };
   } catch (e) {
     if (e instanceof Interrupted || e instanceof TransientAgentError || e instanceof ProviderWindowError || e instanceof WallTimeExceeded || e instanceof EnvMissing) throw e;
     const reason = (e as Error).message.slice(0, 500);

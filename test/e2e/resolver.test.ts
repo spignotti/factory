@@ -68,6 +68,28 @@ describe("resolver on a technical stop", () => {
     expect(turn.prompt).toMatch(/stalemate/);
     expect(turn.prompt).toContain("R1-plan-1");
     expect(r.runner.calls.map((c) => c.role).slice(-4)).toEqual(["resolve", "review_plan", "review_simplicity", "pr_writer"]);
+    // The delta review sees the resolver's account next to the finding it answered.
+    expect(r.runner.calls.filter((c) => c.role === "review_plan").at(-1)!.prompt).toContain("resolver: resolved the stop");
+  });
+
+  it("a resolver turn that changes nothing does not clear open findings: the run fails instead of skipping review", async () => {
+    const r = await runScenario({
+      script: "stalemate.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.status = "green";
+      },
+      patch: (c) => void (c.merge = { auto_merge_max_risk: "medium", policy: { low: "bot_review", medium: "bot_review" } }),
+      steps: (steps) => [...steps.filter((s) => s.role !== "pr_writer"), resolve(), resolve()],
+    });
+    expect(r.result.result).toBe("failed");
+    expect(r.result.reason).toMatch(/^stalemate.*; resolver: the resolver changed nothing, so the open review findings still stand$/s);
+    const turns = r.runner.calls.filter((c) => c.role === "resolve");
+    expect(turns).toHaveLength(2);
+    expect(turns[1]!.prompt).toContain("<previous_resolver_turn>");
+    expect(r.runner.calls.at(-1)!.role).toBe("resolve");
+    expect(r.github.prs).toEqual([]);
+    expect(r.github.autoMerged).toEqual([]);
   });
 
   it("red CI after ready goes to the resolver with the logs; two turns that do not fix it end failed and reported", async () => {
@@ -105,7 +127,8 @@ describe("resolver on a technical stop", () => {
     const comments = r.github.comments.get(7)!;
     expect(comments).toHaveLength(1);
     expect(comments[0]!.body).toContain("The factory gave up on this issue");
-    expect(comments[0]!.body).toContain("CI on the PR head");
+    expect(comments[0]!.body).toMatch(/\*\*Why:\*\* CI on the PR head \([0-9a-f]{8}\) is red \(resolver: no resolver turn left \(2\/2\)\)/);
+    expect(comments[0]!.body).toContain("<details><summary>Full reason");
     expect(comments[0]!.body).toContain(`Its pull request ${pr} is closed.`);
     expect(comments[0]!.body).toContain("rewrite the ticket");
     expect(comments[0]!.body).toContain(`<!-- factory:failed run=${r.runId} -->`);

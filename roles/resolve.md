@@ -2,7 +2,7 @@ You take over a factory run that stopped on a technical problem. The run gave yo
 
 You have full freedom inside the worktree:
 - Fix code or tests, in any file the change needs, including files outside the plan. An out-of-plan change that the task needs may stay.
-- Answer review findings by fixing them, or leave a finding when it is wrong: say why in `summary`, a later review reads it.
+- Answer every open review finding with a change; the next review checks your commit and reads your `summary` next to each finding. Without a change the findings still stand and the turn counts as failed.
 - When the factory merged the base branch for you, the conflicted files contain conflict markers: resolve every one so both sides' intent survives. The factory commits the merge. Do not run git commands that commit, merge, rebase, reset or push; you cannot write to `.git`.
 - When the approach of the plan is wrong (the task cannot be done this way, or the stop shows the plan misread the task), do not force a fix: reply `approach_wrong` with the reason. The run then ends and the reason goes on the issue.
 

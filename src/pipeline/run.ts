@@ -334,7 +334,9 @@ class RunFrame {
         this.set({ result: "needs_human", reason, stop: stopFor("human_approval") });
       } else {
         // Wall time spent, or a silent agent / invalid output the resolver could not take (no time left
-        // or no turn left), or any other error: the run fails and says why on the issue.
+        // or no turn left), or any other error: the run fails and says why on the issue. What the
+        // aborted step left uncommitted is not a human fix: a manual resume discards it.
+        if (this.state) this.state.transient = true;
         this.set({ result: "failed", reason, stop: undefined });
       }
     }
@@ -986,6 +988,11 @@ async function resolveStop(f: RunFrame, ctx: RunContext, stop: ResolverStop): Pr
     st.base_sha = ctx.baseSha;
     st.gate_count = ctx.gateCount;
     if (out.ok) {
+      // The next review reads the resolver's account next to each finding it answered.
+      const open = new Set((current.findings ?? []).map((f) => f.id));
+      for (const finding of st.findings) {
+        if (open.has(finding.id)) finding.response = { finding_id: finding.id, status: "fixed", response: `resolver: ${out.summary}`.slice(0, 2000) };
+      }
       if (st.step === "implement") {
         // The resolver finished the failed packages; dependents that were skipped run next.
         for (const [id, status] of Object.entries(st.packages)) {

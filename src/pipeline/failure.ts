@@ -31,21 +31,33 @@ export function failureMarker(runId: string): string {
   return `<!-- factory:failed run=${runId} -->`;
 }
 
+/** The stop's first line and, when the resolver gave up, its reason: the comment's short answer. */
+export function failureHeadline(reason: string): string {
+  const firstLine = (t: string, max: number) => (t.trim().split("\n")[0] ?? "").slice(0, max);
+  const at = reason.lastIndexOf("; resolver: ");
+  if (at < 0) return firstLine(reason, 300) || "no reason recorded";
+  return `${firstLine(reason.slice(0, at), 200)} (resolver: ${firstLine(reason.slice(at + "; resolver: ".length), 300)})`;
+}
+
 export function renderFailureComment(runId: string, reason: string, pr?: string | null): string {
   const text = (reason.trim() || "no reason recorded").slice(0, MAX_REASON);
   const fence = "~".repeat(Math.max(3, ...[...text.matchAll(/~+/g)].map((m) => m[0].length + 1)));
   return [
     `The factory gave up on this issue (run \`${runId}\`).`,
     "",
-    "**Why:**",
+    `**Why:** ${failureHeadline(reason)}`,
+    "",
+    pr ? `Its pull request ${pr} is closed. Nobody is waiting on this run.` : "Nobody is waiting on this run.",
+    "",
+    `**What to do:** rewrite the ticket (a clearer task, a smaller scope, the missing detail) or split it into smaller issues. Then remove the \`${FACTORY_FAILED_LABEL}\` label and add \`${FACTORY_READY_LABEL}\` again; the next run starts fresh.`,
+    "",
+    "<details><summary>Full reason (the run's own wording)</summary>",
     "",
     `${fence}text`,
     text,
     fence,
     "",
-    pr ? `Its pull request ${pr} is closed. Nobody is waiting on this run.` : "Nobody is waiting on this run.",
-    "",
-    `**What to do:** rewrite the ticket (a clearer task, a smaller scope, the missing detail) or split it into smaller issues. Then remove the \`${FACTORY_FAILED_LABEL}\` label and add \`${FACTORY_READY_LABEL}\` again; the next run starts fresh.`,
+    "</details>",
     "",
     failureMarker(runId),
   ].join("\n");
