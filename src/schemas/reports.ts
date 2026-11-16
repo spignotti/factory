@@ -237,6 +237,29 @@ export const StatusReportSchema = z.strictObject({
   ),
 });
 
+/**
+ * `factory status --repo <path> --since <time> --json`: the short check-in for one repository.
+ * Merged and failed are windowed (`since`); the other sections are the state at `generated_at`.
+ * Empty sections are empty arrays, `null` or zero counts here; only the text report drops them.
+ */
+export const StatusCheckinSchema = z.strictObject({
+  generated_at: z.string(),
+  repo: z.string(),
+  since: z.strictObject({ since: z.string(), from: z.string() }),
+  /** PR shows merged on GitHub and the run finished in the window. `assumptions` is the plan's full list. */
+  merged: z.array(z.strictObject({ issue: z.number().int().nullable(), task: z.string(), pr: z.string(), assumptions: z.array(z.string()) })),
+  /** `done` with merge policy `human_review` and a ready PR. `reason` is `risk_reasons` (hard list, merge holds). `unknown`: the PR state could not be read. */
+  waiting_for_merge: z.array(
+    z.strictObject({ issue: z.number().int().nullable(), task: z.string(), pr: z.string(), reason: z.string(), pr_state: z.enum(["open", "unknown"]) }),
+  ),
+  /** Parked queue entries waiting for an answer. `posted`: the questions are on the issue. */
+  questions_open: z.array(z.strictObject({ issue: z.number().int(), questions: z.array(z.string()), posted: z.boolean() })),
+  /** `reported`: the failure comment and label are on the issue. */
+  failed: z.array(z.strictObject({ issue: z.number().int().nullable(), task: z.string(), reason: z.string(), reported: z.boolean() })),
+  base_problem: z.string().nullable(),
+  queue: z.strictObject({ pending: z.number().int().min(0), running: z.number().int().min(0), parked: z.number().int().min(0) }),
+});
+
 const quantiles = z.strictObject({ median: z.number().nullable(), p90: z.number().nullable() });
 const counts = z.record(z.string(), z.number().int());
 const usage = { calls: z.number().int(), tokens_in: z.number(), tokens_out: z.number(), cost_usd: z.number() };

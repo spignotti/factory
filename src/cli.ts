@@ -17,7 +17,7 @@ import { abandonRun } from "./commands/abandon.js";
 import { autoGc, gcCommand, resumesBaseRedAfterGc } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { queueCommand } from "./commands/queue.js";
-import { statusCommand } from "./commands/status.js";
+import { checkinCommand, statusCommand } from "./commands/status.js";
 import { releaseCommand } from "./commands/release.js";
 import { adoptCommand } from "./commands/adopt.js";
 import { standardsMigrateCommand } from "./commands/standards.js";
@@ -113,6 +113,10 @@ const USAGE = `usage:
   factory release status [--json]
               (this CLI, the active release, the live worker, published candidates, live runs, the
                admission hold and the handoff transaction)
+  factory status --repo <path> --since <duration|ISO time> [--json]
+              (check-in for one repo, only sections with content: merged since, waiting for a human merge,
+               questions open, failed since, base problem, queue counts; merged and failed are windowed,
+               the rest is the state now)
   factory status [--since <duration>] [--timezone <IANA>] [--json]
               (running, waiting for a human, interrupted runs; queues; open factory PRs;
                stale draft factory PRs, with a hint to close or resume them;
@@ -563,7 +567,14 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       }
     }
     if (command === "status") {
-      const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, timezone: { type: "string" }, json: { type: "boolean", default: false } } });
+      const { values } = parseArgs({ args: rest, options: { since: { type: "string" }, timezone: { type: "string" }, repo: { type: "string" }, json: { type: "boolean", default: false } } });
+      if (values.repo !== undefined) {
+        if (!values.since) {
+          io.err("factory: status --repo needs --since <duration or ISO time>\n");
+          return 2;
+        }
+        return await checkinCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), repo: values.repo, since: values.since, json: values.json }, io);
+      }
       return await statusCommand({ factoryHome: factoryHomeOf(), github: new GhCli(), since: values.since, timezone: values.timezone, json: values.json }, io);
     }
     if (command === "release") {

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { EVENT_TYPES, ResultSchema } from "../events.js";
 import { MemoryFileSchema } from "../memory.js";
 import { EvalProfileSchema, EvalRecordSchema, EvalTaskSchema, VerdictSchema as ExperimentVerdictSchema } from "./eval.js";
-import { DoctorReportSchema, GcReportSchema, StatsReportSchema, StatusReportSchema } from "./reports.js";
+import { DoctorReportSchema, GcReportSchema, StatsReportSchema, StatusCheckinSchema, StatusReportSchema } from "./reports.js";
 import { AuditReportSchema, HardenReportSchema, ImproveReportSchema, MetricsSchema, ProposalSchema } from "./proposal.js";
 import { ReviewOutputSchema } from "./review.js";
 
@@ -28,6 +28,7 @@ export const JSON_SCHEMAS: Record<string, { schema: z.ZodType; io: "input" | "ou
   "result.schema.json": { schema: ResultSchema, io: "output", title: "factory result.json" },
   "event.schema.json": { schema: EventLineSchema, io: "output", title: "factory events.jsonl line" },
   "status.schema.json": { schema: StatusReportSchema, io: "output", title: "factory status --json" },
+  "status-checkin.schema.json": { schema: StatusCheckinSchema, io: "output", title: "factory status --repo <path> --since <time> --json" },
   "stats.schema.json": { schema: StatsReportSchema, io: "output", title: "factory stats --json" },
   "gc.schema.json": { schema: GcReportSchema, io: "output", title: "factory gc --json" },
   "doctor.schema.json": { schema: DoctorReportSchema, io: "output", title: "factory doctor --json" },

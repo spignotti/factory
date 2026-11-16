@@ -1,0 +1,221 @@
+{
+  "$id": "https://github.com/spignotti/factory/schemas/status-checkin.schema.json",
+  "title": "factory status --repo <path> --since <time> --json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "generated_at": {
+      "type": "string"
+    },
+    "repo": {
+      "type": "string"
+    },
+    "since": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "from"
+      ],
+      "additionalProperties": false
+    },
+    "merged": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issue": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "string"
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "issue",
+          "task",
+          "pr",
+          "assumptions"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "waiting_for_merge": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issue": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "pr_state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "issue",
+          "task",
+          "pr",
+          "reason",
+          "pr_state"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "questions_open": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issue": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "posted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "issue",
+          "questions",
+          "posted"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issue": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "reported": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "issue",
+          "task",
+          "reason",
+          "reported"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "base_problem": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "queue": {
+      "type": "object",
+      "properties": {
+        "pending": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "running": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "parked": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "pending",
+        "running",
+        "parked"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "generated_at",
+    "repo",
+    "since",
+    "merged",
+    "waiting_for_merge",
+    "questions_open",
+    "failed",
+    "base_problem",
+    "queue"
+  ],
+  "additionalProperties": false
+}
