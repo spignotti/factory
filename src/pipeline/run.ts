@@ -265,6 +265,8 @@ interface Outcome {
    * the queue parks the entry until then without holding a coding slot.
    */
   window_resets_at?: number;
+  /** `window_resets_at` is an assumed time, not one the provider reported. */
+  window_estimated?: boolean;
   type: RunResult["type"];
   risk: RunResult["risk"];
   /** `riskClass` reasons. Absent until finalize classifies the diff. */
@@ -332,11 +334,11 @@ class RunFrame {
         // The run, checkpoint and spent budgets stay.
         this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("transient_retry") });
       } else if (e instanceof ProviderWindowError) {
-        // Every usable model hit a usage limit with an explicitly resetting window (#177). The reset time is
+        // Every usable model hit a usage limit with a resetting window, reported or assumed (#177). The reset time is
         // result metadata, not reason text: the queue waits for that window without a coding slot. The run,
         // checkpoint and spent budgets stay; generic 429/capacity stays on the transient_retry path above.
         if (this.state) this.state.transient = true;
-        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("provider_window_wait"), window_resets_at: e.resetsAtMs });
+        this.set({ result: "needs_human", reason: `${reason}; factory resume ${this.runId}`, stop: stopFor("provider_window_wait"), window_resets_at: e.resetsAtMs, ...(e.estimated ? { window_estimated: true } : {}) });
       } else if (e instanceof WallTimeExceeded) {
         // The work so far stays in the worktree; resume re-runs the gates over it and continues.
         this.set({ result: "needs_human", reason: this.state?.worktree ? `${reason}; factory resume ${this.runId}` : reason, stop: stopFor("budget_exhausted") });
@@ -412,6 +414,7 @@ class RunFrame {
       reason: out.reason,
       ...(out.stop ? { stop: out.stop } : {}),
       ...(out.window_resets_at !== undefined ? { window_resets_at: out.window_resets_at } : {}),
+      ...(out.window_estimated ? { window_estimated: true } : {}),
       ...(outcome ? { outcome } : {}),
       provenance,
       ...(this.events.diffCount ?? {}),

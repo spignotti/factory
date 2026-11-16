@@ -659,11 +659,32 @@ describe("the pipeline records the explicit usage window (#177)", () => {
     expect(r.resultFile.window_resets_at).toBeUndefined();
   });
 
-  it("a usage limit without an explicit reset window does not become a window wait", async () => {
+  it("a usage limit without a reset time waits on an assumed one-hour window, marked as estimated", async () => {
     const at = (model: string): FakeStep => ({ role: "implement", model, error: { message: "usage limit reached" } });
+    const errors = [at("opencode-go/deepseek-v4.1-flash"), at("opencode-go/deepseek-v4-pro")];
+    const before = Date.now();
+    const r = await runScenario({ script: "clean.json", steps: failFirstImplement(errors) });
+    expect(r.result.result).toBe("needs_human");
+    expect(r.resultFile.stop).toEqual({ cause: "provider_window_wait", action: "wait" });
+    expect(r.resultFile.window_resets_at).toBeGreaterThanOrEqual(before + 60 * 60_000);
+    expect(r.resultFile.window_resets_at).toBeLessThanOrEqual(Date.now() + 60 * 60_000);
+    expect(r.resultFile.window_estimated).toBe(true);
+    expect(r.resultFile.reason).toMatch(/estimated/);
+  });
+
+  it("a billing limit without a reset time does not become a window wait", async () => {
+    const at = (model: string): FakeStep => ({ role: "implement", model, error: { message: "insufficient_quota: billing hard limit" } });
     const errors = [at("opencode-go/deepseek-v4.1-flash"), at("opencode-go/deepseek-v4-pro")];
     const r = await runScenario({ script: "clean.json", steps: failFirstImplement(errors) });
     expect(r.resultFile.stop).not.toEqual({ cause: "provider_window_wait", action: "wait" });
     expect(r.resultFile.window_resets_at).toBeUndefined();
+    expect(r.resultFile.window_estimated).toBeUndefined();
+  });
+
+  it("an explicit reset time leaves the result without the estimated mark", async () => {
+    const at = (model: string): FakeStep => ({ role: "implement", model, error: { message: "Weekly usage limit reached. Resets in 2 hours." } });
+    const errors = [at("opencode-go/deepseek-v4.1-flash"), at("opencode-go/deepseek-v4-pro")];
+    const r = await runScenario({ script: "clean.json", steps: failFirstImplement(errors) });
+    expect(r.resultFile.window_estimated).toBeUndefined();
   });
 });

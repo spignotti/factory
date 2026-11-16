@@ -10,7 +10,7 @@ import { fixStep, reviewDelta } from "../pipeline/loop.js";
 import { openFindings, type TrackedFinding } from "../pipeline/merge.js";
 import { repairScope } from "../pipeline/scope-repair.js";
 import { protectedFiles } from "../gates/builtin.js";
-import { diffSizeSignal, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
+import { diffSizeSignal, humanReviewPaths, type MergePolicy, mergePolicy, riskClass, riskReasonLine, type RiskAssessment, securityRows } from "../pipeline/risk.js";
 import type { HostSteps } from "../schemas/plan.js";
 import type { StopCause } from "../events.js";
 import type { RoleUsage } from "../events.js";
@@ -252,7 +252,7 @@ export function renderPrBody(ctx: RunContext, v: {
     protected: v.protectedConfig ? `\n${v.protectedConfig}` : "",
     risk: out.risk.risk,
     risk_reason: cell([riskReasonLine(out.risk), v.sizeSignal ? `size signal (does not change risk): ${v.sizeSignal}` : ""].filter(Boolean).join("; ")),
-    security_rows: securityRows(v.changed)
+    security_rows: securityRows(v.changed, humanReviewPaths(ctx.repo))
       .map((r) => `| ${cell(r.area)} | ${r.touched ? "yes" : "no"} | ${cell(r.note)} |`)
       .join("\n"),
     host_steps: (() => {
