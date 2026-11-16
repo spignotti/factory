@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { changedFiles, commitAll, diffText, headSha, stageAll } from "../git.js";
 import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
@@ -12,7 +10,6 @@ import { evaluateRound } from "../steps/evaluate.js";
 import { reviewRound } from "../steps/review.js";
 import { checkDeadline, type RunContext, writeJson } from "./context.js";
 import { decideExit, isStalemate, mergeRound, openFindings, type TrackedFinding } from "./merge.js";
-import { settlePlanDispute } from "./plan-authority.js";
 import { invalidateAffected, reviewCoversHead } from "./review-bind.js";
 
 export interface LoopOutcome {
@@ -162,21 +159,6 @@ export async function evaluateFirst(ctx: RunContext, round: number, findings: Tr
   return { review: report.review, bugs: report.review.findings.filter((f) => f.severity === "bug").length };
 }
 
-function applyPlanSettlement(ctx: RunContext, findings: TrackedFinding[]): string | undefined {
-  const exists = (file: string) => existsSync(join(ctx.worktree, file));
-  const settled = settlePlanDispute(ctx.plan, ctx.task.text, findings, exists);
-  if (settled.decision) return settled.decision;
-  if (!settled.notes.length) return;
-  const resolved = new Set(settled.resolvedIds);
-  for (const finding of findings) if (resolved.has(finding.id)) finding.status = "resolved";
-  ctx.plan.packages = settled.plan.packages;
-  ctx.plan.acceptance = settled.plan.acceptance;
-  ctx.plan.out_of_scope = settled.plan.out_of_scope;
-  writeJson(ctx, "plan.json", ctx.plan);
-  ctx.events.emit({ step: "review", event: "progress", data: { plan_corrected: settled.notes } });
-  return;
-}
-
 /** One review of the commits since `reviewedSha`. An open bug on that delta blocks; it does not start another fix. */
 export async function reviewDelta(
   ctx: RunContext,
@@ -186,8 +168,6 @@ export async function reviewDelta(
   const prior = invalidateAffected(input.findings, delta);
   const reviews = await reviewRound(ctx, { round: input.round, gates: input.gates, findings: prior, lastReviewedSha: input.reviewedSha });
   const merged = mergeRound(prior, input.round, reviews, ctx.repo.review.max_nits);
-  const dispute = applyPlanSettlement(ctx, merged.findings);
-  if (dispute) return { ok: false, reason: dispute, cause: "explicit_decision", findings: merged.findings };
   const openBugs = openFindings(merged.findings).filter((f) => f.severity === "bug");
   if (openBugs.length) {
     return { ok: false, reason: `open bug on the final tree: ${openBugs.map((b) => b.claim).join("; ")}`, cause: "technical_repair", findings: merged.findings };
@@ -238,13 +218,9 @@ export async function reviewLoop(
     if (!skipReview) lastReviewedSha = await headSha(ctx.worktree);
     const merged = mergeRound(findings, round, reviews, ctx.repo.review.max_nits);
     findings = merged.findings;
-    const dispute = applyPlanSettlement(ctx, findings);
     writeJson(ctx, `merged-${round}.json`, { ...merged, findings });
     const open = openFindings(findings);
     opts.onRound?.(round, findings, lastReviewedSha);
-    if (dispute) {
-      return { result: "needs_human", reason: dispute, cause: "explicit_decision", rounds: round, findings, gates, reviewedSha: lastReviewedSha };
-    }
     const decision = decideExit({ round: round - firstRound + 1, maxRounds, stalemate: isStalemate(merged), open });
     ctx.events.emit({
       step: "review",

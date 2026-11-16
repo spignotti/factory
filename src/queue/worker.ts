@@ -244,14 +244,6 @@ export function prNumberOf(ref: string): number | undefined {
   return m ? Number(m[1]) : undefined;
 }
 
-/** PR numbers in `planned paths overlap open factory PR #12 (…)`. Empty when this lock is not that case. */
-export function overlapPrNumbers(reason: string): number[] {
-  if (!/overlap open factory PR/i.test(reason)) return [];
-  const nums = new Set<number>();
-  for (const m of reason.matchAll(/#(\d+)/g)) nums.add(Number(m[1]));
-  return [...nums];
-}
-
 /** Run ids in `planned paths overlap active runs: <id> (…)` / `… overlap another factory run: <id> …`. */
 export function overlapRunIds(reason: string): string[] {
   if (!/overlap (active runs|another factory run)/i.test(reason)) return [];
@@ -288,12 +280,11 @@ export function isTransientNeedsHuman(result: RunResult, stateTransient = false,
   return stateTransient || (result as { transient?: boolean }).transient === true;
 }
 
-function park(entry: QueueEntry, reason: string, runId?: string, blocked?: number[], blockedRuns?: string[]): void {
+function park(entry: QueueEntry, reason: string, runId?: string, blockedRuns?: string[]): void {
   entry.status = "parked";
   entry.reason = reason;
   if (runId) entry.run_id = runId;
-  if (blocked?.length) entry.blocked_by = blocked;
-  else delete entry.blocked_by;
+  delete entry.blocked_by;
   if (blockedRuns?.length) entry.blocked_runs = blockedRuns;
   else delete entry.blocked_runs;
   delete entry.pid;
@@ -352,7 +343,7 @@ export function isLocalBaseRed(result: RunResult): boolean {
   return result.result === "base_red" && !!result.worktree;
 }
 
-/** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. Overlap `locked` parks on the PR numbers. A repo-lock `locked` goes back to pending. Everything else parks. */
+/** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. A live-run overlap `locked` parks on those runs. A repo-lock `locked` goes back to pending. Everything else parks. */
 export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown; now?: number }): "done" | "requeue" | "parked" {
   entry.run_id = result.run_id;
   if (result.pr) entry.pr = result.pr;
@@ -412,15 +403,10 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     return "requeue";
   }
   if (result.result === "locked") {
-    const blocked = overlapPrNumbers(result.reason);
-    if (blocked.length) {
-      park(entry, result.reason || result.result, result.run_id, blocked);
-      return "parked";
-    }
     // A live run claims these paths: wait for it to finish instead of parking for the night.
     const runs = overlapRunIds(result.reason);
     if (runs.length) {
-      park(entry, result.reason, result.run_id, undefined, runs);
+      park(entry, result.reason, result.run_id, runs);
       return "parked";
     }
     if (isRepoLockHeld(result.reason)) {
@@ -820,22 +806,17 @@ async function afterGate(entry: QueueEntry, q: QueueFile, github: GitHub, repo: 
   return "wait";
 }
 
-async function unparkReady(q: QueueFile, github: GitHub, repo: string, io: Io, timeoutMs: number, factoryHome: string, onFailure?: () => void): Promise<Set<number>> {
+/**
+ * Entries parked behind live runs come back once those runs have a result. An entry parked behind an
+ * open factory PR (`blocked_by`, written before PR overlap stopped blocking) comes back on the next tick.
+ */
+function unparkReady(q: QueueFile, factoryHome: string): Set<number> {
   const ready = new Set<number>();
   const finished = new Set(listRuns(factoryHome).filter((r) => r.result).map((r) => r.run_id));
   for (const entry of q.entries) {
-    if (entry.status === "parked" && entry.blocked_runs?.length) {
-      if (entry.blocked_runs.every((id) => finished.has(id))) ready.add(entry.issue);
-      continue;
-    }
-    if (entry.status !== "parked" || !entry.blocked_by?.length) continue;
-    try {
-      const states = await Promise.all(entry.blocked_by.map((n) => withTimeout(github.prStatus(repo, String(n)), timeoutMs, `pr status #${n}`)));
-      if (states.every((s) => s.state === "merged" || s.state === "closed")) ready.add(entry.issue);
-    } catch (e) {
-      onFailure?.();
-      io.err(`factory: blocking PR status failed for #${entry.issue}: ${(e as Error).message.slice(0, 200)}\n`);
-    }
+    if (entry.status !== "parked") continue;
+    if (entry.blocked_by?.length) ready.add(entry.issue);
+    else if (entry.blocked_runs?.length && entry.blocked_runs.every((id) => finished.has(id))) ready.add(entry.issue);
   }
   return ready;
 }
@@ -845,7 +826,7 @@ function applyUnpark(q: QueueFile, ready: Set<number>, io: Io): void {
     if (!ready.has(entry.issue) || entry.status !== "parked" || !(entry.blocked_by?.length || entry.blocked_runs?.length)) continue;
     const byRun = (entry.blocked_runs?.length ?? 0) > 0;
     releaseToPending(entry, true);
-    io.out(`queue: #${entry.issue} pending (${byRun ? "overlapping run finished" : "blocking PR closed"})\n`);
+    io.out(`queue: #${entry.issue} pending (${byRun ? "overlapping run finished" : "open PRs no longer block"})\n`);
   }
 }
 
@@ -1097,17 +1078,6 @@ function selfMergeRuns(runs: RunRecord[], pr: OpenFactoryPr): RunRecord[] {
   return runs.filter((r) => selfMergePolicy(r.result?.merge_policy) && runEndedDone([r], pr));
 }
 
-/** Distinct parked tickets whose `blocked_by` names this open PR. #178 repair priority. */
-function blockerImpact(q: QueueFile, pr: number): number {
-  if (pr <= 0) return 0;
-  const tickets = new Set<number>();
-  for (const e of q.entries) {
-    if (e.status !== "parked" || !e.blocked_by?.length) continue;
-    if (e.blocked_by.includes(pr)) tickets.add(e.issue);
-  }
-  return tickets.size;
-}
-
 /** Revalidate through the existing pipeline. A poller never manufactures a review SHA. */
 async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> {
   const q = loadQueueByKey(ctx.factoryHome, await repoQueueKey(repo));
@@ -1121,9 +1091,9 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
     // stays as it was. None of this grants merge permission.
     if (run.result.result !== "done") {
       if (!repairContinuationAllowed(st, run.result)) continue;
-      // #178: a repairable stop is resumed automatically only when a prior continuation exists or
-      // its open PR blocks queued tickets; otherwise it stays parked for the operator.
-      if (!st.continuation && blockerImpact(q, prNumberOf(st.pr) ?? 0) === 0) continue;
+      // A repairable stop is resumed automatically only when a prior continuation exists; otherwise
+      // it stays parked for the operator.
+      if (!st.continuation) continue;
     } else if (!st.continuation && !selfMergePolicy(run.result.merge_policy)) {
       continue;
     }
@@ -1138,15 +1108,13 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
       if (!head?.headSha || head.url !== st.pr) continue;
       const kind: "ci" | "head" | "base" | "blocker" | undefined = st.continuation
         ? st.continuation.kind
-        : run.result.result !== "done"
-          ? "blocker"
-          : head.headSha !== st.approved_sha
-            ? "head"
-            : status.behind
-              ? "base"
-              : status.ci === "red"
-                ? "ci"
-                : undefined;
+        : head.headSha !== st.approved_sha
+          ? "head"
+          : status.behind
+            ? "base"
+            : status.ci === "red"
+              ? "ci"
+              : undefined;
       if (!kind) continue;
       await withTimeout(ctx.github.disableAutoMerge(repo, st.pr), ctx.netTimeoutMs, "disable stale approval");
       if ((st.continuation_attempts ?? 0) >= continuationLimit(st.continuation_extra)) {
@@ -1348,7 +1316,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
 
   // A release handoff classifies finished runs and changes nothing else: no unpark, no pause, no
   // update-branch, no approval and no auto-merge while the admission hold is in place.
-  const unpark = ctx.releaseHold ? new Set<number>() : await unparkReady(snap, ctx.github, repo, ctx.io, timeoutMs, ctx.factoryHome, noteFailure);
+  const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
@@ -1538,13 +1506,11 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     }
     const ranked = rankPending(
       candidates.map((entry) => {
-        const pr = entry.pr ? prNumberOf(entry.pr) : undefined;
         return {
           issue: entry.issue,
           addedAt: entry.added_at,
           index: q.entries.indexOf(entry),
           priority: priorityRank(issueByNumber.get(entry.issue)?.labels ?? []),
-          ...(pr !== undefined ? { blockerImpact: blockerImpact(q, pr) } : {}),
         };
       }),
       ctx.nowMs,
@@ -1658,7 +1624,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   if (!q) return false;
   const pending = q.entries.some((e) => e.status === "pending");
   const running = q.entries.some((e) => e.status === "running");
-  const overlap = q.entries.some((e) => e.status === "parked" && ((e.blocked_by?.length ?? 0) > 0 || (e.blocked_runs?.length ?? 0) > 0));
+  const overlap = q.entries.some((e) => e.status === "parked" && (e.blocked_runs?.length ?? 0) > 0);
   // A window wait keeps the worker on its poll cadence until the wake-up is released or dropped.
   // A due wait (window already open, or paused past it) still waits for the next tick — not a busy poll.
   const windowWait = q.entries.some((e) => e.status === "parked" && e.wait_until !== undefined);
@@ -1692,7 +1658,7 @@ function activeCoding(factoryHome: string, handles: Map<string, Tracked>): boole
 /**
  * One worker. Fills slots in queue order, classifies `result.json` when a run ends, updates behind PRs.
  * A stall keeps the slot until the process exits (SIGKILL after a grace period).
- * Stops when nothing is pending, running, or behind (overlap parks keep polling until the blocking PR closes).
+ * Stops when nothing is pending, running, or behind (overlap parks keep polling until the blocking run ends).
  * With `untilMs`, also stays until that time while an open factory PR is behind or waiting for auto-merge;
  * at `untilMs` live runs finish and the worker exits. `stay` keeps polling with backoff when idle.
  * Pause and drain start nothing. Drain exits once no coding run is left. A second worker is refused.
