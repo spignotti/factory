@@ -300,6 +300,7 @@ function park(entry: QueueEntry, reason: string, runId?: string, blocked?: numbe
   // A park for another reason is no longer a window wait; the spent `window_waits` budget stays.
   delete entry.wait_until;
   delete entry.window_resets_at;
+  delete entry.window_estimated;
   delete entry.awaiting_answer;
 }
 
@@ -324,6 +325,7 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
   delete entry.choice;
   delete entry.wait_until;
   delete entry.window_resets_at;
+  delete entry.window_estimated;
   delete entry.awaiting_answer;
 }
 
@@ -365,9 +367,11 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     if (waits <= MAX_WINDOW_WAITS && resetsAt !== undefined && Number.isFinite(resetsAt) && resetsAt > 0) {
       // A window that has already opened is due on the next tick. applyOutcome does not resume: the
       // worker revalidates issue revision, pause and stop authorization first.
-      park(entry, `provider usage window resets ${new Date(resetsAt).toISOString()} (wait ${waits}/${MAX_WINDOW_WAITS}); factory resume ${result.run_id}`, result.run_id);
+      const estimated = result.window_estimated === true;
+      park(entry, `provider usage window resets ${new Date(resetsAt).toISOString()} (${estimated ? "estimated; " : ""}wait ${waits}/${MAX_WINDOW_WAITS}); factory resume ${result.run_id}`, result.run_id);
       entry.wait_until = resetsAt > now ? Math.min(resetsAt, now + MAX_WINDOW_WAIT_MS) : now;
       entry.window_resets_at = resetsAt;
+      if (estimated) entry.window_estimated = true;
       return "parked";
     }
     // No usable window metadata, or the bounded wait budget is spent: a permanent stop, never a requeue

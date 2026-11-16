@@ -293,9 +293,11 @@ export const ResultSchema = z.object({
   stop: StopSchema.optional(),
   /**
    * Epoch ms when the provider usage window resets (`provider_window_wait` only, issue #177).
-   * Set only from explicit window metadata on the stop, never inferred from generic 429/capacity text.
+   * Set only from a usage limit, never inferred from generic 429/capacity text. `window_estimated` marks an assumed time.
    */
   window_resets_at: z.number().int().positive().optional(),
+  /** `window_resets_at` is an assumption (the provider reported no reset time), not a reported time. Omitted when reported. */
+  window_estimated: z.boolean().optional(),
   /** Separate counters. Omitted on results written before this field. A `done` run is not a merge. */
   outcome: OutcomeSchema.optional(),
   /** Factory version, prompts, model, effort, sanitized config, base/head, check versions. No secrets. */

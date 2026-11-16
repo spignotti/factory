@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FakeRunner } from "../../src/agents/fake-runner.js";
-import { callModel, ProviderWindowError, providerWindowResetsAtMs, TransientAgentError } from "../../src/agents/models.js";
+import { callModel, ESTIMATED_WINDOW_MS, ProviderWindowError, providerWindowResetsAtMs, TransientAgentError } from "../../src/agents/models.js";
 import { AgentError } from "../../src/agents/runner.js";
 import { EventLog } from "../../src/events.js";
 import { parseProfile, PROFILE_ROLES } from "../../src/schemas/profile.js";
@@ -56,7 +56,7 @@ describe("explicit usage window reset time (#177)", () => {
     expect(providerWindowResetsAtMs(new AgentError("Too Many Requests, please retry later"), now)).toBeUndefined();
   });
 
-  it("requires an explicit reset time on the usage limit", () => {
+  it("the parser itself still reports only an explicit reset time; the estimate is made by callModel", () => {
     expect(providerWindowResetsAtMs(new AgentError("usage limit reached"), now)).toBeUndefined();
     expect(providerWindowResetsAtMs(new AgentError("quota exceeded, will reset eventually"), now)).toBeUndefined();
   });
@@ -98,14 +98,59 @@ describe("callModel provider window error (#177)", () => {
     expect(slept).toEqual([]);
   });
 
-  it("a usable model without an explicit window is not a window wait", async () => {
+  it("a usable model on a billing limit is not a window wait, even when another one has a reset time", async () => {
     const { deps } = setup(chainProfile, [
       { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "Weekly usage limit reached. Resets in 2 hours." } },
-      { role: "implement", model: "opencode-go/deepseek-v4-pro", error: { message: "usage limit reached" } },
+      { role: "implement", model: "opencode-go/deepseek-v4-pro", error: { message: "insufficient_quota: billing hard limit" } },
     ]);
     const err = await callModel(deps, "implement", req).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AgentError);
     expect(err).not.toBeInstanceOf(ProviderWindowError);
+  });
+
+  it("a usage limit without a reset time waits on an assumed window of one hour, marked as estimated", async () => {
+    const { deps, runner, slept } = setup(chainProfile, [
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "You have hit your ChatGPT usage limit." } },
+      { role: "implement", model: "opencode-go/deepseek-v4-pro", error: { message: "usage limit reached" } },
+    ]);
+    const before = Date.now();
+    const err = await callModel(deps, "implement", req).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderWindowError);
+    const win = err as ProviderWindowError;
+    expect(win.estimated).toBe(true);
+    expect(win.resetsAtMs).toBeGreaterThanOrEqual(before + ESTIMATED_WINDOW_MS);
+    expect(win.resetsAtMs).toBeLessThanOrEqual(Date.now() + ESTIMATED_WINDOW_MS);
+    expect(win.message).toMatch(/estimated/);
+    // Fallback still had its chance first; no same-model retry for a limit.
+    expect(runner.calls.map((c) => c.model)).toEqual(["opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4-pro"]);
+    expect(slept).toEqual([]);
+  });
+
+  it("a later explicit reset wins over the assumed one and is not marked as estimated; an earlier one loses", async () => {
+    const later = setup(chainProfile, [
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "usage limit reached" } },
+      { role: "implement", model: "opencode-go/deepseek-v4-pro", error: { message: "Weekly usage limit reached. Resets in 3 hours." } },
+    ]);
+    const a = (await callModel(later.deps, "implement", req).catch((e: unknown) => e)) as ProviderWindowError;
+    expect(a).toBeInstanceOf(ProviderWindowError);
+    expect(a.estimated).toBe(false);
+    expect(a.resetsAtMs).toBeGreaterThan(Date.now() + 2 * 3_600_000);
+
+    const earlier = setup(chainProfile, [
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "usage limit reached" } },
+      { role: "implement", model: "opencode-go/deepseek-v4-pro", error: { message: "Weekly usage limit reached. Resets in 10 minutes." } },
+    ]);
+    const b = (await callModel(earlier.deps, "implement", req).catch((e: unknown) => e)) as ProviderWindowError;
+    expect(b.estimated).toBe(true);
+  });
+
+  it("an explicit reset time is never marked as estimated", async () => {
+    const { deps } = setup(chainProfile, [
+      { role: "implement", model: "opencode-go/deepseek-v4.1-flash", error: { message: "Weekly usage limit reached. Resets in 2 hours." } },
+      { role: "implement", model: "opencode-go/deepseek-v4-pro", error: { message: "Weekly usage limit reached. Resets in 3 hours." } },
+    ]);
+    const err = (await callModel(deps, "implement", req).catch((e: unknown) => e)) as ProviderWindowError;
+    expect(err.estimated).toBe(false);
   });
 
   it("model fallback still comes first: a later usable model without a limit wins", async () => {
