@@ -17,6 +17,7 @@ export const PLAN_SHAPE = `plan.json shape:
  "out_of_scope":[],"protected_changes":[]}
 Optional, only when the change needs manual production-host commands (launchd, restic, Docker Desktop, files outside the repo): "host_steps":{"commands":["exact command"],"verify":"how to check","rollback":"how to undo"}. Omit host_steps otherwise.
 Optional, only for test-stabilization or the issue label factory:red-green-not-applicable: "red_green":"not_applicable","red_green_reason":"why the repro cannot fail on base". That loosens the red-green proof. Omit both for a normal bug.
+Optional: "assumptions":["what you assumed where the task is unclear"]. Omit it when you assumed nothing.
 or {"version":1,"questions":["..."]}. Return it as a single \`\`\`json block.`;
 
 async function planInput(ctx: PlanContext): Promise<string> {
@@ -28,6 +29,7 @@ async function planInput(ctx: PlanContext): Promise<string> {
   const areas = ctx.repo.verify.areas.map((a) => `- ${a.name}: ${a.paths.join(", ")}`).join("\n") || "(none)";
   return [
     asData("task", ctx.task.text),
+    ctx.task.comments ? asData("issue_comments", ctx.task.comments) : "",
     `Repo tree:\n${tree}`,
     // AGENTS.md is not pasted here: the agent session carries the base worktree's AGENTS.md as context.
     existsSync(join(ctx.repoDir, "AGENTS.md")) ? "" : "AGENTS.md: (none)",

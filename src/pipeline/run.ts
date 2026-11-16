@@ -33,6 +33,7 @@ import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProbl
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
+import { postQuestions as postQuestionsOnIssue } from "./questions.js";
 import { notifyRunFinished, flushNotifyOutbox, START_FLUSH } from "../notify.js";
 import { listRuns, runStartedAt } from "../runs.js";
 
@@ -252,6 +253,10 @@ interface Outcome {
   pr: string | null;
   rounds: number;
   questions?: string[];
+  /** Whether the questions reached the issue (comment and labels). Set only when a post was attempted. */
+  questions_posted?: boolean;
+  /** The plan's stated assumptions. */
+  assumptions?: string[];
   skipped_gates?: string[];
   branch: string | null;
   worktree: string | null;
@@ -327,6 +332,7 @@ class RunFrame {
       } else this.set({ result: "failed", reason });
     }
     for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
+    await this.postQuestions();
     // Service logs and browser captures are written by child processes: redact them in place.
     if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
     let result: RunResult;
@@ -338,6 +344,25 @@ class RunFrame {
     // After the lock is released: the woken bot may start the next run right away.
     if (this.deps) await notifyFinished(result, this.deps, this.events);
     return result;
+  }
+
+  /**
+   * Questions belong on the issue, not only in result.json; queue runs have no notify hook. A GitHub
+   * failure is recorded (`questions_posted: false`) and never changes the result; the queue worker
+   * retries. A `--no-pr` run writes nothing to GitHub.
+   */
+  private async postQuestions(): Promise<void> {
+    const issue = this.state?.task.issue;
+    const questions = this.out.questions;
+    if (this.out.result !== "needs_input" || !questions?.length || issue === undefined || !this.deps || this.state?.no_pr) return;
+    try {
+      await postQuestionsOnIssue(this.deps.github, this.repoDir, issue, this.runId, questions, (t) => this.events.redact(t));
+      this.out.questions_posted = true;
+      this.events.emit({ step: "run", event: "progress", data: { questions_posted: true, issue } });
+    } catch (e) {
+      this.out.questions_posted = false;
+      this.events.emit({ step: "run", event: "progress", data: { questions_posted: false, issue, error: (e as Error).message.slice(0, 300) } });
+    }
   }
 
   private flushMemory(): void {
@@ -396,6 +421,8 @@ class RunFrame {
       provenance,
       ...(this.events.diffCount ?? {}),
       ...(out.questions ? { questions: out.questions } : {}),
+      ...(out.questions_posted !== undefined ? { questions_posted: out.questions_posted } : {}),
+      ...(out.assumptions?.length ? { assumptions: out.assumptions } : {}),
       ...(out.skipped_gates?.length ? { skipped_gates: out.skipped_gates } : {}),
       branch: out.branch,
       worktree: out.worktree,
@@ -549,7 +576,7 @@ export async function runFactory(opts: RunOptions, deps: RunDeps): Promise<RunRe
     if (planned.kind === "needs_input") return f.set({ result: "needs_input", reason: "plan needs input", questions: planned.questions, stop: stopFor("explicit_decision") });
     if (planned.kind === "failed") return f.set({ result: "failed", reason: planned.reason });
     const plan = planned.plan;
-    f.set({ type: plan.type });
+    f.set({ type: plan.type, ...(plan.assumptions?.length ? { assumptions: plan.assumptions } : {}) });
     writeJson(base, "plan.json", plan);
     events.emit({ step: "intake", event: "step_finished", data: { plan_source: planned.source, packages: plan.packages.length } });
     f.save();
@@ -741,7 +768,7 @@ export async function continueBaseRed(runId: string, deps: RunDeps): Promise<Run
     const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
     if (!secrets) return;
     const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
-    f.set({ type: plan.type });
+    f.set({ type: plan.type, ...(plan.assumptions?.length ? { assumptions: plan.assumptions } : {}) });
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
     const budget = budgetFrom(st.repair);
@@ -1043,7 +1070,7 @@ export async function resumeFactory(runId: string, opts: ResumeOptions, deps: Ru
     const secrets = await openSecrets(f, repo, st.repo, deps, "resume");
     if (!secrets) return;
     const plan = PlanSchema.parse(JSON.parse(readFileSync(join(runDir, "plan.json"), "utf8")));
-    f.set({ type: plan.type });
+    f.set({ type: plan.type, ...(plan.assumptions?.length ? { assumptions: plan.assumptions } : {}) });
     const deadline = wallBudget(f, events, repo);
     const memoryBriefing = await openMemory(f, deps, st.repo);
     const budget = budgetFrom(st.repair);

@@ -110,6 +110,12 @@ Unverified (needs a real provider):
   UNVERIFIED against a live `gh`: `files` is an exportable field; the parser accepts `{path}` / `{filename}`
   and a `{nodes}` wrapper. A page that hits 1000 is incomplete: the run blocks instead of treating it as every open PR.
   Whatever file page `gh` requests is still a separate cap.
+- Questions on the issue: `issueComments` reads `gh issue view <n> --json comments`
+  (`author.login`, `authorAssociation`, `body`, `createdAt`, `isMinimized`; field shape checked 2026-11-16 on
+  `spignotti/factory`). UNVERIFIED: that it returns every comment on a long thread, oldest first.
+  `commentIssue` is `gh issue comment <n> --body`. `addIssueLabel` is `gh issue edit --add-label`; on a
+  "not found" error it creates the label without `--force` and adds it again. UNVERIFIED: the exact error text
+  for a missing label. `removeIssueLabel` is `gh issue edit --remove-label`.
 - Branch protection and auto-merge hints on a private repository without GitHub Pro.
 - `baseStatus` joins check runs to workflow runs by `check_suite_id` and reads workflow run `name` as the
   workflow file's `name:` (not `display_title`). UNVERIFIED against a live repository. A missing name keeps

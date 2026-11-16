@@ -13,6 +13,7 @@ import { deliveryForDone, isProviderRetryCause, readStop, repairContinuationAllo
 import { newRunId } from "../pipeline/run.js";
 import { continuationLimit } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
+import { postQuestions } from "../pipeline/questions.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { loadRepoConfig } from "../schemas/repo.js";
 import { admissionHold } from "./admission.js";
@@ -292,6 +293,7 @@ function park(entry: QueueEntry, reason: string, runId?: string, blockedRuns?: s
   delete entry.wait_until;
   delete entry.window_resets_at;
   delete entry.window_estimated;
+  delete entry.awaiting_answer;
 }
 
 function moveToEnd(q: QueueFile, entry: QueueEntry): void {
@@ -316,6 +318,7 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
   delete entry.wait_until;
   delete entry.window_resets_at;
   delete entry.window_estimated;
+  delete entry.awaiting_answer;
 }
 
 /**
@@ -343,11 +346,12 @@ export function isLocalBaseRed(result: RunResult): boolean {
   return result.result === "base_red" && !!result.worktree;
 }
 
-/** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. A live-run overlap `locked` parks on those runs. A repo-lock `locked` goes back to pending. Everything else parks. */
+/** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. A live-run overlap `locked` parks on those runs. A repo-lock `locked` goes back to pending. Questions park until answered. Everything else parks. */
 export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown; now?: number }): "done" | "requeue" | "parked" {
   entry.run_id = result.run_id;
   if (result.pr) entry.pr = result.pr;
   delete entry.pid;
+  delete entry.awaiting_answer;
   if (result.result === "done") {
     entry.status = "done";
     entry.delivery = deliveryForDone(result);
@@ -415,6 +419,10 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     }
   }
   park(entry, result.reason || result.result, result.run_id);
+  // The questions travel with the entry: a retry of the post does not depend on the run directory.
+  if (result.result === "needs_input" && result.questions?.length) {
+    entry.awaiting_answer = { questions: result.questions, posted: result.questions_posted === true };
+  }
   return "parked";
 }
 
@@ -1262,6 +1270,44 @@ function noteRunId(entry: QueueEntry, tracked: Tracked | undefined): void {
   if (tracked?.pid) entry.pid = tracked.pid;
 }
 
+/**
+ * A ticket parked on posted questions starts a FRESH run once its issue is admissible again: a human
+ * answered, removed `needs-input` and set `factory-ready`. Read from the open-issue list discovery
+ * already fetched; no extra GitHub call. A human pause holds it; a stale label pause is cleared.
+ */
+function releaseAnswered(q: QueueFile, open: Issue[], repo: string, ctx: TickCtx): void {
+  const byNumber = new Map(open.map((i) => [i.number, i]));
+  for (const entry of q.entries) {
+    if (entry.status !== "parked" || !entry.awaiting_answer?.posted) continue;
+    const issue = byNumber.get(entry.issue);
+    if (!issue || admissionBlock(issue)) continue;
+    const pauseKey = { runId: entry.run_id, repo, issue: entry.issue };
+    if (hasRealPause(ctx.factoryHome, pauseKey)) continue;
+    clearPause(ctx.factoryHome, pauseKey);
+    releaseToPending(entry);
+    ctx.io.out(`queue: #${entry.issue} pending (questions answered, fresh run)\n`);
+  }
+}
+
+/**
+ * Entries parked on questions that did not reach the issue: post them again (comment once per run,
+ * then the label swap). Network on the snapshot; the caller marks the posted ones under the queue lock.
+ */
+async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx, noteFailure: () => void): Promise<Set<number>> {
+  const posted = new Set<number>();
+  for (const entry of snap.entries) {
+    if (entry.status !== "parked" || !entry.awaiting_answer || entry.awaiting_answer.posted || !entry.run_id) continue;
+    try {
+      await withTimeout(postQuestions(ctx.github, repo, entry.issue, entry.run_id, entry.awaiting_answer.questions), ctx.netTimeoutMs, `questions #${entry.issue}`);
+      posted.add(entry.issue);
+    } catch (e) {
+      noteFailure();
+      ctx.io.err(`factory: posting questions on #${entry.issue} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
+  return posted;
+}
+
 async function discoverReady(q: QueueFile, ctx: TickCtx, repo: string): Promise<void> {
   let list: { issues: Issue[]; complete: boolean };
   try {
@@ -1275,6 +1321,7 @@ async function discoverReady(q: QueueFile, ctx: TickCtx, repo: string): Promise<
   if (!list.complete) return;
   const known = new Set(q.entries.map((e) => e.issue));
   const at = new Date(ctx.nowMs).toISOString();
+  releaseAnswered(q, list.issues, repo, ctx);
   for (const issue of list.issues) {
     if (known.has(issue.number) || admissionBlock(issue)) continue;
     q.entries.push({ issue: issue.number, status: "pending", added_at: at });
@@ -1318,6 +1365,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   // update-branch, no approval and no auto-merge while the admission hold is in place.
   const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
+  const questionsPosted = ctx.releaseHold ? new Set<number>() : await postPendingQuestions(snap, repo, ctx, noteFailure);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
   const evaluatedAfter = new Set<number>();
@@ -1410,6 +1458,12 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       clearPause(ctx.factoryHome, { runId: entry.run_id, repo, issue });
     }
     applyUnpark(q, unpark, ctx.io);
+    for (const issue of questionsPosted) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.awaiting_answer && !e.awaiting_answer.posted);
+      if (!entry?.awaiting_answer) continue;
+      entry.awaiting_answer.posted = true;
+      ctx.io.out(`queue: #${issue} questions posted on the issue\n`);
+    }
     // Window waits (#177): a far window only moves the next recheck; an opened one becomes pending again.
     for (const issue of win.clearAdmissionPause) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.wait_until !== undefined && ctx.nowMs >= e.wait_until);

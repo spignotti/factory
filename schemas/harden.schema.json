@@ -463,6 +463,13 @@
                       "red_green_reason": {
                         "type": "string",
                         "minLength": 1
+                      },
+                      "assumptions": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
                       }
                     },
                     "required": [

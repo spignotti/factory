@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { extractJson } from "../agents/runner.js";
-import type { GitHub } from "../gh.js";
+import type { GitHub, IssueComment } from "../gh.js";
 import { type AgentCall, callAgent, type RunContext, type Task } from "../pipeline/context.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { normalizeRetryNote, type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
@@ -19,11 +19,50 @@ function firstLine(text: string): string {
   return (text.split("\n").find((l) => l.trim()) ?? "task").replace(/^#+\s*/, "").trim();
 }
 
+/** One comment longer than this is cut. */
+export const MAX_COMMENT_CHARS = 4_000;
+/** The comment section stays under this; the newest comments are kept because answers come last. */
+export const MAX_COMMENTS_CHARS = 16_000;
+
+/**
+ * Issue comments for the planner, oldest first, under one heading. Hidden (minimized) and empty
+ * comments are left out. The factory's own question comment stays in, so the answers have context.
+ */
+export function renderIssueComments(comments: IssueComment[]): string {
+  const blocks = comments
+    .filter((c) => !c.minimized && c.body.trim())
+    .map((c) => {
+      const body = c.body.trim();
+      const text = body.length > MAX_COMMENT_CHARS ? `${body.slice(0, MAX_COMMENT_CHARS)}\n[comment truncated]` : body;
+      return `### ${c.author}${c.association ? ` (${c.association.toLowerCase()})` : ""}, ${c.created_at}\n\n${text}`;
+    });
+  const kept: string[] = [];
+  let size = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i]!;
+    if (size + block.length > MAX_COMMENTS_CHARS) break;
+    kept.unshift(block);
+    size += block.length;
+  }
+  if (!kept.length) return "";
+  const omitted = blocks.length - kept.length;
+  return ["## Issue comments (oldest first)", omitted ? `(${omitted} earlier comments omitted)` : "", ...kept].filter(Boolean).join("\n\n");
+}
+
 /** Reads the task from an issue, a plan file or a plain-text file. */
 export async function readTask(input: TaskInput, repoDir: string, github: GitHub): Promise<Task> {
   if (input.issue !== undefined) {
     const issue = await github.getIssue(repoDir, input.issue);
-    return { ref: `#${issue.number}`, issue: issue.number, title: issue.title, text: `# ${issue.title}\n\n${issue.body}`, labels: issue.labels };
+    // A failed read throws: planning without the answers would only ask the same questions again.
+    const comments = renderIssueComments(await github.issueComments(repoDir, input.issue));
+    return {
+      ref: `#${issue.number}`,
+      issue: issue.number,
+      title: issue.title,
+      text: `# ${issue.title}\n\n${issue.body}`,
+      labels: issue.labels,
+      ...(comments ? { comments } : {}),
+    };
   }
   const file = input.planFile ?? input.textFile;
   if (!file) throw new Error("one of --issue, --plan or --text is required");
@@ -70,6 +109,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
       system: rolePrompt("plan_normalize", ctx.deps.prompts),
       prompt: [
         asData("task", ctx.task.text),
+        ctx.task.comments ? asData("issue_comments", ctx.task.comments) : "",
         ctx.task.labels.length ? `Issue labels: ${ctx.task.labels.join(", ")}` : "",
         errors.length
           ? normalizeRetryNote(errors)
