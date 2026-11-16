@@ -8,6 +8,7 @@ import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { saveState } from "../pipeline/state.js";
+import { baseCheckGate, baseProblem, type BaseCheckRecord, readBaseCheck, writeBaseCheck } from "../pipeline/base-check.js";
 import { deliveryForDone, isProviderRetryCause, readStop, repairContinuationAllowed, stopCauseOf } from "../pipeline/outcome.js";
 import { newRunId } from "../pipeline/run.js";
 import { continuationLimit } from "../pipeline/recovery.js";
@@ -335,7 +336,17 @@ function isWindowWaitStop(result: RunResult, stateStop?: unknown): boolean {
   return true;
 }
 
-/** `done` records the PR. Transient `needs_human` requeues. An explicit usage window parks until the reset. A live-run overlap `locked` parks on those runs. A repo-lock `locked` goes back to pending. Questions park until answered. Everything else parks. */
+const BASE_PROBLEM = "base problem:";
+
+/**
+ * A `base_red` from the local fast checks on the base. It got as far as its worktree; a GitHub-CI
+ * `base_red` stops before that and is resumed by its own run once the base CI is green.
+ */
+export function isLocalBaseRed(result: RunResult): boolean {
+  return result.result === "base_red" && !!result.worktree;
+}
+
+/** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. A live-run overlap `locked` parks on those runs. A repo-lock `locked` goes back to pending. Questions park until answered. Everything else parks. */
 export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown; now?: number }): "done" | "requeue" | "parked" {
   entry.run_id = result.run_id;
   if (result.pr) entry.pr = result.pr;
@@ -387,6 +398,13 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
     }
     park(entry, result.reason, result.run_id);
     return "parked";
+  }
+  if (isLocalBaseRed(result)) {
+    // The base, not this ticket, is red. The worker holds starts on the recorded base check, so the
+    // ticket waits as pending and starts by itself once the base is green; no requeue budget is spent.
+    releaseToPending(entry);
+    entry.reason = `${BASE_PROBLEM} ${result.reason}`;
+    return "requeue";
   }
   if (result.result === "locked") {
     // A live run claims these paths: wait for it to finish instead of parking for the night.
@@ -628,6 +646,7 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
     const action = finishEntry(q, entry, factoryHome, tracked.settled, io, nowMs);
     if (action === "done") io.out(`queue: #${entry.issue} done${entry.pr ? ` ${entry.pr}` : ""}\n`);
     else if (action === "requeue" && tracked.settled.result === "locked") io.out(`queue: #${entry.issue} pending (repo lock held)\n`);
+    else if (action === "requeue" && tracked.settled.result === "base_red") io.out(`queue: #${entry.issue} pending (${entry.reason})\n`);
     else if (action === "requeue") io.out(`queue: #${entry.issue} requeued (${entry.requeues}/${MAX_REQUEUES})\n`);
     else io.out(`queue: #${entry.issue} parked: ${entry.reason}\n`);
   }
@@ -917,24 +936,46 @@ async function windowWaits(snap: QueueFile, repo: string, ctx: TickCtx, noteFail
   return { release, extend, refuse, clearAdmissionPause };
 }
 
-/** Red base CI, or a check we could not read: start nothing for this repo this tick. */
-async function baseBlocks(github: GitHub, repo: string, io: Io, redLogged: Set<string>, timeoutMs: number, onFailure?: () => void): Promise<boolean> {
+interface BaseGate {
+  block: boolean;
+  /** A red local base check of the current base commit, as shown on pending entries. */
+  problem?: string;
+  /** The red local record is old enough: one run may check the base again. */
+  recheck?: BaseCheckRecord;
+}
+
+/**
+ * Red base CI, a red local base check that is still recent (when GitHub reports no CI), or a check we
+ * could not read: start nothing for this repo this tick.
+ */
+async function baseBlocks(github: GitHub, repo: string, io: Io, redLogged: Set<string>, timeoutMs: number, record: { factoryHome: string; repoKey: string; nowMs: number }, onFailure?: () => void): Promise<BaseGate> {
   try {
     const cfg = loadRepoConfig(repo);
     const gitOpts = { timeoutMs };
     const sha = await revParse(repo, await baseRef(repo, cfg.base_branch, gitOpts), gitOpts);
     const status = await withTimeout(github.baseStatus(repo, sha), timeoutMs, "base CI");
-    if (status !== "red") {
-      redLogged.delete(repo);
-      return false;
+    if (status !== "red") redLogged.delete(repo);
+    else {
+      if (!redLogged.has(repo)) io.err(`factory: base CI red, not starting (${repo})\n`);
+      redLogged.add(repo);
+      return { block: true };
     }
-    if (!redLogged.has(repo)) io.err(`factory: base CI red, not starting (${repo})\n`);
-    redLogged.add(repo);
-    return true;
+    const logKey = `${repo}#local`;
+    const recorded = status === "none" ? readBaseCheck(record.factoryHome, record.repoKey) : undefined;
+    const gate = baseCheckGate(recorded, sha, record.nowMs);
+    if (gate === "start") {
+      redLogged.delete(logKey);
+      return { block: false };
+    }
+    const problem = baseProblem(recorded)!;
+    if (gate === "recheck") return { block: false, problem, recheck: recorded! };
+    if (!redLogged.has(logKey)) io.err(`factory: ${problem}; not starting (${repo})\n`);
+    redLogged.add(logKey);
+    return { block: true, problem };
   } catch (e) {
     onFailure?.();
     io.err(`factory: base CI check failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
-    return true;
+    return { block: true };
   }
 }
 
@@ -1344,6 +1385,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
 
   const mightStart = !ctx.holdStarts && snap.entries.some((e) => (e.status === "pending" || unpark.has(e.issue)) && !waiting.has(e.issue) && !parkAfter.has(e.issue));
   let blockStart = false;
+  let base: BaseGate = { block: false };
   let openPrs: OpenFactoryPr[] | undefined;
   const issueState = new Map<number, "open" | "closed" | "missing" | "error">();
   const issueByNumber = new Map<number, Issue>();
@@ -1365,7 +1407,8 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     }
   }
   if (mightStart) {
-    blockStart = await baseBlocks(ctx.github, repo, ctx.io, ctx.redLogged, timeoutMs, noteFailure);
+    base = await baseBlocks(ctx.github, repo, ctx.io, ctx.redLogged, timeoutMs, { factoryHome: ctx.factoryHome, repoKey: key, nowMs: ctx.nowMs }, noteFailure);
+    blockStart = base.block;
     if (!blockStart) {
       try {
         openPrs = await withTimeout(ctx.github.openFactoryPrFiles(repo), timeoutMs, "open PRs");
@@ -1462,6 +1505,15 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     }
     const running = q.entries.filter((e) => e.status === "running").length;
     let room = Math.max(0, Math.min(ctx.slots - (othersRunning(ctx.factoryHome, repo) + running), repoMax - running));
+    // A red local base check is re-checked by exactly one run, and only while no other run of this repo is going.
+    const recheck = base.recheck;
+    if (recheck) room = running > 0 ? 0 : Math.min(room, 1);
+    for (const entry of q.entries) {
+      if (entry.status !== "pending" || entry.bundled_with !== undefined) continue;
+      const baseReason = entry.reason?.startsWith(BASE_PROBLEM) === true;
+      if (base.problem && (!entry.reason || baseReason || entry.reason === "global coding cap")) entry.reason = base.problem;
+      else if (!base.problem && baseReason) delete entry.reason;
+    }
     const starts: { issue: number; runId: string; resumeRunId?: string; bundle?: number[]; choice: string }[] = [];
     if (ctx.holdStarts || blockStart || room <= 0) {
       if (!ctx.holdStarts && !blockStart && room <= 0 && running < repoMax) {
@@ -1574,6 +1626,8 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       });
       room -= 1;
     }
+    // The re-check window restarts now, so later ticks wait for this run's own base check.
+    if (recheck && starts.length) writeBaseCheck(ctx.factoryHome, key, { ...recheck, at: new Date(ctx.nowMs).toISOString() });
     const runningNow = q.entries.filter((e) => e.status === "running").length;
     const globalLeft = ctx.slots - (othersRunning(ctx.factoryHome, repo) + runningNow);
     if (globalLeft <= 0 && runningNow < repoMax) {

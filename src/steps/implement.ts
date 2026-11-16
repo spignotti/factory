@@ -7,7 +7,7 @@ import { type PackageStatus, runInDagOrder } from "../pipeline/dag.js";
 import { asData, taskBlock, rolePrompt } from "../prompts.js";
 import { type Handoff, HandoffSchema } from "../schemas/handoff.js";
 import type { Package } from "../schemas/plan.js";
-import { failureSummary, type GateReport, runGates } from "./gates.js";
+import { checkBlocksGate, failureSummary, type GateReport, runGates } from "./gates.js";
 import { blockedRepairReason, clearRepair, ensureBudget, gateLimit, holdUnfixed, MAX_GATE_ATTEMPTS, recoverRedGates, repairHandover, withDiagnosticStrategy } from "../pipeline/recovery.js";
 
 export { MAX_GATE_ATTEMPTS };
@@ -111,8 +111,6 @@ async function packagePrompt(ctx: RunContext, pkg: Package): Promise<string> {
 export interface ImplementOutcome {
   status: Map<string, PackageStatus>;
   failures: Record<string, string>;
-  /** Bug plan whose repro never failed on base: never fix blind. */
-  needsInput?: string[];
   lastGates?: GateReport;
 }
 
@@ -128,7 +126,6 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
   const failures: Record<string, string> = {};
   const alreadyDone = new Set(opts.done ?? []);
   const done: string[] = ctx.plan.packages.map((p) => p.id).filter((id) => alreadyDone.has(id));
-  let needsInput: string[] | undefined;
   let lastGates: GateReport | undefined;
 
   const status = await runInDagOrder(ctx.plan.packages, async (pkg) => {
@@ -139,10 +136,6 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
   });
 
   async function implementOne(pkg: Package): Promise<boolean> {
-    if (needsInput) {
-      failures[pkg.id] = "not run: needs_input";
-      return false;
-    }
     ctx.events.emit({ step: "implement", event: "step_started", data: { package: pkg.id } });
     const sessionKey = `${ctx.runId}-implement-${pkg.id}`;
     const packages = [...done, pkg.id];
@@ -216,7 +209,7 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
         reason = recovered.reason;
         break;
       }
-      const timeoutNote = report.checks.some((c) => c.status === "timeout")
+      const timeoutNote = report.checks.some((c) => c.status === "timeout" && checkBlocksGate(c))
         ? "A timed-out check was killed and is inconclusive, not a failing test.\n\n"
         : "";
       prompt = `Gates are red. Fix the failures, then reply with the updated handoff.\n\n${timeoutNote}${failureSummary(report)}\n\n${handoffShape(ctx, pkg.id)}`;
@@ -234,14 +227,6 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
       });
     }
     failures[pkg.id] = reason;
-    const firstOfBug = ctx.plan.type === "bug" && done.length === 0;
-    if (firstOfBug && report?.repro_red_on_base === false) {
-      needsInput = [
-        `Could not produce a failing repro test for the bug within ${MAX_GATE_ATTEMPTS} attempts. ` +
-          `Tried: ${ctx.handoffs.find((h) => h.package === pkg.id)?.done.join("; ") || "(no handoff)"}. ` +
-          "How can the bug be reproduced?",
-      ];
-    }
     ctx.handoffs = ctx.handoffs.filter((h) => h.package !== pkg.id);
     await discardChanges(ctx.worktree);
     ctx.events.emit({ step: "implement", event: "step_finished", data: { package: pkg.id, status: "failed", reason } });
@@ -253,5 +238,5 @@ export async function implementPackages(ctx: RunContext, opts: ImplementOptions 
     ctx.events.emit({ step: "implement", event: "step_finished", data: { package: id, status: "skipped" } });
     opts.onPackage?.(id, "skipped");
   }
-  return { status, failures, needsInput, lastGates };
+  return { status, failures, lastGates };
 }

@@ -154,6 +154,11 @@ export function stopCauseForClass(cls: RepairClass): StopCause {
   }
 }
 
+/** A failed or timed-out check that blocks. An advisory gate is reported, never a failure to repair. */
+function isRed(c: { status: string; advisory?: boolean }): boolean {
+  return !c.advisory && (c.status === "fail" || c.status === "timeout");
+}
+
 const CODE = /\bSyntaxError\b|\bAssertionError\b|\bTypeError\b|\bReferenceError\b|not ok \d|✖|ERR_ASSERT|Assertion failed|\bExpected\b|^FAILED\s+\S+::/im;
 const CONFIG = /command not found|EnvMissing|configuration file not found|config file not found|not recognized as an internal or external command/i;
 const INFRA = /runner has received a shutdown signal|No space left on device|Resource temporarily unavailable|\bETIMEDOUT\b|\bECONNRESET\b|\bEAI_AGAIN\b|TLS handshake|temporary failure in name resolution|\b502 Bad Gateway\b|\b503 Service Unavailable\b/i;
@@ -184,12 +189,12 @@ function classifyOne(
  * (the caller already knows that); the other classes are read from the check command and its output.
  */
 export function classifyRepair(
-  report: { checks: { name: string; kind?: string; status: string; output_tail: string }[] },
+  report: { checks: { name: string; kind?: string; status: string; output_tail: string; advisory?: boolean }[] },
   checks: Pick<Check, "name" | "run">[],
   opts?: { onBase?: boolean },
 ): RepairClass {
   if (opts?.onBase) return "base";
-  const red = report.checks.filter((c) => c.status === "fail" || c.status === "timeout");
+  const red = report.checks.filter(isRed);
   if (!red.length) return "code";
   const classes = red.map((c) => classifyOne(c, checks));
   if (classes.every((c) => c === "format")) return "format";
@@ -268,10 +273,10 @@ function highestSeverity(text: string): FailureRoot["severity"] | undefined {
   return best?.name;
 }
 
-/** Root checks of a red report: name, diagnostic codes, highest severity. `repair_hold` is not a root. */
-export function failureRoots(report: { checks: { name: string; status: string; output_tail?: string }[] }): FailureRoot[] {
+/** Root checks of a red report: name, diagnostic codes, highest severity. `repair_hold` and advisory gates are not roots. */
+export function failureRoots(report: { checks: { name: string; status: string; output_tail?: string; advisory?: boolean }[] }): FailureRoot[] {
   return report.checks
-    .filter((c) => (c.status === "fail" || c.status === "timeout") && c.name !== "repair_hold")
+    .filter((c) => isRed(c) && c.name !== "repair_hold")
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     .map((c) => {
       const tail = c.output_tail ?? "";
@@ -285,9 +290,9 @@ export function failureRoots(report: { checks: { name: string; status: string; o
  * codes survive rewording. Ordered semantic values keep swapped results apart. Hashed so the
  * persisted state stays short.
  */
-export function failureSignature(report: { checks: { name: string; status: string; output_tail: string }[] }): string {
+export function failureSignature(report: { checks: { name: string; status: string; output_tail: string; advisory?: boolean }[] }): string {
   const parts = report.checks
-    .filter((c) => (c.status === "fail" || c.status === "timeout") && c.name !== "repair_hold")
+    .filter((c) => isRed(c) && c.name !== "repair_hold")
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     .map((c) => `${c.name}|${c.status}|${diagnosticIdentity(c.output_tail ?? "")}`);
   return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 12);
@@ -355,7 +360,7 @@ export function repairHandover(v: {
 }
 
 function redChecks(report: GateReport): GateReport["checks"] {
-  return report.checks.filter((c) => c.status === "fail" || c.status === "timeout");
+  return report.checks.filter(isRed);
 }
 
 export function formatterCommands(report: GateReport, checks: Pick<Check, "name" | "run">[]): string[] {
@@ -447,7 +452,7 @@ export async function recoverRedGates(
   const budget = ensureBudget(ctx);
   let current = report;
   // A held fake fix is the same unfixed failure. Do not reset the fingerprint because the check went green.
-  const held = current.checks.some((c) => c.name === "repair_hold" && (c.status === "fail" || c.status === "timeout"));
+  const held = current.checks.some((c) => c.name === "repair_hold" && isRed(c));
   const signature = held && budget.failure ? budget.failure.signature : failureSignature(current);
   const roots = held && budget.failure?.roots.length ? budget.failure.roots : failureRoots(current);
   const identity = recordFailure(budget, signature, await checkpoint(ctx), roots);
@@ -673,13 +678,16 @@ function disablesCode(added: string, code: string): boolean {
   return flag.test(added) || key.test(added);
 }
 
-/** Missing or red members of the gate set that must pass before approval. */
-export function approvalGateGap(input: { required: string[]; report: { name: string; status: string }[] }): string | undefined {
-  const have = new Map(input.report.map((check) => [check.name, check.status]));
+/**
+ * Missing or red members of the gate set that must pass before approval. An advisory gate (a root
+ * persisted before gates became advisory, for example) is present but never red.
+ */
+export function approvalGateGap(input: { required: string[]; report: { name: string; status: string; advisory?: boolean }[] }): string | undefined {
+  const have = new Map(input.report.map((check) => [check.name, check]));
   const required = [...new Set(input.required)];
   const missing = required.filter((name) => !have.has(name));
   if (missing.length) return `required gate set incomplete: ${missing.join(", ")}; not approving`;
-  const red = required.filter((name) => have.get(name) === "fail" || have.get(name) === "timeout");
+  const red = required.filter((name) => isRed(have.get(name)!));
   if (red.length) return `required gates red: ${red.join(", ")}; not approving`;
   return undefined;
 }
@@ -699,7 +707,9 @@ function markHeld(report: GateReport, reason: string): GateReport {
  * proceed, and the previous fingerprint is kept by `recoverRedGates`.
  */
 export async function holdUnfixed(ctx: RunContext, report: GateReport): Promise<GateReport> {
-  const roots = ctx.budget?.failure?.roots ?? [];
+  // A root persisted for a gate that is advisory now is not an unfixed failure.
+  const advisory = new Set(report.checks.filter((c) => c.advisory).map((c) => c.name));
+  const roots = (ctx.budget?.failure?.roots ?? []).filter((root) => !advisory.has(root.name));
   if (!roots.length) return report;
   let diff: string;
   let changed: string[];

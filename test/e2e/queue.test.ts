@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import type { Io } from "../../src/commands/gates.js";
 import type { RunResult } from "../../src/events.js";
 import { repoLockId } from "../../src/git.js";
 import { FakeGitHub, type Issue } from "../../src/gh.js";
+import { readBaseCheck, writeBaseCheck } from "../../src/pipeline/base-check.js";
 import { activeHolders, lockRepoKey, tryPathLock } from "../../src/pipeline/lock.js";
 import { runFactory } from "../../src/pipeline/run.js";
 import { factoryRunArgs } from "../../src/queue/spawn.js";
@@ -221,6 +222,74 @@ describe("factory queue", () => {
         [4, "parked", "CI on main is red"],
       ]);
       expect(g.calls).toEqual([1, 2, 3, 4]);
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("a local base_red goes back to pending; a red base record holds starts until it is 30 minutes old, then one run re-checks", async () => {
+    const repo = createFixtureRepo((c) => void (c.concurrency = { max_runs: 2 }));
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1, 2]);
+    const key = await repoQueueKey(repo);
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+    const t0 = Date.parse("2026-11-16T08:00:00.000Z");
+    let clock = t0;
+    const g = gate();
+    const ctl = new AbortController();
+    const out = capture();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: out.io, now: () => clock });
+    try {
+      await waitFor("first start", () => g.calls.length === 1);
+      // What the run writes when the fast checks fail on a base without GitHub CI.
+      writeBaseCheck(factoryHome, key, { sha, status: "red", failed: ["run-all"], at: new Date(clock).toISOString() });
+      g.release(1, outcome(repo, 1, "base_red", "fast checks red on base: run-all", { worktree: join(factoryHome, "wt") }));
+      await waitFor("held as pending", async () => (await entries(factoryHome, repo)).every((e) => e.status === "pending" && e.reason?.startsWith("base problem:")));
+      clock += 20 * 60_000;
+      await new Promise((r) => setTimeout(r, 200));
+      expect(g.calls).toEqual([1]);
+      const rows = await entries(factoryHome, repo);
+      expect(rows.map((e) => [e.issue, e.status, e.requeues ?? 0])).toEqual([[1, "pending", 0], [2, "pending", 0]]);
+      expect(rows[0]?.reason).toMatch(/^base problem: fast checks red on base [0-9a-f]{8}: run-all/);
+
+      const list = capture();
+      expect(await queueList({ factoryHome, repo, json: false }, list.io)).toBe(0);
+      expect(list.out()).toMatch(/#1 {2}pending {2}base problem: fast checks red on base [0-9a-f]{8}: run-all/);
+      const status = renderStatus(await statusReport({ factoryHome, github, now: () => clock }));
+      expect(status).toMatch(/#1 pending base problem: fast checks red on base [0-9a-f]{8}: run-all/);
+
+      // Thirty minutes after the record, exactly one run checks the base again.
+      clock = t0 + 31 * 60_000;
+      await waitFor("re-check start", () => g.calls.length === 2);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(g.calls).toEqual([1, 1]);
+      expect(readBaseCheck(factoryHome, key)).toMatchObject({ status: "red", at: new Date(clock).toISOString() });
+
+      // The re-check finds the base green: the run records it and the rest of the queue starts.
+      writeBaseCheck(factoryHome, key, { sha, status: "green", failed: [], at: new Date(clock).toISOString() });
+      g.release(1, outcome(repo, 1, "done", "", { pr: "https://github.test/pr/1" }));
+      await waitFor("second ticket starts", () => g.calls.length === 3);
+      expect(g.calls).toEqual([1, 1, 2]);
+      expect((await entries(factoryHome, repo)).find((e) => e.issue === 2)?.reason).toBeUndefined();
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
+  it("a red base record of an older base commit does not hold starts", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    writeBaseCheck(factoryHome, await repoQueueKey(repo), { sha: "0".repeat(40), status: "red", failed: ["run-all"], at: new Date().toISOString() });
+    const g = gate();
+    const ctl = new AbortController();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
+    try {
+      await waitFor("started", () => g.calls.length === 1);
     } finally {
       ctl.abort();
       await worker.catch(() => undefined);

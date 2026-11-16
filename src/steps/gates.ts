@@ -41,10 +41,17 @@ export interface CheckResult {
   flake_allowed?: boolean;
   /** An actual red-on-base, green-on-head proof, never an exemption or a green command alone. */
   effect_proven?: boolean;
+  /**
+   * The factory's own bookkeeping gate (evidence, test presence, red-green, config guard, guide
+   * update, in-run security scanners). It is reported, and never turns the report red: quality is
+   * enforced by the repository's checks, its CI and the review.
+   */
+  advisory?: boolean;
 }
 
-/** A fail, a timeout, or a product flake that no repo rule allows. */
-export function checkBlocksGate(check: CheckResult): boolean {
+/** A fail, a timeout, or a product flake that no repo rule allows. An advisory gate never blocks. */
+export function checkBlocksGate(check: Pick<CheckResult, "status" | "flake_allowed" | "advisory">): boolean {
+  if (check.advisory) return false;
   if (check.status === "fail" || check.status === "timeout") return true;
   return check.status === "flaky" && !check.flake_allowed;
 }
@@ -180,13 +187,14 @@ export async function runChecks(
   return results;
 }
 
-const fromBuiltin = (b: BuiltinResult): CheckResult => ({
+const fromBuiltin = (b: BuiltinResult, advisory = false): CheckResult => ({
   name: b.name,
   kind: "builtin",
   status: b.timedOut ? "timeout" : b.ok ? "pass" : "fail",
   duration_ms: b.duration_ms ?? 0,
   output_tail: b.detail,
   ...(b.timedOut ? { timed_out: true } : {}),
+  ...(advisory ? { advisory: true } : {}),
 });
 
 /** First line of a gate detail the PR body should show (skipped scanners, red-green exemption, flake and dedupe). */
@@ -225,7 +233,7 @@ export function baseCheckOutcome(results: CheckResult[]): { result: "base_red" |
 
 /** Stored on the package when a gate attempt does not go green. A timeout is not called red. */
 export function gateAttemptReason(attempt: number, report: GateReport): string {
-  const timed = report.checks.filter((c) => c.status === "timeout").map((c) => c.name);
+  const timed = report.checks.filter((c) => c.status === "timeout" && checkBlocksGate(c)).map((c) => c.name);
   if (timed.length) return `gates timed out after ${attempt} attempt(s) (inconclusive): ${timed.join(", ")}`;
   return `fast gates red after ${attempt} attempt(s)`;
 }
@@ -351,6 +359,9 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     forbiddenPaths(changed, repo.limits.forbidden_paths),
     protectedPaths(plan, changed, repo.human_only_paths),
     diffSize(stat, repo.limits.max_diff_lines, { countTests }),
+  ];
+  // Reported, never blocking: the repo's own checks and CI decide, not the factory's bookkeeping.
+  const advisory: BuiltinResult[] = [
     testPresence(plan, packages, handoffs, evidence),
     { ...evidenceCheck(handoffs, evidence), duration_ms: evidenceDuration },
     guideUpdate(plan, packages, changed, repo),
@@ -376,9 +387,9 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
   if ((plan.type === "bug" || plan.red_green === "required") && first && packages.includes(first.id)) {
     const decision = redGreenDecision(plan, ctx.task.labels);
     if (decision.kind === "exempt") {
-      builtins.push({ name: "red_green", ok: true, detail: redGreenExemptDetail(decision.reason) });
+      advisory.push({ name: "red_green", ok: true, detail: redGreenExemptDetail(decision.reason) });
     } else if (decision.kind === "missing_reason") {
-      builtins.push({ name: "red_green", ok: false, detail: `loosening: ${RED_GREEN_NEEDS_REASON}` });
+      advisory.push({ name: "red_green", ok: false, detail: `loosening: ${RED_GREEN_NEEDS_REASON}` });
     } else {
       const probe = baseProbeFiles(reproFiles(plan, handoffs), changed, repo.tests.globs);
       const proof = await redGreenProof({
@@ -404,10 +415,10 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
       });
       checkDeadline(ctx);
       reproRedOnBase = proof.inconclusive ? undefined : proof.redOnBase;
-      builtins.push({ name: "red_green", ok: proof.ok, detail: proof.detail, timedOut: proof.timedOut, duration_ms: proof.duration_ms });
+      advisory.push({ name: "red_green", ok: proof.ok, detail: proof.detail, timedOut: proof.timedOut, duration_ms: proof.duration_ms });
     }
   }
-  const all = [...checks, ...builtins.map(fromBuiltin)];
+  const all = [...checks, ...builtins.map((b) => fromBuiltin(b)), ...advisory.map((b) => fromBuiltin(b, true))];
   const redGreen = all.find((c) => c.name === "red_green");
   if (redGreen && reproRedOnBase === true && redGreen.status === "pass") redGreen.effect_proven = true;
   const report: GateReport = {
@@ -431,6 +442,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
         check: c.name,
         kind: c.kind,
         status: c.status,
+        ...(c.advisory ? { advisory: true } : {}),
         ...(c.name === "max_diff_lines" && diffReport ? diffReport : {}),
         ...(detail ? { detail } : {}),
       },
@@ -447,10 +459,26 @@ export function skippedSecurityGates(checks: { name: string; status: string; out
   return checks.filter((c) => c.status === "pass" && c.output_tail.startsWith("SKIPPED")).map((c) => c.name);
 }
 
-/** Gate list for the PR body. Skipped security gates are named above the check marks. */
+/** The factory's own advisory gates; any other advisory gate is an in-run security scanner. */
+const BOOKKEEPING_GATES = new Set(["test_presence", "evidence", "guide_update", "config_guard", "red_green"]);
+
+/** A failed advisory gate's note: the first detail line for bookkeeping gates, never scanner output. */
+function advisoryNote(c: CheckResult): string {
+  if (c.status === "pass") return visibleGateDetail(c.output_tail);
+  if (!BOOKKEEPING_GATES.has(c.name)) return "";
+  const lines = c.output_tail.split("\n").map((line) => line.trim()).filter(Boolean);
+  // A heading line ("…:") says nothing alone; the first finding under it does.
+  const head = lines[0]?.endsWith(":") && lines[1] ? `${lines[0]} ${lines[1]}` : (lines[0] ?? "");
+  return head.length > 200 ? `${head.slice(0, 199)}…` : head;
+}
+
+/**
+ * Gate list for the PR body. Skipped security gates are named above the check marks. Advisory gates
+ * follow in their own list: a failed one is a note, not a red gate.
+ */
 export function formatGateResults(checks: CheckResult[]): string {
   const skipped = skippedSecurityGates(checks);
-  const lines = checks.map((c) => {
+  const lines = checks.filter((c) => !c.advisory).map((c) => {
     const mark = c.status === "pass" ? "✅" : c.status === "flaky" ? "⚠️" : c.status === "timeout" ? "⏱️" : "❌";
     const flaky = c.status === "flaky" ? ", flaky" : c.status === "timeout" ? ", timed out" : "";
     const shown = visibleGateDetail(c.output_tail);
@@ -458,10 +486,20 @@ export function formatGateResults(checks: CheckResult[]): string {
     return `- ${mark} ${c.name} (${c.kind}${flaky})${detail}`;
   });
   if (skipped.length) lines.unshift(`Skipped security gates: ${skipped.join(", ")}`);
+  const advisory = checks.filter((c) => c.advisory);
+  if (advisory.length) {
+    lines.push("", "Advisory gates (reported, not blocking):");
+    for (const c of advisory) {
+      const state = c.status === "pass" ? "" : c.status === "timeout" ? ", timed out" : ", failed";
+      const mark = c.status === "pass" ? "✅" : "📝";
+      const note = advisoryNote(c);
+      lines.push(`- ${mark} ${c.name} (${c.kind}, advisory${state})${note ? `: ${note}` : ""}`);
+    }
+  }
   return lines.join("\n");
 }
 
-/** Failure tail handed back to the implementer. */
+/** Failure tail handed back to the implementer. Advisory gates are not failures. */
 export function failureSummary(report: GateReport): string {
   return report.checks
     .filter((c) => checkBlocksGate(c))

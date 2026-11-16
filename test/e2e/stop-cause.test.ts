@@ -168,15 +168,21 @@ describe("stop cause on the run result and state", () => {
     expect(exhausted.result.pr).toBe(r.result.pr);
   });
 
-  it("a missing repo config for the bug red-green proof persists human_approval", async () => {
+  it("a bug plan without tests.run is no longer a human_approval stop", async () => {
     const r = await runScenario({
-      script: "bug-plan-only.json",
+      script: "bug-no-repro.json",
+      steps: (s) => [
+        ...s.slice(0, 2),
+        { role: "review_plan", output: { reviewer: "plan", prior: [], findings: [] } },
+        { role: "review_simplicity", output: { reviewer: "simplicity", prior: [], findings: [] } },
+        { role: "pr_writer", raw: "Fix max." },
+      ],
       patch: (c) => void delete (c.tests as Record<string, unknown>).run,
       task: "max-bug.md",
     });
-    expect(r.result.result).toBe("needs_human");
-    expect(r.result.reason).toMatch(/tests.run is required/);
-    expect(r.resultFile.stop).toEqual({ cause: "human_approval", action: "approve" });
+    expect(r.result.result).toBe("done");
+    expect(r.resultFile.stop).toBeUndefined();
+    expect(readState(r.runDir).stop).toBeUndefined();
   });
 
   it("a completed technical recovery keeps the original run, branch, worktree, PR and spent budgets", async () => {

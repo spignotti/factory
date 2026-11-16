@@ -1,17 +1,19 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
 import { Interrupted } from "../../src/interrupt.js";
 import type { RunDeps } from "../../src/pipeline/context.js";
-import { acquireRepoLock } from "../../src/pipeline/lock.js";
+import { readBaseCheck, writeBaseCheck } from "../../src/pipeline/base-check.js";
+import { acquireRepoLock, lockRepoKey } from "../../src/pipeline/lock.js";
+import { repoLockId } from "../../src/git.js";
 import { continueBaseRed } from "../../src/pipeline/run.js";
 import { loadProfile } from "../../src/schemas/profile.js";
 import { requestPause } from "../../src/queue/pause.js";
 import { canonicalRepoId, flushMemory, loadMemory } from "../../src/memory.js";
 import type { AgentRequest } from "../../src/agents/runner.js";
-import { realSleep } from "../../src/agents/fake-runner.js";
+import { type FakeStep, realSleep } from "../../src/agents/fake-runner.js";
 import { createSandbox, hostProbe, type Sandbox } from "../../src/sandbox/sandbox.js";
 import { addOrigin, commitFile, FIXTURES } from "../helpers/repo.js";
 import { runScenario, type ScenarioRun, SECRET } from "../helpers/scenario.js";
@@ -27,6 +29,11 @@ function onPath(tool: string): boolean {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 const eventsOf = (r: ScenarioRun, type: string) => r.events.filter((e) => e.event === type);
+const bugReviews = (): FakeStep[] => [
+  { role: "review_plan", output: { reviewer: "plan", prior: [], findings: [] } },
+  { role: "review_simplicity", output: { reviewer: "simplicity", prior: [], findings: [] } },
+  { role: "pr_writer", raw: "Fix max." },
+];
 
 const HOOK_URL = "https://hooks.example.test/automations/webhook/e2e-secret-id";
 const HOOK_KEY = "crsr_e2e-sender-key-0123456789abcdef";
@@ -355,26 +362,24 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(eventsOf(r, "gate_result").some((e) => e.data.status === "fail")).toBe(true);
   });
 
-  it("an added lint suppression the plan does not name fails the gates and goes back to the implementer", async () => {
-    let first = true;
+  it("an added lint suppression the plan does not name is an advisory config_guard note, not a repair turn", async () => {
     const r = await runScenario({
       script: "gate-fail-fix.json",
-      steps: (s) =>
-        s.map((x) => {
-          if (x.role !== "implement" || !first || !x.writes) return x;
-          first = false;
-          const fixed = s.filter((y) => y.role === "implement")[1]!.writes!["src/math.js"]!;
-          return { ...x, writes: { ...x.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars
-${fixed}` } };
-        }),
+      steps: (s) => {
+        const impl = s.filter((y) => y.role === "implement");
+        const fixed = impl[1]!.writes!["src/math.js"]!;
+        const first = { ...impl[0]!, writes: { ...impl[0]!.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars\n${fixed}` } };
+        return s.filter((x) => x !== impl[1]).map((x) => (x === impl[0] ? first : x));
+      },
     });
     expect(r.result.result).toBe("done");
     const gate1 = JSON.parse(r.file("gates-1.json"));
+    expect(gate1.green).toBe(true);
     const guard = gate1.checks.find((c: { name: string }) => c.name === "config_guard");
-    expect(guard.status).toBe("fail");
+    expect(guard).toMatchObject({ status: "fail", advisory: true });
     expect(guard.output_tail).toContain("src/math.js: adds `eslint-disable`");
-    expect(r.runner.calls.filter((c) => c.role === "implement")[1]!.prompt).toContain("config_guard");
-    expect(JSON.parse(r.file("gates-2.json")).green).toBe(true);
+    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
+    expect(r.github.prs[0]?.body ?? "").toMatch(/config_guard \(builtin, advisory, failed\): .*src\/math.js: adds `eslint-disable`/);
   });
 
   it("accepted wontfix: done after round 2", async () => {
@@ -614,6 +619,26 @@ ${fixed}` } };
     expect(r.result).toMatchObject({ result: "base_red", pr: null });
     expect(r.result.reason).toContain("broken");
     expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
+    const sha = git(r.repo, "rev-parse", "HEAD").trim();
+    expect(readBaseCheck(r.factoryHome, lockRepoKey(await repoLockId(r.repo)))).toMatchObject({ sha, status: "red", failed: ["broken"] });
+  });
+
+  it("a green base check is recorded per base commit; a run on that commit skips the local check", async () => {
+    const first = await runScenario({ script: "clean.json" });
+    expect(first.result.result).toBe("done");
+    expect(eventsOf(first, "gate_result").some((e) => e.data.base)).toBe(true);
+    const sha = git(first.repo, "rev-parse", "main").trim();
+    expect(readBaseCheck(first.factoryHome, lockRepoKey(await repoLockId(first.repo)))).toMatchObject({ sha, status: "green", failed: [] });
+
+    const second = await runScenario({
+      script: "clean.json",
+      // The fixture repo has no origin, so its key is the repo path.
+      before: (repo, factoryHome) =>
+        writeBaseCheck(factoryHome, lockRepoKey(resolve(repo)), { sha: git(repo, "rev-parse", "HEAD").trim(), status: "green", failed: [], at: new Date().toISOString() }),
+    });
+    expect(second.result.result).toBe("done");
+    expect(eventsOf(second, "gate_result").some((e) => e.data.base)).toBe(false);
+    expect(eventsOf(second, "progress").some((e) => (e.data.base_check as { status?: string } | undefined)?.status === "green")).toBe(true);
   });
 
   it.each(["red", "pending"] as const)("base_red: %s CI status on base", async (status) => {
@@ -991,10 +1016,17 @@ ${fixed}` } };
     expect(eventsOf(r, "gate_result").some((e) => e.data.base)).toBe(false);
   });
 
-  it("bug plans need tests.run for the red-green proof", async () => {
-    const r = await runScenario({ script: "bug-plan-only.json", patch: (c) => void delete (c.tests as Record<string, unknown>).run, task: "max-bug.md" });
-    expect(r.result).toMatchObject({ result: "needs_human", type: "bug" });
-    expect(r.result.reason).toMatch(/tests.run is required/);
+  it("a bug plan without tests.run proceeds: the red-green proof is an advisory note", async () => {
+    const r = await runScenario({
+      script: "bug-no-repro.json",
+      steps: (s) => [...s.slice(0, 2), ...bugReviews()],
+      patch: (c) => void delete (c.tests as Record<string, unknown>).run,
+      task: "max-bug.md",
+    });
+    expect(r.result).toMatchObject({ result: "done", type: "bug" });
+    const gates = JSON.parse(r.file("gates-1.json"));
+    expect(gates.checks.find((c: { name: string }) => c.name === "red_green")).toMatchObject({ status: "fail", advisory: true });
+    expect(r.github.prs[0]?.body ?? "").toMatch(/red_green \(builtin, advisory, failed\): .*tests\.run is not set/);
   });
 
   it("invented normalize content is rejected: one retry, then plan step at medium", async () => {
@@ -1054,13 +1086,17 @@ ${fixed}` } };
     expect(r.github.prs[0]?.title).toBe("fix: max returns the larger value");
   });
 
-  it("bug without failing repro is rejected -> needs_input", async () => {
-    const r = await runScenario({ script: "bug-no-repro.json", task: "max-bug.md" });
-    expect(r.result.result).toBe("needs_input");
-    expect(r.result.reason).toBe("bug without failing repro");
-    expect(r.result.questions?.[0]).toMatch(/failing repro/);
-    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(3);
-    expect(r.github.prs).toEqual([]);
+  it("bug without a failing repro proceeds: the missing proof is a note, not a question", async () => {
+    const r = await runScenario({ script: "bug-no-repro.json", steps: (s) => [...s.slice(0, 2), ...bugReviews()], task: "max-bug.md" });
+    expect(r.result).toMatchObject({ result: "done", type: "bug" });
+    expect(r.result.questions).toBeUndefined();
+    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
+    const gates = JSON.parse(r.file("gates-1.json"));
+    expect(gates).toMatchObject({ green: true, repro_red_on_base: false });
+    expect(gates.checks.find((c: { name: string }) => c.name === "red_green")).toMatchObject({ status: "fail", advisory: true });
+    const body = r.github.prs[0]?.body ?? "";
+    expect(body).toContain("Advisory gates (reported, not blocking):");
+    expect(body).toMatch(/- 📝 red_green \(builtin, advisory, failed\)/);
   });
 
   describe("each merge policy is reachable via config", () => {
