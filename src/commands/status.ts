@@ -642,11 +642,14 @@ export async function checkinReport(opts: { factoryHome: string; github: GitHub;
     if (!res?.pr || seenPr.has(res.pr) || (res.result !== "done" && res.result !== "needs_human")) continue;
     const finished = resultFinishedMs(r);
     const inWindow = finished !== undefined && finished >= from;
-    const waits = res.result === "done" && res.merge_policy === "human_review" && latestOfTask.get(taskOf(r)) === r && !r.state?.gc_at;
+    const issue = issueOf(r);
+    // A failed queue entry that keeps its PR (post-push repair spent) is a failure, not a PR waiting for a merge.
+    const failedEntry = issue !== null && entryOfIssue.get(issue)?.failed !== undefined;
+    const waits = res.result === "done" && res.merge_policy === "human_review" && latestOfTask.get(taskOf(r)) === r && !r.state?.gc_at && !failedEntry;
     if (!inWindow && !waits) continue;
     seenPr.add(res.pr);
     const live = await loadPr(res.pr);
-    const row = { issue: issueOf(r), task: taskOf(r), pr: res.pr };
+    const row = { issue, task: taskOf(r), pr: res.pr };
     if (!(live instanceof Error) && live.state === "merged") {
       if (inWindow) merged.push({ ...row, assumptions: res.assumptions ?? [] });
     } else if (waits && (live instanceof Error || (live.state === "open" && !live.draft))) {

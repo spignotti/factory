@@ -60,6 +60,9 @@ function seeded() {
   f.run("20261115-100000-000008", BEFORE, "#8", { result: "done", merge_policy: "human_review", risk: "high", risk_reasons: ["old"], pr: "https://pr/superseded" });
   f.pr("https://pr/superseded", { state: "open" });
   f.run("20261116-083000-000009", INSIDE, "#8", { result: "failed", reason: "second try failed", pr: null });
+  // A done PR kept open by a failed queue entry (post-push repair spent) is a failure, not a PR waiting for a merge.
+  f.run("20261116-083500-00000e", INSIDE, "#13", { result: "done", merge_policy: "human_review", risk: "high", risk_reasons: ["kept"], pr: "https://pr/kept" });
+  f.pr("https://pr/kept", { state: "open" });
   // Failed: the result says unreported, the queue entry says reported (the worker retried successfully).
   f.run("20261116-084000-00000a", INSIDE, "#10", { result: "failed", reason: "implement crashed\nstack line", failure_reported: false, pr: null });
   // Failed before the window: out. Another repo: out.
@@ -68,6 +71,7 @@ function seeded() {
   f.pr("https://pr/other", { state: "merged" });
   f.queue([
     entry(10, { status: "parked", run_id: "20261116-084000-00000a", reason: "implement crashed\nstack line", failed: { reported: true } }),
+    entry(13, { status: "parked", run_id: "20261116-083500-00000e", reason: "post-push repair exhausted (1/1)", failed: { reported: false, keep_pr: true } }),
     entry(11, { status: "parked", run_id: "20261115-090000-00000b", reason: "too old", failed: { reported: true } }),
     entry(20, { status: "parked", awaiting_answer: { questions: ["Which table?", "Keep the old API?"], posted: false } }),
     entry(21, { status: "pending", reason: "base problem: fast checks red on base abc12345: lint (re-check after later)" }),
@@ -95,10 +99,11 @@ describe("factory status --repo --since (check-in)", () => {
     expect(c.questions_open).toEqual([{ issue: 20, questions: ["Which table?", "Keep the old API?"], posted: false }]);
     expect(c.failed).toEqual([
       { issue: 10, task: "#10", reason: "implement crashed", reported: true },
+      { issue: 13, task: "#13", reason: "post-push repair exhausted (1/1)", reported: false },
       { issue: 8, task: "#8", reason: "second try failed", reported: false },
     ]);
     expect(c.base_problem).toBe("base problem: fast checks red on base abc12345: lint (re-check after later)");
-    expect(c.queue).toEqual({ pending: 2, running: 1, parked: 3 });
+    expect(c.queue).toEqual({ pending: 2, running: 1, parked: 4 });
     expect(JSON.stringify(c)).not.toMatch(/other|closed|auto|too old/);
   });
 
@@ -128,16 +133,18 @@ describe("factory status --repo --since (check-in)", () => {
         "    1. Which table?",
         "    2. Keep the old API?",
         "",
-        "Failed since (2)",
+        "Failed since (3)",
         "  #10 (reported on GitHub)",
         "    implement crashed",
+        "  #13 (not reported on GitHub)",
+        "    post-push repair exhausted (1/1)",
         "  #8 (not reported on GitHub)",
         "    second try failed",
         "",
         "Base problem",
         "  base problem: fast checks red on base abc12345: lint (re-check after later)",
         "",
-        "Queue: pending 2, running 1, parked 3",
+        "Queue: pending 2, running 1, parked 4",
         "",
       ].join("\n"),
     );
@@ -155,7 +162,7 @@ describe("factory status --repo --since (check-in)", () => {
     expect(later.merged).toEqual([]);
     expect(later.failed).toEqual([]);
     expect(later.waiting_for_merge.map((w) => w.issue)).toEqual([5, 6]);
-    expect((await since("24h")).failed.map((x) => x.issue)).toEqual([10, 11, 8]);
+    expect((await since("24h")).failed.map((x) => x.issue)).toEqual([10, 13, 11, 8]);
     await expect(since("soon")).rejects.toThrow(/invalid --since/);
     await expect(since("2026-11-17T00:00:00Z")).rejects.toThrow(/future/);
   });
