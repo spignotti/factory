@@ -1632,7 +1632,8 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       room -= 1;
     }
     // The re-check window restarts now, so later ticks wait for this run's own base check.
-    if (recheck && starts.length) writeBaseCheck(ctx.factoryHome, key, { ...recheck, at: new Date(ctx.nowMs).toISOString(), rechecks: (recheck.rechecks ?? 0) + 1 });
+    // Only a fresh start runs the base check; a resume does not, so it does not advance the backoff.
+    if (recheck && starts.some((s) => !s.resumeRunId)) writeBaseCheck(ctx.factoryHome, key, { ...recheck, at: new Date(ctx.nowMs).toISOString(), rechecks: (recheck.rechecks ?? 0) + 1 });
     const runningNow = q.entries.filter((e) => e.status === "running").length;
     const globalLeft = ctx.slots - (othersRunning(ctx.factoryHome, repo) + runningNow);
     if (globalLeft <= 0 && runningNow < repoMax) {
