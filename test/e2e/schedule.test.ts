@@ -385,6 +385,9 @@ describe("queue schedule", () => {
           { id: "a3", text: "fulfills #3", verify: "test" },
         ],
       }) + "\n");
+      // A handoff names evidence for a3 that the evidence gate did not accept: finalize closed only #2.
+      writeFileSync(join(runDir, "state.json"), JSON.stringify({ handoffs: [{ evidence: [{ acceptance_id: "a3", kind: "test", ref: "test/invented.test.js" }] }] }) + "\n");
+      writeFileSync(join(runDir, "fulfilled.json"), JSON.stringify({ issues: [2] }) + "\n");
       g.release(1, outcome(repo, 1, "done", "", { run_id: runId, pr: "https://github.test/pr/1" }));
       g.release(4, outcome(repo, 4, "done", "", { pr: "https://github.test/pr/4" }));
       await waitFor("evidenced extra", async () => (await entries(factoryHome, repo)).find((e) => e.issue === 2)?.reason === "fulfilled with #1");

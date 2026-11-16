@@ -9,6 +9,7 @@ import {
   evidenceCheck,
   forbiddenPaths,
   guideUpdate,
+  judgeEvidence,
   protectedPaths,
   reproFiles,
   scopeReport,
@@ -27,6 +28,7 @@ import type { Deadline } from "../pipeline/budget.js";
 import { checkDeadline, commandEnv, jailFor, type RunContext, writeJson } from "../pipeline/context.js";
 import type { Jail } from "../sandbox/sandbox.js";
 import { EnvMissing, type Services } from "../services.js";
+import type { Handoff } from "../schemas/handoff.js";
 import type { Check, Tier } from "../schemas/repo.js";
 
 export interface CheckResult {
@@ -79,6 +81,11 @@ export interface GateReport {
   scope_report: string[];
   /** Bug plans: whether the repro test fails on base (false = it does not reproduce the bug). */
   repro_red_on_base?: boolean;
+  /**
+   * Handoff evidence the evidence gate accepted for this tree. Only these refs check an acceptance
+   * box or close a bundle issue; a rejected (invented) ref is a note, not evidence.
+   */
+  accepted_evidence?: Handoff["evidence"];
 }
 
 export function withEnvCommand(run: string, envCommand: string): string {
@@ -429,6 +436,7 @@ export async function runGates(ctx: RunContext, tier: Exclude<Tier, "manual">, p
     checks: all,
     scope_report: scopeReport(plan, changed),
     repro_red_on_base: reproRedOnBase,
+    accepted_evidence: judgeEvidence(handoffs, evidence).accepted,
   };
   writeJson(ctx, `gates-${report.n}.json`, report);
   for (const c of all) {
@@ -461,6 +469,22 @@ export function skippedSecurityGates(checks: { name: string; status: string; out
 
 /** The factory's own advisory gates; any other advisory gate is an in-run security scanner. */
 const BOOKKEEPING_GATES = new Set(["test_presence", "evidence", "guide_update", "config_guard", "red_green"]);
+
+/**
+ * Advisory gates whose failure keeps a person in front of the merge. They never stop the run, but a
+ * loosened check or a scanner finding must not auto-merge. A gitleaks finding also keeps the branch
+ * off the remote: a pushed secret is public at once. A timed-out scanner counts as failed.
+ */
+export function mergeHolds(checks: Pick<CheckResult, "name" | "status" | "advisory">[]): { reasons: string[]; secret: boolean } {
+  const red = checks.filter((c) => c.status === "fail" || c.status === "timeout");
+  const failed = red.filter((c) => c.advisory);
+  const reasons: string[] = [];
+  if (failed.some((c) => c.name === "config_guard")) reasons.push("config_guard failed: the diff loosens the repo's own checks");
+  const scanners = failed.filter((c) => !BOOKKEEPING_GATES.has(c.name)).map((c) => c.name);
+  if (scanners.length) reasons.push(`security scanner failed: ${scanners.join(", ")}`);
+  // A repo check named gitleaks replaces the baseline scanner, so it counts the same.
+  return { reasons, secret: red.some((c) => c.name === "gitleaks") };
+}
 
 /** A failed advisory gate's note: the first detail line for bookkeeping gates, never scanner output. */
 function advisoryNote(c: CheckResult): string {

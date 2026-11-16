@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import type { GitHub, IssueComment } from "../gh.js";
 import { type AgentCall, callAgent, type RunContext, type Task } from "../pipeline/context.js";
+import { trustedComment } from "../pipeline/questions.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { normalizeRetryNote, type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import { planStep } from "./plan.js";
@@ -11,6 +12,8 @@ export type PlanEffort = "none" | "medium" | "high";
 
 export interface TaskInput {
   issue?: number;
+  /** Bundle partners of `issue` (queue only). */
+  bundle?: number[];
   planFile?: string;
   textFile?: string;
 }
@@ -25,16 +28,19 @@ export const MAX_COMMENT_CHARS = 4_000;
 export const MAX_COMMENTS_CHARS = 16_000;
 
 /**
- * Issue comments for the planner, oldest first, under one heading. Hidden (minimized) and empty
- * comments are left out. The factory's own question comment stays in, so the answers have context.
+ * Issue comments for the planner, oldest first, under one heading. Only comments by people with
+ * write access and the factory's own comments are kept: on a public repo anyone can comment, and
+ * the plan of an auto-mergeable run must not take orders from them. Hidden (minimized) and empty
+ * comments are left out. Every body line is quoted, so a body cannot fake another comment's header.
  */
 export function renderIssueComments(comments: IssueComment[]): string {
   const blocks = comments
-    .filter((c) => !c.minimized && c.body.trim())
+    .filter((c) => !c.minimized && c.body.trim() && trustedComment(c))
     .map((c) => {
       const body = c.body.trim();
       const text = body.length > MAX_COMMENT_CHARS ? `${body.slice(0, MAX_COMMENT_CHARS)}\n[comment truncated]` : body;
-      return `### ${c.author}${c.association ? ` (${c.association.toLowerCase()})` : ""}, ${c.created_at}\n\n${text}`;
+      const quoted = text.split("\n").map((line) => `> ${line}`).join("\n");
+      return `### ${c.author}${c.association ? ` (${c.association.toLowerCase()})` : ""}, ${c.created_at}\n\n${quoted}`;
     });
   const kept: string[] = [];
   let size = 0;
@@ -62,6 +68,7 @@ export async function readTask(input: TaskInput, repoDir: string, github: GitHub
       text: `# ${issue.title}\n\n${issue.body}`,
       labels: issue.labels,
       ...(comments ? { comments } : {}),
+      ...(input.bundle?.length ? { bundle: input.bundle } : {}),
     };
   }
   const file = input.planFile ?? input.textFile;

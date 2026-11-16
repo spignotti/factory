@@ -38,6 +38,7 @@ const USAGE = `usage:
   factory --version
   factory run --repo <path> (--issue <n> | --plan <file> | --text <file>)
               [--plan-effort none|medium|high] [--no-pr] [--profile <file>] [--wait] [--run-id <id>]
+              [--bundle <n,n>]
               (up to concurrency.max_runs runs per repo, default 2; a full repo or an overlapping
                plan → result "locked", or queue with --wait; exclusive_paths run alone)
               [--notify <target>] [--no-notify]
@@ -641,6 +642,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
           notify: { type: "string" },
           profile: { type: "string" },
           "run-id": { type: "string" },
+          bundle: { type: "string" },
         },
       });
       if (!values.repo || [values.issue, values.plan, values.text].filter(Boolean).length !== 1) {
@@ -649,6 +651,8 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       }
       const effort = values["plan-effort"];
       if (effort !== undefined && !["none", "medium", "high"].includes(effort)) throw new Error(`invalid --plan-effort ${effort}`);
+      const bundle = values.bundle?.split(",").map((n) => Number(n.trim()));
+      if (bundle?.some((n) => !Number.isInteger(n) || n <= 0) || (bundle && values.issue === undefined)) throw new Error(`invalid --bundle ${values.bundle} (comma-separated issue numbers, with --issue)`);
       if (values.lane === "fast") throw new Error("the fast lane was removed; run without --lane (plan effort is --plan-effort none|medium|high)");
       if (values.lane !== undefined && values.lane !== "standard") throw new Error(`invalid --lane ${values.lane}`);
       const factoryHome = factoryHomeOf();
@@ -678,6 +682,7 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
           {
             repo: values.repo,
             issue: values.issue !== undefined ? Number(values.issue) : undefined,
+            ...(bundle ? { bundle } : {}),
             planFile: values.plan,
             textFile: values.text,
             planEffort: effort as "none" | "medium" | "high" | undefined,

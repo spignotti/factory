@@ -17,8 +17,9 @@ export function factoryCliScript(): string {
 }
 
 /** Args for the detached `factory run`. The run id is on the command line so `ps -o command=` can match a restarted worker's pid. */
-export function factoryRunArgs(script: string, req: { repo: string; issue: number; runId: string }): string[] {
-  return [script, "run", "--repo", req.repo, "--issue", String(req.issue), "--no-notify", "--run-id", req.runId];
+export function factoryRunArgs(script: string, req: { repo: string; issue: number; runId: string; bundle?: number[] }): string[] {
+  const bundle = req.bundle?.length ? ["--bundle", req.bundle.join(",")] : [];
+  return [script, "run", "--repo", req.repo, "--issue", String(req.issue), "--no-notify", "--run-id", req.runId, ...bundle];
 }
 
 /** Args for a detached `factory resume`. `--no-notify` matches `factory run` from the queue. */
@@ -35,7 +36,7 @@ export function spawnFactoryRun(req: StartRunRequest): StartedRun {
   if (req.resumeRunId) return spawnResume(req);
   const prior = new Set(issueRuns(req.factoryHome, req.repo, req.issue).map((r) => r.run_id));
   const plannedId = req.runId ?? newRunId(Date.now());
-  const child = spawn(process.execPath, factoryRunArgs(factoryCliScript(), { repo: req.repo, issue: req.issue, runId: plannedId }), {
+  const child = spawn(process.execPath, factoryRunArgs(factoryCliScript(), { repo: req.repo, issue: req.issue, runId: plannedId, bundle: req.bundle }), {
     cwd: req.repo,
     env: { ...process.env, FACTORY_HOME: req.factoryHome },
     stdio: "ignore",

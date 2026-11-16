@@ -38,6 +38,8 @@ export interface QueueEntry {
   window_estimated?: boolean;
   /** Times this entry waited for a provider usage window. Bounded; a window reset does not give it back. */
   window_waits?: number;
+  /** Assumed waiting (ms) for windows without a reported reset time. Bounded separately; never given back. */
+  window_estimated_ms?: number;
   /** Open factory PR numbers that overlap this run. Pending again once each is merged or closed. */
   blocked_by?: number[];
   /** Live factory runs whose claimed paths overlap this one. Pending again once each has finished. */
@@ -94,6 +96,7 @@ const EntrySchema = z.object({
   window_resets_at: z.number().int().positive().optional(),
   window_estimated: z.boolean().optional(),
   window_waits: z.number().int().min(0).optional(),
+  window_estimated_ms: z.number().int().min(0).optional(),
   blocked_by: z.array(z.number().int().positive()).optional(),
   blocked_runs: z.array(z.string()).optional(),
   pid: z.number().int().optional(),

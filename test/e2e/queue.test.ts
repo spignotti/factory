@@ -357,6 +357,38 @@ describe("factory queue", () => {
     }
   });
 
+  it("a label-swap retry after a human answered keeps factory-ready and starts the fresh run", async () => {
+    const repo = createFixtureRepo();
+    const factoryHome = home();
+    const github = new FakeGitHub();
+    await enqueue(factoryHome, repo, github, [1]);
+    const g = gate();
+    const ctl = new AbortController();
+    const cap = capture();
+    const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: cap.io, stay: true, random: () => 0 });
+    const asked = outcome(repo, 1, "needs_input", "plan needs input", { questions: ["Which unit?"], questions_posted: false, stop: { cause: "explicit_decision", action: "decide" } });
+    const row = async () => (await entries(factoryHome, repo)).find((e) => e.issue === 1)!;
+    try {
+      await waitFor("first start", () => g.calls.length === 1);
+      // The comment lands, the label swap does not.
+      github.issueLabelError = "HTTP 403";
+      g.release(1, asked);
+      await waitFor("a failed swap", () => cap.err().includes("posting questions on #1 failed"));
+      expect(github.comments.get(1)).toHaveLength(1);
+      expect(github.issues.get(1)!.labels).toEqual(["factory-ready"]);
+      // A maintainer answers and leaves factory-ready on; then the label API recovers.
+      github.comments.get(1)!.push({ author: "maintainer", association: "OWNER", body: "Metres.", created_at: "2026-11-16T10:00:00Z" });
+      github.issueLabelError = null;
+      await waitFor("fresh start", () => g.calls.length === 2);
+      expect(github.issues.get(1)!.labels).toEqual(["factory-ready"]);
+      expect(cap.out()).toContain("queue: #1 answered before the label swap");
+      expect((await row()).awaiting_answer).toBeUndefined();
+    } finally {
+      ctl.abort();
+      await worker.catch(() => undefined);
+    }
+  });
+
   it("a run that already posted its questions is not posted again by the worker", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
@@ -1216,6 +1248,9 @@ describe("factory queue", () => {
     const runId = "20261029-210000-abc123";
     expect(factoryRunArgs("/cli.js", { repo: "/repo", issue: 4, runId })).toEqual([
       "/cli.js", "run", "--repo", "/repo", "--issue", "4", "--no-notify", "--run-id", runId,
+    ]);
+    expect(factoryRunArgs("/cli.js", { repo: "/repo", issue: 4, runId, bundle: [5, 7] })).toEqual([
+      "/cli.js", "run", "--repo", "/repo", "--issue", "4", "--no-notify", "--run-id", runId, "--bundle", "5,7",
     ]);
     const repo = createFixtureRepo();
     const factoryHome = home();

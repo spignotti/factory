@@ -7,6 +7,7 @@ import { realSleep } from "../agents/fake-runner.js";
 import { InvalidOutputError, ProviderWindowError, TransientAgentError } from "../agents/models.js";
 import { type Clock, EventLog, type RunResult, type RunResultKind, type RunStop, type StopCause, secretValues, writeResult } from "../events.js";
 import { isCommandTimeout, sh, tail } from "../exec.js";
+import { removeRunWorktree } from "../commands/abandon.js";
 import { baseRef, commitAll, discardChanges, git, gitOk, headSha, isAncestor, mergeRef, withBaseWorktree, originUrl, remoteBranchExists, repoLockId, revParse, withRepoGitOps } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { PlanSchema, type Plan } from "../schemas/plan.js";
@@ -679,6 +680,13 @@ async function beginWork(
     if (!stop || stop.result === "base_red") {
       const failed = results.filter((r) => r.status === "fail").map((r) => r.name);
       writeBaseCheck(deps.factoryHome, baseKey, { sha: baseSha, status: stop ? "red" : "green", failed: stop ? failed : [], at: new Date(f.now()).toISOString() });
+    }
+    // A local base_red starts over on its next try: drop the worktree (and its setup output) once services stop.
+    if (stop?.result === "base_red") {
+      f.cleanups.push(async () => {
+        await removeRunWorktree(repoDir, worktree);
+        await withRepoGitOps(repoDir, () => git(repoDir, ["branch", "-D", branch])).catch(() => undefined);
+      });
     }
     if (stop) return f.set(stop.result === "needs_human" ? { result: stop.result, reason: stop.reason, stop: stopFor("unknown") } : stop);
   }

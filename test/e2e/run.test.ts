@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ResultSchema } from "../../src/events.js";
@@ -382,6 +383,75 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.github.prs[0]?.body ?? "").toMatch(/config_guard \(builtin, advisory, failed\): .*src\/math.js: adds `eslint-disable`/);
   });
 
+  it("an added suppression ends done and ready but holds the merge for a human, with the reason on the risk line", async () => {
+    let n = 0;
+    const r = await runScenario({
+      script: "gate-fail-fix.json",
+      github: (gh) => {
+        gh.settings.required_checks = ["done"];
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+      },
+      patch: (c) => void (c.merge = { auto_merge_max_risk: "low" }),
+      steps: (s) => {
+        const impl = s.filter((y) => y.role === "implement");
+        const fixed = impl[1]!.writes!["src/math.js"]!;
+        const first = { ...impl[0]!, writes: { ...impl[0]!.writes, "src/math.js": `// eslint-disable-next-line no-unused-vars\n${fixed}` } };
+        return s.filter((x) => x !== impl[1]).map((x) => (x === impl[0] ? first : x));
+      },
+    });
+    expect(r.result).toMatchObject({ result: "done", risk: "low", merge_policy: "human_review" });
+    expect(r.result.risk_reasons).toContain("config_guard failed: the diff loosens the repo's own checks");
+    expect(r.github.prs[0]?.draft).toBe(false);
+    expect(r.github.autoMerged).toEqual([]);
+    expect(r.github.prs[0]?.body ?? "").toMatch(/\*\*low\*\* — .*config_guard failed: the diff loosens the repo's own checks/);
+  });
+
+  describe("in-run security scanners", () => {
+    /** Fake scanner binaries in front of PATH for one run: `name -> exit code`. */
+    async function withScanners<T>(exits: Record<string, number>, fn: () => Promise<T>): Promise<T> {
+      const bin = mkdtempSync(join(tmpdir(), "factory-scanners-"));
+      for (const [name, code] of Object.entries(exits)) {
+        writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} finding"\nexit ${code}\n`, { mode: 0o755 });
+      }
+      const saved = process.env.PATH;
+      process.env.PATH = `${bin}:${saved ?? ""}`;
+      try {
+        return await fn();
+      } finally {
+        process.env.PATH = saved;
+      }
+    }
+    const autoLow = {
+      github: (gh: { settings: { required_checks: string[] }; baseStatus: unknown }) => {
+        let n = 0;
+        gh.settings.required_checks = ["done"];
+        gh.baseStatus = async () => (n++ === 0 ? "none" : "green");
+      },
+      patch: (c: Record<string, unknown>) => void (c.merge = { auto_merge_max_risk: "low" }),
+    };
+
+    it("a gitleaks finding keeps the branch off the remote", async () => {
+      const r = await withScanners({ gitleaks: 1, semgrep: 0 }, () => runScenario({ script: "clean.json", ...autoLow } as Parameters<typeof runScenario>[0]));
+      expect(r.result).toMatchObject({ result: "needs_human", merge_policy: "human_review", pr: null });
+      expect(r.result.reason).toContain("gitleaks did not pass");
+      expect(r.result.reason).toContain("the branch was not pushed");
+      expect(r.github.pushes).toEqual([]);
+      expect(r.github.prs).toEqual([]);
+      expect(r.github.autoMerged).toEqual([]);
+    });
+
+    it("another scanner finding ends done and ready, and holds the merge for a human", async () => {
+      const r = await withScanners({ gitleaks: 0, semgrep: 1 }, () => runScenario({ script: "clean.json", ...autoLow } as Parameters<typeof runScenario>[0]));
+      expect(r.result).toMatchObject({ result: "done", risk: "low", merge_policy: "human_review" });
+      expect(r.result.risk_reasons).toEqual(["security scanner failed: semgrep"]);
+      expect(r.github.prs[0]?.draft).toBe(false);
+      expect(r.github.autoMerged).toEqual([]);
+      expect(r.github.prs[0]?.body ?? "").toContain("**low** — security scanner failed: semgrep");
+      // Scanner output stays out of the PR body.
+      expect(r.github.prs[0]?.body ?? "").not.toContain("semgrep finding");
+    });
+  });
+
   it("accepted wontfix: done after round 2", async () => {
     const r = await runScenario({ script: "wontfix.json" });
     expect(r.result).toMatchObject({ result: "done", rounds: 2 });
@@ -621,6 +691,11 @@ describe("E2E with fake-runner on a fixture repo", () => {
     expect(r.runner.calls.map((c) => c.role)).toEqual(["plan_high"]);
     const sha = git(r.repo, "rev-parse", "HEAD").trim();
     expect(readBaseCheck(r.factoryHome, lockRepoKey(await repoLockId(r.repo)))).toMatchObject({ sha, status: "red", failed: ["broken"] });
+    // The worktree (with its setup output) is gone at once; the result still names it as a local stop.
+    expect(r.result.worktree).toBe(join(r.runDir, "worktree"));
+    expect(existsSync(join(r.runDir, "worktree"))).toBe(false);
+    expect(git(r.repo, "worktree", "list")).not.toContain(r.runDir);
+    expect(git(r.repo, "branch", "--list", r.result.branch!).trim()).toBe("");
   });
 
   it("a green base check is recorded per base commit; a run on that commit skips the local check", async () => {
