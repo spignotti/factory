@@ -11,8 +11,10 @@ export type ErrorClass = "capacity" | "network" | "stream" | "limit" | "auth" | 
  * connection as `Connection error.` (20261030-125347-5b7ada: a request in flight across a 19 min box freeze).
  * A TLS appendix on that message (`certificate verify failed`, `unable to verify the first certificate`,
  * `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `TLS handshake`) is the same class. The word "certificate" alone is not.
+ * Both exact-looking messages may carry a detail after them (`terminated: <TLS alert>`, `Request timed out. (cause)`),
+ * so they are anchored at the start only; `tool terminated the process` is still not a drop.
  */
-const NETWORK = /^terminated$|^request timed out\.?$|^connection error\b|\bAPIConnectionTimeoutError\b|\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|socket hang up|fetch failed|other side closed|premature close|\bTLS handshake\b|unable to verify the first certificate|\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b|certificate verify failed/i;
+const NETWORK = /^terminated(?:$|:)|^request timed out\b|^connection error\b|\bAPIConnectionTimeoutError\b|\bECONNRESET\b|\bETIMEDOUT\b|\bEPIPE\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|socket hang up|fetch failed|other side closed|premature close|\bTLS handshake\b|unable to verify the first certificate|\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b|certificate verify failed/i;
 
 /**
  * The provider closed the token stream before a finish reason (20261104-150805-15d527:
