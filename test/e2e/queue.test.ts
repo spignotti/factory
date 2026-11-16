@@ -390,10 +390,13 @@ describe("factory queue", () => {
     const worker = runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, signal: ctl.signal, start: g.start, io: capture().io });
     try {
       await waitFor("started", () => g.calls.length === 1);
-      // A reason an older run may still write: it is no longer a PR park.
+      // A reason an older run may still write: it is no longer a PR park. Any lock that is not a
+      // live-run overlap goes back to pending and starts again.
       g.release(1, outcome(repo, 1, "locked", "planned paths overlap open factory PR #9 (src/math.js)"));
-      await waitFor("settled", async () => (await entries(factoryHome, repo))[0]?.status === "parked");
-      expect((await entries(factoryHome, repo))[0]?.blocked_by).toBeUndefined();
+      await waitFor("restarted", () => g.calls.length === 2);
+      const row = (await entries(factoryHome, repo))[0];
+      expect(row?.blocked_by).toBeUndefined();
+      expect(row?.failed).toBeUndefined();
     } finally {
       ctl.abort();
       await worker.catch(() => undefined);

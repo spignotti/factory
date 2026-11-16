@@ -105,7 +105,7 @@ describe("F02 recovery", () => {
       setup: (repo) => commitTools(repo, { hold: HOLD }),
       patch: holdCheck(),
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(r.result.reason).toMatch(/class=unknown/);
     expect(r.result.reason).toMatch(/attempts=1\/3/);
     expect(r.result.reason).toMatch(/checkpoint=[0-9a-f]{7,}/);
@@ -124,7 +124,7 @@ describe("F02 recovery", () => {
           writes: { "src/math.js": "export const invented = true;\n" },
         })),
     });
-    expect(r2.result.result).toBe("needs_human");
+    expect(r2.result.result).toBe("failed");
     expect(r2.result.reason).toMatch(/class=unknown/);
     expect(r2.runner.calls.filter((c) => c.role === "implement")).toHaveLength(0);
     expect(r2.runner.calls.filter((c) => c.role.startsWith("plan"))).toHaveLength(0);
@@ -139,7 +139,7 @@ describe("F02 recovery", () => {
       setup: (repo) => commitTools(repo, { hold: HOLD }),
       patch: holdCheck("connect ETIMEDOUT"),
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     expect(r.result.reason).toMatch(/class=infra/);
     expect(r.result.reason).toMatch(/Do not cancel and rerun/);
     expect(r.events.filter((e) => e.data.repair === "infra_rerun")).toHaveLength(1);
@@ -167,7 +167,7 @@ describe("F02 recovery", () => {
       script: "gate-fail-fix.json",
       steps: (steps) => [brokenImplement(steps)],
     });
-    expect(r2.result.result).toBe("needs_human");
+    expect(r2.result.result).toBe("failed");
     expect(r2.result.reason).toMatch(/class=code/);
     expect(r2.result.reason).toMatch(/attempts=3\/3/);
     expect(r2.result.reason).toMatch(/checkpoint=[0-9a-f]{7,}/);
@@ -197,7 +197,7 @@ describe("F02 recovery", () => {
       patch,
       steps: brokenThrice,
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const impl = r.runner.calls.filter((c) => c.role === "implement");
     expect(impl).toHaveLength(3);
     expect(impl[1]!.prompt).toContain("Gates are red");
@@ -239,7 +239,7 @@ describe("F02 recovery", () => {
       script: "gate-fail-fix.json",
       steps: (steps) => [brokenImplement(steps)],
     });
-    expect(r2.result.result).toBe("needs_human");
+    expect(r2.result.result).toBe("failed");
     const after = JSON.parse(r2.file("state.json")) as { repair?: { gate_attempts?: number; failure?: { signature?: string; unchanged?: number } } };
     expect(after.repair?.gate_attempts).toBe(3);
     expect(after.repair?.failure?.signature).toBe(before.repair?.failure?.signature);
@@ -412,7 +412,7 @@ exit 1
         gh.issues.set(7, { number: 7, title: "Multiply", body: ISSUE_BODY, labels: [] });
       },
     });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const issue = r.github.issues.get(7)!;
     issue.body = "A different request.";
     const r2 = await resumeScenario(r, { script: "clean.json", steps: () => [] });
@@ -424,8 +424,10 @@ exit 1
   });
 
   it("resume does not open another pull request when the saved one is closed", async () => {
-    const r = await runScenario({ script: "stalemate.json" });
-    expect(r.result.result).toBe("needs_human");
+    let n = 0;
+    // Red PR CI the resolver cannot fix: the run fails with its draft PR.
+    const r = await runScenario({ script: "clean.json", github: (gh) => void (gh.baseStatus = async () => (n++ === 0 ? "none" : "red")) });
+    expect(r.result.result).toBe("failed");
     expect(r.github.prs).toHaveLength(1);
     const url = r.github.prs[0]!.url;
     r.github.prStates.set(url, { state: "closed", draft: true });

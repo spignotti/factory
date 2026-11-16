@@ -296,7 +296,7 @@ describe("parallel runs and host steps", () => {
         run,
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("reacquire ignored the wall deadline")), 20_000)),
       ]);
-      expect(result.result).toBe("needs_human");
+      expect(result.result).toBe("failed");
       expect(result.reason).toMatch(/max_wall_minutes/);
     } finally {
       snatched?.();
@@ -339,7 +339,7 @@ describe("parallel runs and host steps", () => {
     }
   });
 
-  it("needs_human before push when the diff adds a migration the plan omitted beside an exclusive run", async () => {
+  it("locked before push when the diff adds a migration the plan omitted beside an exclusive run", async () => {
     let release: (() => void) | undefined;
     const migration = "supabase/migrations/001_add.sql";
     const r = await runScenario({
@@ -366,8 +366,11 @@ describe("parallel runs and host steps", () => {
         ),
     });
     release?.();
-    expect(r.result.result, r.file("state.json")).toBe("needs_human");
-    expect(r.result.reason).toMatch(/changed files overlap another factory run/);
+    // A live run holds those paths: a lock the queue parks on (blocked_runs), not a technical stop.
+    expect(r.result.result, r.file("state.json")).toBe("locked");
+    expect(r.result.reason).toMatch(/changed files overlap another factory run: migration-blocker/);
+    expect(r.resultFile.stop).toBeUndefined();
+    expect(r.runner.calls.some((c) => c.role === "resolve")).toBe(false);
     expect(r.github.pushes).toEqual([]);
     expect(r.runner.calls.some((c) => c.role === "implement")).toBe(true);
   });

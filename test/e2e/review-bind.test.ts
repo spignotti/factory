@@ -61,20 +61,21 @@ describe("F04 review binding", () => {
         return [...steps.slice(0, at), bug, emptyReview("review_simplicity"), ...steps.slice(at)];
       },
     });
-    expect(r.result.result).toBe("needs_human");
-    expect(r.result.reason).toMatch(/open bug on the final tree/);
+    expect(r.result.result).toBe("failed");
+    expect(r.result.reason).toMatch(/^open bug on the final tree.*; resolver: /s);
     expect(r.github.autoMerged).toEqual([]);
   });
 
   it("V12: resume of an unchanged commit with an open bug does not review it again", async () => {
     const r = await runScenario({ script: "bug-max-rounds.json" });
-    expect(r.result.result).toBe("needs_human");
+    expect(r.result.result).toBe("failed");
     const before = readState(r.runDir).reviewed_sha;
     expect(before).toBeTruthy();
     const r2 = await resumeScenario(r, { script: "clean.json", steps: (steps) => steps.filter((s) => s.role === "pr_writer") });
-    expect(r2.runner.calls.map((c) => c.role)).toEqual(["pr_writer"]);
-    expect(r2.result.result).toBe("needs_human");
-    expect(r2.result.reason).toMatch(/open bug on the reviewed commit/);
+    // The reviewers are not asked again; the open bug goes to the resolver, whose turns are spent.
+    expect(r2.runner.calls.map((c) => c.role)).toEqual([]);
+    expect(r2.result.result).toBe("failed");
+    expect(r2.result.reason).toMatch(/^open bug on the reviewed commit.*; resolver: no resolver turn left \(2\/2\)$/s);
     expect(readState(r.runDir).reviewed_sha).toBe(before);
     expect(readFileSync(join(r.runDir, "worktree", "src/math.js"), "utf8")).toContain("multiply");
   });
