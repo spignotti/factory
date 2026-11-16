@@ -12,47 +12,29 @@ const emptyReview = (role: "review_plan" | "review_simplicity" | "review_securit
 });
 
 describe("F04 review binding", () => {
-  it("V11: an invented plan restriction is corrected once and does not start a dispute round", async () => {
+  it("a scope-expansion claim is an ordinary finding: the fix round answers it and the run goes on", async () => {
     const r = await runScenario({
       script: "clean.json",
       steps: (steps) => {
-        const plan = steps[0]!.output as { acceptance: { text: string }[] };
-        plan.acceptance[0]!.text = "only test/multiply.test.js";
-        const review = steps.find((s) => s.role === "review_plan")!;
-        review.output = {
-          reviewer: "plan",
-          prior: [],
-          findings: [{ severity: "bug", file: "src/math.js", line: 1, claim: "the plan is stricter than the task: only test/multiply.test.js", evidence: "plan", fix: "drop the restriction" }],
-        };
-        return steps;
-      },
-    });
-    expect(r.result.result).toBe("done");
-    expect(r.runner.calls.filter((c) => c.role === "review_plan")).toHaveLength(1);
-    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
-    const saved = JSON.parse(r.file("plan.json")) as { acceptance: { text: string }[] };
-    expect(saved.acceptance[0]!.text).toBe("Add a multiply function");
-    expect(saved.acceptance[0]!.text).not.toContain("only test/multiply.test.js");
-    expect(r.events.some((e) => Array.isArray(e.data.plan_corrected))).toBe(true);
-  });
-
-  it("V11: a scope expansion stays a decision and does not change the plan", async () => {
-    const r = await runScenario({
-      script: "clean.json",
-      steps: (steps) => {
+        const at = steps.findIndex((s) => s.role === "pr_writer");
         const review = steps.find((s) => s.role === "review_plan")!;
         review.output = {
           reviewer: "plan",
           prior: [],
           findings: [{ severity: "bug", file: "", line: 0, claim: "scope expansion: also add divide()", evidence: "task", fix: "implement divide" }],
         };
-        return steps;
+        const fix: FakeStep = {
+          role: "implement",
+          output: { package: "fix", done: ["fix round"], responses: [{ finding_id: "R1-plan-1", status: "wontfix", response: "the task asks only for multiply" }] },
+        };
+        const accept: FakeStep = { role: "review_plan", output: { reviewer: "plan", prior: [{ finding_id: "R1-plan-1", verdict: "accept_wontfix" }], findings: [] } };
+        return [...steps.slice(0, at), fix, accept, emptyReview("review_simplicity"), ...steps.slice(at)];
       },
     });
-    expect(r.result).toMatchObject({ result: "needs_human" });
-    expect(r.result.reason).toMatch(/scope expansion needs a decision/);
-    expect(r.runner.calls.filter((c) => c.role === "review_plan")).toHaveLength(1);
-    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
+    expect(r.result.result).toBe("done");
+    expect(r.resultFile.stop).toBeUndefined();
+    expect(r.result.reason).not.toMatch(/scope expansion needs a decision/);
+    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(2);
     const saved = JSON.parse(r.file("plan.json")) as { acceptance: { text: string }[]; packages: { files: string[] }[] };
     expect(JSON.stringify(saved)).not.toContain("divide");
   });
