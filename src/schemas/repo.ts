@@ -380,6 +380,11 @@ export const RepoConfigSchema = z
           })
           .default({ low: "human_review", medium: "human_review", high: "human_review" }),
         low_max_diff_lines: z.number().int().min(0).default(300),
+        /**
+         * Globs of files that always make a run `high` risk, so a person merges. Same matching as
+         * `sensitive_paths`. Absent: migrations and secret files (`DEFAULT_HUMAN_REVIEW_PATHS`). `[]`: none.
+         */
+        human_review_paths: z.array(z.string()).optional(),
       })
       .default({
         auto_merge_max_risk: "none",

@@ -1127,6 +1127,37 @@ ${fixed}` } };
       expect(r.result.merge_policy).toBe("human_review");
     });
 
+    it("a hard-list hit (default migration path) ends done with a ready PR that is not merged, even with bot_review", async () => {
+      const r = await runScenario({
+        script: "clean.json",
+        github: (gh) => {
+          gh.settings.required_checks = ["done"];
+          gh.status = "green";
+        },
+        patch: (c) => void (c.merge = { auto_merge_max_risk: "medium", policy: { low: "bot_review", medium: "bot_review" } }),
+        steps: (steps) => {
+          const plan = steps[0]!.output as { packages: { files: string[] }[] };
+          plan.packages[0]!.files.push("db/migrations/001_add_table.sql");
+          const impl = steps.find((s) => s.role === "implement")!;
+          impl.writes = { ...impl.writes, "db/migrations/001_add_table.sql": "create table t (id int);\n" };
+          return steps;
+        },
+      });
+      expect(r.result).toMatchObject({
+        result: "done",
+        risk: "high",
+        merge_policy: "human_review",
+        risk_reasons: ["human_review_paths: db/migrations/001_add_table.sql"],
+      });
+      expect(r.github.autoMerged).toEqual([]);
+      const pr = r.github.prs[0]!;
+      expect(pr.draft).toBe(false);
+      expect(r.github.prStates.get(pr.url)).toMatchObject({ state: "open", draft: false });
+      expect(r.github.drafted).toEqual([]);
+      expect(pr.body).toContain("human_review_paths: db/migrations/001_add_table.sql");
+      expect(pr.body).toMatch(/\| Human review \(hard list\) \| yes \| db\/migrations\/001_add_table\.sql \|/);
+    });
+
     it("high risk is never auto", async () => {
       const r = await runScenario({
         script: "clean.json",
