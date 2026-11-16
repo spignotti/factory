@@ -47,6 +47,19 @@ function apply(e: QueueEntry, result: RunResult, opts?: Parameters<typeof applyO
 }
 
 describe("window wait parks without a slot (#177)", () => {
+  it("an estimated reset time parks the same way and says so in the reason and on the entry", () => {
+    const e = entry(1);
+    expect(apply(e, windowResult(NOW + HOUR, { window_estimated: true }))).toBe("parked");
+    expect(e.wait_until).toBe(NOW + HOUR);
+    expect(e.window_resets_at).toBe(NOW + HOUR);
+    expect(e.window_estimated).toBe(true);
+    expect(e.reason).toMatch(/\(estimated; wait 1\/2\)/);
+    const exact = entry(2);
+    apply(exact, windowResult(NOW + HOUR));
+    expect(exact.window_estimated).toBeUndefined();
+    expect(exact.reason).not.toMatch(/estimated/);
+  });
+
   it("parks with wait_until at the reset window, keeping run, checkpoint and PR, and never touches requeues", () => {
     const e = entry(1, { pr: "https://github.test/pr/9" });
     expect(apply(e, windowResult(NOW + 30 * MIN))).toBe("parked");
