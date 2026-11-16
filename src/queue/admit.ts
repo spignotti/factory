@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { FACTORY_PROPOSAL_LABEL } from "../improve/issues.js";
-import { FACTORY_READY_LABEL, NEEDS_INPUT_LABEL, NEEDS_PLAN_LABEL } from "./store.js";
+import { FACTORY_FAILED_LABEL, FACTORY_READY_LABEL, NEEDS_INPUT_LABEL, NEEDS_PLAN_LABEL } from "./store.js";
 
 /** Issue needs a human decision before a coding run. */
 export const NEEDS_DECISION_LABEL = "needs-decision";
@@ -28,6 +28,7 @@ export function admissionBlock(issue: AdmitIssue): string | undefined {
   if (issue.labels.includes(NEEDS_PLAN_LABEL)) return `carries ${NEEDS_PLAN_LABEL}`;
   if (issue.labels.includes(NEEDS_DECISION_LABEL)) return `carries ${NEEDS_DECISION_LABEL}`;
   if (issue.labels.includes(NEEDS_INPUT_LABEL)) return `carries ${NEEDS_INPUT_LABEL}`;
+  if (issue.labels.includes(FACTORY_FAILED_LABEL)) return `carries ${FACTORY_FAILED_LABEL}`;
   if (issue.labels.includes(FACTORY_PROPOSAL_LABEL)) return `carries ${FACTORY_PROPOSAL_LABEL}`;
   if (!issue.title?.trim() || !issue.body?.trim()) return "task is not sufficient";
   return undefined;
@@ -43,6 +44,7 @@ export function isAdmissionPauseReason(reason: string): boolean {
     reason === `carries ${NEEDS_PLAN_LABEL}` ||
     reason === `carries ${NEEDS_DECISION_LABEL}` ||
     reason === `carries ${NEEDS_INPUT_LABEL}` ||
+    reason === `carries ${FACTORY_FAILED_LABEL}` ||
     reason === `carries ${FACTORY_PROPOSAL_LABEL}` ||
     reason === "task is not sufficient"
   );

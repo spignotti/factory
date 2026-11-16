@@ -23,8 +23,8 @@ import { type EvaluateReport, evidenceDir, latestEvaluateReport } from "./evalua
 import { gitAuthor } from "./implement.js";
 import { ensurePrDraft } from "./pr-draft.js";
 import { pollCommitCi } from "../pipeline/ci-wait.js";
-import { autoMergeCleanStatus } from "../gh.js";
-import { fallbackMergeMethod, mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
+import { autoMergeCleanStatus, githubUnavailable } from "../gh.js";
+import { fallbackMergeMethod, mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
 
 export interface FinalizeInput {
@@ -78,6 +78,20 @@ export function protectedSection(ctx: Pick<RunContext, "plan">, files: string[],
   ].join("\n");
 }
 
+/**
+ * A finalize stop the resolver may take over, with what the run knows about it. Absent on a stop that is
+ * not technical: a pause, a GitHub outage, or a merge refusal that only a person can lift.
+ */
+export interface TechnicalStop {
+  gates?: GateReport;
+  /** Open findings of the delta review. */
+  findings?: TrackedFinding[];
+  /** The PR head whose CI is red. */
+  ciSha?: string;
+  /** The base merge conflicted: the resolver gets the merge with its conflicts. */
+  baseConflict?: boolean;
+}
+
 export interface FinalizeOutput {
   result: "done" | "needs_human" | "locked";
   reason: string;
@@ -96,7 +110,7 @@ export interface FinalizeOutput {
   ciWait?: "pending" | "none";
   /** SHA the review evidence covers after a delta review. */
   reviewedSha?: string;
-  continuation?: { kind: "ci"; sha: string };
+  technical?: TechnicalStop;
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -447,11 +461,12 @@ async function enableAutoMergeOrReconcile(
 
 export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<FinalizeOutput> {
   ctx.events.emit({ step: "finalize", event: "step_started", data: { result: input.result } });
-  let result = input.result;
+  let result: FinalizeOutput["result"] = input.result;
   let reason = input.reason;
   let gates = input.gates;
   // The cause travels with the stop; every site that flips the run to needs_human names why.
   let cause: StopCause | undefined = result === "needs_human" ? input.cause : undefined;
+  let technical: TechnicalStop | undefined;
   if (result === "done") {
     gates = await runGates(ctx, "full", ctx.plan.packages.map((p) => p.id));
     if (!gates.green) {
@@ -461,6 +476,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         result = "needs_human";
         reason = fixed.reason;
         cause = fixed.cause;
+        technical = { gates };
       }
     }
   }
@@ -471,6 +487,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       result = "needs_human";
       reason = synced.reason;
       cause = stopCauseForSyncFailure(synced.failure, synced.gates);
+      technical = { gates: synced.gates ?? gates, ...(synced.failure === "conflict" ? { baseConflict: true } : {}) };
     }
   }
   // Approval requires the complete required gate set. A focused check, a suppression, a lower
@@ -481,6 +498,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       result = "needs_human";
       reason = failureSummary(gates);
       cause = "technical_repair";
+      technical = { gates };
     } else {
       const gap = approvalGateGap({
         required: [
@@ -493,6 +511,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         result = "needs_human";
         reason = gap;
         cause = "technical_repair";
+        technical = { gates };
       }
     }
   }
@@ -507,6 +526,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         result = "needs_human";
         reason = delta.reason;
         cause = delta.cause;
+        technical = { gates, findings: openFindings(delta.findings) };
       } else reviewedSha = delta.reviewedSha;
     }
   }
@@ -522,12 +542,17 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   let policy: MergePolicy = guarded.length ? "human_review" : mergePolicy(risk.risk, result, ctx.repo.merge);
   const hasCommits = (await revParse(ctx.worktree, "HEAD")) !== ctx.baseSha;
   let blockPush = false;
+  let locked = false;
   if (!input.noPr && hasCommits) {
     const claim = await ensureChangedPathClaim(ctx, changed, ctx.wait ?? false);
     if (!claim.ok) {
+      // Another live run holds these paths: a lock, not a technical stop. The queue parks this run on
+      // that one and resumes it at finalize once it has finished.
       result = "needs_human";
       reason = claim.reason;
-      cause = "unknown";
+      cause = undefined;
+      technical = undefined;
+      locked = true;
       policy = "human_review";
       blockPush = true;
     }
@@ -561,14 +586,11 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       draft = held.draft;
       if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: input.existingPr.url } });
     } catch (e) {
-      const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
-      ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", cause: "unknown", reason: `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
+      return prStepFailed(ctx, e, `${reason}; `, { risk, pr, draft, reviewedSha, gates, technical });
     }
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
-  let continuation: FinalizeOutput["continuation"];
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
@@ -668,17 +690,16 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         ctx.deadline.extend?.(ci.waitedMs);
         headGreen = ci.status === "green";
         if (ci.status === "red") {
-          if (selfMergePolicy(policy)) continuation = { kind: "ci", sha: head };
           result = "needs_human";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
-          // A self-merge policy may repair this head. A protected or other human_review stop is an
-          // approval: continuation stays unset, and the cause is not a technical recovery.
-          // Neither cause grants merge permission.
-          cause = selfMergePolicy(policy) ? "technical_repair" : "human_approval";
+          // Red CI is technical under every policy: the resolver repairs it. A human_review PR still
+          // ends done and waits for a human merge once it is green. Neither grants merge permission.
+          cause = "technical_repair";
+          technical = { gates, ciSha: head };
           const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr, draft: false });
           draft = held.draft;
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
-          await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the run is needs_human.\n` });
+          await ctx.deps.github.updatePr(ctx.worktree, pr, { title, body: `${body}\n\n## CI\n\nChecks on \`${head.slice(0, 8)}\` are red; the factory is repairing them.\n` });
         } else if (waitingOnMergeCi({ policy, ci: ci.status, draft: draft === true, state: "open" })) {
           // The same predicate as the worker. A later commit is a different SHA and is not approved.
           ciWait = ci.status === "pending" ? "pending" : "none";
@@ -726,7 +747,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
           result = "needs_human";
           cause = "technical_repair";
           reason = `CI on the PR head (${head.slice(0, 8)}) is red`;
-          continuation = { kind: "ci", sha: head };
+          technical = { gates, ciSha: head };
           const held = await ensurePrDraft(ctx.deps.github, ctx.worktree, { url: pr!, draft: false });
           draft = held.draft;
           if (held.changed) ctx.events.emit({ step: "finalize", event: "progress", data: { pr_marked_draft: pr } });
@@ -743,27 +764,54 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
         }
       }
     } catch (e) {
-      const msg = `PR step failed: ${(e as Error).message.slice(0, 300)}`;
-      ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
-      return { result: "needs_human", cause: "unknown", reason: result === "done" ? msg : `${reason}; ${msg}`, risk, mergePolicy: "human_review", pr, draft, ...(reviewedSha ? { reviewedSha } : {}), ...skippedField(gates) };
+      return prStepFailed(ctx, e, result === "done" ? "" : `${reason}; `, { risk, pr, draft, reviewedSha, gates, technical });
     }
   } else if (!input.noPr) {
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
   if (result !== "done") policy = "human_review";
+  if (locked) result = "locked";
   ctx.events.emit({ step: "finalize", event: "step_finished", data: { result, risk: risk.risk, merge_policy: policy, pr } });
   return {
     ...out,
     result,
     reason,
-    ...(result === "done" ? {} : { cause: cause ?? "unknown" }),
+    ...(result === "needs_human" ? { cause: cause ?? "unknown" } : {}),
     mergePolicy: policy,
     pr,
     draft,
     ...(approvedSha && result === "done" ? { approvedSha } : {}),
     ...(ciWait && result === "done" ? { ciWait } : {}),
     ...(reviewedSha ? { reviewedSha } : {}),
-    ...(continuation ? { continuation } : {}),
+    ...(technical && result === "needs_human" ? { technical } : {}),
     ...skippedField(gates),
+  };
+}
+
+/**
+ * A failed push, PR or merge call. A GitHub outage is retried later on the same run; any other error
+ * is technical and goes to the resolver with what the run knew before the call.
+ */
+function prStepFailed(
+  ctx: RunContext,
+  e: unknown,
+  prefix: string,
+  v: { risk: RiskAssessment; pr: string | null; draft: boolean | null; reviewedSha?: string; gates?: GateReport; technical?: TechnicalStop },
+): FinalizeOutput {
+  const message = (e as Error).message;
+  const msg = `PR step failed: ${message.slice(0, 300)}`;
+  ctx.events.emit({ step: "finalize", event: "progress", data: { pr_error: msg } });
+  const outage = githubUnavailable(message);
+  return {
+    result: "needs_human",
+    cause: outage ? "transient_retry" : "unknown",
+    reason: outage ? `${prefix}${msg}; factory resume ${ctx.runId}` : `${prefix}${msg}`,
+    risk: v.risk,
+    mergePolicy: "human_review",
+    pr: v.pr,
+    draft: v.draft,
+    ...(v.reviewedSha ? { reviewedSha: v.reviewedSha } : {}),
+    ...(outage ? {} : { technical: v.technical ?? { gates: v.gates } }),
+    ...skippedField(v.gates),
   };
 }

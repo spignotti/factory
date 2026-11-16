@@ -392,6 +392,9 @@
     "questions_posted": {
       "type": "boolean"
     },
+    "failure_reported": {
+      "type": "boolean"
+    },
     "assumptions": {
       "type": "array",
       "items": {

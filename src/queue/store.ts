@@ -10,6 +10,8 @@ export const FACTORY_READY_LABEL = "factory-ready";
 export const NEEDS_PLAN_LABEL = "needs-plan";
 /** A run asked questions on the issue. The ticket runs again once a human removes it and sets `factory-ready`. */
 export const NEEDS_INPUT_LABEL = "needs-input";
+/** The factory gave up on the issue and said why in a comment. A human rewrites the ticket, removes it and sets `factory-ready`. */
+export const FACTORY_FAILED_LABEL = "factory-failed";
 
 export const QUEUE_STATUSES = ["pending", "running", "done", "parked"] as const;
 export type QueueStatus = (typeof QUEUE_STATUSES)[number];
@@ -72,6 +74,14 @@ export interface QueueEntry {
    * A posted entry starts a fresh run when the issue is admissible again. Cleared on any other park or release.
    */
   awaiting_answer?: { questions: string[]; posted: boolean };
+  /**
+   * The run failed (a technical stop the resolver could not fix, or any stop that is not a question, a
+   * provider wait, a base problem or a lock); `reason` says why. `reported` turns true once the issue has
+   * the comment and the label swap (`factory-failed` on, `factory-ready` off) and the run's PR is closed;
+   * until then the worker retries. A reported entry starts a fresh run when the issue is admissible again.
+   * Cleared on any other park or release.
+   */
+  failed?: { reported: boolean };
 }
 
 export interface QueueFile {
@@ -111,6 +121,7 @@ const EntrySchema = z.object({
     .optional(),
   release_id: z.string().optional(),
   awaiting_answer: z.object({ questions: z.array(z.string()), posted: z.boolean() }).optional(),
+  failed: z.object({ reported: z.boolean() }).optional(),
 });
 
 const FileSchema = z.object({
@@ -219,6 +230,12 @@ function isOpen(e: QueueEntry): e is QueueEntry & { status: "pending" | "running
   return e.status !== "done";
 }
 
+/** The entry's reason, marked when the entry failed (and whether the issue has been told yet). */
+export function failedReason(e: Pick<QueueEntry, "reason" | "failed">): string | null {
+  if (!e.failed) return e.reason ?? null;
+  return `failed${e.failed.reported ? "" : " (not reported on the issue yet)"}: ${e.reason ?? "no reason recorded"}`;
+}
+
 export function summarizeQueue(q: QueueFile): QueueSummary {
   const count = (s: QueueStatus) => q.entries.filter((e) => e.status === s).length;
   return {
@@ -230,7 +247,7 @@ export function summarizeQueue(q: QueueFile): QueueSummary {
       issue: e.issue,
       status: e.status,
       run_id: e.run_id ?? null,
-      reason: e.reason ?? (e.after !== undefined && e.status === "pending" ? `after #${e.after}` : null),
+      reason: failedReason(e) ?? (e.after !== undefined && e.status === "pending" ? `after #${e.after}` : null),
     })),
   };
 }

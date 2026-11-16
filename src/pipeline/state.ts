@@ -58,6 +58,11 @@ export interface RunState {
   ci_wait?: "pending" | "none";
   /** Pending bounded continuation on this same run/PR; no approval is carried to a new head. */
   continuation?: { kind: "ci" | "head" | "base" | "blocker"; sha: string };
+  /**
+   * Resolver turns this run has started (at most two per run). Counted before the turn, so a crash
+   * does not give one back. Absent on runs that never called the resolver.
+   */
+  resolver_turns?: number;
   /** Persisted before each automatic continuation; restart never resets the two-attempt budget. */
   continuation_attempts?: number;
   /**

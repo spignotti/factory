@@ -317,6 +317,12 @@ export const ResultSchema = z.object({
    * GitHub. False after a GitHub error (the queue worker retries). Omitted when nothing was posted.
    */
   questions_posted: z.boolean().optional(),
+  /**
+   * A failed run on an issue: whether the failure comment, the `factory-failed` label swap and the
+   * closing of the run's own PR reached GitHub. False after a GitHub error (the queue worker retries).
+   * Omitted when nothing was reported.
+   */
+  failure_reported: z.boolean().optional(),
   /** Assumptions the plan stated instead of asking. Omitted when there are none. */
   assumptions: z.array(z.string()).optional(),
   /** Where to find the work (null until created); needed to fix and `factory resume` a run. */

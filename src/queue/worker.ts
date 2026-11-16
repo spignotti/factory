@@ -7,9 +7,10 @@ import type { GitHub, Issue, OpenFactoryPr, PrStatus } from "../gh.js";
 import { baseRef, revParse } from "../git.js";
 import { activeHolders, claimResources, releaseResourceClaims, tryPathLock } from "../pipeline/lock.js";
 import { mayEnableAutoMerge, selfMergePolicy, waitingOnMergeCi } from "../pipeline/merge-ready.js";
-import { saveState } from "../pipeline/state.js";
+import { readState, saveState } from "../pipeline/state.js";
 import { baseCheckGate, baseProblem, type BaseCheckRecord, readBaseCheck, writeBaseCheck } from "../pipeline/base-check.js";
-import { deliveryForDone, isProviderRetryCause, readStop, repairContinuationAllowed, stopCauseOf } from "../pipeline/outcome.js";
+import { deliveryForDone, isProviderRetryCause, readStop, stopCauseOf } from "../pipeline/outcome.js";
+import { isFailedExit, reportFailure } from "../pipeline/failure.js";
 import { newRunId } from "../pipeline/run.js";
 import { continuationLimit } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
@@ -251,11 +252,6 @@ export function overlapRunIds(reason: string): string[] {
   return [...new Set(reason.match(/\b\d{8}-\d{6}-[0-9a-f]{6}\b/g) ?? [])];
 }
 
-/** `repo … is locked by run …`: the slot was still held. Not an open-PR overlap. */
-export function isRepoLockHeld(reason: string): boolean {
-  return /\bis locked by\b/i.test(reason);
-}
-
 /**
  * A provider stop the worker may retry within its bounded requeues. Only a canonical
  * `transient_retry` pair requeues. Present but malformed stop metadata fails closed and does not
@@ -294,6 +290,17 @@ function park(entry: QueueEntry, reason: string, runId?: string, blockedRuns?: s
   delete entry.window_resets_at;
   delete entry.window_estimated;
   delete entry.awaiting_answer;
+  delete entry.failed;
+}
+
+/**
+ * The one failed exit of the queue: a park that waits for nobody. A later tick puts the reason on the
+ * issue, swaps `factory-ready` for `factory-failed` and closes the run's PR (unless the run already
+ * did: `reported`); the entry starts a fresh run once a human sets `factory-ready` again.
+ */
+function failEntry(entry: QueueEntry, reason: string, runId?: string, reported = false): void {
+  park(entry, reason, runId);
+  entry.failed = { reported };
 }
 
 function moveToEnd(q: QueueFile, entry: QueueEntry): void {
@@ -319,6 +326,7 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
   delete entry.window_resets_at;
   delete entry.window_estimated;
   delete entry.awaiting_answer;
+  delete entry.failed;
 }
 
 /**
@@ -346,8 +354,13 @@ export function isLocalBaseRed(result: RunResult): boolean {
   return result.result === "base_red" && !!result.worktree;
 }
 
-/** `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit usage window parks until the reset. A live-run overlap `locked` parks on those runs. A repo-lock `locked` goes back to pending. Questions park until answered. Everything else parks. */
-export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown; now?: number }): "done" | "requeue" | "parked" {
+/**
+ * `done` records the PR. Transient `needs_human` requeues. A local `base_red` goes back to pending. An explicit
+ * usage window parks until the reset. A live-run overlap `locked` parks on those runs; any other `locked` goes
+ * back to pending. Questions park until answered; a pause and a GitHub-CI `base_red` park as before.
+ * Everything else, including a result nobody listed, is failed (`failEntry`). `paused`: a pause marker exists.
+ */
+export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult, opts?: { transient?: boolean; stateStop?: unknown; now?: number; paused?: boolean }): "done" | "requeue" | "parked" {
   entry.run_id = result.run_id;
   if (result.pr) entry.pr = result.pr;
   delete entry.pid;
@@ -413,10 +426,14 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
       park(entry, result.reason, result.run_id, runs);
       return "parked";
     }
-    if (isRepoLockHeld(result.reason)) {
-      releaseToPending(entry);
-      return "requeue";
-    }
+    // A repo slot or a resource held by another run: try again on a later tick.
+    releaseToPending(entry);
+    return "requeue";
+  }
+  // The run decided it failed and reported it (or tried to): the queue does not judge it again.
+  if (result.failure_reported !== undefined || isFailedExit(result, { paused: opts?.paused === true })) {
+    failEntry(entry, result.reason || result.result, result.run_id, result.failure_reported === true);
+    return "parked";
   }
   park(entry, result.reason || result.result, result.run_id);
   // The questions travel with the entry: a retry of the post does not depend on the run directory.
@@ -529,7 +546,8 @@ function releaseBundle(q: QueueFile, issue: number): void {
 function finishEntry(q: QueueFile, entry: QueueEntry, factoryHome: string, result: RunResult, io: Io, nowMs: number): ReturnType<typeof applyOutcome> {
   releaseEntryResources(factoryHome, q.repo, entry);
   const state = listRuns(factoryHome).find((r) => r.run_id === result.run_id)?.state;
-  const action = applyOutcome(q, entry, result, { transient: state?.transient === true, stateStop: state?.stop, now: nowMs });
+  const paused = pauseRequested(factoryHome, { runId: result.run_id, repo: q.repo, issue: entry.issue }) !== undefined;
+  const action = applyOutcome(q, entry, result, { transient: state?.transient === true, stateStop: state?.stop, now: nowMs, paused });
   if (action === "done") settleBundle(q, entry, factoryHome, io);
   else releaseBundle(q, entry.issue);
   return action;
@@ -619,7 +637,7 @@ function adopt(q: QueueFile, factoryHome: string, handles: Map<string, Tracked>,
         continue;
       }
       releaseEntryResources(factoryHome, q.repo, entry);
-      park(entry, "run ended without result.json", entry.run_id);
+      failEntry(entry, "run ended without result.json", entry.run_id);
     }
   }
 }
@@ -638,8 +656,8 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
     if (tracked.failed && !tracked.settled) {
       releaseEntryResources(factoryHome, q.repo, entry);
       releaseBundle(q, entry.issue);
-      park(entry, tracked.failed);
-      io.out(`queue: #${entry.issue} parked: ${tracked.failed}\n`);
+      failEntry(entry, tracked.failed);
+      io.out(`queue: #${entry.issue} failed: ${tracked.failed}\n`);
       continue;
     }
     if (!tracked.settled) continue;
@@ -648,7 +666,7 @@ function absorbHandles(q: QueueFile, handles: Map<string, Tracked>, io: Io, fact
     else if (action === "requeue" && tracked.settled.result === "locked") io.out(`queue: #${entry.issue} pending (repo lock held)\n`);
     else if (action === "requeue" && tracked.settled.result === "base_red") io.out(`queue: #${entry.issue} pending (${entry.reason})\n`);
     else if (action === "requeue") io.out(`queue: #${entry.issue} requeued (${entry.requeues}/${MAX_REQUEUES})\n`);
-    else io.out(`queue: #${entry.issue} parked: ${entry.reason}\n`);
+    else io.out(`queue: #${entry.issue} ${entry.failed ? "failed" : "parked"}: ${entry.reason}\n`);
   }
 }
 
@@ -698,7 +716,7 @@ function runExited(tracked: Tracked | undefined, entry: QueueEntry): boolean {
 
 function parkStalled(entry: QueueEntry, mins: number, ctx: TickCtx): void {
   const reason = `stalled: events.jsonl unchanged for ${mins} min`;
-  park(entry, reason, entry.run_id);
+  failEntry(entry, reason, entry.run_id);
   if (entry.run_id) {
     ctx.terminating.delete(entry.run_id);
     ctx.stall.delete(entry.run_id);
@@ -1093,18 +1111,10 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
   for (const run of listRuns(ctx.factoryHome).filter((r) => sameRepo(r, repo))) {
     const st = run.state;
     if (!st?.pr || !st.branch || !st.worktree || !run.result || st.gc_at) continue;
-    // A stopped run needs a canonical repair pair on the original state and result, naming the
-    // same branch, worktree and PR. Missing, malformed, decision, protected, unknown and
-    // budget-exhausted stops do not inherit a stale continuation. Done self-merge revalidation
-    // stays as it was. None of this grants merge permission.
-    if (run.result.result !== "done") {
-      if (!repairContinuationAllowed(st, run.result)) continue;
-      // A repairable stop is resumed automatically only when a prior continuation exists; otherwise
-      // it stays parked for the operator.
-      if (!st.continuation) continue;
-    } else if (!st.continuation && !selfMergePolicy(run.result.merge_policy)) {
-      continue;
-    }
+    // Only a done self-merge PR is revalidated here. A stopped run had its resolver turns in the run
+    // and ended failed; nothing continues it. None of this grants merge permission.
+    if (run.result.result !== "done") continue;
+    if (!st.continuation && !selfMergePolicy(run.result.merge_policy)) continue;
     const entry = q.entries.find((e) => e.run_id === run.run_id);
     if (!entry || entry.status === "running" || entry.status === "pending" || !entry.issue_rev) continue;
     if (pauseRequested(ctx.factoryHome, { runId: run.run_id })) continue;
@@ -1128,7 +1138,7 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
       if ((st.continuation_attempts ?? 0) >= continuationLimit(st.continuation_extra)) {
         await updateQueue(ctx.factoryHome, repo, (queue) => {
           const own = queue.entries.find((e) => e.run_id === run.run_id);
-          if (own) park(own, `post-push repair exhausted (${st.continuation_attempts ?? 0}/${continuationLimit(st.continuation_extra)}); factory resume ${run.run_id}`);
+          if (own) failEntry(own, `post-push repair exhausted (${st.continuation_attempts ?? 0}/${continuationLimit(st.continuation_extra)})`);
         });
         continue;
       }
@@ -1308,6 +1318,58 @@ async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx,
   return posted;
 }
 
+/**
+ * A failed entry whose issue is admissible again (a human set `factory-ready` and removed `factory-failed`)
+ * starts a FRESH run. Only once its failure was reported. Same pause handling as `releaseAnswered`.
+ */
+function releaseFailed(q: QueueFile, open: Issue[], repo: string, ctx: TickCtx): void {
+  const byNumber = new Map(open.map((i) => [i.number, i]));
+  for (const entry of q.entries) {
+    if (entry.status !== "parked" || !entry.failed?.reported) continue;
+    const issue = byNumber.get(entry.issue);
+    if (!issue || admissionBlock(issue)) continue;
+    const pauseKey = { runId: entry.run_id, repo, issue: entry.issue };
+    if (hasRealPause(ctx.factoryHome, pauseKey)) continue;
+    clearPause(ctx.factoryHome, pauseKey);
+    releaseToPending(entry);
+    ctx.io.out(`queue: #${entry.issue} pending (factory-ready again after a failure, fresh run)\n`);
+  }
+}
+
+/** The run's PR when the entry does not name one (a stall or a crash before result.json). */
+function failedPr(factoryHome: string, entry: QueueEntry): string | null {
+  if (entry.pr) return entry.pr;
+  if (!entry.run_id) return null;
+  try {
+    return readState(join(factoryHome, "runs", entry.run_id)).pr;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Failed entries whose report did not reach GitHub: post it again (comment once per run, the label
+ * swap, the run's PR closed). Network on the snapshot; the caller marks the reported ones under the lock.
+ */
+async function reportPendingFailures(snap: QueueFile, repo: string, ctx: TickCtx, noteFailure: () => void): Promise<Set<number>> {
+  const reported = new Set<number>();
+  for (const entry of snap.entries) {
+    if (entry.status !== "parked" || !entry.failed || entry.failed.reported) continue;
+    try {
+      await withTimeout(
+        reportFailure(ctx.github, repo, entry.issue, entry.run_id ?? `issue-${entry.issue}`, entry.reason ?? "failed", failedPr(ctx.factoryHome, entry)),
+        ctx.netTimeoutMs,
+        `failure #${entry.issue}`,
+      );
+      reported.add(entry.issue);
+    } catch (e) {
+      noteFailure();
+      ctx.io.err(`factory: reporting the failure on #${entry.issue} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
+  return reported;
+}
+
 async function discoverReady(q: QueueFile, ctx: TickCtx, repo: string): Promise<void> {
   let list: { issues: Issue[]; complete: boolean };
   try {
@@ -1322,6 +1384,7 @@ async function discoverReady(q: QueueFile, ctx: TickCtx, repo: string): Promise<
   const known = new Set(q.entries.map((e) => e.issue));
   const at = new Date(ctx.nowMs).toISOString();
   releaseAnswered(q, list.issues, repo, ctx);
+  releaseFailed(q, list.issues, repo, ctx);
   for (const issue of list.issues) {
     if (known.has(issue.number) || admissionBlock(issue)) continue;
     q.entries.push({ issue: issue.number, status: "pending", added_at: at });
@@ -1366,6 +1429,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const questionsPosted = ctx.releaseHold ? new Set<number>() : await postPendingQuestions(snap, repo, ctx, noteFailure);
+  const failuresReported = ctx.releaseHold ? new Set<number>() : await reportPendingFailures(snap, repo, ctx, noteFailure);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
   const evaluatedAfter = new Set<number>();
@@ -1463,6 +1527,12 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       if (!entry?.awaiting_answer) continue;
       entry.awaiting_answer.posted = true;
       ctx.io.out(`queue: #${issue} questions posted on the issue\n`);
+    }
+    for (const issue of failuresReported) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.failed && !e.failed.reported);
+      if (!entry?.failed) continue;
+      entry.failed.reported = true;
+      ctx.io.out(`queue: #${issue} failure reported on the issue\n`);
     }
     // Window waits (#177): a far window only moves the next recheck; an opened one becomes pending again.
     for (const issue of win.clearAdmissionPause) {
@@ -1656,9 +1726,9 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
         const entry = q.entries.find((en) => en.issue === planned.issue && en.status === "running");
         if (!entry) return;
         releaseBundle(q, entry.issue);
-        park(entry, msg);
+        failEntry(entry, msg);
       }, gitOpts);
-      ctx.io.out(`queue: #${planned.issue} parked: ${msg}\n`);
+      ctx.io.out(`queue: #${planned.issue} failed: ${msg}\n`);
       continue;
     }
     ctx.handles.set(handleKey(repo, planned.issue), track(started, repo, planned.issue));

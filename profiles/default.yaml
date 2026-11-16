@@ -8,6 +8,9 @@ roles:
   implement:
     - { model: opencode-go/deepseek-v4.1-flash, thinking: high }
     - { model: opencode-go/mimo-v2.6-flash, capacity_only: true }
+  # Takes over a technical stop (red gates after the repair budget, review stalemate, base conflict,
+  # red CI): same chain as plan_high.
+  resolve:           [{ model: openai/gpt-6.1-sol, thinking: high }]
   review_plan:       [{ model: openai/gpt-6.1-sol, thinking: medium }]
   review_standards:  [{ model: openai/gpt-6.1-sol, thinking: medium }]
   review_security:   [{ model: openai/gpt-6.1-sol, thinking: high }]

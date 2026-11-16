@@ -370,6 +370,23 @@ export async function mergeRef(cwd: string, ref: string, message: string, author
   }
 }
 
+/**
+ * Starts merging `ref` into HEAD without committing and leaves any conflicts (with their markers) in the
+ * worktree for the resolver. `merging` is false when there was nothing to merge or git refused to start.
+ */
+export async function startMerge(cwd: string, ref: string, author: { name: string; email: string }): Promise<{ merging: boolean; conflicts: string[] }> {
+  await gitOk(cwd, ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "merge", "-q", "--no-ff", "--no-commit", "--no-verify", ref]);
+  const merging = await gitOk(cwd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+  const conflicts = merging ? lines(await git(cwd, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")) : [];
+  return { merging, conflicts };
+}
+
+/** Commits an in-progress merge as `author` with everything staged. */
+export async function commitMerge(cwd: string, message: string, author: { name: string; email: string }): Promise<void> {
+  await stageAll(cwd);
+  await git(cwd, ["-c", `user.name=${author.name}`, "-c", `user.email=${author.email}`, "commit", "-q", "--no-verify", "-m", message]);
+}
+
 export async function isAncestor(cwd: string, ancestor: string, of = "HEAD"): Promise<boolean> {
   return gitOk(cwd, ["merge-base", "--is-ancestor", ancestor, of]);
 }

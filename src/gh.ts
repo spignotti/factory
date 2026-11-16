@@ -200,6 +200,11 @@ export interface GitHub {
   markReady(repoDir: string, pr: string): Promise<void>;
   /** A ready PR whose run is not done, or whose next push must stay cheap, becomes a draft. */
   markDraft(repoDir: string, pr: string): Promise<void>;
+  /**
+   * A failed run's PR: closes it when open and deletes its head branch on origin, so a fresh run of the
+   * issue is not held by an open factory PR. The local branch stays (the run's worktree has it checked out).
+   */
+  closePr(repoDir: string, pr: string): Promise<void>;
   /** `status` / `gc`: current state of a factory PR. */
   prStatus(repoDir: string, pr: string): Promise<PrStatus>;
   /**
@@ -736,6 +741,14 @@ async function workflowNames(repoDir: string): Promise<Map<string, string>> {
   return map;
 }
 
+/**
+ * A GitHub or network outage, not a problem with the change: server errors, rate limits, timeouts and
+ * connection failures. A PR step that fails this way is retried later; any other failure is technical.
+ */
+export function githubUnavailable(message: string): boolean {
+  return /\bHTTP 5\d\d\b|\b50[0234]\b|bad gateway|service unavailable|gateway time-?out|something went wrong|rate limit|timed out|\bETIMEDOUT\b|\bECONNRESET\b|\bECONNREFUSED\b|\bEAI_AGAIN\b|could not resolve host|connection (reset|refused)|i\/o timeout|TLS handshake/i.test(message);
+}
+
 /** GitHub says this when auto-merge is already on. A restarted runner asks again. */
 export function autoMergeAlreadyEnabled(message: string): boolean {
   return /already enabled/i.test(message);
@@ -1049,6 +1062,22 @@ export class GhCli implements GitHub {
     await gh(repoDir, ["pr", "ready", "--undo", pr]);
   }
 
+  async closePr(repoDir: string, pr: string): Promise<void> {
+    const view = JSON.parse((await gh(repoDir, ["pr", "view", pr, "--json", "state,headRefName,isCrossRepository"])) || "{}") as {
+      state?: string;
+      headRefName?: string;
+      isCrossRepository?: boolean;
+    };
+    if ((view.state ?? "").toUpperCase() === "OPEN") await gh(repoDir, ["pr", "close", pr]);
+    // Not `gh pr close --delete-branch`: it also deletes the local branch, which the run's worktree has checked out.
+    // UNVERIFIED: DELETE on an already deleted ref answers 422 "Reference does not exist" (docs/VERIFY.md).
+    if (!view.headRefName || view.isCrossRepository) return;
+    await gh(repoDir, ["api", "--method", "DELETE", `repos/{owner}/{repo}/git/refs/heads/${view.headRefName}`]).catch((e: Error) => {
+      if (!/reference does not exist|\b422\b|not found/i.test(e.message)) throw e;
+      return "";
+    });
+  }
+
   async ciRuns(repoDir: string, since: string, limit: number): Promise<CiRun[]> {
     const list = JSON.parse(
       await gh(repoDir, ["run", "list", "--limit", String(limit), "--created", `>=${since.slice(0, 10)}`, "--json", "databaseId,headSha,workflowName,event,conclusion,createdAt"]),
@@ -1334,6 +1363,25 @@ export class FakeGitHub implements GitHub {
     this.drafted.push(pr);
     const prev = this.prStates.get(pr);
     this.prStates.set(pr, { state: prev?.state ?? "open", draft: true });
+  }
+
+  readonly closed: string[] = [];
+  /** When set, `closePr` throws this instead of closing. */
+  closeError: string | null = null;
+
+  async closePr(_repoDir: string, pr: string): Promise<void> {
+    if (this.closeError) throw new Error(this.closeError);
+    const created = this.prs.find((p) => p.url === pr);
+    const prev = this.prStates.get(pr) ?? { state: "open" as const, draft: created?.draft ?? false };
+    if (prev.state === "open") {
+      this.closed.push(pr);
+      this.prStates.set(pr, { ...prev, state: "closed" });
+    }
+    const branch = created?.head;
+    if (!branch) return;
+    this.remoteShas.delete(branch);
+    const i = this.factoryPrs.findIndex((p) => p.branch === branch);
+    if (i >= 0) this.factoryPrs.splice(i, 1);
   }
 
   /** PR states by URL; created PRs are open. */
