@@ -26,6 +26,11 @@ const errorsOf = (raw: unknown, sourceText?: string) => {
   const r = validatePlan(raw, { repo, sourceText });
   return r.ok ? [] : r.errors;
 };
+/** Plan guidance that no longer fails the plan. */
+const warningsOf = (raw: unknown, labels?: string[]) => {
+  const r = validatePlan(raw, { repo, labels });
+  return r.ok ? (r.warnings ?? []) : [`invalid: ${r.errors.join("; ")}`];
+};
 
 describe("plan validation", () => {
   it("accepts a valid plan", () => {
@@ -80,18 +85,19 @@ describe("plan validation", () => {
     expect(errs).toContain("A1: verify:evaluator requires ui in repo.yaml");
   });
 
-  describe("bug requires repro", () => {
-    it("rejects a bug plan without repro criterion in the first package", () => {
-      expect(errorsOf(plan({ type: "bug" }))).toContain(
+  describe("bug repro is guidance, not a plan failure", () => {
+    it("warns on a bug plan without repro criterion in the first package", () => {
+      expect(errorsOf(plan({ type: "bug" }))).toEqual([]);
+      expect(warningsOf(plan({ type: "bug" }))).toContain(
         "type bug: first package needs a kind:repro, verify:test criterion",
       );
     });
-    it("rejects a repro that is not verify:test", () => {
+    it("warns on a repro that is not verify:test", () => {
       const acc = [{ id: "A1", package: "P1", text: "x", verify: "review", kind: "repro" }];
-      expect(errorsOf(plan({ type: "bug", acceptance: acc })).length).toBe(1);
+      expect(warningsOf(plan({ type: "bug", acceptance: acc })).length).toBe(1);
     });
-    it("rejects a repro only in a later package", () => {
-      const errs = errorsOf(
+    it("warns on a repro only in a later package", () => {
+      const errs = warningsOf(
         plan({
           type: "bug",
           packages: [
@@ -106,9 +112,10 @@ describe("plan validation", () => {
       );
       expect(errs).toContain("type bug: first package needs a kind:repro, verify:test criterion");
     });
-    it("accepts a bug plan with repro in the first package", () => {
+    it("accepts a bug plan with repro in the first package without a warning", () => {
       const acc = [{ id: "A1", package: "P1", text: "x", verify: "test", kind: "repro" }];
       expect(errorsOf(plan({ type: "bug", acceptance: acc }))).toEqual([]);
+      expect(warningsOf(plan({ type: "bug", acceptance: acc }))).toEqual([]);
     });
   });
 
@@ -280,13 +287,11 @@ describe("red_green exemption", () => {
     expect(errorsOf(bug())).toEqual([]);
   });
 
-  it("needs a stated reason for the plan field or the issue label", () => {
-    expect(errorsOf({ ...bug(), red_green: "not_applicable" })).toContain(
+  it("warns without a stated reason for the plan field or the issue label", () => {
+    expect(warningsOf({ ...bug(), red_green: "not_applicable" })).toContain(
       "red_green exemption is a loosening and needs red_green_reason",
     );
-    const labeled = validatePlan(bug(), { repo, labels: [RED_GREEN_NA_LABEL] });
-    expect(labeled.ok).toBe(false);
-    if (!labeled.ok) expect(labeled.errors).toContain("red_green exemption is a loosening and needs red_green_reason");
+    expect(warningsOf(bug(), [RED_GREEN_NA_LABEL])).toContain("red_green exemption is a loosening and needs red_green_reason");
     const ok = validatePlan({ ...bug(), red_green: "not_applicable", red_green_reason: "stabilizing a flaky test" }, { repo });
     expect(ok.ok).toBe(true);
     if (ok.ok) expect(redGreenDecision(ok.plan)).toEqual({ kind: "exempt", reason: "stabilizing a flaky test" });

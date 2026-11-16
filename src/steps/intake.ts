@@ -83,7 +83,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
     const v = validatePlan(json, { repo: ctx.repo, sourceText: ctx.task.text, labels: ctx.task.labels });
     if (v.ok) {
       attempts.push({ n, ok: true });
-      ctx.events.emit({ step: "intake", event: "progress", role: "plan_normalize", data: { attempts } });
+      ctx.events.emit({ step: "intake", event: "progress", role: "plan_normalize", data: { attempts, ...(v.warnings ? { warnings: v.warnings } : {}) } });
       return { kind: "plan", plan: v.plan, source: "plan_normalize" };
     }
     errors = json === undefined ? ["no JSON object in output"] : v.errors;

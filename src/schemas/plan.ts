@@ -141,7 +141,11 @@ export interface PlanValidationContext {
   labels?: string[];
 }
 
-export type PlanValidation = { ok: true; plan: Plan } | { ok: false; errors: string[] };
+/**
+ * `warnings` are plan guidance that no longer fails the plan: the red-green proof they served is
+ * advisory, so a bug plan without a repro or an unexplained red_green opt-out is still a plan.
+ */
+export type PlanValidation = { ok: true; plan: Plan; warnings?: string[] } | { ok: false; errors: string[] };
 
 function dropNullHostSteps(raw: unknown): unknown {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("host_steps" in raw)) return raw;
@@ -180,6 +184,7 @@ export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanVali
   }
   const plan = parsed.data;
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   const pkgIds = new Set<string>();
   for (const p of plan.packages) {
@@ -222,7 +227,7 @@ export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanVali
     const hasRepro =
       first !== undefined &&
       plan.acceptance.some((a) => a.package === first.id && a.kind === "repro" && a.verify === "test");
-    if (!hasRepro) errors.push(`type bug: first package needs a kind:repro, verify:test criterion`);
+    if (!hasRepro) warnings.push(`type bug: first package needs a kind:repro, verify:test criterion`);
   }
 
   for (const p of plan.packages) {
@@ -256,9 +261,10 @@ export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanVali
     }
   }
 
-  if (redGreenDecision(plan, ctx.labels ?? []).kind === "missing_reason") errors.push(RED_GREEN_NEEDS_REASON);
+  if (redGreenDecision(plan, ctx.labels ?? []).kind === "missing_reason") warnings.push(RED_GREEN_NEEDS_REASON);
 
-  return errors.length ? { ok: false, errors } : { ok: true, plan };
+  if (errors.length) return { ok: false, errors };
+  return warnings.length ? { ok: true, plan, warnings } : { ok: true, plan };
 }
 
 const ONLY_FILLER = "in|under|within|to|the|a|an|file|files|path|paths|touch|touching|change|changing|edit|editing|modify|modifying|update|updating";

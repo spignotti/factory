@@ -7,6 +7,7 @@ import {
   clearRepair,
   emptyBudget,
   approvalGateGap,
+  failureRoots,
   failureSignature,
   fakeFixReason,
   gateImplementation,
@@ -355,6 +356,22 @@ describe("repair classification", () => {
       expect(approvalGateGap({ required: ["syntax", "shellcheck"], report: [{ name: "syntax", status: "pass" }] })).toMatch(/incomplete/);
       expect(approvalGateGap({ required: ["syntax"], report: [{ name: "syntax", status: "fail" }] })).toMatch(/not approving/);
       expect(approvalGateGap({ required: ["syntax", "unit"], report: [{ name: "syntax", status: "pass" }, { name: "unit", status: "pass" }] })).toBeUndefined();
+    });
+
+    it("an advisory gate is never a red root, a repair class or a missing approval gate", () => {
+      const report = {
+        checks: [
+          { name: "unit", kind: "check", status: "fail", output_tail: "AssertionError: expected 3" },
+          { name: "evidence", kind: "builtin", status: "fail", output_tail: "invented reference", advisory: true },
+          { name: "red_green", kind: "builtin", status: "timeout", output_tail: "timed out", advisory: true },
+        ],
+      };
+      expect(failureRoots(report).map((root) => root.name)).toEqual(["unit"]);
+      expect(failureSignature(report)).toBe(failureSignature({ checks: [report.checks[0]!] }));
+      expect(classifyRepair({ checks: report.checks.slice(1) }, [])).toBe("code");
+      // A root persisted before the gate became advisory does not hold approval.
+      expect(approvalGateGap({ required: ["unit", "evidence"], report: [{ name: "unit", status: "pass" }, { name: "evidence", status: "fail", advisory: true }] })).toBeUndefined();
+      expect(approvalGateGap({ required: ["unit"], report: [{ name: "unit", status: "fail" }, { name: "evidence", status: "fail", advisory: true }] })).toMatch(/required gates red: unit/);
     });
 
     it("handovers the remaining failure identity when one is known", () => {

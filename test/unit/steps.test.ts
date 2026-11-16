@@ -233,6 +233,23 @@ describe("gate result lines", () => {
     ].join("\n"));
     expect(formatGateResults([row("red_green", "repro fails on base\nrepro passes on HEAD")])).toBe("- ✅ red_green (builtin)");
   });
+
+  it("lists advisory gates after the blocking ones: a failure is a note, scanner output stays out", () => {
+    const failed = (name: string, output_tail: string) => ({ ...row(name, output_tail), status: "fail" as const, advisory: true });
+    expect(formatGateResults([
+      { name: "unit", kind: "check", status: "pass", duration_ms: 0, output_tail: "" },
+      failed("evidence", "evidence refs not accepted: A1: invented reference test/x.test.js\nmore"),
+      failed("gitleaks", "Finding: secret=REDACTED"),
+      { ...row("red_green", "EXEMPT not_applicable (loosening): flaky test"), advisory: true },
+    ])).toBe([
+      "- ✅ unit (check)",
+      "",
+      "Advisory gates (reported, not blocking):",
+      "- 📝 evidence (builtin, advisory, failed): evidence refs not accepted: A1: invented reference test/x.test.js",
+      "- 📝 gitleaks (builtin, advisory, failed)",
+      "- ✅ red_green (builtin, advisory): EXEMPT not_applicable (loosening): flaky test",
+    ].join("\n"));
+  });
 });
 
 describe("handoff shape", () => {

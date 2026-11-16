@@ -103,7 +103,8 @@ export function renderQueues(report: QueueListReport): string {
       const bits = [`  ${e.order}`, `#${e.issue}`, e.status];
       if (e.status === "running" && e.run_id) bits.push(e.run_id);
       if (e.status === "done" && e.pr) bits.push(e.pr);
-      if (e.status === "parked" && e.reason) bits.push(e.reason);
+      // A pending reason says why it does not start yet (base problem, admission, resource, cap).
+      if ((e.status === "parked" || e.status === "pending") && e.reason) bits.push(e.reason);
       if (e.status === "pending" && e.after !== null) bits.push(`after #${e.after}`);
       if (e.choice) bits.push(e.choice);
       lines.push(bits.join("  "));

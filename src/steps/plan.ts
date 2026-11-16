@@ -56,7 +56,7 @@ export async function planStep(ctx: PlanContext, level: "medium" | "high"): Prom
     }
     const v = validatePlan(json, { repo: ctx.repo, labels: ctx.task.labels });
     if (v.ok) {
-      ctx.events.emit({ step: "plan", event: "step_finished", role, data: { outcome: "plan" } });
+      ctx.events.emit({ step: "plan", event: "step_finished", role, data: { outcome: "plan", ...(v.warnings ? { warnings: v.warnings } : {}) } });
       return { kind: "plan", plan: v.plan, source: role };
     }
     errors = json === undefined ? ["no JSON object in output"] : v.errors;

@@ -38,30 +38,34 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   → `needs_input`; per-repo lock (`concurrency.max_runs`, default 2; `--wait` queues on a full slot or on overlapping plans); base check (`base_red`; pending CI on the base is polled up to `limits.base_ci_wait_minutes`; a GitHub-CI `base_red` resumes itself once that commit is green, see Cleanup); worktree and branch
   `factory/<task>-<slug>-<run id>-s<slot>` (no suffix when `max_runs` is 1).
 - **Plan** (`src/steps/plan.ts`, `src/schemas/plan.ts`): zod schema plus code checks (ids, DAG, limits,
-  bug → repro, risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity, and a scope check that
+  risk rule, `changes_flows`, `verify: evaluator` only with `ui`, quote fidelity, and a scope check that
   warns the plan reviewer when the plan says "only" a path the task does not). The planner reads the repo's
   `AGENTS.md` at the base commit. `plan_normalize` retries once with the zod paths and the JSON schema of the failing
   fields (the first prompt does not include that schema) before the run falls back to the planner; the progress
-  event lists both attempts.
+  event lists both attempts. A bug plan without a `kind: repro`, `verify: test` criterion in its first package, or a
+  red-green opt-out without `red_green_reason`, is a warning on the plan event, not an invalid plan.
 - **Implement** (`src/steps/implement.ts`): DAG order, fresh session per package, handoff validation with one
   re-prompt, fast gates with the failure tail back into the same session (max 3), factory commits,
   cascade-skip. An unchanged failure (same check, diagnostic code, and file when the output names one; reworded prose does not count,
   swapped values do) makes the next turn, including the first turn after resume, run that check before
   another edit. Suppression, a lower severity, a dropped gate, or an edited gate script (including one an interpreter or package script runs) is not a fix, and approval still requires
-  the complete gate set. The gate budget is not reset. Bug plans prove the repro red on base and green after the fix. A plan opts out only with
+  the complete gate set. The gate budget is not reset. Bug plans try to prove the repro red on base and green after the fix (an advisory
+  gate: a missing proof is a note in the PR, not a question or a stop, and a repo without `tests.run` still runs bug plans). A plan opts out only with
   `red_green: not_applicable` and `red_green_reason`, or the issue label `factory:red-green-not-applicable` plus that
   reason (test-stabilization, where the repro cannot fail on base). That opt-out is a loosening: the reason is required,
   and the gate result, config guard and PR body name it. The plan reviewer must justify it. Without the field and the
   label, the proof is unchanged.
 - **Gates** (`src/gates/`, `src/steps/gates.ts`): tier/path selection shared with CI, one command per phase, an infrastructure retry versus a blocking product flake, built-ins
-  (forbidden paths, diff size, test presence, evidence, guide update, scope report, red-green proof, config
-  guard). The config guard fails the gates when the change loosens lint/type/format/test-runner config
+  (forbidden paths, protected paths, diff size, scope report). The repository's checks and these built-ins block. The factory's
+  own bookkeeping gates (test presence, evidence, guide update, red-green proof, config guard) and the in-run security
+  scanners are advisory: they run and stay in the gate report marked `advisory`, they never turn the report red or start a
+  repair turn, and the PR body lists them in a separate advisory list, where a failed one is a note. The config guard reports when the change loosens lint/type/format/test-runner config
   (`ruff.toml`, `[tool.ruff|mypy|pyright|…]`, eslint/biome/prettier config, `tsconfig` strictness flags,
   coverage thresholds) or adds inline suppressions (`noqa`, `type: ignore`, `eslint-disable`, `@ts-ignore`,
   `biome-ignore`, …), unless the plan lists that config file in a package's `files` or names the suppression.
   A `.factory/repo.yaml` change that weakens the factory's own checks (removing or changing a check,
   making one `local_only`, adding a `host: true` service, dropping `human_only_paths`/`sensitive_paths`/`forbidden_paths` entries, raising merge or diff limits,
-  raising `concurrency.max_runs`, removing `concurrency.exclusive_paths`, changing secrets, `setup`, `env_command`, services, models, adding `agent_env`) fails it even when declared.
+  raising `concurrency.max_runs`, removing `concurrency.exclusive_paths`, changing secrets, `setup`, `env_command`, services, models, adding `agent_env`) is reported even when declared; keep `.factory/` under `human_only_paths` so such a change needs a human.
   The `protected_paths` gate fails on any changed `human_only_paths` file the plan does not declare (see
   [Protected config](#protected-config)).
 - **Evaluate** (only with `ui`, see below) runs before the reviewers; any evaluator bug skips review that round.
@@ -263,7 +267,8 @@ limits: { max_diff_lines: 1500, max_wall_minutes: 240, stall_minutes: 15, comman
 # once); only red or a timeout ends the run as base_red. The wait does not count against max_wall_minutes.
 # limits.base_red_resume_hours [48]: a base_red caused by GitHub CI on the base commit is resumed (same run
 # id) once that commit is green or has no checks, if it stopped within this many hours (0–168; 0 = off).
-# `factory gc` and the start of `factory run` do the check. A local fast-check base_red is not resumed.
+# `factory gc` and the start of `factory run` do the check. A local fast-check base_red is not resumed; its
+# ticket goes back to pending in the queue (see Queue).
 # limits.pr_ci_wait_minutes [20]: after the PR is pushed, none and pending CI on the head are polled
 # this long (0–120; 0 = one sample). Still none or pending does not fail the run, keeps an auto
 # policy, and does not enable auto-merge until that same SHA is green. Only green enables auto-merge. Red CI ends it
@@ -814,8 +819,8 @@ base branch; the user's checkout is not touched):
 - **Settings** are never changed: branch protection (required check `done`, omitted when no check runs in CI) and auto-merge are printed hints, so
   no admin token or GitHub Pro is needed. `--no-pr` commits the branch locally only. An adopted repo (with
   `.factory/repo.yaml`) is refused unless `--force`.
-- **After the merge**: if the repo has tests, check that `tests.globs` and `tests.run` are set (bug plans
-  stop with `needs_human` without `tests.run`; adopt prints a hint when it found tests but no runner).
+- **After the merge**: if the repo has tests, check that `tests.globs` and `tests.run` are set (without
+  `tests.run` the red-green proof of bug plans is only a note; adopt prints a hint when it found tests but no runner).
   `factory doctor` warns when the repo has checks or test globs, no check runs tests, and `tests.run` is unset. The
   repo bot sets up its webhook routine and writes its own `notify.yaml` entry, then runs
   `factory notify test <owner/name>` (checklist in [docs/BOTS.md](docs/BOTS.md#onboarding-checklist-new-repo--new-bot)).
@@ -988,7 +993,7 @@ The worker takes the queue. On each repo that already has a queue file it also t
 
 The worker starts `factory run --issue N --no-notify` up to `--slots` coding runs in total (default 2), and also up to `concurrency.max_runs` in that repo. Priority is `prio:high`, then normal, then `prio:low` (legacy `priority:*` labels remain accepted); equal priority keeps queue order, oldest first. A normal ticket waiting 24 hours starts ahead of a newer higher-priority one. The choice is priority and wait, not a model reordering the queue. Waiting on `--after`, on CI, or on a `concurrency.resources` name does not use a coding slot. A second run, including a manual `factory run`, waits while that name is held.
 
-It starts nothing for a repo while the base branch CI is red. It does not start an issue that is closed, missing `factory-ready`, carrying a blocked label, or already has an open factory PR. Losing `factory-ready` (or gaining `needs-plan`, `needs-decision`, or `factory-proposal`) while a run is in progress pauses at the next step, keeps the worktree, and does not auto-merge; restoring the label lets that same run continue. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. Any other `needs_human`, `needs_input`, `failed` or `base_red` is parked with the reason and is not resumed. A `locked` overlap with an open factory PR stays parked until that PR is merged or closed, then resumes the saved plan when the issue text is unchanged. A predecessor that closed without merging, and an `after` cycle, stay parked with the reason and are not started again. A draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) does not block, and `factory status` lists it as stale.
+It starts nothing for a repo while the base branch CI is red. When GitHub reports no CI for the base commit, the run checks the base with the repo's fast checks once and records the result per repository and base commit in `$FACTORY_HOME/base-checks/`: a green record lets later runs on that commit skip the check; a red one makes the worker start nothing for the repo until the base commit changes or 30 minutes have passed (then one run checks again). Pending entries, `factory queue list` and `factory status` show it as `base problem: fast checks red on base <sha>: <checks>`, and a ticket whose run ended with that local `base_red` goes back to pending without spending a requeue. It does not start an issue that is closed, missing `factory-ready`, carrying a blocked label, or already has an open factory PR. Losing `factory-ready` (or gaining `needs-plan`, `needs-decision`, or `factory-proposal`) while a run is in progress pauses at the next step, keeps the worktree, and does not auto-merge; restoring the label lets that same run continue. A `done` result records the PR. A transient provider `needs_human` (capacity or network) goes back to the end of the queue, at most twice. Any other `needs_human`, `needs_input`, `failed` or GitHub-CI `base_red` is parked with the reason and is not resumed. A `locked` overlap with an open factory PR stays parked until that PR is merged or closed, then resumes the saved plan when the issue text is unchanged. A predecessor that closed without merging, and an `after` cycle, stay parked with the reason and are not started again. A draft factory PR whose head has not changed for `limits.stale_draft_days` (default 3, 0 = off) does not block, and `factory status` lists it as stale.
 
 Two issues are one bundle only when each body contains `factory-bundle: #` the other. The pull request closes an extra issue only when an acceptance line `fulfills #N` is evidenced. File overlap alone is not a bundle.
 
@@ -1055,7 +1060,7 @@ What `gc` cleans (see [docs/GC_RETENTION.md](docs/GC_RETENTION.md) for defaults 
 
 `factory abandon <run-id>` does the same abandon by hand (stale lock released; a process that is still running must be stopped first). The branch is kept. `factory resume` refuses an abandoned run.
 
-A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by a live `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume, and neither does `factory gc --scheduled` while `gc.retention.dry_run` is true. Local fast checks that failed on the base are not resumed. The daily LaunchAgent below is the timer when nothing else starts a run.
+A `base_red` that stopped because GitHub CI on the base commit was red or still pending is resumed by a live `factory gc` and by the start of `factory run`, once that commit is green or has no checks and the run is younger than `limits.base_red_resume_hours` (default 48). The same run id continues; the bot gets another `run_finished`. `--dry-run` does not resume, and neither does `factory gc --scheduled` while `gc.retention.dry_run` is true. Local fast checks that failed on the base are not resumed; the queue starts the ticket again once the base check is green (see Queue). The daily LaunchAgent below is the timer when nothing else starts a run.
 
 A live run (one that holds a lock slot) is left untouched, and a worktree with uncommitted changes needs `--force`. Stripping `home/` and dependency folders does not take the repo lock. Published `evidence/` and `services/` removals are listed in the gc report and in `gc.log`, including a dry-run. Worktree removal and local `factory/*` branch deletion take a short `factory.gitops.lock` in the git common dir (the same lock as `git worktree add` / `remove` / `prune` elsewhere) and wait up to 60s for it, so they proceed while another run of the repo is active. When deploy-self's `once` holds its deploy flock, gc skips deletions; the flock dies with that process, so a finished deploy cannot skip the daily run permanently. A missing `flock` binary does not skip gc.
 `factory run` starts with the same gc, best effort: at most 60 s, no `--force`, no evidence-branch pruning, a 5s git-ops wait, and a failure never stops the run (`FACTORY_NO_AUTO_GC=1` turns it off). The strip of terminal homes and dependency folders is included. The base_red resume sweep still runs.

@@ -69,7 +69,7 @@ describe("evidence scenarios", () => {
     expect(implement?.prompt).toMatch(/An unchanged test is valid evidence/);
   });
 
-  it("V09: an invented test reference is rejected and the run does not succeed", async () => {
+  it("V09: an invented test reference is an advisory note: the run finishes and the PR names it", async () => {
     const invented = {
       role: "implement",
       writes: { "src/math.js": math },
@@ -81,12 +81,20 @@ describe("evidence scenarios", () => {
     } satisfies FakeStep;
     const r = await runScenario({
       script: "clean.json",
-      steps: () => [planStep(unchanged), invented, structuredClone(invented), structuredClone(invented)],
+      steps: () => [planStep(unchanged), invented, ...reviews()],
     });
-    expect(r.result.result).toBe("needs_human");
-    expect(r.result.reason).toMatch(/packages not done/);
-    expect(r.file("gates-1.json")).toMatch(/invented reference/);
-    expect(r.runner.calls.some((c) => c.role === "review_plan")).toBe(false);
+    expect(r.result.result).toBe("done");
+    expect(r.runner.calls.filter((c) => c.role === "implement")).toHaveLength(1);
+    const gates = JSON.parse(r.file("gates-1.json"));
+    expect(gates.green).toBe(true);
+    expect(gates.checks.find((c: { name: string }) => c.name === "evidence")).toMatchObject({ status: "fail", advisory: true });
+    expect(gates.checks.find((c: { name: string }) => c.name === "test_presence")).toMatchObject({ status: "fail", advisory: true });
+    const body = r.github.prs[0]?.body ?? "";
+    const [blocking, advisory] = body.split("Advisory gates (reported, not blocking):");
+    expect(advisory).toMatch(/- 📝 evidence \(builtin, advisory, failed\): .*invented reference/);
+    expect(advisory).toMatch(/- 📝 test_presence \(builtin, advisory, failed\)/);
+    expect(blocking).not.toMatch(/evidence \(builtin/);
+    expect(blocking).not.toContain("❌");
   });
 
   it("V10: a documentation change finishes with review and without a new test", async () => {

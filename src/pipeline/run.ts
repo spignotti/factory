@@ -23,6 +23,7 @@ import { redactTree, type ResolvedSecrets, resolveSecrets, SecretsError } from "
 import { WallBudget } from "./budget.js";
 import { pollCommitCi } from "./ci-wait.js";
 import { agentEnv, checkDeadline, commandEnv, jailFor, runServices, type RunContext, type RunDeps, type Task, throwIfInterrupted, WallTimeExceeded, writeJson } from "./context.js";
+import { readBaseCheck, writeBaseCheck } from "./base-check.js";
 import { acquireRepoLockWithRetry, claimResources, decidePathClaim, lockRepoKey, repoLockHolder, waitForRepoLock, type LockRelease } from "./lock.js";
 import { pauseRequested } from "../queue/pause.js";
 import { admissionBlock } from "../queue/admit.js";
@@ -617,9 +618,6 @@ async function beginWork(
 ): Promise<void> {
   const { deps, events, repo, deadline, repoDir, runDir, runId, task } = base;
   const st = f.state!;
-  if (plan.type === "bug" && !repo.tests.run) {
-    return f.set({ result: "needs_human", reason: "repo.yaml tests.run is required for the red-green proof of bug plans: the repo's bot adds tests.run (and tests.globs) to .factory/repo.yaml in a config PR, then re-runs after the merge", stop: stopFor("human_approval") });
-  }
   const stem = `factory/${task.issue ?? "task"}-${slug(plan.goal)}`;
   const slot = f.lockSlot;
   let branch = f.maxRuns > 1 ? `${stem}-${runId.slice(-6)}-s${slot}` : stem;
@@ -650,7 +648,13 @@ async function beginWork(
     checkDeadline(ctx);
     if (setup.code !== 0) return f.set({ result: "needs_human", reason: `setup failed (env_missing?): ${tail(setup.output, 5)}`, stop: stopFor("unknown") });
   }
-  if (ciStatus === "none") {
+  // No GitHub CI on the base: the fast checks run here once per base commit; the outcome is shared
+  // with later runs and with the queue worker, which holds starts while it is red.
+  const baseKey = ciStatus === "none" ? lockRepoKey(await repoLockId(repoDir)) : "";
+  const recorded = baseKey ? readBaseCheck(deps.factoryHome, baseKey) : undefined;
+  if (recorded?.status === "green" && recorded.sha === baseSha) {
+    events.emit({ step: "intake", event: "progress", data: { base_check: { status: "green", sha: baseSha, recorded_at: recorded.at } } });
+  } else if (ciStatus === "none") {
     const fast = repo.checks.filter((c) => c.tier === "fast");
     const results = await runChecks(fast, {
       cwd: worktree,
@@ -665,6 +669,10 @@ async function beginWork(
     throwIfInterrupted(deps);
     for (const r of results) events.emit({ step: "intake", event: "gate_result", data: { base: true, check: r.name, status: r.status } });
     const stop = baseCheckOutcome(results);
+    if (!stop || stop.result === "base_red") {
+      const failed = results.filter((r) => r.status === "fail").map((r) => r.name);
+      writeBaseCheck(deps.factoryHome, baseKey, { sha: baseSha, status: stop ? "red" : "green", failed: stop ? failed : [], at: new Date(f.now()).toISOString() });
+    }
     if (stop) return f.set(stop.result === "needs_human" ? { result: stop.result, reason: stop.reason, stop: stopFor("unknown") } : stop);
   }
   await advance(f, ctx, { noPr: opts.noPr, startedAt: opts.startedAt });
@@ -833,10 +841,6 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
     st.packages = Object.fromEntries(impl.status);
     st.failures = impl.failures;
     sync();
-    if (impl.needsInput) {
-      const draftError = await keepDraft(f);
-      return f.set({ result: "needs_input", reason: draftError ? `bug without failing repro; ${draftError}` : "bug without failing repro", questions: impl.needsInput, stop: stopFor("explicit_decision") });
-    }
     gates = impl.lastGates ?? gates;
     const failed = [...impl.status].filter(([, s]) => s !== "done").map(([id, s]) => `${id} ${s}${impl.failures[id] ? `: ${impl.failures[id]}` : ""}`);
     if (failed.length || !gates) {

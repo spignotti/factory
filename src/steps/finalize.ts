@@ -124,10 +124,10 @@ export function stopCauseForMergeFailure(conflicts: readonly string[]): StopCaus
  * Map a structured sync failure. A timeout is inconclusive, not a repair permission.
  * Red gates after a clean merge stay a mechanical repair. Conflicts are an explicit decision.
  */
-export function stopCauseForSyncFailure(kind: SyncFailureKind, gates?: { checks: { status: string }[] }): StopCause {
+export function stopCauseForSyncFailure(kind: SyncFailureKind, gates?: { checks: { status: string; advisory?: boolean }[] }): StopCause {
   if (kind === "conflict") return "explicit_decision";
   if (kind === "ambiguous") return "unknown";
-  if (gates?.checks.some((c) => c.status === "timeout")) return "unknown";
+  if (gates?.checks.some((c) => c.status === "timeout" && !c.advisory)) return "unknown";
   return "technical_repair";
 }
 
@@ -163,7 +163,7 @@ export async function syncBase(ctx: RunContext, step = "finalize"): Promise<Sync
 
 /** Why a post-merge gate run did not go green. A timeout is named as inconclusive, not as a red base. */
 export function baseSyncFailureReason(branch: string, gates: GateReport): string {
-  const timed = gates.checks.filter((c) => c.status === "timeout").map((c) => c.name);
+  const timed = gates.checks.filter((c) => c.status === "timeout" && !c.advisory).map((c) => c.name);
   if (timed.length) return `base ${branch} moved: ${timed.join(", ")} timed out (inconclusive, not a red result)`;
   return `base ${branch} moved: gates red after merging it`;
 }
