@@ -113,7 +113,7 @@ export const StatusReportSchema = z.strictObject({
           origin: z.enum(["confirmed", "unknown"]).optional(),
         }),
       ),
-      /** Open, CI green, not behind or conflicting, `merge_policy` human_review. `none` and a missing rollup are not green. */
+      /** Open, CI green, not conflicting, `merge_policy` human_review. `none` and a missing rollup are not green. */
       human_review: z.array(
         z.strictObject({
           run_id: z.string(),
@@ -121,12 +121,14 @@ export const StatusReportSchema = z.strictObject({
           task: z.string(),
           pr: z.string(),
           risk: z.enum(["low", "medium", "high"]).nullable(),
+          /** The base moved on. The worker does not update the branch; `factory queue batch --pr <repo>#<n> --apply` does. */
+          behind: z.boolean().optional(),
           /** `risk`, `diff size`, `protected paths`, plus the `risk_reasons` they came from. Not the review-exit `reason`. */
           review_reasons: z.array(z.string()),
         }),
       ),
       /**
-       * Blocked by draft, CI, behind/conflicting, or a needs_human result.
+       * Blocked by draft, CI, conflicting, behind (automatic policies only), or a needs_human result.
        * A thrown `prStatus` is also here (`pr status unknown` plus `error`) and is not a confirmed open PR.
        */
       blocked: z.array(

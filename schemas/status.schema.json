@@ -686,6 +686,9 @@
                       }
                     ]
                   },
+                  "behind": {
+                    "type": "boolean"
+                  },
                   "review_reasons": {
                     "type": "array",
                     "items": {

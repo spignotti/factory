@@ -411,7 +411,12 @@ export function ticketFunnel(input: {
       else if (ci === "pending") reasons.push({ reason: "CI pending", cls: "ci_runner" });
       else if (ci === "none") reasons.push({ reason: "CI none", cls: "ci_runner" });
       else if (ci === undefined) reasons.push({ reason: "CI missing", cls: "ci_runner" });
-      if (s.pr_state.behind) reasons.push({ reason: "behind", cls: "technical_repair" });
+      // A PR that waits for a human merge is not updated by the worker; its base update is the person's call.
+      // Blocker rows are keyed by reason, so the two cases need two reasons to keep their classes apart.
+      if (s.pr_state.behind) {
+        if (s.merge_policy === "human_review" || !s.merge_policy) reasons.push({ reason: "behind (human merge)", cls: "human_decision" });
+        else reasons.push({ reason: "behind", cls: "technical_repair" });
+      }
       if (s.pr_state.conflicting) reasons.push({ reason: "conflicting", cls: "technical_repair" });
       if (s.unresolved_decision) reasons.push({ reason: "needs_human", cls: "human_decision" });
       const extra = reasonRow();
@@ -461,7 +466,6 @@ export function ticketFunnel(input: {
           s.merge_policy === "human_review" &&
           !s.pr_state.draft &&
           s.pr_state.ci === "green" &&
-          !s.pr_state.behind &&
           !s.pr_state.conflicting &&
           !s.unresolved_decision;
         if (s.pr) recordOpen(s, ready, ready ? [] : blockerReasons());

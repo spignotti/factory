@@ -84,14 +84,19 @@ function resultFinishedMs(run: RunRecord): number | undefined {
   }
 }
 
-function blockersOf(result: string, live: PrStatus | undefined, prError: string | undefined): string[] {
+/** A done PR whose merge is a person's call. The worker does not update its branch, so "behind" is no blocker for it. */
+function waitsForHuman(res: { result?: string; merge_policy?: string | null }): boolean {
+  return res.result === "done" && (res.merge_policy === "human_review" || !res.merge_policy);
+}
+
+function blockersOf(result: string, live: PrStatus | undefined, prError: string | undefined, humanMerge: boolean): string[] {
   const out: string[] = [];
   if (live?.draft) out.push("draft");
   if (live?.ci === "red") out.push("CI red");
   if (live?.ci === "pending") out.push("CI pending");
   // `none` and a rollup that was not read are not green: an empty check list must not land in human_review.
   if (live && live.ci !== "green" && live.ci !== "red" && live.ci !== "pending") out.push(live.ci === "none" ? "CI none" : "CI missing");
-  if (live?.behind) out.push("behind");
+  if (live?.behind && !humanMerge) out.push("behind");
   if (live?.conflicting) out.push("conflicting");
   if (result === "needs_human") out.push("needs_human");
   if (prError) out.push("pr status unknown");
@@ -168,14 +173,14 @@ async function sinceFinished(
       }
       continue;
     }
-    const blockers = blockersOf(kind, live, prError);
+    const blockers = blockersOf(kind, live, prError, waitsForHuman(res));
     if (blockers.length && (res.pr || kind === "needs_human")) {
       view.blocked.push({ ...row, pr: res.pr ?? null, blockers, reason, ...(prError ? { error: prError } : {}) });
       continue;
     }
-    if (live?.state === "open" && res.pr && kind === "done" && res.merge_policy === "human_review" && live.ci === "green" && !live.behind && !live.conflicting) {
+    if (live?.state === "open" && res.pr && kind === "done" && res.merge_policy === "human_review" && live.ci === "green" && !live.conflicting) {
       const risk = res.risk && RISK.has(res.risk) ? res.risk : null;
-      view.human_review.push({ ...row, pr: res.pr, risk, review_reasons: humanReviewReasons({ risk_reasons: res.risk_reasons, risk: res.risk }) });
+      view.human_review.push({ ...row, pr: res.pr, risk, ...(live.behind ? { behind: true } : {}), review_reasons: humanReviewReasons({ risk_reasons: res.risk_reasons, risk: res.risk }) });
     }
   }
   return view;
@@ -540,7 +545,7 @@ export function renderStatus(s: StatusReport): string {
     const fin = s.since;
     out.push(`since ${fin.since}:`);
     section("merged", fin.merged.map((r) => `${r.run_id} ${r.task} — ${r.pr_state} ${r.pr}`));
-    section("open, green, human_review", fin.human_review.map((r) => `${r.run_id} ${r.task} — ${reviewText(r.review_reasons, r.risk)} ${r.pr}`));
+    section("open, green, human_review", fin.human_review.map((r) => `${r.run_id} ${r.task} — ${reviewText(r.review_reasons, r.risk)}${r.behind ? "; behind; merge via factory queue batch --pr <repo>#<n> --apply" : ""} ${r.pr}`));
     const unknownPr = fin.blocked.filter((r) => r.blockers.includes("pr status unknown"));
     const openBlocked = fin.blocked.filter((r) => !r.blockers.includes("pr status unknown"));
     section("open, blocked", openBlocked.map((r) => {

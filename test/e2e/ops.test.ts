@@ -233,6 +233,26 @@ describe("factory status", () => {
     expect(renderStatus(off)).not.toContain("since 12h:");
   });
 
+  it("--since lists a behind human_review PR as ready with a merge hint instead of blocking it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "factory-home-"));
+    const gh = new FakeGitHub();
+    const now = Date.parse("2026-10-29T12:00:00Z");
+    const t = new Date("2026-10-29T08:00:00Z");
+    const plant = (id: string, pr: string, policy: "human_review" | null) => {
+      fakeRun(home, id, { state: { result: "done", pr }, result: { result: "done", merge_policy: policy, risk: "low", reason: "", risk_reasons: [], pr } });
+      utimesSync(join(home, "runs", id, "result.json"), t, t);
+      gh.prStates.set(pr, { state: "open", draft: false, ci: "green", behind: true });
+    };
+    plant("20261029-080000-0000ba", "https://pr/behind-human", "human_review");
+    plant("20261029-080000-0000bb", "https://pr/behind-nopolicy", null);
+    const s = await statusReport({ factoryHome: home, github: gh, since: "12h", now: () => now });
+    expect(s.since?.human_review.map((r) => [r.pr, r.behind])).toEqual([["https://pr/behind-human", true]]);
+    expect(s.since?.blocked).toEqual([]);
+    const text: string[] = [];
+    await statusCommand({ factoryHome: home, github: gh, since: "12h", json: false, now: () => now }, { out: (line) => text.push(line), err: () => {} });
+    expect(text.join("")).toContain("behind; merge via factory queue batch --pr <repo>#<n> --apply");
+  });
+
   it("--since does not treat none, missing CI, or a thrown prStatus as an open green PR", async () => {
     const home = mkdtempSync(join(tmpdir(), "factory-home-"));
     const gh = new FakeGitHub();

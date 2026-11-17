@@ -1739,7 +1739,8 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       }, gitOpts);
     }
   }
-  const openSelfMerge = ctx.releaseHold ? false : await openSelfMergePr(ctx.github, repo, ctx.factoryHome, ctx.io, timeoutMs, noteFailure);
+  // Only `--until` reads this answer, so a worker without it skips the PR listing.
+  const openSelfMerge = ctx.releaseHold || ctx.untilMs === undefined ? false : await openSelfMergePr(ctx.github, repo, ctx.factoryHome, ctx.io, timeoutMs, noteFailure);
   const waitingMerge = ctx.releaseHold ? false : await enableReadyMerges(ctx.github, repo, ctx.factoryHome, ctx.mergeEnabled, ctx.io, timeoutMs, noteFailure);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
