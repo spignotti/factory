@@ -109,7 +109,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
   refusal or a missing secret) is reported the same way but never closes the PR. A resolver turn that leaves
   the reviewed head unchanged never clears an open finding, and finalize never approves a head with an open bug.
 - **Agents** (`src/agents/`): one `AgentRunner` interface, `fake-runner` (tests) and `pi-runner` (Pi SDK);
-  env allowlist and isolated `HOME`; capacity/network/stream/limit/auth/invalid_output classification with same-model
+  env allowlist and isolated `HOME` (plus `DOCKER_HOST` when the factory's user has a Docker socket, as for checks, so a repo's own docker tooling works for agents; not inside the Linux jail); capacity/network/stream/limit/auth/invalid_output classification with same-model
   backoff before fallback, `implement` never crossing model families; heartbeats and a silence watchdog
   (a frozen box/VM is not counted as silence, `progress` event `suspended_ms`). Provider timeouts and dropped
   streams (`Request timed out.`, `Connection error.`, `terminated`, `ECONNRESET`, …) are `network` errors and
@@ -638,6 +638,8 @@ read-only, host loopback, Docker bridge, metadata service and LAN are unreachabl
 Jailed commands run as the factory's own uid/gid with all capabilities dropped (never root, so file
 permissions apply as in CI). File tools (read, write, edit, grep, find, ls) stay confined to the
 worktree even when no OS sandbox is active (`sandbox: off`, or `preferred` degraded to unjailed).
+The Docker socket is never bound, so jailed agents get no `DOCKER_HOST`; without the jail (macOS,
+`sandbox: off`, `preferred` degraded) they get the same `DOCKER_HOST` as checks.
 Set `sandbox: required | preferred | off` in
 `~/.factory/profile.yaml` (default `preferred`, which degrades with a warning). Needs `bwrap`
 (bubblewrap), `pasta` (passt) and `ip` (iproute2); `factory doctor` shows what is in effect.

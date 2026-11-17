@@ -145,26 +145,36 @@ export function writeRunFile(ctx: Pick<RunContext, "runDir" | "events">, name: s
   writeFileSync(join(ctx.runDir, name), ctx.events.redact(text));
 }
 
-/** Allowlisted env for agent tool processes of this run (never a repo secret, even if listed in agent_env). */
+/**
+ * Allowlisted env for agent tool processes of this run (never a repo secret, even if listed in agent_env).
+ * Agents get the same docker host as the checks (the repo's own docker tooling, e.g. a local database
+ * stack, must work for them too). Not inside the bubblewrap jail: it never binds the socket, so the
+ * variable would only point at a path that does not exist there.
+ */
 export function agentEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "secrets">, role?: string): Record<string, string> {
   const roleEnv = role ? (ctx.deps.profile.env[profileRoleOf(role)] ?? []) : [];
   const exclude = [...(ctx.repo.secrets?.names ?? []), ...(ctx.secrets?.names ?? [])];
-  return buildAgentEnv(ctx.deps.parentEnv ?? process.env, {
+  const env = buildAgentEnv(ctx.deps.parentEnv ?? process.env, {
     home: ctx.agentHome,
     factoryHome: ctx.deps.factoryHome,
     extra: [...ctx.repo.agent_env, ...roleEnv],
     exclude,
   });
+  const docker = ctx.deps.sandbox?.fs === "bwrap" ? undefined : dockerHost(ctx.deps.parentEnv ?? process.env);
+  return docker ? { ...env, DOCKER_HOST: docker } : env;
 }
 
-/** Env for repo commands the factory runs itself (checks, red-green tests, services, the ui, flows): agentEnv plus the repo secrets. */
+/**
+ * Env for repo commands the factory runs itself (checks, red-green tests, services, the ui, flows): agentEnv plus the repo secrets.
+ * The docker host is always set here: `host: true` services run outside the jail.
+ */
 export function commandEnv(ctx: Pick<RunContext, "deps" | "repo" | "agentHome" | "secrets">): Record<string, string> {
-  const docker = dockerHost();
+  const docker = dockerHost(ctx.deps.parentEnv ?? process.env);
   return { ...agentEnv(ctx), ...(docker ? { DOCKER_HOST: docker } : {}), ...(ctx.secrets?.env ?? {}) };
 }
 
 /**
- * Checks run with an isolated HOME, so the docker CLI loses Docker Desktop's context and looks for
+ * Checks and agents run with an isolated HOME, so the docker CLI loses Docker Desktop's context and looks for
  * /var/run/docker.sock, which Docker Desktop does not create by default. Hand checks the socket the
  * factory's own user has: DOCKER_HOST when set, else Docker Desktop's per-user socket, else nothing
  * (Linux daemons listen on /var/run/docker.sock).
