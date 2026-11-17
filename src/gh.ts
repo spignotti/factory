@@ -768,7 +768,8 @@ export function autoMergeCleanStatus(message: string): boolean {
 
 /** GitHub says this when auto-merge was not on. Disabling it again is a no-op. UNVERIFIED live wording. */
 export function autoMergeNotEnabled(message: string): boolean {
-  return /not enabled/i.test(message);
+  // A draft or a PR without auto-merge: GitHub answers "Can't disable auto-merge for this pull request".
+  return /not enabled|can't disable auto-merge/i.test(message);
 }
 
 export class GhCli implements GitHub {

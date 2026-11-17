@@ -48,6 +48,7 @@ describe("merge readiness", () => {
     expect(autoMergeAlreadyEnabled("GraphQL: Auto merge is already enabled (enablePullRequestAutoMerge)")).toBe(true);
     expect(autoMergeAlreadyEnabled("pull request is not mergeable")).toBe(false);
     expect(autoMergeNotEnabled("auto merge is not enabled")).toBe(true);
+    expect(autoMergeNotEnabled("GraphQL: Can't disable auto-merge for this pull request. (disablePullRequestAutoMerge)")).toBe(true);
     expect(autoMergeNotEnabled("pull request is not mergeable")).toBe(false);
   });
 
