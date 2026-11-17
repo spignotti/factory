@@ -26,6 +26,7 @@ import { pollCommitCi } from "../pipeline/ci-wait.js";
 import { autoMergeCleanStatus, githubUnavailable } from "../gh.js";
 import { fallbackMergeMethod, mayEnableAutoMerge, waitingOnMergeCi } from "../pipeline/merge-ready.js";
 import { ensureChangedPathClaim } from "../pipeline/path-claim.js";
+import { noChangeSummary } from "../pipeline/no-change.js";
 
 export interface FinalizeInput {
   result: "done" | "needs_human";
@@ -111,6 +112,11 @@ export interface FinalizeOutput {
   /** SHA the review evidence covers after a delta review. */
   reviewedSha?: string;
   technical?: TechnicalStop;
+  /**
+   * A done run that ended without commits and without a PR: the change was already on the base. The
+   * run's own account of why (the implementer's handoff lines). Absent otherwise.
+   */
+  noChange?: string;
 }
 
 function skippedField(gates: GateReport | undefined): { skipped_gates?: string[] } {
@@ -633,6 +639,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
   }
   let approvedSha: string | undefined;
   let ciWait: "pending" | "none" | undefined;
+  let noChange: string | undefined;
   if (willPush) {
     const prefix = ctx.plan.type === "bug" ? "fix" : ctx.plan.type === "chore" ? "chore" : "feat";
     const title = ctx.events.redact(`${prefix}: ${ctx.plan.goal}`);
@@ -809,6 +816,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
       return prStepFailed(ctx, e, result === "done" ? "" : `${reason}; `, { risk, pr, draft, reviewedSha, gates, technical });
     }
   } else if (!input.noPr) {
+    noChange = result === "done" && !locked && !pr ? noChangeSummary(ctx.handoffs, reason) : undefined;
     reason = reason ? `${reason}; no commits, no PR` : "no commits, no PR";
   }
   if (result !== "done") policy = "human_review";
@@ -826,6 +834,7 @@ export async function finalize(ctx: RunContext, input: FinalizeInput): Promise<F
     ...(ciWait && result === "done" ? { ciWait } : {}),
     ...(reviewedSha ? { reviewedSha } : {}),
     ...(technical && result === "needs_human" ? { technical } : {}),
+    ...(noChange ? { noChange } : {}),
     ...skippedField(gates),
   };
 }

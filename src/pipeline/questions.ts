@@ -4,7 +4,7 @@ import { FACTORY_READY_LABEL, NEEDS_INPUT_LABEL } from "../queue/store.js";
 export const NEEDS_INPUT_LABEL_SPEC: LabelSpec = {
   name: NEEDS_INPUT_LABEL,
   color: "D93F0B",
-  description: "The factory asked questions on this issue",
+  description: "The factory needs a person on this issue; its comment says what",
 };
 
 /** Associations of people with write access to the repository. */

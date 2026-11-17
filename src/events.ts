@@ -323,6 +323,16 @@ export const ResultSchema = z.object({
    * Omitted when nothing was reported.
    */
   failure_reported: z.boolean().optional(),
+  /**
+   * A `done` run with no commits and no PR (the change was already on the base): the run's own account
+   * of why, quoted on the issue. Omitted otherwise.
+   */
+  no_change: z.string().optional(),
+  /**
+   * Whether the no-change comment and the `needs-input` label swap reached GitHub. False after a GitHub
+   * error (the queue worker retries). Omitted when nothing was reported.
+   */
+  no_change_reported: z.boolean().optional(),
   /** Assumptions the plan stated instead of asking. Omitted when there are none. */
   assumptions: z.array(z.string()).optional(),
   /** Where to find the work (null until created); needed to fix and `factory resume` a run. */
