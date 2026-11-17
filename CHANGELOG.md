@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0](https://github.com/spignotti/factory/compare/v0.7.0...v0.8.0) (2026-11-17)
+
+
+### Features
+
+* **cli:** add factory approve for reviewed pull requests that did not come through the factory ([#219](https://github.com/spignotti/factory/issues/219)) ([f27b021](https://github.com/spignotti/factory/commit/f27b021a76e1e247e676c30bac9b852f31af67f3))
+* **gates:** make bookkeeping gates advisory and record the local base check ([#205](https://github.com/spignotti/factory/issues/205)) ([68fbf42](https://github.com/spignotti/factory/commit/68fbf4268eb5315da4ad9d50dae906dd3019cfcf))
+* **improve:** apply the repo thinking level to the first model of the chain only ([#209](https://github.com/spignotti/factory/issues/209)) ([6c4a6af](https://github.com/spignotti/factory/commit/6c4a6af7ea97aae8600eba75f0692cb49993abd2))
+* **ops:** nightly self-update script for a launchd worker ([#212](https://github.com/spignotti/factory/issues/212)) ([086ca2c](https://github.com/spignotti/factory/commit/086ca2c8fe8629b0ed1558f5e2cbb7512659089b))
+* **queue:** post run questions on the issue and restart once answered ([#202](https://github.com/spignotti/factory/issues/202)) ([7d74bab](https://github.com/spignotti/factory/commit/7d74bab22747dea69e69e71fad0a1a9acae762d8))
+* **queue:** tell the issue when a run had nothing to change ([#216](https://github.com/spignotti/factory/issues/216)) ([88cf366](https://github.com/spignotti/factory/commit/88cf366b15144fe1e68ef48794647d7d98488fca))
+* **resolver:** hand technical stops to a resolver agent and fail tickets on the issue ([#207](https://github.com/spignotti/factory/issues/207)) ([5b0b157](https://github.com/spignotti/factory/commit/5b0b1573dc3a6699ba664dd007123cca80cd62a0))
+* **risk:** add merge.human_review_paths hard list ([#204](https://github.com/spignotti/factory/issues/204)) ([7d6398d](https://github.com/spignotti/factory/commit/7d6398d0db33d01ef2f7c06b31d9e95927eca266))
+* **status:** short check-in report for an area session ([#208](https://github.com/spignotti/factory/issues/208)) ([5964f7f](https://github.com/spignotti/factory/commit/5964f7fd79a13cdf94e0907d68ce1f2905a43626))
+
+
+### Bug Fixes
+
+* **agents:** give agents the docker host the checks use ([#214](https://github.com/spignotti/factory/issues/214)) ([64fe87e](https://github.com/spignotti/factory/commit/64fe87e7bab108ace37b6cc1fbb2f2f8daaaf1e0))
+* **agents:** retry terminated-with-detail and wait out usage limits without a reset time ([#200](https://github.com/spignotti/factory/issues/200)) ([bde93a0](https://github.com/spignotti/factory/commit/bde93a0d4d0f473d306891b1798ad97f998adaec))
+* **failure:** tell ticket and technical failures apart in the issue comment ([#211](https://github.com/spignotti/factory/issues/211)) ([5f31204](https://github.com/spignotti/factory/commit/5f31204dbc6c45a000bfdcfe07780c632dfc3f54))
+* **gh:** treat "can't disable auto-merge" as nothing to disable ([#213](https://github.com/spignotti/factory/issues/213)) ([ea2f9bc](https://github.com/spignotti/factory/commit/ea2f9bcbf3fb0d67045562f09ebf30fd2e5af4d0))
+* hold risky merges for a human and harden queue retries ([#206](https://github.com/spignotti/factory/issues/206)) ([b7bd5fe](https://github.com/spignotti/factory/commit/b7bd5fe23047cae163653006d73f0847a6cbb5bf))
+* **queue:** do not update-branch a PR while its run is live ([#210](https://github.com/spignotti/factory/issues/210)) ([c675954](https://github.com/spignotti/factory/commit/c675954e846b961b824cc304d10e49f4e67331ba))
+* **queue:** leave PRs that wait for a human merge behind instead of updating them ([#218](https://github.com/spignotti/factory/issues/218)) ([8de6a3a](https://github.com/spignotti/factory/commit/8de6a3a34e2ca2ddf3dd1f7cb4e76d4964f5be9d))
+* **review:** flag edits to legacy rule files that standards.md makes dead ([#217](https://github.com/spignotti/factory/issues/217)) ([92d246c](https://github.com/spignotti/factory/commit/92d246cff7cb397a8bf90de61a47e1b81341f5cc))
+* **review:** measure delta reviews against the current base, not the last reviewed commit ([#215](https://github.com/spignotti/factory/issues/215)) ([b791675](https://github.com/spignotti/factory/commit/b791675d8d8ecb64ac6114a0685c6f5d27a037aa))
+
 ## [0.7.0](https://github.com/spignotti/factory/compare/v0.6.0...v0.7.0) (2026-11-14)
 
 
