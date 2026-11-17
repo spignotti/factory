@@ -22,7 +22,7 @@ import { loadRepoConfig } from "../schemas/repo.js";
 import { admissionHold } from "./admission.js";
 import { clearWorkerIdentity, executingRelease, publishWorkerIdentity, type ReleaseIdentity } from "./identity.js";
 import type { Io } from "../commands/gates.js";
-import { admissionBlock, cycleReasons, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending, updateNeedsDecision } from "./admit.js";
+import { admissionBlock, cycleReasons, isAdmissionPauseReason, issueRevision, mutualBundle, priorityRank, rankPending } from "./admit.js";
 import { clearWorkerMode, readWorkerMode } from "./control.js";
 import { clearPause, pausePaths, pauseRequested, requestPause, type PauseKey } from "./pause.js";
 import { advanceMergeBatch, batchBusy } from "./batch.js";
@@ -171,23 +171,11 @@ interface TickCtx {
   handles: Map<string, Tracked>;
   stall: Map<string, StallWatch>;
   terminating: Map<string, Terminating>;
-  behindUpdated: Map<string, number>;
-  /** `update-branch` still running after a tick timeout. One per repo; a later tick does not start another. */
-  behindFlight: Map<string, Promise<unknown>>;
   redLogged: Set<string>;
   /** `pr@sha` already asked to auto-merge in this process. */
   mergeEnabled: Set<string>;
-  /** `repo#pr` whose update-branch hit a conflict. Not retried. */
-  behindConflict: Set<string>;
   /** Release this worker runs; stamped on every entry it starts. */
   release: ReleaseIdentity;
-}
-
-interface BehindWatch {
-  /** A behind PR whose run ended `done` still needs `update-branch` (failed, or not tried). */
-  needsUpdate: boolean;
-  /** Open factory PR whose run ended `done`: behind, or still waiting for auto-merge. */
-  openDone: boolean;
 }
 
 function alive(pid: number): boolean {
@@ -210,14 +198,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
   });
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
-}
-
-/** True when `p` has not settled. Yields once so an already-rejected call is not treated as in flight. */
-async function stillPending(p: Promise<unknown>): Promise<boolean> {
-  let settled = false;
-  p.then(() => { settled = true; }, () => { settled = true; });
-  await Promise.resolve();
-  return !settled;
 }
 
 /** `ps -o command= -p PID`. Empty when the pid is gone or ps cannot be asked. */
@@ -1194,103 +1174,23 @@ async function scheduleContinuations(ctx: TickCtx, repo: string): Promise<void> 
 }
 
 /**
- * Every behind `factory/*` PR whose run ended `done`, one `update-branch` at a time.
- * A failure is logged and left for a later tick; it does not skip the rest of the list.
- * `auto` and `bot_review` drop the old auto-merge and approve only the head this call just produced.
+ * True while an open `factory/*` PR whose run ended `done` is one the worker must stay up for under `--until`:
+ * a self-merge PR (`auto`, `bot_review`) is revalidated by `scheduleContinuations`, which only runs while a worker polls.
+ * A PR that waits for a human merge (`human_review`, or no recorded policy) is never updated here: update-branch pushes
+ * a head without the `factory=success` status and turns the required `done` check red. `factory queue batch --apply`
+ * updates, revalidates and merges it when a person decides.
  */
-const BEHIND_RETRY_MS = 10 * 60_000;
-
-async function updateBehind(
-  github: GitHub,
-  repo: string,
-  factoryHome: string,
-  updated: Map<string, number>,
-  flight: Map<string, Promise<unknown>>,
-  conflicted: Set<string>,
-  io: Io,
-  timeoutMs: number,
-  onFailure?: () => void,
-): Promise<BehindWatch> {
+async function openSelfMergePr(github: GitHub, repo: string, factoryHome: string, io: Io, timeoutMs: number, onFailure?: () => void): Promise<boolean> {
   let prs: OpenFactoryPr[];
   try {
     prs = await withTimeout(github.openFactoryPrFiles(repo), timeoutMs, "open PRs");
   } catch (e) {
     onFailure?.();
     io.err(`factory: open PR list failed (${repo}): ${(e as Error).message.slice(0, 200)}\n`);
-    return { needsUpdate: true, openDone: false };
+    return true;
   }
   const runs = listRuns(factoryHome).filter((r) => sameRepo(r, repo));
-  const holders = holderIds(factoryHome);
-  let needsUpdate = false;
-  let openDone = false;
-  for (const pr of prs) {
-    if (!runEndedDone(runs, pr)) continue;
-    const key = String(pr.number);
-    let status: PrStatus;
-    try {
-      status = await withTimeout(github.prStatus(repo, key), timeoutMs, `pr status #${pr.number}`);
-    } catch (e) {
-      onFailure?.();
-      io.err(`factory: pr status #${pr.number} failed: ${(e as Error).message.slice(0, 200)}\n`);
-      needsUpdate = true;
-      openDone = true;
-      continue;
-    }
-    if (status.state !== "open") {
-      updated.delete(key);
-      continue;
-    }
-    openDone = true;
-    if (!status.behind) {
-      updated.delete(key);
-      continue;
-    }
-    // A resumed run keeps its old `done` result while it is live again and merges the base locally; a server-side
-    // update-branch now would make its push non-fast-forward.
-    if (runs.some((r) => holders.has(r.run_id) && runIsForPr(r, pr))) {
-      needsUpdate = true;
-      continue;
-    }
-    // Automatic runs merge locally under their normal slot, then run gates and a delta review.
-    if (selfMergeRuns(runs, pr).length) continue;
-    // A semantic conflict is a question for a person. Retrying update-branch would spin.
-    if (conflicted.has(`${repo}#${pr.number}`)) continue;
-    // A PR still behind 10 minutes after its last update fell behind again (another PR merged): update it again.
-    const last = updated.get(key);
-    if ((last !== undefined && Date.now() - last < BEHIND_RETRY_MS) || flight.has(repo)) {
-      needsUpdate = true;
-      continue;
-    }
-    const job = github.updateBranch(repo, key);
-    const tracked = job.finally(() => {
-      if (flight.get(repo) === tracked) flight.delete(repo);
-    });
-    void tracked.catch(() => undefined);
-    flight.set(repo, tracked);
-    try {
-      await withTimeout(job, timeoutMs, `update-branch #${pr.number}`);
-    } catch (e) {
-      const msg = (e as Error).message;
-      if (updateNeedsDecision(msg)) {
-        conflicted.add(`${repo}#${pr.number}`);
-        io.err(`factory: update-branch #${pr.number} needs a decision: ${msg.slice(0, 200)}\n`);
-        if (!(await stillPending(job))) flight.delete(repo);
-        continue;
-      }
-      onFailure?.();
-      io.err(`factory: update-branch #${pr.number} failed: ${msg.slice(0, 200)}\n`);
-      needsUpdate = true;
-      // Still running: do not start a second update. A settled failure is retried later and does not skip the rest.
-      if (await stillPending(job)) break;
-      flight.delete(repo);
-      continue;
-    }
-    flight.delete(repo);
-    updated.set(key, Date.now());
-    needsUpdate = true;
-    io.out(`queue: updated PR #${pr.number} (behind)\n`);
-  }
-  return { needsUpdate, openDone };
+  return prs.some((pr) => selfMergeRuns(runs, pr).length > 0);
 }
 
 function track(started: StartedRun, repo: string, issue: number): Tracked {
@@ -1503,7 +1403,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   if (!snap) return false;
 
   // A release handoff classifies finished runs and changes nothing else: no unpark, no pause, no
-  // update-branch, no approval and no auto-merge while the admission hold is in place.
+  // approval and no auto-merge while the admission hold is in place.
   const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const questionsPosted = ctx.releaseHold ? new Set<number>() : await postPendingQuestions(snap, repo, ctx, noteFailure);
@@ -1839,9 +1739,8 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       }, gitOpts);
     }
   }
-  const watch: BehindWatch = ctx.releaseHold
-    ? { needsUpdate: false, openDone: false }
-    : await updateBehind(ctx.github, repo, ctx.factoryHome, ctx.behindUpdated, ctx.behindFlight, ctx.behindConflict, ctx.io, timeoutMs, noteFailure);
+  // Only `--until` reads this answer, so a worker without it skips the PR listing.
+  const openSelfMerge = ctx.releaseHold || ctx.untilMs === undefined ? false : await openSelfMergePr(ctx.github, repo, ctx.factoryHome, ctx.io, timeoutMs, noteFailure);
   const waitingMerge = ctx.releaseHold ? false : await enableReadyMerges(ctx.github, repo, ctx.factoryHome, ctx.mergeEnabled, ctx.io, timeoutMs, noteFailure);
   const q = loadQueueByKey(ctx.factoryHome, key);
   if (!q) return false;
@@ -1861,7 +1760,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
     }
   }
   if (ctx.pastUntil) return running || live;
-  const behind = watch.needsUpdate || (ctx.untilMs !== undefined && (watch.openDone || waitingMerge));
+  const behind = ctx.untilMs !== undefined && (openSelfMerge || waitingMerge);
   return pending || running || overlap || live || behind || windowWait || batchBusy(ctx.factoryHome, repo);
 }
 
@@ -1879,10 +1778,10 @@ function activeCoding(factoryHome: string, handles: Map<string, Tracked>): boole
 }
 
 /**
- * One worker. Fills slots in queue order, classifies `result.json` when a run ends, updates behind PRs.
+ * One worker. Fills slots in queue order, classifies `result.json` when a run ends.
  * A stall keeps the slot until the process exits (SIGKILL after a grace period).
- * Stops when nothing is pending, running, or behind (overlap parks keep polling until the blocking run ends).
- * With `untilMs`, also stays until that time while an open factory PR is behind or waiting for auto-merge;
+ * Stops when nothing is pending or running (overlap parks keep polling until the blocking run ends).
+ * With `untilMs`, also stays until that time while an open self-merge factory PR (auto, bot_review) exists or one waits for auto-merge;
  * at `untilMs` live runs finish and the worker exits. `stay` keeps polling with backoff when idle.
  * Pause and drain start nothing. Drain exits once no coding run is left. A second worker is refused.
  * Stop exits at the next tick and does not signal a live run. A suspend gap uses the run watchdog's slack.
@@ -1898,11 +1797,8 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
   const handles = new Map<string, Tracked>();
   const stall = new Map<string, StallWatch>();
   const terminating = new Map<string, Terminating>();
-  const behindUpdated = new Map<string, number>();
-  const behindFlight = new Map<string, Promise<unknown>>();
   const redLogged = new Set<string>();
   const mergeEnabled = new Set<string>();
-  const behindConflict = new Set<string>();
   const release = opts.release ?? executingRelease();
   const dir = queueDir(opts.factoryHome);
   mkdirSync(dir, { recursive: true });
@@ -1953,11 +1849,8 @@ export async function runQueue(opts: RunQueueOptions): Promise<void> {
               handles,
               stall,
               terminating,
-              behindUpdated,
-              behindFlight,
               redLogged,
               mergeEnabled,
-              behindConflict,
               release,
             };
             try {

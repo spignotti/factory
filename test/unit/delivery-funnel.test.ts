@@ -155,6 +155,19 @@ describe("delivery funnel (#185)", () => {
     expect(funnel.idle_slot_minutes).toBeNull(); // no waited_ms data: unknown, not zero
   });
 
+  it("a behind PR that waits for a human merge is ready; behind is a human decision there and a repair for an automatic policy", () => {
+    const behindHuman = source({ run_id: "b1", ticket: 50, first_attempt: INTERVAL.from + 1, finished: INTERVAL.from + 1, pr: PR(50), pr_state: pr({ state: "open", behind: true }), merge_policy: "human_review", merged_stored: "no" });
+    const behindNoPolicy = source({ run_id: "b2", ticket: 51, first_attempt: INTERVAL.from + 1, finished: INTERVAL.from + 1, pr: PR(51), pr_state: pr({ state: "open", behind: true }), merge_policy: null, merged_stored: "no" });
+    const behindAuto = source({ run_id: "b3", ticket: 52, first_attempt: INTERVAL.from + 1, finished: INTERVAL.from + 1, pr: PR(52), pr_state: pr({ state: "open", behind: true }), merge_policy: "auto", merged_stored: "no" });
+    const funnel = ticketFunnel({ interval: INTERVAL, sources: [behindHuman, behindNoPolicy, behindAuto], queue: [] });
+    expect(funnel.ready_awaiting_approval).toEqual({ prs: 1, tickets: 1 });
+    expect(funnel.blockers).toEqual(expect.arrayContaining([
+      { reason: "behind (human merge)", cls: "human_decision", prs: 1, tickets: 1 },
+      { reason: "behind", cls: "technical_repair", prs: 1, tickets: 1 },
+    ]));
+    expect(funnel.blockers).toHaveLength(2);
+  });
+
   it("separates ready PRs, github-only merges, closed PRs and recoveries; idle slot stays unknown without an idle-slot event", () => {
     const ready = source({ run_id: "r1", ticket: 20, first_attempt: INTERVAL.from + 1, finished: INTERVAL.from + 1, pr: PR(20), pr_state: pr({ state: "open" }), merge_policy: "human_review", merged_stored: "no" });
     const draft = source({ run_id: "r2", ticket: 21, first_attempt: INTERVAL.from + 1, finished: INTERVAL.from + 1, pr: PR(21), pr_state: pr({ state: "open", draft: true }), merge_policy: "human_review", merged_stored: "no" });

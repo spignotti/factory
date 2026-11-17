@@ -437,31 +437,6 @@ describe("queue schedule", () => {
     }
   });
 
-  it("asks for a decision when update-branch conflicts and does not retry it", async () => {
-    const repo = createFixtureRepo();
-    const factoryHome = home();
-    const github = new FakeGitHub();
-    await updateQueue(factoryHome, repo, () => undefined);
-    const runId = "20261112-120000-be11ad";
-    mkdirSync(join(factoryHome, "runs", runId), { recursive: true });
-    writeFileSync(
-      join(factoryHome, "runs", runId, "result.json"),
-      JSON.stringify(outcome(repo, 7, "done", "", { run_id: runId, pr: "https://github.test/pull/7", branch: "factory/7-goal" })) + "\n",
-    );
-    github.factoryPrs.push({ number: 7, branch: "factory/7-goal", files: ["src/a.js"] });
-    github.prStates.set("7", { state: "open", draft: false, behind: true });
-    let attempts = 0;
-    github.updateBranch = async () => {
-      attempts += 1;
-      throw new Error("merge conflict in src/a.js");
-    };
-    const cap = capture();
-    await runQueue({ factoryHome, github, repo, slots: 1, pollMs: 15, start: () => { throw new Error("should not start"); }, io: cap.io });
-    expect(attempts).toBe(1);
-    expect(cap.err()).toContain("update-branch #7 needs a decision");
-    expect(cap.out()).toContain("queue: idle");
-  });
-
   it("refuses needs-decision, factory-proposal and an empty task at queue add", async () => {
     const repo = createFixtureRepo();
     const factoryHome = home();
