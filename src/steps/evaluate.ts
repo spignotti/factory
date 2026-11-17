@@ -159,11 +159,11 @@ export function criteriaFindings(criteria: CriterionResult[]): Finding[] {
     .map((c) => ({ severity: "bug" as const, file: "", line: 0, claim: `acceptance criterion ${c.id} is not met in the running app`, evidence: c.note, fix: "", checkable: "no" as const, check_sketch: "" }));
 }
 
-/** Verdicts on the evaluator's prior open findings, in code: found again → still open, else resolved. */
-export function priorVerdicts(prior: TrackedFinding[], findings: Finding[]): ReviewOutput["prior"] {
+/** Verdicts on a code-decided reviewer's prior open findings: found again → still open, else resolved. */
+export function priorVerdicts(prior: TrackedFinding[], findings: Finding[], reviewer: "evaluator" | "config" = "evaluator"): ReviewOutput["prior"] {
   const now = new Set(findings.map(findingKey));
   return prior
-    .filter((f) => f.reviewer === "evaluator" && f.status === "open")
+    .filter((f) => f.reviewer === reviewer && f.status === "open")
     .map((f) => ({
       finding_id: f.id,
       verdict: now.has(findingKey(f)) ? (f.response?.status === "wontfix" ? ("reject_wontfix" as const) : ("still_open" as const)) : ("resolved" as const),
