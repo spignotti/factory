@@ -34,6 +34,7 @@ import { openFindings } from "./merge.js";
 import { budgetFrom, budgetTo, continuationLimit, missingPlanQuotes, openPrProblem } from "./recovery.js";
 import { buildOutcome, buildProvenance, implementModel, nextAttempt, stopFor, writeRecoveryNote } from "./outcome.js";
 import { closableTarget, isFailedExit, keepsPr, reportFailure } from "./failure.js";
+import { reportNoChange } from "./no-change.js";
 import { MAX_RESOLVER_TURNS, type ResolverStop, resolverTurn } from "./resolve.js";
 import { newState, readState, type RunState, saveState } from "./state.js";
 import { WatchdogAbort } from "./watchdog.js";
@@ -261,6 +262,10 @@ interface Outcome {
   questions_posted?: boolean;
   /** Whether a failed run's comment, label swap and PR close reached the issue. Set only when a report was attempted. */
   failure_reported?: boolean;
+  /** A done run with nothing to change (no commits, no PR): the run's own account of why. */
+  no_change?: string;
+  /** Whether the no-change comment and label swap reached the issue. Set only when a report was attempted. */
+  no_change_reported?: boolean;
   /** The plan's stated assumptions. */
   assumptions?: string[];
   skipped_gates?: string[];
@@ -344,6 +349,7 @@ class RunFrame {
     for (const cleanup of this.cleanups.splice(0)) await cleanup().catch(() => undefined);
     await this.postQuestions();
     await this.reportFailure();
+    await this.reportNoChange();
     // Service logs and browser captures are written by child processes: redact them in place.
     if (this.events.secrets.length) redactTree(this.runDir, (t) => this.events.redact(t), ["worktree", "home", "plan-base", "eval-base"]);
     let result: RunResult;
@@ -396,6 +402,26 @@ class RunFrame {
     } catch (e) {
       this.out.failure_reported = false;
       this.events.emit({ step: "run", event: "progress", data: { failure_reported: false, issue, error: (e as Error).message.slice(0, 300) } });
+    }
+  }
+
+  /**
+   * A done run that changed nothing tells its issue (comment, `needs-input` on, `factory-ready` off):
+   * without this the ticket stays open and ready, and nobody knows why. A GitHub failure is recorded
+   * (`no_change_reported: false`) and never changes the result; the queue worker retries. A `--no-pr`
+   * run writes nothing to GitHub.
+   */
+  private async reportNoChange(): Promise<void> {
+    const issue = this.state?.task.issue;
+    const summary = this.out.no_change;
+    if (this.out.result !== "done" || this.out.pr || summary === undefined || issue === undefined || !this.deps || this.state?.no_pr) return;
+    try {
+      await reportNoChange(this.deps.github, this.repoDir, issue, this.runId, summary, (t) => this.events.redact(t));
+      this.out.no_change_reported = true;
+      this.events.emit({ step: "run", event: "progress", data: { no_change_reported: true, issue } });
+    } catch (e) {
+      this.out.no_change_reported = false;
+      this.events.emit({ step: "run", event: "progress", data: { no_change_reported: false, issue, error: (e as Error).message.slice(0, 300) } });
     }
   }
 
@@ -457,6 +483,8 @@ class RunFrame {
       ...(out.questions ? { questions: out.questions } : {}),
       ...(out.questions_posted !== undefined ? { questions_posted: out.questions_posted } : {}),
       ...(out.failure_reported !== undefined ? { failure_reported: out.failure_reported } : {}),
+      ...(out.no_change !== undefined ? { no_change: out.no_change } : {}),
+      ...(out.no_change_reported !== undefined ? { no_change_reported: out.no_change_reported } : {}),
       ...(out.assumptions?.length ? { assumptions: out.assumptions } : {}),
       ...(out.skipped_gates?.length ? { skipped_gates: out.skipped_gates } : {}),
       branch: out.branch,
@@ -938,7 +966,7 @@ async function advance(f: RunFrame, ctx: RunContext, opts: { noPr: boolean; star
   delete st.continuation;
   if (st.step === "finalize" && fin.result === "done") st.step = "finished";
   sync();
-  f.set({ result: fin.result, reason: fin.reason, stop: fin.cause && fin.result === "needs_human" ? stopFor(fin.cause) : undefined, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
+  f.set({ result: fin.result, reason: fin.reason, stop: fin.cause && fin.result === "needs_human" ? stopFor(fin.cause) : undefined, risk: fin.risk.risk, risk_reasons: fin.risk.reasons, merge_policy: fin.mergePolicy, pr: fin.pr, rounds: st.rounds, no_change: fin.noChange, ...(fin.skipped_gates?.length ? { skipped_gates: fin.skipped_gates } : {}) });
   const tech = fin.result === "needs_human" ? fin.technical : undefined;
   if (!tech) return;
   const stop: ResolverStop = { reason: fin.reason, gates: tech.gates, ...(tech.findings?.length ? { findings: tech.findings } : {}) };

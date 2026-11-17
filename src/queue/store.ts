@@ -90,6 +90,14 @@ export interface QueueEntry {
     /** Failed report attempts; the worker stops retrying at a bound and logs it. */
     attempts?: number;
   };
+  /**
+   * The run ended `done` with no commits and no PR: the change was already on the base. `summary` is
+   * the run's own account of why. `posted` turns true once the issue has the comment and the label swap
+   * (`needs-input` on, `factory-ready` off); until then the worker retries, at a bound. A posted entry starts a
+   * fresh run when the issue is admissible again (a person added what was missing and set
+   * `factory-ready`). The entry stays `done`. Cleared on release.
+   */
+  no_change?: { summary: string; posted: boolean; /** Failed report attempts; the worker stops retrying at a bound. */ attempts?: number };
 }
 
 export interface QueueFile {
@@ -131,6 +139,7 @@ const EntrySchema = z.object({
   release_id: z.string().optional(),
   awaiting_answer: z.object({ questions: z.array(z.string()), posted: z.boolean() }).optional(),
   failed: z.object({ reported: z.boolean(), keep_pr: z.boolean().optional(), attempts: z.number().int().min(0).optional() }).optional(),
+  no_change: z.object({ summary: z.string(), posted: z.boolean(), attempts: z.number().int().min(0).optional() }).optional(),
 });
 
 const FileSchema = z.object({

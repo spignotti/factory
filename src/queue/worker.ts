@@ -14,6 +14,7 @@ import { closableTarget, isFailedExit, keepsPr, reportFailure } from "../pipelin
 import { newRunId } from "../pipeline/run.js";
 import { continuationLimit } from "../pipeline/recovery.js";
 import { suspendSlackMs } from "../pipeline/watchdog.js";
+import { reportNoChange } from "../pipeline/no-change.js";
 import { postQuestions } from "../pipeline/questions.js";
 import { listRuns, type RunRecord } from "../runs.js";
 import { ESTIMATED_WINDOW_MS } from "../agents/models.js";
@@ -297,6 +298,7 @@ function park(entry: QueueEntry, reason: string, runId?: string, blockedRuns?: s
   delete entry.window_estimated;
   delete entry.awaiting_answer;
   delete entry.failed;
+  delete entry.no_change;
 }
 
 /**
@@ -351,6 +353,7 @@ function releaseToPending(entry: QueueEntry, keepRun = false): void {
   delete entry.window_estimated;
   delete entry.awaiting_answer;
   delete entry.failed;
+  delete entry.no_change;
 }
 
 /**
@@ -393,9 +396,13 @@ export function applyOutcome(q: QueueFile, entry: QueueEntry, result: RunResult,
   if (result.pr) entry.pr = result.pr;
   delete entry.pid;
   delete entry.awaiting_answer;
+  delete entry.no_change;
   if (result.result === "done") {
     entry.status = "done";
     entry.delivery = deliveryForDone(result);
+    // Done without commits and without a PR: the run told the issue (or tried to). The entry stays done;
+    // it starts a fresh run when a person sets `factory-ready` again, like an answered question.
+    if (result.no_change !== undefined && !result.pr) entry.no_change = { summary: result.no_change, posted: result.no_change_reported === true };
     delete entry.reason;
     delete entry.blocked_by;
     return "done";
@@ -1315,21 +1322,25 @@ function noteRunId(entry: QueueEntry, tracked: Tracked | undefined): void {
 
 /**
  * A ticket parked on posted questions starts a FRESH run once its issue is admissible again: a human
- * answered, removed `needs-input` and set `factory-ready`. Read from the open-issue list discovery
+ * answered, removed `needs-input` and set `factory-ready`. A done ticket that had nothing to change
+ * (`no_change`, told on the issue) restarts the same way once a person added the missing detail. Read from the open-issue list discovery
  * already fetched; no extra GitHub call. A human pause holds it; a stale label pause is cleared.
  */
 function releaseAnswered(q: QueueFile, open: Issue[], repo: string, ctx: TickCtx): void {
   const byNumber = new Map(open.map((i) => [i.number, i]));
   for (const entry of q.entries) {
-    if (entry.status !== "parked" || !entry.awaiting_answer?.posted) continue;
+    const nothingToChange = entry.status === "done" && entry.no_change?.posted === true;
+    if (!nothingToChange && (entry.status !== "parked" || !entry.awaiting_answer?.posted)) continue;
     const issue = byNumber.get(entry.issue);
     if (!issue || admissionBlock(issue)) continue;
     const pauseKey = { runId: entry.run_id, repo, issue: entry.issue };
     if (hasRealPause(ctx.factoryHome, pauseKey)) continue;
     clearPause(ctx.factoryHome, pauseKey);
     releaseToPending(entry);
+    // A finished entry starts over: its old delivery (no PR) says nothing about the fresh run.
+    if (nothingToChange) delete entry.delivery;
     freshBudgets(entry);
-    ctx.io.out(`queue: #${entry.issue} pending (questions answered, fresh run)\n`);
+    ctx.io.out(`queue: #${entry.issue} pending (${nothingToChange ? "factory-ready again after nothing to change, fresh run" : "questions answered, fresh run"})\n`);
   }
 }
 
@@ -1352,6 +1363,27 @@ async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx,
     }
   }
   return posted;
+}
+
+/**
+ * Done entries whose "nothing to change" report did not reach the issue: post it again (comment once
+ * per run, then the label swap), at most MAX_REPORT_ATTEMPTS times. Network on the snapshot; the caller
+ * records the outcome under the queue lock.
+ */
+async function reportPendingNoChange(snap: QueueFile, repo: string, ctx: TickCtx): Promise<Map<number, boolean>> {
+  const outcome = new Map<number, boolean>();
+  for (const entry of snap.entries) {
+    if (entry.status !== "done" || !entry.no_change || entry.no_change.posted || !entry.run_id || (entry.no_change.attempts ?? 0) >= MAX_REPORT_ATTEMPTS) continue;
+    try {
+      await withTimeout(reportNoChange(ctx.github, repo, entry.issue, entry.run_id, entry.no_change.summary), ctx.netTimeoutMs, `no change #${entry.issue}`);
+      outcome.set(entry.issue, true);
+    } catch (e) {
+      // Like a failure report: logged and bounded, it does not put the worker into backoff.
+      outcome.set(entry.issue, false);
+      ctx.io.err(`factory: reporting no change on #${entry.issue} failed: ${(e as Error).message.slice(0, 200)}\n`);
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -1475,6 +1507,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const questionsPosted = ctx.releaseHold ? new Set<number>() : await postPendingQuestions(snap, repo, ctx, noteFailure);
+  const noChangeReported = ctx.releaseHold ? new Map<number, boolean>() : await reportPendingNoChange(snap, repo, ctx);
   const failuresReported = ctx.releaseHold ? new Map<number, boolean>() : await reportPendingFailures(snap, repo, ctx);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
@@ -1573,6 +1606,17 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       if (!entry?.awaiting_answer) continue;
       entry.awaiting_answer.posted = true;
       ctx.io.out(`queue: #${issue} questions posted on the issue\n`);
+    }
+    for (const [issue, ok] of noChangeReported) {
+      const entry = q.entries.find((e) => e.issue === issue && e.status === "done" && e.no_change && !e.no_change.posted);
+      if (!entry?.no_change) continue;
+      if (ok) {
+        entry.no_change.posted = true;
+        ctx.io.out(`queue: #${issue} nothing to change reported on the issue\n`);
+        continue;
+      }
+      entry.no_change.attempts = (entry.no_change.attempts ?? 0) + 1;
+      if (entry.no_change.attempts >= MAX_REPORT_ATTEMPTS) ctx.io.err(`factory: gave up reporting nothing to change on #${issue} after ${MAX_REPORT_ATTEMPTS} attempts; \`factory queue add ${issue}\` starts it again\n`);
     }
     for (const [issue, ok] of failuresReported) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.failed && !e.failed.reported);
