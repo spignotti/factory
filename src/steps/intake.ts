@@ -4,6 +4,7 @@ import { extractJson } from "../agents/runner.js";
 import type { GitHub, IssueComment } from "../gh.js";
 import { type AgentCall, callAgent, type RunContext, type Task } from "../pipeline/context.js";
 import { trustedComment } from "../pipeline/questions.js";
+import { repoHasStandards } from "../standards.js";
 import { asData, rolePrompt } from "../prompts.js";
 import { normalizeRetryNote, type Plan, QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import { planStep } from "./plan.js";
@@ -127,7 +128,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
     const json = extractJson(res.text);
     const questions = QuestionsSchema.safeParse(json);
     if (questions.success) return { kind: "needs_input", questions: questions.data.questions };
-    const v = validatePlan(json, { repo: ctx.repo, sourceText: ctx.task.text, labels: ctx.task.labels });
+    const v = validatePlan(json, { repo: ctx.repo, sourceText: ctx.task.text, labels: ctx.task.labels, hasStandards: repoHasStandards(ctx.repoDir) });
     if (v.ok) {
       attempts.push({ n, ok: true });
       ctx.events.emit({ step: "intake", event: "progress", role: "plan_normalize", data: { attempts, ...(v.warnings ? { warnings: v.warnings } : {}) } });
@@ -144,7 +145,7 @@ async function normalize(ctx: IntakeContext): Promise<PlanOutcome | { kind: "inv
 export async function obtainPlan(ctx: IntakeContext, effort: PlanEffort): Promise<PlanOutcome> {
   const block = extractPlanBlock(ctx.task.text);
   if (block !== undefined) {
-    const v = validatePlan(block, { repo: ctx.repo, labels: ctx.task.labels });
+    const v = validatePlan(block, { repo: ctx.repo, labels: ctx.task.labels, hasStandards: repoHasStandards(ctx.repoDir) });
     if (v.ok) return { kind: "plan", plan: v.plan, source: "block" };
   }
   let level: "medium" | "high" = effort === "medium" ? "medium" : "high";

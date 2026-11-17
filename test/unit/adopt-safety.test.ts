@@ -88,7 +88,7 @@ describe("adopt: legacy safety", () => {
     const text: Record<string, string> = { ".cursor/config/bugbot.yaml": "version: 1\ninstructions: |\n  Flag RLS changes.\n", ".bugbot/config.json": '{"autofix": false}' };
     const r = classifyLegacy({ ...base, files, read: (p) => text[p] });
     expect(r.removed.map((i) => i.path)).toEqual([".bugbot/config.json", ".cursor/BUGBOT.md"]);
-    expect(r.proposed).toEqual([{ path: ".cursor/config/bugbot.yaml", reason: expect.stringMatching(/review instructions: move them into \.factory\/review-rules\.md/) }]);
+    expect(r.proposed).toEqual([{ path: ".cursor/config/bugbot.yaml", reason: expect.stringMatching(/review instructions: move them into \.factory\/standards\.md by hand/) }]);
   });
 
   it("review-bot rules are appended to review-rules.md, headings demoted, duplicates of the standard skipped", () => {

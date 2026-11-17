@@ -204,7 +204,7 @@ export function classifyLegacy(input: {
       p = `operator tooling (${root}/ has skills or scripts, e.g. ops commands); never deleted, check by hand`;
       r = undefined;
     } else if (r && isReviewFile(f) && !f.endsWith(".md") && REVIEW_RULE_KEYS.test(input.read?.(f) ?? "")) {
-      p = `${r}; holds review instructions: move them into .factory/review-rules.md by hand, then delete`;
+      p = `${r}; holds review instructions: move them into .factory/standards.md by hand (judgment rules under ## Severity, deterministic rules under ## Rules), then delete`;
       r = undefined;
     }
     if (!r && !p) continue;

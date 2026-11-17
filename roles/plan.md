@@ -8,6 +8,7 @@ Sensitive paths: add risk:true edge-case tests.
 human_only_paths (CI workflows, .factory/): plan a change there only when the task requires it. List each such file in its
 package's files and in protected_changes [{"file","change","reason"}] with the exact change. The declaration authorizes the run
 to make that change. Add no criterion about obtaining or recording approval.
+Repo review rules belong in .factory/standards.md (judgment rules under `## Severity`, deterministic rules under `## Rules`); once it exists, .factory/review-rules.md and .factory/checklist.md are ignored, so plan the change there.
 Never weaken a check, policy or protection there (removing or relaxing checks, paths, limits, merge policy or secrets): that is human work, put it in out_of_scope.
 Acceptance criteria and out_of_scope must not be stricter than the task. If the task explicitly allows something, the plan keeps it allowed. Do not write "only <path>" unless the task text says that restriction.
 red_green: omit it for a normal bug. Set "red_green":"not_applicable" and "red_green_reason" (why the repro cannot fail on base) only for test-stabilization, or when the task is labeled factory:red-green-not-applicable. That loosens the red-green proof and the reason is required.

@@ -10,7 +10,8 @@ import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
 import { DEPENDENCY_GLOBS } from "../paths.js";
 import { matchesAny, planReviewNotes } from "../schemas/plan.js";
 import { type Reviewer, type ReviewOutput, ReviewOutputSchema } from "../schemas/review.js";
-import { CHECKLIST_REL, resolveStandards, REVIEW_RULES_REL, rulesForReview, STANDARDS_REL, type ResolvedStandards } from "../standards.js";
+import { CHECKLIST_REL, deadRuleFileFindings, resolveStandards, REVIEW_RULES_REL, rulesForReview, STANDARDS_REL, type ResolvedStandards } from "../standards.js";
+import { priorVerdicts } from "./evaluate.js";
 import { skippedSecurityGates, type GateReport, visibleGateDetail } from "./gates.js";
 
 
@@ -213,6 +214,21 @@ async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput,
   throw new InvalidOutputError(`${s.role} output invalid: ${errors.join("; ")}`);
 }
 
+/**
+ * `config` reviewer, decided in code: a legacy rule file edited while `standards.md` exists is dead
+ * config (whether or not `review.checklist` is on), so the run must not end with the rules in a file no reviewer reads. Deleting one is fine.
+ */
+function legacyRuleFilesReview(ctx: RunContext, input: ReviewInput, files: string): ReviewOutput | undefined {
+  const edited = files
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .filter(([status, path]) => status && !status.startsWith("D") && path)
+    .map(([, path]) => path!);
+  const findings = existsSync(join(ctx.worktree, STANDARDS_REL)) ? deadRuleFileFindings(edited) : [];
+  const prior = priorVerdicts(input.findings, findings, "config");
+  return findings.length || prior.length ? { reviewer: "config", prior, findings } : undefined;
+}
+
 /** One review round: every active reviewer in its own session. */
 export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<ReviewOutput[]> {
   // Stage and diff once: parallel reviewers must not touch the git index concurrently.
@@ -243,6 +259,11 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
   const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
   if (failed) throw failed.reason;
   const outputs = settled.flatMap((s) => (s as PromiseFulfilledResult<ReviewOutput[]>).value);
+  const config = legacyRuleFilesReview(ctx, input, diffs.files);
+  if (config) {
+    writeJson(ctx, `review-${input.round}-config.json`, config);
+    outputs.push(config);
+  }
   ctx.events.emit({ step: "review", event: "step_finished", data: { round: input.round } });
   return outputs;
 }

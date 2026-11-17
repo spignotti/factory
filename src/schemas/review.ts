@@ -1,11 +1,12 @@
 import { z } from "zod";
 
 /**
+ * `evaluator` and `config` are decided in code (browser evidence, rule files), not by a model session.
  * `checklist` is the old name of the standards reviewer. It stays in the input enum so the
  * published JSON schema still lists the alias; parsing maps it to `standards`.
  */
 export const ReviewerSchema = z
-  .enum(["plan", "simplicity", "security", "standards", "checklist", "evaluator"])
+  .enum(["plan", "simplicity", "security", "standards", "checklist", "evaluator", "config"])
   .transform((v) => (v === "checklist" ? "standards" : v));
 export type Reviewer = z.infer<typeof ReviewerSchema>;
 

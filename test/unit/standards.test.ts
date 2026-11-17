@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { standardsMigrateCommand } from "../../src/commands/standards.js";
 import { checklistSignals } from "../../src/harden/signals.js";
 import { parseRepoConfig } from "../../src/schemas/repo.js";
-import { migrateStandards, readRepoStandards, resolveStandards, standardsDoctorNotes, standardsOldIgnored, standardsRemovalDeclared, standardsRemovals, STANDARDS_DEPRECATION, unmarkedStandardRules } from "../../src/standards.js";
+import { deadRuleFileFindings, migrateStandards, readRepoStandards, resolveStandards, standardsDoctorNotes, standardsOldIgnored, standardsRemovalDeclared, standardsRemovals, STANDARDS_DEPRECATION, unmarkedStandardRules } from "../../src/standards.js";
 
 const io = () => {
   let out = "";
@@ -162,5 +162,18 @@ describe("standards.md", () => {
     expect(standardsRemovals(afterSeverity, afterSeverity.replace("- keep\n", ""))).toEqual([{ kind: "rule", text: "keep" }]);
     const markerInSeverity = "# Standards\n\n## Severity\n\n- tests pass <!-- check: unit -->\n\n## Rules\n\n- keep\n";
     expect(standardsRemovals(markerInSeverity, markerInSeverity.replace(" <!-- check: unit -->", ""))).toEqual([]);
+  });
+});
+
+describe("deadRuleFileFindings", () => {
+  it("is a bug per edited legacy file, naming standards.md and its sections; other files give none", () => {
+    const found = deadRuleFileFindings([".factory/checklist.md", ".factory/review-rules.md", ".factory/standards.md", "src/a.ts"]);
+    expect(found.map((f) => f.file)).toEqual([".factory/checklist.md", ".factory/review-rules.md"]);
+    for (const f of found) {
+      expect(f.severity).toBe("bug");
+      expect(f.claim).toContain("ignored because .factory/standards.md exists");
+      expect(f.fix).toMatch(/## Severity[\s\S]*## Rules/);
+    }
+    expect(deadRuleFileFindings([".factory/standards.md"])).toEqual([]);
   });
 });

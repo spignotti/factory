@@ -12,7 +12,8 @@
         "security",
         "standards",
         "checklist",
-        "evaluator"
+        "evaluator",
+        "config"
       ]
     },
     "prior": {

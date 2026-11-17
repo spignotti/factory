@@ -1,6 +1,7 @@
 import picomatch from "picomatch";
 import { z } from "zod";
 import { topoOrder } from "../pipeline/dag.js";
+import { LEGACY_RULE_FILES, STANDARDS_REL } from "../standards.js";
 import type { RepoConfig } from "./repo.js";
 
 export const PackageSchema = z.object({
@@ -141,6 +142,8 @@ export interface PlanValidationContext {
   sourceText?: string;
   /** Issue labels. `factory:red-green-not-applicable` opts into the red-green exemption and needs a reason. */
   labels?: string[];
+  /** The repo has `.factory/standards.md`: a plan must not edit the legacy rule files it makes dead. */
+  hasStandards?: boolean;
 }
 
 /**
@@ -252,6 +255,18 @@ export function validatePlan(raw: unknown, ctx: PlanValidationContext): PlanVali
   for (const p of plan.packages) {
     for (const f of p.files) {
       if (isProtected(f, human) && !declared.has(f)) errors.push(`${p.id}: ${f} is under human_only_paths; declare it in protected_changes (file, change, reason) or drop it`);
+    }
+  }
+
+  if (ctx.hasStandards) {
+    for (const p of plan.packages) {
+      for (const f of p.files.filter((x) => LEGACY_RULE_FILES.includes(x))) {
+        const c = plan.protected_changes.find((x) => x.file === f);
+        const what = c ? `${c.change} ${c.reason}` : `${p.title} ${p.description}`;
+        if (!/\b(delet|remov)/i.test(what)) {
+          errors.push(`${p.id}: ${f} is ignored because ${STANDARDS_REL} exists; plan the rules into ${STANDARDS_REL} instead (judgment rules under \`## Severity\`, deterministic rules under \`## Rules\`), and only delete ${f}`);
+        }
+      }
     }
   }
 
