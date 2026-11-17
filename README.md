@@ -1043,7 +1043,7 @@ reviews the actual delta before approval. Post-push continuations have a persist
 pause, drain, the work window, withdrawn admission or a changed issue prevent automatic starts. Missing
 checkpoints and uncommitted work fail the ticket. Red CI goes through finalize to the resolver with the
 failed-check logs of the exact SHA, bounded and redacted. A base conflict goes to the resolver. Spent
-continuations fail the ticket. Human-policy PRs may still receive `gh pr update-branch` without any new approval.
+continuations fail the ticket. The worker never runs `gh pr update-branch` on a done PR that waits for a human merge: the new head would lack the `factory=success` status and fail the required `done` check. `factory queue batch --pr <repo>#<n> --apply` updates the base, revalidates and merges it when a person decides.
 A run whose `events.jsonl` has not grown for `limits.stall_minutes` × 2 is stopped (SIGTERM) and failed.
 `--until HH:MM` is an optional local-time window: no new starts after it, and live runs finish.
 

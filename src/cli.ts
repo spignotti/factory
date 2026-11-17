@@ -89,8 +89,9 @@ const USAGE = `usage:
                a second start against the same factory home is refused;
                factory run --issue N --no-notify --run-id <id>; parks needs_human/needs_input/failed/base_red;
                transient needs_human (state.json transient flag) requeues at most twice;
-               updates every behind factory PR (one at a time; a failure is retried, it does not stop the others);
-               --until is local time: no new starts after it; stays until then while a factory PR is behind or waiting for auto-merge; live runs finish;
+               never updates a PR branch (a new head would lack the factory status): a PR that waits for a human merge stays as it is
+               and factory queue batch --pr <repo>#<n> --apply updates, revalidates and merges it;
+               --until is local time: no new starts after it; stays until then while an automatic-merge factory PR is open or waiting for auto-merge; live runs finish;
                --stay keeps this worker up when idle and backs off; it does not raise the slot cap.
                The worker does not run improve.)
   factory release stage (--from <built-tree> | --source <checkout>) [--commit <sha>] [--ref <tag>]
