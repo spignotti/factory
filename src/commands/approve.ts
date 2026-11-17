@@ -10,6 +10,11 @@ export interface ApproveOptions {
   json: boolean;
 }
 
+/** A PR number or a pull request URL. A branch name would also work for `gh pr view`, but is not a reviewed, fixed target. */
+export function isPrRef(pr: string): boolean {
+  return /^\d+$/.test(pr) || /^https?:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+\/pull\/\d+(\/\S*)?$/.test(pr);
+}
+
 /** Commit status `factory=success` for a pull request a person reviewed. Never called from the pipeline. */
 export async function approveCommand(opts: ApproveOptions, deps: { github: GitHub }, io: Io): Promise<number> {
   const refuse = (reason: string): number => {
@@ -17,9 +22,14 @@ export async function approveCommand(opts: ApproveOptions, deps: { github: GitHu
     else io.err(`factory: not approved: ${reason}\n`);
     return 1;
   };
+  if (!isPrRef(opts.pr)) return refuse(`${opts.pr} is not a pull request number or URL`);
   const status = await deps.github.prStatus(opts.repo, opts.pr);
   if (status.state !== "open") return refuse(`${opts.pr} is ${status.state}, not open`);
   if (status.draft) return refuse(`${opts.pr} is a draft; mark it ready for review first`);
+  // approveHead posts to the repository of the --repo checkout, so a PR URL of another repository (fork, upstream) must not pass.
+  const target = await deps.github.repoSlug(opts.repo);
+  if (!status.repo) return refuse(`could not read the repository of ${opts.pr}`);
+  if (status.repo.toLowerCase() !== target.toLowerCase()) return refuse(`${opts.pr} belongs to ${status.repo}, but --repo is ${target}`);
   const head = status.headSha?.toLowerCase();
   if (!head || !status.headBranch) return refuse(`could not read the head of ${opts.pr}`);
   if (!head.startsWith(opts.sha.toLowerCase())) return refuse(`head of ${opts.pr} is ${head}, not ${opts.sha}; review the new commits and approve that SHA`);

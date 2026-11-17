@@ -210,6 +210,8 @@ export interface GitHub {
    * commit is one of `expect.heads` (commits the run produced): a human push or another branch is never closed.
    */
   closePr(repoDir: string, pr: string, expect: { branch: string; heads: string[] }): Promise<boolean>;
+  /** `owner/name` of the repository `gh` resolves for this checkout: the one `repos/{owner}/{repo}` calls hit. */
+  repoSlug(repoDir: string): Promise<string>;
   /** `status` / `gc`: current state of a factory PR. */
   prStatus(repoDir: string, pr: string): Promise<PrStatus>;
   /**
@@ -434,6 +436,8 @@ export interface PrStatus {
   headSha?: string;
   /** Head branch name (`headRefName`). Absent when this status was stored without it. */
   headBranch?: string;
+  /** `owner/name` the pull request belongs to, from its URL. Absent when this status was stored without it. */
+  repo?: string;
 }
 
 function factoryIssueNumber(branch: string): number | undefined {
@@ -552,8 +556,14 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
   return runs;
 }
 
+/** `owner/name` from `https://<host>/<owner>/<name>/pull/<n>`; undefined for anything else. */
+function prRepoFromUrl(url: string | undefined): string | undefined {
+  const m = /^https?:\/\/[^/\s]+\/([^/\s]+\/[^/\s]+)\/pull\/\d+/.exec(url ?? "");
+  return m?.[1];
+}
+
 /**
- * `gh pr view --json state,isDraft,headRefOid,headRefName,mergeable,mergeStateStatus,statusCheckRollup`.
+ * `gh pr view --json state,isDraft,url,headRefOid,headRefName,mergeable,mergeStateStatus,statusCheckRollup`.
  * CI uses `aggregateCheckRuns`: latest event of each name, draft hold, skipped `done` is not green.
  * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
  */
@@ -562,6 +572,7 @@ export function prStatusFromView(raw: {
   isDraft?: boolean;
   headRefOid?: string;
   headRefName?: string;
+  url?: string;
   mergeable?: string | null;
   mergeStateStatus?: string | null;
   statusCheckRollup?: unknown;
@@ -580,6 +591,7 @@ export function prStatusFromView(raw: {
     conflicting: mergeable === "CONFLICTING" || mergeState === "DIRTY",
     ...(raw.headRefOid ? { headSha: raw.headRefOid } : {}),
     ...(raw.headRefName ? { headBranch: raw.headRefName } : {}),
+    ...(prRepoFromUrl(raw.url) ? { repo: prRepoFromUrl(raw.url) } : {}),
   };
 }
 
@@ -1123,8 +1135,12 @@ export class GhCli implements GitHub {
   }
 
   async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
-    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,headRefOid,headRefName,mergeable,mergeStateStatus,statusCheckRollup"]));
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,url,headRefOid,headRefName,mergeable,mergeStateStatus,statusCheckRollup"]));
     return prStatusFromView(j);
+  }
+
+  async repoSlug(repoDir: string): Promise<string> {
+    return (await gh(repoDir, ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
   }
 
   async updateBranch(repoDir: string, pr: string): Promise<void> {
@@ -1449,6 +1465,12 @@ export class FakeGitHub implements GitHub {
     const created = this.prs.find((p) => p.url === pr || p.url.endsWith(`/${pr}`));
     if (!created) throw new Error(`PR ${pr} not found`);
     return this.prStates.get(created.url) ?? { state: "open", draft: created.draft };
+  }
+
+  /** What `repoSlug` answers. */
+  slug = "acme/widgets";
+  async repoSlug(): Promise<string> {
+    return this.slug;
   }
 
   /** `gh pr update-branch` stand-in: records the call, clears `behind`, and moves the branch head so a test can read the new SHA. */

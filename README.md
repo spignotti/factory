@@ -773,7 +773,7 @@ name without the workflow name, so branch protection (or a ruleset) must require
 Actions; requiring `factory / done` blocks every PR, because nothing ever reports that context
 (`factory doctor --repo .` warns about it). When no check runs in CI, do not require `done`.
 
-**Pull requests that did not come through the factory** (Dependabot, hand-written) never get the `factory=success` status, so `done` stays red. After a person has reviewed one, `factory approve --repo <path> --pr <n|url> --sha <reviewed-head>` posts the status. It refuses a PR that is closed or a draft, a head that no longer matches `--sha` (a push after the review is never approved), and a `factory/*` branch (the pipeline approves those itself; use `factory resume` or `factory queue batch`).
+**Pull requests that did not come through the factory** (Dependabot, hand-written) never get the `factory=success` status, so `done` stays red. After a person has reviewed one, `factory approve --repo <path> --pr <n|url> --sha <reviewed-head>` posts the status. It refuses a PR that is closed or a draft, a PR of another repository than `--repo` (`--pr` is a number or a pull request URL), a head that no longer matches `--sha` (a push after the review is never approved), and a `factory/*` branch (the pipeline approves those itself; use `factory resume` or `factory queue batch`).
 
 **Draft pull requests.** The pipeline opens every PR as a draft and pushes while it is still a draft.
 It marks the PR ready only after the local gates have passed and that push has finished, and only
