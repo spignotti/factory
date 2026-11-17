@@ -1367,23 +1367,23 @@ async function postPendingQuestions(snap: QueueFile, repo: string, ctx: TickCtx,
 
 /**
  * Done entries whose "nothing to change" report did not reach the issue: post it again (comment once
- * per run, then the label swap). Network on the snapshot; the caller marks the posted ones under the
- * queue lock.
+ * per run, then the label swap), at most MAX_REPORT_ATTEMPTS times. Network on the snapshot; the caller
+ * records the outcome under the queue lock.
  */
-async function reportPendingNoChange(snap: QueueFile, repo: string, ctx: TickCtx, noteFailure: () => void): Promise<Set<number>> {
-  const posted = new Set<number>();
+async function reportPendingNoChange(snap: QueueFile, repo: string, ctx: TickCtx): Promise<Map<number, boolean>> {
+  const outcome = new Map<number, boolean>();
   for (const entry of snap.entries) {
-    if (entry.status !== "done" || !entry.no_change || entry.no_change.posted || !entry.run_id) continue;
+    if (entry.status !== "done" || !entry.no_change || entry.no_change.posted || !entry.run_id || (entry.no_change.attempts ?? 0) >= MAX_REPORT_ATTEMPTS) continue;
     try {
-      const done = await withTimeout(reportNoChange(ctx.github, repo, entry.issue, entry.run_id, entry.no_change.summary), ctx.netTimeoutMs, `no change #${entry.issue}`);
-      if (done === "answered") ctx.io.out(`queue: #${entry.issue} answered before the label swap; labels left as they are\n`);
-      posted.add(entry.issue);
+      await withTimeout(reportNoChange(ctx.github, repo, entry.issue, entry.run_id, entry.no_change.summary), ctx.netTimeoutMs, `no change #${entry.issue}`);
+      outcome.set(entry.issue, true);
     } catch (e) {
-      noteFailure();
+      // Like a failure report: logged and bounded, it does not put the worker into backoff.
+      outcome.set(entry.issue, false);
       ctx.io.err(`factory: reporting no change on #${entry.issue} failed: ${(e as Error).message.slice(0, 200)}\n`);
     }
   }
-  return posted;
+  return outcome;
 }
 
 /**
@@ -1507,7 +1507,7 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
   const unpark = ctx.releaseHold ? new Set<number>() : unparkReady(snap, ctx.factoryHome);
   const win = await windowWaits(snap, repo, ctx, noteFailure);
   const questionsPosted = ctx.releaseHold ? new Set<number>() : await postPendingQuestions(snap, repo, ctx, noteFailure);
-  const noChangeReported = ctx.releaseHold ? new Set<number>() : await reportPendingNoChange(snap, repo, ctx, noteFailure);
+  const noChangeReported = ctx.releaseHold ? new Map<number, boolean>() : await reportPendingNoChange(snap, repo, ctx);
   const failuresReported = ctx.releaseHold ? new Map<number, boolean>() : await reportPendingFailures(snap, repo, ctx);
   const waiting = new Set<number>();
   const parkAfter = new Map<number, string>();
@@ -1607,11 +1607,16 @@ async function tickRepo(ctx: TickCtx, repo: string): Promise<boolean> {
       entry.awaiting_answer.posted = true;
       ctx.io.out(`queue: #${issue} questions posted on the issue\n`);
     }
-    for (const issue of noChangeReported) {
+    for (const [issue, ok] of noChangeReported) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "done" && e.no_change && !e.no_change.posted);
       if (!entry?.no_change) continue;
-      entry.no_change.posted = true;
-      ctx.io.out(`queue: #${issue} nothing to change reported on the issue\n`);
+      if (ok) {
+        entry.no_change.posted = true;
+        ctx.io.out(`queue: #${issue} nothing to change reported on the issue\n`);
+        continue;
+      }
+      entry.no_change.attempts = (entry.no_change.attempts ?? 0) + 1;
+      if (entry.no_change.attempts >= MAX_REPORT_ATTEMPTS) ctx.io.err(`factory: gave up reporting nothing to change on #${issue} after ${MAX_REPORT_ATTEMPTS} attempts; \`factory queue add ${issue}\` starts it again\n`);
     }
     for (const [issue, ok] of failuresReported) {
       const entry = q.entries.find((e) => e.issue === issue && e.status === "parked" && e.failed && !e.failed.reported);

@@ -102,7 +102,7 @@ export async function reportFailure(
 ): Promise<void> {
   const marker = failureMarker(runId);
   const existing: IssueComment[] = await github.issueComments(repoDir, issue);
-  if (!existing.some((c) => c.body.includes(marker))) await github.commentIssue(repoDir, issue, redact(renderFailureComment(runId, reason, target)));
+  if (!existing.some((c) => c.body.includes(marker))) await github.commentIssue(repoDir, issue, redact(renderFailureComment(runId, redact(reason), target)));
   await github.addIssueLabel(repoDir, issue, FACTORY_FAILED_LABEL_SPEC);
   const current = await github.getIssue(repoDir, issue);
   if (current.labels.includes(FACTORY_READY_LABEL)) await github.removeIssueLabel(repoDir, issue, FACTORY_READY_LABEL);

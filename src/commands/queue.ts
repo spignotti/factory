@@ -151,6 +151,9 @@ export async function queueAdd(
   }
   try {
     await updateQueue(opts.factoryHome, opts.repo, (q) => {
+      // A done entry that told its issue "nothing to change" would restart on its own once factory-ready is
+      // back; this add is that restart, so the new entry replaces it instead of racing it.
+      q.entries = q.entries.filter((e) => !(e.status === "done" && e.no_change && opts.issues.includes(e.issue)));
       const active = new Set(q.entries.filter((e) => e.status !== "done").map((e) => e.issue));
       const dup = opts.issues.filter((n) => active.has(n));
       if (dup.length) throw new Error(`already queued: ${dup.map((n) => `#${n}`).join(", ")}`);

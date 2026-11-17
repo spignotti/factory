@@ -8,9 +8,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RunResult } from "../../src/events.js";
 import { FakeGitHub } from "../../src/gh.js";
+import { queueAdd } from "../../src/commands/queue.js";
+import { reportFailure } from "../../src/pipeline/failure.js";
 import { noChangeMarker, reportNoChange } from "../../src/pipeline/no-change.js";
 import { loadQueueByKey, repoQueueKey, updateQueue, type QueueEntry } from "../../src/queue/store.js";
-import { runQueue, type StartRunRequest } from "../../src/queue/worker.js";
+import { MAX_REPORT_ATTEMPTS, runQueue, type StartRunRequest } from "../../src/queue/worker.js";
 import { createFixtureRepo, FIXTURES } from "../helpers/repo.js";
 import { runScenario, SECRET } from "../helpers/scenario.js";
 
@@ -56,6 +58,28 @@ describe("a done run with nothing to change", () => {
     await reportNoChange(r.github, r.repo, 7, r.runId, "again");
     expect(r.github.comments.get(7)).toHaveLength(1);
     expect(r.github.issues.get(7)!.labels).toEqual(["prio:high", "needs-input"]);
+  });
+
+  it("a comment already there never stands in for the label swap", async () => {
+    const r = await runScenario({ script: "clean.json", options: { issue: 7 }, github: withIssue, steps: alreadyThere });
+    // The comment landed but the label swap did not; a person replied and the labels are as before.
+    r.github.issues.get(7)!.labels = ["factory-ready", "prio:high"];
+    r.github.comments.get(7)!.push({ author: "maintainer", association: "OWNER", body: "Thanks, looking.", created_at: "2026-11-16T10:00:00Z" });
+    await reportNoChange(r.github, r.repo, 7, r.runId, "again");
+    expect(r.github.comments.get(7)).toHaveLength(2);
+    expect(r.github.issues.get(7)!.labels).toEqual(["prio:high", "needs-input"]);
+  });
+
+  it("redacts before truncating: a secret that crosses the cut is still masked", async () => {
+    const redact = (t: string) => t.split(SECRET).join("[redacted]");
+    const summary = `${"x".repeat(1485)}${SECRET}`;
+    const gh = new FakeGitHub();
+    withIssue(gh);
+    await reportNoChange(gh, "/repo", 7, "run-1", summary, redact);
+    expect(gh.comments.get(7)![0]!.body).not.toContain("fake-foo");
+    const reason = `${"y".repeat(1485)}${SECRET}`;
+    await reportFailure(gh, "/repo", 7, "run-2", reason, { pr: null }, redact);
+    expect(gh.comments.get(7)![1]!.body).not.toContain("fake-foo");
   });
 
   it("a GitHub error is recorded and never changes the done result", async () => {
@@ -104,7 +128,7 @@ async function queueSetup() {
     });
     return loadQueueByKey(home, await repoQueueKey(repo))!.entries.find((e) => e.issue === 7)!;
   };
-  return { gh, starts, work };
+  return { gh, starts, work, repo, home };
 }
 
 describe("queue: a done run with nothing to change", () => {
@@ -149,6 +173,44 @@ describe("queue: a done run with nothing to change", () => {
     await s.work({});
     expect(s.gh.comments.get(7)).toHaveLength(1);
     expect(s.starts).toHaveLength(1);
+  });
+
+  it("a comment and a reply without the label swap: the retry swaps the labels and nothing restarts", async () => {
+    const s = await queueSetup();
+    s.gh.issueLabelError = "HTTP 502";
+    const first = await s.work({ no_change: "already merged", no_change_reported: false });
+    expect(first.no_change).toMatchObject({ posted: false, attempts: 1 });
+    s.gh.comments.get(7)!.push({ author: "maintainer", association: "OWNER", body: "On it.", created_at: "2026-11-16T10:00:00Z" });
+    s.gh.issueLabelError = null;
+    const second = await s.work({});
+    expect(second).toMatchObject({ status: "done", no_change: { posted: true } });
+    expect(s.starts).toHaveLength(1);
+    expect(s.gh.issues.get(7)!.labels).toEqual(["needs-input"]);
+  });
+
+  it("stops retrying the report after MAX_REPORT_ATTEMPTS", async () => {
+    const s = await queueSetup();
+    s.gh.commentError = "HTTP 502";
+    let entry = await s.work({ no_change: "already merged", no_change_reported: false });
+    for (let i = 1; i < MAX_REPORT_ATTEMPTS + 2; i++) entry = await s.work({});
+    expect(entry.no_change).toMatchObject({ posted: false, attempts: MAX_REPORT_ATTEMPTS });
+    s.gh.commentError = null;
+    await s.work({});
+    expect(s.gh.comments.get(7) ?? []).toHaveLength(0);
+    expect(s.starts).toHaveLength(1);
+  }, 120_000);
+
+  it("queue add for the issue replaces the done entry instead of racing it", async () => {
+    const s = await queueSetup();
+    await s.work(() => (s.gh.issues.get(7)!.labels = ["needs-input"], { no_change: "already merged", no_change_reported: true }));
+    s.gh.issues.get(7)!.labels = ["factory-ready"];
+    const out: string[] = [];
+    expect(await queueAdd({ factoryHome: s.home, repo: s.repo, issues: [7], github: s.gh }, { out: (t) => void out.push(t), err: (t) => void out.push(t) })).toBe(0);
+    const q = loadQueueByKey(s.home, await repoQueueKey(s.repo))!;
+    expect(q.entries.filter((e) => e.issue === 7)).toMatchObject([{ status: "pending" }]);
+    const entry = await s.work({});
+    expect(s.starts).toHaveLength(2);
+    expect(entry.no_change).toBeUndefined();
   });
 
   it("a plain done run without the field is unchanged", async () => {

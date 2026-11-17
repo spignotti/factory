@@ -1,6 +1,6 @@
 import type { GitHub, IssueComment } from "../gh.js";
 import { FACTORY_READY_LABEL, NEEDS_INPUT_LABEL } from "../queue/store.js";
-import { NEEDS_INPUT_LABEL_SPEC, trustedComment } from "./questions.js";
+import { NEEDS_INPUT_LABEL_SPEC } from "./questions.js";
 
 /** Longest summary quoted on the issue. The full text stays in the run's handoffs and result.json. */
 const MAX_SUMMARY = 1500;
@@ -44,8 +44,9 @@ export function renderNoChangeComment(runId: string, summary: string): string {
  * (skipped when this run's marker is already there), `needs-input` on, `factory-ready` off. The issue
  * stays open for a person to confirm and close. Each step is safe to repeat, so a caller retries the
  * whole sequence after any failure. Throws on the first GitHub error. `redact` applies to the comment
- * body: the summary is model output. Like `postQuestions`, a retry that finds a trusted reply after
- * this run's comment stops before the labels and returns `answered`: the swap would undo it.
+ * body: the summary is model output, and it is redacted before it is truncated so a secret that
+ * crosses the cut is still masked. The label swap always happens, even when someone has already
+ * commented: only a person setting `factory-ready` again (with `needs-input` removed) restarts the ticket.
  */
 export async function reportNoChange(
   github: GitHub,
@@ -54,14 +55,11 @@ export async function reportNoChange(
   runId: string,
   summary: string,
   redact: (text: string) => string = (t) => t,
-): Promise<"posted" | "answered"> {
+): Promise<void> {
   const marker = noChangeMarker(runId);
   const existing: IssueComment[] = await github.issueComments(repoDir, issue);
-  const told = existing.findIndex((c) => c.body.includes(marker));
-  if (told < 0) await github.commentIssue(repoDir, issue, redact(renderNoChangeComment(runId, summary)));
-  else if (existing.slice(told + 1).some((c) => trustedComment(c) && !c.minimized && !c.body.includes("<!-- factory:"))) return "answered";
+  if (!existing.some((c) => c.body.includes(marker))) await github.commentIssue(repoDir, issue, redact(renderNoChangeComment(runId, redact(summary))));
   await github.addIssueLabel(repoDir, issue, NEEDS_INPUT_LABEL_SPEC);
   const current = await github.getIssue(repoDir, issue);
   if (current.labels.includes(FACTORY_READY_LABEL)) await github.removeIssueLabel(repoDir, issue, FACTORY_READY_LABEL);
-  return "posted";
 }
