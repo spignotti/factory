@@ -162,6 +162,7 @@ Agent path ([docs/BOTS.md](docs/BOTS.md#choosing-the-path-for-a-code-change)).
 | `factory run --repo <p> (--issue n \| --plan f \| --text f)` | one task → one PR (`--plan-effort`, `--no-pr`, `--wait`, `--no-notify`) |
 | `factory resume <run-id>` | continue after a human fix |
 | `factory abandon <run-id>` | mark abandoned, drop the lock and worktree; keep result and logs |
+| `factory approve --repo <p> --pr <n\|url> --sha <head>` | after a human review, post `factory=success` on the head of a PR that did not come through the factory |
 | `factory doctor [--repo <p>] [--ping] [--services]` | setup, node (path/version), provider policy, models per role, agent context, CI stub, tool baseline ([docs/BASELINE.md](docs/BASELINE.md)), disk/inodes |
 | `factory queue add\|list\|remove\|run` | ordered issue queue per repo; one worker (`--slots`, `--until`, `--stay`) |
 | `factory status` / `stats` / `gc` | runs (running, queued, stalled, orphaned), queues, PRs, `--since` finished runs, period stats, cleanup |
@@ -771,6 +772,8 @@ stub, not a reusable workflow, because doctor hashes this file and branch protec
 name without the workflow name, so branch protection (or a ruleset) must require `done` from GitHub
 Actions; requiring `factory / done` blocks every PR, because nothing ever reports that context
 (`factory doctor --repo .` warns about it). When no check runs in CI, do not require `done`.
+
+**Pull requests that did not come through the factory** (Dependabot, hand-written) never get the `factory=success` status, so `done` stays red. After a person has reviewed one, `factory approve --repo <path> --pr <n|url> --sha <reviewed-head>` posts the status. It refuses a PR that is closed or a draft, a head that no longer matches `--sha` (a push after the review is never approved), and a `factory/*` branch (the pipeline approves those itself; use `factory resume` or `factory queue batch`).
 
 **Draft pull requests.** The pipeline opens every PR as a draft and pushes while it is still a draft.
 It marks the PR ready only after the local gates have passed and that push has finished, and only

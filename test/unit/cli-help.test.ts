@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { main, usageFor } from "../../src/cli.js";
 import { createFixtureRepo } from "../helpers/repo.js";
 
-const COMMANDS = ["run", "resume", "abandon", "standards", "doctor", "queue", "status", "stats", "gc", "gates", "eval", "experiment", "adopt", "improve", "harden", "audit", "notify", "ci-stub", "release"];
+const COMMANDS = ["run", "resume", "abandon", "approve", "standards", "doctor", "queue", "status", "stats", "gc", "gates", "eval", "experiment", "adopt", "improve", "harden", "audit", "notify", "ci-stub", "release"];
 
 describe("subcommand --help", () => {
   it("prints that command's usage and exits 0 for --help and -h", async () => {

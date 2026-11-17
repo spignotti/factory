@@ -14,6 +14,7 @@ import { Context7Client } from "./docs/context7.js";
 import { evalCommand, experimentCommand, validateCommand } from "./commands/eval.js";
 import { gatesCommand, type Io } from "./commands/gates.js";
 import { abandonRun } from "./commands/abandon.js";
+import { approveCommand } from "./commands/approve.js";
 import { autoGc, gcCommand, resumesBaseRedAfterGc } from "./commands/gc.js";
 import { statsCommand } from "./commands/stats.js";
 import { queueCommand } from "./commands/queue.js";
@@ -49,6 +50,10 @@ const USAGE = `usage:
               (after a human fix: commits it, merges base, re-runs gates, continues; updates the PR)
   factory abandon <run-id> [--json]
               (marks the run abandoned, releases a stale lock, removes its worktree; result and logs stay)
+  factory approve --repo <path> --pr <n|url> --sha <head-sha> [--json]
+              (posts commit status factory=success on the head of a pull request that did not come through the
+               factory (Dependabot, hand-written), after a person reviewed it; --sha is the reviewed head, at least
+               7 hex characters, and a push since then is refused; refuses a closed or draft PR and factory/* branches)
   factory standards migrate --repo <path> [--json]
               (writes .factory/standards.md from checklist.md and review-rules.md, severity first and ## Rules last; does not delete the old files)
   factory doctor [--repo <path>] [--profile <file>] [--ping] [--services] [--json]
@@ -601,6 +606,14 @@ export async function main(argv: string[], io: Io = defaultIo, deps: CliDeps = {
       if (values.json) io.out(JSON.stringify(outcome) + "\n");
       else (outcome.ok ? io.out : io.err)(`${outcome.message}\n`);
       return outcome.ok ? 0 : 1;
+    }
+    if (command === "approve") {
+      const { values } = parseArgs({ args: rest, options: { repo: { type: "string" }, pr: { type: "string" }, sha: { type: "string" }, json: { type: "boolean", default: false } } });
+      if (!values.repo || !values.pr || !values.sha || !/^[0-9a-f]{7,40}$/i.test(values.sha)) {
+        io.err(usageFor(["approve"]));
+        return 2;
+      }
+      return await approveCommand({ repo: resolve(values.repo), pr: values.pr, sha: values.sha, json: values.json }, { github: new GhCli() }, io);
     }
     if (command === "gc") {
       const { values } = parseArgs({

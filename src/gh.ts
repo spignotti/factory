@@ -185,8 +185,9 @@ export interface GitHub {
   /** `gh pr merge --disable-auto`. Not an error when auto-merge was not enabled. */
   disableAutoMerge(repoDir: string, pr: string): Promise<void>;
   /**
-   * Commit status `factory` = success on a SHA the run verified. The required `done` job
-   * fails a pull request without it, including while this process is not running.
+   * Commit status `factory` = success on a SHA the run verified (or, for `factory approve`, that a
+   * person reviewed). The required `done` job fails a pull request without it, including while this
+   * process is not running.
    */
   approveHead(repoDir: string, sha: string): Promise<void>;
   /**
@@ -429,6 +430,10 @@ export interface PrStatus {
   behind?: boolean;
   /** `mergeable` CONFLICTING or `mergeStateStatus` DIRTY. */
   conflicting?: boolean;
+  /** Full head commit SHA (`headRefOid`). Absent when this status was stored without it. */
+  headSha?: string;
+  /** Head branch name (`headRefName`). Absent when this status was stored without it. */
+  headBranch?: string;
 }
 
 function factoryIssueNumber(branch: string): number | undefined {
@@ -548,13 +553,15 @@ function rollupToCheckRuns(nodes: unknown[]): CheckRunView[] {
 }
 
 /**
- * `gh pr view --json state,isDraft,mergeable,mergeStateStatus,statusCheckRollup`.
+ * `gh pr view --json state,isDraft,headRefOid,headRefName,mergeable,mergeStateStatus,statusCheckRollup`.
  * CI uses `aggregateCheckRuns`: latest event of each name, draft hold, skipped `done` is not green.
  * An empty rollup is `none`, never green. `mergeStateStatus` UNSTABLE is red unless a draft hold is still pending.
  */
 export function prStatusFromView(raw: {
   state?: string;
   isDraft?: boolean;
+  headRefOid?: string;
+  headRefName?: string;
   mergeable?: string | null;
   mergeStateStatus?: string | null;
   statusCheckRollup?: unknown;
@@ -571,6 +578,8 @@ export function prStatusFromView(raw: {
     ci,
     behind: mergeState === "BEHIND",
     conflicting: mergeable === "CONFLICTING" || mergeState === "DIRTY",
+    ...(raw.headRefOid ? { headSha: raw.headRefOid } : {}),
+    ...(raw.headRefName ? { headBranch: raw.headRefName } : {}),
   };
 }
 
@@ -1114,7 +1123,7 @@ export class GhCli implements GitHub {
   }
 
   async prStatus(repoDir: string, pr: string): Promise<PrStatus> {
-    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,mergeable,mergeStateStatus,statusCheckRollup"]));
+    const j = JSON.parse(await gh(repoDir, ["pr", "view", pr, "--json", "state,isDraft,headRefOid,headRefName,mergeable,mergeStateStatus,statusCheckRollup"]));
     return prStatusFromView(j);
   }
 
@@ -1302,7 +1311,7 @@ export class FakeGitHub implements GitHub {
     const number = this.prs.length + 1;
     const url = `https://github.test/pr/${number}`;
     this.prs.push({ ...req, url });
-    this.prStates.set(url, { state: "open", draft: req.draft });
+    this.prStates.set(url, { state: "open", draft: req.draft, headBranch: req.head });
     // A finished run drops its slot; the PR it just opened still occupies those files.
     if (req.head.startsWith("factory/")) this.factoryPrs.push({ number, branch: req.head, files: committedDiffNames(req.repoDir, req.base) });
     for (const label of req.labels ?? []) await this.addLabel(req.repoDir, url, label);
