@@ -156,15 +156,23 @@ async function changedFrom(cwd: string, from: string): Promise<string[]> {
 export async function reviewedOnBase(cwd: string, base: string, reviewed: string): Promise<string | undefined> {
   const mb = await mergeBase(cwd, base);
   if (await isAncestor(cwd, mb, reviewed)) return reviewed;
-  // Exit 1 (conflict) throws; the first output line is the merged tree otherwise.
-  const tree = await git(cwd, ["merge-tree", "--write-tree", reviewed, mb]).catch(() => undefined);
+  // Exit 1 (conflict) throws; the first output line is the merged tree otherwise. A timeout is rethrown
+  // (as in gitOk); any other failure falls back to a full review, which only reviews more.
+  const tree = await git(cwd, ["merge-tree", "--write-tree", reviewed, mb]).catch((e: unknown) => {
+    if (isCommandTimeout(e)) throw e;
+    return undefined;
+  });
   return tree?.split("\n")[0]?.trim() || undefined;
 }
 
 /** Files the change touched since `reviewed`, on the current base; every changed file when that cannot be told apart. */
 export async function changedSinceReview(cwd: string, base: string, reviewed: string): Promise<string[]> {
   const from = await reviewedOnBase(cwd, base, reviewed);
-  return from ? changedFrom(cwd, from) : changedFiles(cwd, base);
+  if (from) return changedFrom(cwd, from);
+  // No clean reviewed state on this base: also count files changed since `reviewed` itself, so a file
+  // the change put back to the base version still reopens its findings.
+  const sinceReviewed = await changedFrom(cwd, reviewed).catch(() => []);
+  return [...new Set([...(await changedFiles(cwd, base)), ...sinceReviewed])].sort();
 }
 
 /** `A\tpath`, `M\tpath`, `D\tpath` lines of the change since the merge base with `base` (stage first so new files are A). */
