@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { prStatusFromView } from "../../src/gh.js";
 
 describe("prStatusFromView", () => {
+  it("carries the head SHA and branch when the view has them", () => {
+    expect(prStatusFromView({ state: "OPEN", headRefOid: "abc1234", headRefName: "dependabot/x" })).toMatchObject({ headSha: "abc1234", headBranch: "dependabot/x" });
+    expect(prStatusFromView({ state: "OPEN" })).not.toHaveProperty("headSha");
+    expect(prStatusFromView({ state: "OPEN", url: "https://github.com/Acme/widgets/pull/7" })).toMatchObject({ repo: "Acme/widgets" });
+    expect(prStatusFromView({ state: "OPEN", url: "not a url" })).not.toHaveProperty("repo");
+  });
+
   it("reads draft, failing checks, behind and conflicting from a gh pr view payload", () => {
     expect(
       prStatusFromView({
