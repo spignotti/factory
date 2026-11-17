@@ -175,8 +175,11 @@ describe("factory resume", () => {
     const r3 = await resumeScenario(r, { script: "clean.json", steps: roles("review_plan", "review_simplicity", "pr_writer") });
     expect(r3.result).toMatchObject({ result: "done", pr: r.result.pr });
     expect(r3.runner.calls.map((c) => c.role)).toEqual(["review_plan", "review_simplicity", "pr_writer"]);
-    expect(r3.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("incremental_diff");
-    expect(r3.runner.calls.find((c) => c.role === "review_plan")?.prompt).toContain("divide");
+    // The reviewed commit conflicts with the new base, so the reviewer reads the whole change against it.
+    const reviewed = r3.runner.calls.find((c) => c.role === "review_plan")!.prompt;
+    expect(reviewed).not.toContain("incremental_diff");
+    expect(reviewed).toContain("+export function multiply(a, b) {");
+    expect(reviewed).not.toContain("+export function divide(a, b) {");
     expect(r3.github.prs).toHaveLength(1); // no second PR
     expect(r3.github.updates.map((u) => u.pr)).toEqual([r.result.pr]);
     expect(r3.github.readied).toEqual([r.result.pr]);

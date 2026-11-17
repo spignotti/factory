@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { extractJson } from "../agents/runner.js";
 import { type ChecklistItem } from "../checklist.js";
 import { InvalidOutputError } from "../agents/models.js";
-import { changedFiles, diffText, git, stageAll } from "../git.js";
+import { changedFiles, diffFrom, diffText, git, nameStatus, reviewedOnBase, stageAll } from "../git.js";
 import { callAgent, type RunContext, writeJson, writeRunFile } from "../pipeline/context.js";
 import type { TrackedFinding } from "../pipeline/merge.js";
 import { asData, taskBlock, asset, rolePrompt } from "../prompts.js";
@@ -118,10 +118,12 @@ const shapeOf = (s: ReviewSession): string =>
   `${REVIEW_SHAPE.replace("<name>", s.reviewer)}\nWithout prior findings, "prior" is [].`;
 
 interface Diffs {
-  /** Since base: round 1 and reviewers joining later. */
+  /** Since base: round 1, reviewers joining later, and rounds whose last review cannot be moved onto the base. */
   full: () => Promise<string>;
-  /** Since the HEAD reviewed last round. */
-  incremental: string;
+  /** Since the HEAD reviewed last round, moved onto the current base. Absent when this round reviews in full. */
+  incremental?: string;
+  /** Status of every file of the change against the current base (`A\tpath`, `M\tpath`, `D\tpath`). */
+  files: string;
 }
 
 function gateResultsJson(gates: GateReport, continued: boolean): string {
@@ -139,7 +141,7 @@ function gateResultsJson(gates: GateReport, continued: boolean): string {
 }
 
 async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInput, diffs: Diffs, plan: ReviewerPlan): Promise<string> {
-  const continued = input.round > 1 && input.lastReviewedSha && reviewedBefore(ctx, s.reviewer, input.round);
+  const continued = diffs.incremental !== undefined && reviewedBefore(ctx, s.reviewer, input.round);
   if (!continued) {
     return [
       asData("plan", JSON.stringify(ctx.plan, null, 2)),
@@ -158,7 +160,9 @@ async function reviewPrompt(ctx: RunContext, s: ReviewSession, input: ReviewInpu
   return [
     `Round ${input.round}. Give a verdict for every prior finding below and report only new findings.`,
     priorBlock(input, s),
-    asData("incremental_diff", diffs.incremental),
+    asData("incremental_diff", diffs.incremental!),
+    // The incremental diff shows a file this change added in an earlier round as modified.
+    `Files of the whole change against the current base (A = added by this change, M = modified, D = deleted). A file listed as A is new in this change, even where the incremental diff shows it as modified.\n${asData("change_files", diffs.files.trim() || "none")}`,
     asData("gate_results", gateResultsJson(input.gates, true)),
     shapeOf(s),
   ].join("\n\n");
@@ -227,11 +231,13 @@ export async function reviewRound(ctx: RunContext, input: ReviewInput): Promise<
     },
   });
   const skip = ctx.repo.review.skip_paths;
-  const first = input.round === 1 || !input.lastReviewedSha;
-  const incremental = await diffText(ctx.worktree, first ? ctx.baseSha : input.lastReviewedSha!, skip);
+  // Measured against the current base: base commits merged into the branch after the last review
+  // (finalize, resume, resolver, update-branch) are not this change and never reach the reviewers.
+  const since = input.round > 1 && input.lastReviewedSha ? await reviewedOnBase(ctx.worktree, ctx.baseSha, input.lastReviewedSha) : undefined;
+  const incremental = since ? await diffFrom(ctx.worktree, since, skip) : undefined;
   let full: Promise<string> | undefined;
-  const diffs: Diffs = { incremental, full: () => (full ??= first ? Promise.resolve(incremental) : diffText(ctx.worktree, ctx.baseSha, skip)) };
-  writeRunFile(ctx, `diff-${input.round}.patch`, incremental);
+  const diffs: Diffs = { incremental, full: () => (full ??= diffText(ctx.worktree, ctx.baseSha, skip)), files: await nameStatus(ctx.worktree, ctx.baseSha) };
+  writeRunFile(ctx, `diff-${input.round}.patch`, incremental ?? (await diffs.full()));
   // allSettled: a failing reviewer must not leave its sibling running after the run has finished.
   const settled = await Promise.allSettled(sessions.map((s) => runSession(ctx, s, input, diffs, plan)));
   const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");

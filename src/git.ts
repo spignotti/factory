@@ -138,9 +138,38 @@ function lines(out: string): string[] {
 
 /** Files changed since the merge base with `base`: commits, working tree and untracked files. */
 export async function changedFiles(cwd: string, base: string): Promise<string[]> {
-  const mb = await mergeBase(cwd, base);
-  const tracked = lines(await git(cwd, ["diff", "--no-renames", "--name-only", mb]));
+  return changedFrom(cwd, await mergeBase(cwd, base));
+}
+
+/** Files that differ from `from` (a commit or a tree): working tree and untracked files. */
+async function changedFrom(cwd: string, from: string): Promise<string[]> {
+  const tracked = lines(await git(cwd, ["diff", "--no-renames", "--name-only", from]));
   return [...new Set([...tracked, ...(await untracked(cwd))])].sort();
+}
+
+/**
+ * The reviewed state of the change, moved onto the base HEAD now builds on: `reviewed` itself when it
+ * already contains the merge base of HEAD and `base`, otherwise a tree of `reviewed` with that merge base
+ * merged in. Diffing the worktree against it shows only what the change itself did since `reviewed`,
+ * never base commits merged into the branch after that review. Undefined when that merge conflicts.
+ */
+export async function reviewedOnBase(cwd: string, base: string, reviewed: string): Promise<string | undefined> {
+  const mb = await mergeBase(cwd, base);
+  if (await isAncestor(cwd, mb, reviewed)) return reviewed;
+  // Exit 1 (conflict) throws; the first output line is the merged tree otherwise.
+  const tree = await git(cwd, ["merge-tree", "--write-tree", reviewed, mb]).catch(() => undefined);
+  return tree?.split("\n")[0]?.trim() || undefined;
+}
+
+/** Files the change touched since `reviewed`, on the current base; every changed file when that cannot be told apart. */
+export async function changedSinceReview(cwd: string, base: string, reviewed: string): Promise<string[]> {
+  const from = await reviewedOnBase(cwd, base, reviewed);
+  return from ? changedFrom(cwd, from) : changedFiles(cwd, base);
+}
+
+/** `A\tpath`, `M\tpath`, `D\tpath` lines of the change since the merge base with `base` (stage first so new files are A). */
+export async function nameStatus(cwd: string, base: string): Promise<string> {
+  return git(cwd, ["diff", "--no-renames", "--name-status", await mergeBase(cwd, base)]);
 }
 
 /** Why a changed file does not count toward the diff line limits. */
@@ -330,8 +359,12 @@ export async function repoDiffStat(
 
 /** Unified diff since the merge base (stage first so new files are included). */
 export async function diffText(cwd: string, base: string, exclude: string[] = []): Promise<string> {
-  const mb = await mergeBase(cwd, base);
-  return git(cwd, ["diff", "--no-renames", mb, "--", ".", ...exclude.map((p) => `:(exclude,glob)${p}`)]);
+  return diffFrom(cwd, await mergeBase(cwd, base), exclude);
+}
+
+/** Unified diff of the worktree against `from` (a commit or a tree), taken as is. */
+export async function diffFrom(cwd: string, from: string, exclude: string[] = []): Promise<string> {
+  return git(cwd, ["diff", "--no-renames", from, "--", ".", ...exclude.map((p) => `:(exclude,glob)${p}`)]);
 }
 
 /** Unified diff of the given files since the merge base. */

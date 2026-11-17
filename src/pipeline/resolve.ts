@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { ProviderWindowError, TransientAgentError } from "../agents/models.js";
 import { extractJson } from "../agents/runner.js";
-import { commitAll, commitMerge, diffText, discardChanges, gitOk, headSha, stageAll, startMerge } from "../git.js";
+import { commitAll, commitMerge, diffFrom, diffText, discardChanges, gitOk, headSha, stageAll, startMerge } from "../git.js";
 import { Interrupted } from "../interrupt.js";
 import { asData, rolePrompt, taskBlock } from "../prompts.js";
 import { EnvMissing } from "../services.js";
@@ -113,7 +113,8 @@ export async function resolverTurn(ctx: RunContext, stop: ResolverStop, turn: nu
   try {
     if (stop.merge) ({ merging, conflicts } = await startMerge(ctx.worktree, stop.merge.sha, author));
     if (!merging) await stageAll(ctx.worktree);
-    const diff = await diffText(ctx.worktree, ctx.baseSha);
+    // While the base is being merged, the change is what the worktree adds on top of that base.
+    const diff = merging && stop.merge!.base ? await diffFrom(ctx.worktree, stop.merge!.sha) : await diffText(ctx.worktree, ctx.baseSha);
     ctx.events.emit({ step: "resolve", event: "step_started", data: { turn, reason: stop.reason.slice(0, 300), conflicts } });
     let text = prompt(ctx, stop, { diff, conflicts, previous });
     let reply: z.infer<typeof ReplySchema> | undefined;

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,7 @@ import { runQueue } from "../../src/queue/worker.js";
 import { FIXTURES, commitFile } from "../helpers/repo.js";
 import { resumeScenario, runScenario } from "../helpers/scenario.js";
 
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
 const body = readFileSync(join(FIXTURES, "tasks/multiply.md"), "utf8");
 const issue = { number: 7, title: "Multiply", body, labels: ["factory-ready"] };
 
@@ -76,8 +78,31 @@ describe("bounded post-push continuation", () => {
     expect(next.result.result).toBe("done");
     expect(next.runner.calls.map((c) => c.role)).toEqual(["review_plan", "review_simplicity", "pr_writer"]);
     expect(next.runner.calls[0]!.prompt).toContain("incremental_diff");
+    // The merged base commits are not this change.
+    expect(next.runner.calls[0]!.prompt).not.toContain("src/new-base.js");
     expect(readState(r.runDir).reviewed_sha).not.toBe(prior);
     expect(r.github.updatedBranches).toEqual([]);
+  });
+
+  it("a file this run created stays new against the base when a later round edits it after a base merge", async () => {
+    const r = await runScenario({ script: "clean.json" });
+    const st = readState(r.runDir);
+    const wt = st.worktree!;
+    // A later round of the run edits the test file it created in round 1.
+    const test = readFileSync(join(wt, "test/multiply.test.js"), "utf8");
+    writeFileSync(join(wt, "test/multiply.test.js"), `${test}// edited in a later round\n`);
+    git(wt, "-c", "user.name=factory-bot", "-c", "user.email=bot@test", "commit", "-qam", "fix: edit own test");
+    commitFile(r.repo, "src/new-base.js", "export const fresh = true;\n", "feat: base moved");
+    st.continuation = { kind: "base", sha: st.approved_sha! };
+    writeFileSync(join(r.runDir, "state.json"), JSON.stringify(st));
+    const next = await resumeScenario(r, { script: "clean.json", steps: (s) => s.filter((x) => ["review_plan", "review_simplicity", "pr_writer"].includes(x.role)) });
+    expect(next.result.result).toBe("done");
+    const prompt = next.runner.calls[0]!.prompt;
+    expect(prompt).toContain("incremental_diff");
+    expect(prompt).toContain("edited in a later round");
+    expect(prompt).not.toContain("src/new-base.js");
+    // The incremental diff shows the file as modified; the reviewer is told it is new in this change.
+    expect(prompt).toContain("A\ttest/multiply.test.js");
   });
 
   it("leaves uncommitted work untouched during automatic recovery", async () => {
