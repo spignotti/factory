@@ -216,7 +216,7 @@ async function runSession(ctx: RunContext, s: ReviewSession, input: ReviewInput,
 
 /**
  * `config` reviewer, decided in code: a legacy rule file edited while `standards.md` exists is dead
- * config, so the run must not end with the rules in a file no reviewer reads. Deleting one is fine.
+ * config (whether or not `review.checklist` is on), so the run must not end with the rules in a file no reviewer reads. Deleting one is fine.
  */
 function legacyRuleFilesReview(ctx: RunContext, input: ReviewInput, files: string): ReviewOutput | undefined {
   const edited = files
@@ -224,8 +224,7 @@ function legacyRuleFilesReview(ctx: RunContext, input: ReviewInput, files: strin
     .map((line) => line.split("\t"))
     .filter(([status, path]) => status && !status.startsWith("D") && path)
     .map(([, path]) => path!);
-  const live = ctx.repo.review.checklist && existsSync(join(ctx.worktree, STANDARDS_REL));
-  const findings = live ? deadRuleFileFindings(edited) : [];
+  const findings = existsSync(join(ctx.worktree, STANDARDS_REL)) ? deadRuleFileFindings(edited) : [];
   const prior = priorVerdicts(input.findings, findings, "config");
   return findings.length || prior.length ? { reviewer: "config", prior, findings } : undefined;
 }

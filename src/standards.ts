@@ -17,6 +17,12 @@ import type { Finding } from "./schemas/review.js";
 export const STANDARDS_REL = ".factory/standards.md";
 export const CHECKLIST_REL = ".factory/checklist.md";
 export const REVIEW_RULES_REL = ".factory/review-rules.md";
+export const LEGACY_RULE_FILES = [CHECKLIST_REL, REVIEW_RULES_REL];
+
+/** Whether the repo at `dir` has `standards.md`, which makes the legacy rule files dead. */
+export function repoHasStandards(dir: string): boolean {
+  return existsSync(join(dir, STANDARDS_REL));
+}
 
 /** One line, shared by the read path and `factory doctor --repo`. */
 export const STANDARDS_DEPRECATION =
@@ -32,14 +38,14 @@ export function standardsOldIgnored(paths: readonly string[]): string {
 
 /** Review finding for a legacy rule file that a run edited while `standards.md` exists: the rules never reach a reviewer. */
 export function deadRuleFileFindings(edited: readonly string[]): Finding[] {
-  return [CHECKLIST_REL, REVIEW_RULES_REL]
+  return LEGACY_RULE_FILES
     .filter((path) => edited.includes(path))
     .map((path) => ({
       severity: "bug" as const,
       file: path,
       line: 0,
       claim: `${path} is ignored because ${STANDARDS_REL} exists; rules written there never reach a reviewer`,
-      evidence: `${STANDARDS_REL} is the only rules file read when it exists; ${path} is legacy (see ${STANDARDS_DEPRECATION})`,
+      evidence: standardsOldIgnored([path]),
       fix: `Move the rules into ${STANDARDS_REL}: judgment rules (how a reviewer weighs a finding) under \`## Severity\`, deterministic rules (one checkable list item each) under \`## Rules\`. Then delete ${path}. The plan must declare ${STANDARDS_REL} as a protected change when .factory/ is human-only.`,
       checkable: "no" as const,
       check_sketch: "",

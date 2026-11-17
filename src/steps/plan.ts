@@ -4,7 +4,7 @@ import { extractJson } from "../agents/runner.js";
 import { git } from "../git.js";
 import { callAgent, type RunContext } from "../pipeline/context.js";
 import { asData, asset, rolePrompt } from "../prompts.js";
-import { readRepoStandards, rulesForReview } from "../standards.js";
+import { readRepoStandards, repoHasStandards, rulesForReview } from "../standards.js";
 import { QuestionsSchema, validatePlan } from "../schemas/plan.js";
 import type { PlanOutcome } from "./intake.js";
 
@@ -56,7 +56,7 @@ export async function planStep(ctx: PlanContext, level: "medium" | "high"): Prom
       ctx.events.emit({ step: "plan", event: "step_finished", role, data: { outcome: "needs_input" } });
       return { kind: "needs_input", questions: questions.data.questions };
     }
-    const v = validatePlan(json, { repo: ctx.repo, labels: ctx.task.labels });
+    const v = validatePlan(json, { repo: ctx.repo, labels: ctx.task.labels, hasStandards: repoHasStandards(ctx.repoDir) });
     if (v.ok) {
       ctx.events.emit({ step: "plan", event: "step_finished", role, data: { outcome: "plan", ...(v.warnings ? { warnings: v.warnings } : {}) } });
       return { kind: "plan", plan: v.plan, source: role };
