@@ -1,4 +1,4 @@
-import { changedFiles, commitAll, diffText, headSha, stageAll } from "../git.js";
+import { changedSinceReview, commitAll, diffText, headSha, stageAll } from "../git.js";
 import { asData, taskBlock } from "../prompts.js";
 import type { Handoff } from "../schemas/handoff.js";
 import type { ReviewOutput } from "../schemas/review.js";
@@ -164,7 +164,7 @@ export async function reviewDelta(
   ctx: RunContext,
   input: { round: number; gates: GateReport; findings: TrackedFinding[]; reviewedSha: string },
 ): Promise<{ ok: true; findings: TrackedFinding[]; reviewedSha: string } | { ok: false; reason: string; cause: StopCause; findings: TrackedFinding[] }> {
-  const delta = await changedFiles(ctx.worktree, input.reviewedSha);
+  const delta = await changedSinceReview(ctx.worktree, ctx.baseSha, input.reviewedSha);
   const prior = invalidateAffected(input.findings, delta);
   const reviews = await reviewRound(ctx, { round: input.round, gates: input.gates, findings: prior, lastReviewedSha: input.reviewedSha });
   const merged = mergeRound(prior, input.round, reviews, ctx.repo.review.max_nits);
@@ -209,7 +209,7 @@ export async function reviewLoop(
   }
   for (let round = firstRound; ; round++) {
     checkDeadline(ctx);
-    if (lastReviewedSha) findings = invalidateAffected(findings, await changedFiles(ctx.worktree, lastReviewedSha));
+    if (lastReviewedSha) findings = invalidateAffected(findings, await changedSinceReview(ctx.worktree, ctx.baseSha, lastReviewedSha));
     const evaluation = await evaluateFirst(ctx, round, findings);
     const skipReview = evaluation.bugs > 0;
     const reviews = skipReview ? [] : await reviewRound(ctx, { round, gates, findings, lastReviewedSha });

@@ -1347,7 +1347,11 @@ describe("base moved before finalize", () => {
     const delta = r.runner.calls.filter((c) => c.role === "review_plan");
     expect(delta).toHaveLength(2);
     expect(delta[1]!.prompt).toContain("incremental_diff");
-    expect(delta[1]!.prompt).toContain("src/other.js");
+    // The merged base is not this change: the delta review sees only the branch's own change since round 1.
+    expect(delta[1]!.prompt).not.toContain("src/other.js");
+    expect(r.file("diff-2.patch")).toBe("");
+    expect(delta[1]!.prompt).toContain("M\tsrc/math.js");
+    expect(delta[1]!.prompt).toContain("A\ttest/multiply.test.js");
     expect(delta[0]!.prompt).not.toContain("incremental_diff");
     const head = r.github.prs[0]!.head;
     const [subject, parents, author] = git(r.repo, "log", "-1", "--format=%s|%P|%an", head).trim().split("|");
@@ -1362,6 +1366,24 @@ describe("base moved before finalize", () => {
     expect(() => r.file("gates-3.json")).not.toThrow(); // implement, finalize, after merge
     expect(r.github.prs[0]!.draft).toBe(false);
     expect(r.github.readied).toEqual([]);
+  });
+
+  it("conflict: the resolver's diff is the branch's own change on the merged base, not the base's other commits", async () => {
+    let moved = false;
+    const r = await runScenario({
+      script: "clean.json",
+      onCall: (req, repo) => {
+        if (moved || !req.role.startsWith("review_")) return;
+        moved = true;
+        commitFile(repo, "src/other.js", "export const other = 1;\n", "main: other");
+        commitFile(repo, "src/math.js", "export function sum(a, b) {\n  return a + b;\n}\n\nexport function max(a, b) {\n  return a < b ? a : b;\n}\n\nexport function divide(a, b) {\n  return a / b;\n}\n", "main: divide");
+      },
+    });
+    const resolve = r.runner.calls.filter((c) => c.role === "resolve");
+    expect(resolve.length).toBeGreaterThan(0);
+    const diff = resolve[0]!.prompt.split("diff_since_base")[1] ?? "";
+    expect(diff).toContain("src/math.js");
+    expect(diff).not.toContain("src/other.js");
   });
 
   it("conflict: the resolver gets the merge; without a resolution the merge is aborted, the run fails, worktree clean", async () => {
